@@ -386,7 +386,7 @@ index 81bd7edb536a8da2bb88b45d7e3cd8c04e8bddf6..8e06d2b09d6fdbadcf7dcfac5229a549
   * Internal API to register channel initialization listeners.
   * <p>
 diff --git a/src/main/java/net/minecraft/server/Achievement.java b/src/main/java/net/minecraft/server/Achievement.java
-index fb00a32157f432031338d9930b1ed7a99660f313..4f2131611a083c3342caf246da2aca14a11e0543 100644
+index fb00a32157f432031338d9930b1ed7a99660f313..9a375c5df43df53c62121976e18a920d75643830 100644
 --- a/src/main/java/net/minecraft/server/Achievement.java
 +++ b/src/main/java/net/minecraft/server/Achievement.java
 @@ -1,13 +1,14 @@
@@ -410,7 +410,7 @@ index fb00a32157f432031338d9930b1ed7a99660f313..4f2131611a083c3342caf246da2aca14
  
      public Achievement(String s, String s1, int i, int j, Item item, Achievement achievement) {
          this(s, s1, i, j, new ItemStack(item), achievement);
-@@ -19,55 +20,57 @@ public class Achievement extends Statistic {
+@@ -19,78 +20,67 @@ public class Achievement extends Statistic {
  
      public Achievement(String s, String s1, int i, int j, ItemStack itemstack, Achievement achievement) {
          super(s, new ChatMessage("achievement." + s1, new Object[0]));
@@ -492,33 +492,35 @@ index fb00a32157f432031338d9930b1ed7a99660f313..4f2131611a083c3342caf246da2aca14
          return ichatbasecomponent;
      }
  
-@@ -75,8 +78,8 @@ public class Achievement extends Statistic {
-         return (Achievement) super.b(oclass);
-     }
- 
+-    public Achievement a(Class<? extends IJsonStatistic> oclass) {
+-        return (Achievement) super.b(oclass);
+-    }
+-
 -    public boolean g() {
 -        return this.m;
-+    public boolean getSpecial() {
-+        return this.isSpecial;
-     }
- 
+-    }
+-
      @Override
-@@ -84,13 +87,4 @@ public class Achievement extends Statistic {
-         return this.a(oclass);
+-    public Statistic b(Class oclass) {
+-        return this.a(oclass);
++    public Achievement setSerializable(Class<? extends IJsonStatistic> oclass) {
++        return (Achievement) super.setSerializable(oclass);
      }
  
 -    @Override
 -    public Statistic h() {
 -        return this.c();
--    }
--
++    public boolean getSpecial() {
++        return this.isSpecial;
+     }
+ 
 -    @Override
 -    public Statistic i() {
 -        return this.a();
 -    }
  }
 diff --git a/src/main/java/net/minecraft/server/AchievementList.java b/src/main/java/net/minecraft/server/AchievementList.java
-index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..cf1f7b96a0b2af647fc78eac64b3ef0c45ebb796 100644
+index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..6a5f9392bcbc6c4ffeb76d7176006985f051946f 100644
 --- a/src/main/java/net/minecraft/server/AchievementList.java
 +++ b/src/main/java/net/minecraft/server/AchievementList.java
 @@ -3,47 +3,48 @@ package net.minecraft.server;
@@ -604,7 +606,7 @@ index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..cf1f7b96a0b2af647fc78eac64b3ef0c
 +    public static Achievement spawnWither = (new Achievement("achievement.spawnWither", "spawnWither", 7, 12, new ItemStack(Items.SKULL, 1, 1), AchievementList.theEnd2)).registerStat();
 +    public static Achievement killWither = (new Achievement("achievement.killWither", "killWither", 7, 10, Items.NETHER_STAR, AchievementList.spawnWither)).registerStat();
 +    public static Achievement fullBeacon = (new Achievement("achievement.fullBeacon", "fullBeacon", 7, 8, Blocks.BEACON, AchievementList.killWither)).setSpecial().registerStat();
-+    public static Achievement exploreAllBiomes = (new Achievement("achievement.exploreAllBiomes", "exploreAllBiomes", 4, 8, Items.DIAMOND_BOOTS, AchievementList.theEnd)).a(AchievementSet.class).setSpecial().registerStat();
++    public static Achievement exploreAllBiomes = (new Achievement("achievement.exploreAllBiomes", "exploreAllBiomes", 4, 8, Items.DIAMOND_BOOTS, AchievementList.theEnd)).setSerializable(AchievementSet.class).setSpecial().registerStat();
 +    public static Achievement overpowered = (new Achievement("achievement.overpowered", "overpowered", 6, 4, new ItemStack(Items.GOLDEN_APPLE, 1, 1), AchievementList.buildBetterPickaxe)).setSpecial().registerStat();
  
 -    public static void a() {}
@@ -118884,7 +118886,7 @@ index 3f1f606aa2b0aff755c7657d46eef08eb64781c7..7407553794d65dd8b95328e503ede738
                              // CraftBukkit end
                              flag = true;
 diff --git a/src/main/java/net/minecraft/server/Statistic.java b/src/main/java/net/minecraft/server/Statistic.java
-index 5be70d4ef4ae8743af739100b0e80c6950ad006a..154eba76edfe00c00be1f1e8afba9f93a3fec3fa 100644
+index 5be70d4ef4ae8743af739100b0e80c6950ad006a..4c935763d067346e25c6a85b8ce0627efdc53bfa 100644
 --- a/src/main/java/net/minecraft/server/Statistic.java
 +++ b/src/main/java/net/minecraft/server/Statistic.java
 @@ -4,67 +4,68 @@ import java.text.DecimalFormat;
@@ -118982,7 +118984,7 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..154eba76edfe00c00be1f1e8afba9f93
  
          ichatbasecomponent1.setChatModifier(ichatbasecomponent.getChatModifier());
          return ichatbasecomponent1;
-@@ -87,11 +88,11 @@ public class Statistic {
+@@ -87,18 +88,18 @@ public class Statistic {
      }
  
      public String toString() {
@@ -118997,6 +118999,14 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..154eba76edfe00c00be1f1e8afba9f93
      }
  
      public Class<? extends IJsonStatistic> l() {
+         return this.d;
+     }
+ 
+-    public Statistic b(Class<? extends IJsonStatistic> oclass) {
++    public Statistic setSerializable(Class<? extends IJsonStatistic> oclass) {
+         this.d = oclass;
+         return this;
+     }
 diff --git a/src/main/java/net/minecraft/server/StatisticList.java b/src/main/java/net/minecraft/server/StatisticList.java
 index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..9893a17393503d4566ca647286f827d745fd4d9e 100644
 --- a/src/main/java/net/minecraft/server/StatisticList.java
