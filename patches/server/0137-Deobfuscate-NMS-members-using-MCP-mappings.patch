@@ -386,7 +386,7 @@ index 81bd7edb536a8da2bb88b45d7e3cd8c04e8bddf6..8e06d2b09d6fdbadcf7dcfac5229a549
   * Internal API to register channel initialization listeners.
   * <p>
 diff --git a/src/main/java/net/minecraft/server/Achievement.java b/src/main/java/net/minecraft/server/Achievement.java
-index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6933d03f8 100644
+index fb00a32157f432031338d9930b1ed7a99660f313..4f2131611a083c3342caf246da2aca14a11e0543 100644
 --- a/src/main/java/net/minecraft/server/Achievement.java
 +++ b/src/main/java/net/minecraft/server/Achievement.java
 @@ -1,13 +1,14 @@
@@ -410,7 +410,7 @@ index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6
  
      public Achievement(String s, String s1, int i, int j, Item item, Achievement achievement) {
          this(s, s1, i, j, new ItemStack(item), achievement);
-@@ -19,55 +20,55 @@ public class Achievement extends Statistic {
+@@ -19,55 +20,57 @@ public class Achievement extends Statistic {
  
      public Achievement(String s, String s1, int i, int j, ItemStack itemstack, Achievement achievement) {
          super(s, new ChatMessage("achievement." + s1, new Object[0]));
@@ -452,7 +452,8 @@ index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6
  
 -    public Achievement a() {
 -        this.f = true;
-+    public Achievement a() {  // MCP: initIndependentStat
++    @Override
++    public Achievement initIndependentStat() {
 +        this.isIndependent = true;
          return this;
      }
@@ -467,7 +468,8 @@ index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6
 -    public Achievement c() {
 -        super.h();
 -        AchievementList.e.add(this);
-+    public Achievement c() {  // MCP: registerStat
++    @Override
++    public Achievement registerStat() {
 +        super.registerStat();
 +        AchievementList.achievementList.add(this);
          return this;
@@ -490,7 +492,7 @@ index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6
          return ichatbasecomponent;
      }
  
-@@ -75,8 +76,8 @@ public class Achievement extends Statistic {
+@@ -75,8 +78,8 @@ public class Achievement extends Statistic {
          return (Achievement) super.b(oclass);
      }
  
@@ -501,23 +503,22 @@ index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6
      }
  
      @Override
-@@ -85,12 +86,12 @@ public class Achievement extends Statistic {
+@@ -84,13 +87,4 @@ public class Achievement extends Statistic {
+         return this.a(oclass);
      }
  
-     @Override
+-    @Override
 -    public Statistic h() {
-+    public Statistic registerStat() {
-         return this.c();
-     }
- 
-     @Override
+-        return this.c();
+-    }
+-
+-    @Override
 -    public Statistic i() {
-+    public Statistic initIndependentStat() {
-         return this.a();
-     }
+-        return this.a();
+-    }
  }
 diff --git a/src/main/java/net/minecraft/server/AchievementList.java b/src/main/java/net/minecraft/server/AchievementList.java
-index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..0ce24790c811df806a71068082f12ad5d39d219f 100644
+index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..cf1f7b96a0b2af647fc78eac64b3ef0c45ebb796 100644
 --- a/src/main/java/net/minecraft/server/AchievementList.java
 +++ b/src/main/java/net/minecraft/server/AchievementList.java
 @@ -3,47 +3,48 @@ package net.minecraft.server;
@@ -571,40 +572,40 @@ index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..0ce24790c811df806a71068082f12ad5
 +    public static int maxDisplayColumn;
 +    public static int maxDisplayRow;
 +    public static List<Achievement> achievementList = Lists.newArrayList();
-+    public static Achievement openInventory = (new Achievement("achievement.openInventory", "openInventory", 0, 0, Items.BOOK, (Achievement) null)).a().c();
-+    public static Achievement mineWood = (new Achievement("achievement.mineWood", "mineWood", 2, 1, Blocks.LOG, AchievementList.openInventory)).c();
-+    public static Achievement buildWorkBench = (new Achievement("achievement.buildWorkBench", "buildWorkBench", 4, -1, Blocks.CRAFTING_TABLE, AchievementList.mineWood)).c();
-+    public static Achievement buildPickaxe = (new Achievement("achievement.buildPickaxe", "buildPickaxe", 4, 2, Items.WOODEN_PICKAXE, AchievementList.buildWorkBench)).c();
-+    public static Achievement buildFurnace = (new Achievement("achievement.buildFurnace", "buildFurnace", 3, 4, Blocks.FURNACE, AchievementList.buildPickaxe)).c();
-+    public static Achievement acquireIron = (new Achievement("achievement.acquireIron", "acquireIron", 1, 4, Items.IRON_INGOT, AchievementList.buildFurnace)).c();
-+    public static Achievement buildHoe = (new Achievement("achievement.buildHoe", "buildHoe", 2, -3, Items.WOODEN_HOE, AchievementList.buildWorkBench)).c();
-+    public static Achievement makeBread = (new Achievement("achievement.makeBread", "makeBread", -1, -3, Items.BREAD, AchievementList.buildHoe)).c();
-+    public static Achievement bakeCake = (new Achievement("achievement.bakeCake", "bakeCake", 0, -5, Items.CAKE, AchievementList.buildHoe)).c();
-+    public static Achievement buildBetterPickaxe = (new Achievement("achievement.buildBetterPickaxe", "buildBetterPickaxe", 6, 2, Items.STONE_PICKAXE, AchievementList.buildPickaxe)).c();
-+    public static Achievement cookFish = (new Achievement("achievement.cookFish", "cookFish", 2, 6, Items.COOKED_FISH, AchievementList.buildFurnace)).c();
-+    public static Achievement onARail = (new Achievement("achievement.onARail", "onARail", 2, 3, Blocks.RAIL, AchievementList.acquireIron)).setSpecial().c();
-+    public static Achievement buildSword = (new Achievement("achievement.buildSword", "buildSword", 6, -1, Items.WOODEN_SWORD, AchievementList.buildWorkBench)).c();
-+    public static Achievement killEnemy = (new Achievement("achievement.killEnemy", "killEnemy", 8, -1, Items.BONE, AchievementList.buildSword)).c();
-+    public static Achievement killCow = (new Achievement("achievement.killCow", "killCow", 7, -3, Items.LEATHER, AchievementList.buildSword)).c();
-+    public static Achievement flyPig = (new Achievement("achievement.flyPig", "flyPig", 9, -3, Items.SADDLE, AchievementList.killCow)).setSpecial().c();
-+    public static Achievement snipeSkeleton = (new Achievement("achievement.snipeSkeleton", "snipeSkeleton", 7, 0, Items.BOW, AchievementList.killEnemy)).setSpecial().c();
-+    public static Achievement diamonds = (new Achievement("achievement.diamonds", "diamonds", -1, 5, Blocks.DIAMOND_ORE, AchievementList.acquireIron)).c();
-+    public static Achievement diamondsToYou = (new Achievement("achievement.diamondsToYou", "diamondsToYou", -1, 2, Items.DIAMOND, AchievementList.diamonds)).c();
-+    public static Achievement portal = (new Achievement("achievement.portal", "portal", -1, 7, Blocks.OBSIDIAN, AchievementList.diamonds)).c();
-+    public static Achievement ghast = (new Achievement("achievement.ghast", "ghast", -4, 8, Items.GHAST_TEAR, AchievementList.portal)).setSpecial().c();
-+    public static Achievement blazeRod = (new Achievement("achievement.blazeRod", "blazeRod", 0, 9, Items.BLAZE_ROD, AchievementList.portal)).c();
-+    public static Achievement potion = (new Achievement("achievement.potion", "potion", 2, 8, Items.POTION, AchievementList.blazeRod)).c();
-+    public static Achievement theEnd = (new Achievement("achievement.theEnd", "theEnd", 3, 10, Items.ENDER_EYE, AchievementList.blazeRod)).setSpecial().c();
-+    public static Achievement theEnd2 = (new Achievement("achievement.theEnd2", "theEnd2", 4, 13, Blocks.DRAGON_EGG, AchievementList.theEnd)).setSpecial().c();
-+    public static Achievement enchantments = (new Achievement("achievement.enchantments", "enchantments", -4, 4, Blocks.ENCHANTING_TABLE, AchievementList.diamonds)).c();
-+    public static Achievement overkill = (new Achievement("achievement.overkill", "overkill", -4, 1, Items.DIAMOND_SWORD, AchievementList.enchantments)).setSpecial().c();
-+    public static Achievement bookcase = (new Achievement("achievement.bookcase", "bookcase", -3, 6, Blocks.BOOKSHELF, AchievementList.enchantments)).c();
-+    public static Achievement breedCow = (new Achievement("achievement.breedCow", "breedCow", 7, -5, Items.WHEAT, AchievementList.killCow)).c();
-+    public static Achievement spawnWither = (new Achievement("achievement.spawnWither", "spawnWither", 7, 12, new ItemStack(Items.SKULL, 1, 1), AchievementList.theEnd2)).c();
-+    public static Achievement killWither = (new Achievement("achievement.killWither", "killWither", 7, 10, Items.NETHER_STAR, AchievementList.spawnWither)).c();
-+    public static Achievement fullBeacon = (new Achievement("achievement.fullBeacon", "fullBeacon", 7, 8, Blocks.BEACON, AchievementList.killWither)).setSpecial().c();
-+    public static Achievement exploreAllBiomes = (new Achievement("achievement.exploreAllBiomes", "exploreAllBiomes", 4, 8, Items.DIAMOND_BOOTS, AchievementList.theEnd)).a(AchievementSet.class).setSpecial().c();
-+    public static Achievement overpowered = (new Achievement("achievement.overpowered", "overpowered", 6, 4, new ItemStack(Items.GOLDEN_APPLE, 1, 1), AchievementList.buildBetterPickaxe)).setSpecial().c();
++    public static Achievement openInventory = (new Achievement("achievement.openInventory", "openInventory", 0, 0, Items.BOOK, (Achievement) null)).initIndependentStat().registerStat();
++    public static Achievement mineWood = (new Achievement("achievement.mineWood", "mineWood", 2, 1, Blocks.LOG, AchievementList.openInventory)).registerStat();
++    public static Achievement buildWorkBench = (new Achievement("achievement.buildWorkBench", "buildWorkBench", 4, -1, Blocks.CRAFTING_TABLE, AchievementList.mineWood)).registerStat();
++    public static Achievement buildPickaxe = (new Achievement("achievement.buildPickaxe", "buildPickaxe", 4, 2, Items.WOODEN_PICKAXE, AchievementList.buildWorkBench)).registerStat();
++    public static Achievement buildFurnace = (new Achievement("achievement.buildFurnace", "buildFurnace", 3, 4, Blocks.FURNACE, AchievementList.buildPickaxe)).registerStat();
++    public static Achievement acquireIron = (new Achievement("achievement.acquireIron", "acquireIron", 1, 4, Items.IRON_INGOT, AchievementList.buildFurnace)).registerStat();
++    public static Achievement buildHoe = (new Achievement("achievement.buildHoe", "buildHoe", 2, -3, Items.WOODEN_HOE, AchievementList.buildWorkBench)).registerStat();
++    public static Achievement makeBread = (new Achievement("achievement.makeBread", "makeBread", -1, -3, Items.BREAD, AchievementList.buildHoe)).registerStat();
++    public static Achievement bakeCake = (new Achievement("achievement.bakeCake", "bakeCake", 0, -5, Items.CAKE, AchievementList.buildHoe)).registerStat();
++    public static Achievement buildBetterPickaxe = (new Achievement("achievement.buildBetterPickaxe", "buildBetterPickaxe", 6, 2, Items.STONE_PICKAXE, AchievementList.buildPickaxe)).registerStat();
++    public static Achievement cookFish = (new Achievement("achievement.cookFish", "cookFish", 2, 6, Items.COOKED_FISH, AchievementList.buildFurnace)).registerStat();
++    public static Achievement onARail = (new Achievement("achievement.onARail", "onARail", 2, 3, Blocks.RAIL, AchievementList.acquireIron)).setSpecial().registerStat();
++    public static Achievement buildSword = (new Achievement("achievement.buildSword", "buildSword", 6, -1, Items.WOODEN_SWORD, AchievementList.buildWorkBench)).registerStat();
++    public static Achievement killEnemy = (new Achievement("achievement.killEnemy", "killEnemy", 8, -1, Items.BONE, AchievementList.buildSword)).registerStat();
++    public static Achievement killCow = (new Achievement("achievement.killCow", "killCow", 7, -3, Items.LEATHER, AchievementList.buildSword)).registerStat();
++    public static Achievement flyPig = (new Achievement("achievement.flyPig", "flyPig", 9, -3, Items.SADDLE, AchievementList.killCow)).setSpecial().registerStat();
++    public static Achievement snipeSkeleton = (new Achievement("achievement.snipeSkeleton", "snipeSkeleton", 7, 0, Items.BOW, AchievementList.killEnemy)).setSpecial().registerStat();
++    public static Achievement diamonds = (new Achievement("achievement.diamonds", "diamonds", -1, 5, Blocks.DIAMOND_ORE, AchievementList.acquireIron)).registerStat();
++    public static Achievement diamondsToYou = (new Achievement("achievement.diamondsToYou", "diamondsToYou", -1, 2, Items.DIAMOND, AchievementList.diamonds)).registerStat();
++    public static Achievement portal = (new Achievement("achievement.portal", "portal", -1, 7, Blocks.OBSIDIAN, AchievementList.diamonds)).registerStat();
++    public static Achievement ghast = (new Achievement("achievement.ghast", "ghast", -4, 8, Items.GHAST_TEAR, AchievementList.portal)).setSpecial().registerStat();
++    public static Achievement blazeRod = (new Achievement("achievement.blazeRod", "blazeRod", 0, 9, Items.BLAZE_ROD, AchievementList.portal)).registerStat();
++    public static Achievement potion = (new Achievement("achievement.potion", "potion", 2, 8, Items.POTION, AchievementList.blazeRod)).registerStat();
++    public static Achievement theEnd = (new Achievement("achievement.theEnd", "theEnd", 3, 10, Items.ENDER_EYE, AchievementList.blazeRod)).setSpecial().registerStat();
++    public static Achievement theEnd2 = (new Achievement("achievement.theEnd2", "theEnd2", 4, 13, Blocks.DRAGON_EGG, AchievementList.theEnd)).setSpecial().registerStat();
++    public static Achievement enchantments = (new Achievement("achievement.enchantments", "enchantments", -4, 4, Blocks.ENCHANTING_TABLE, AchievementList.diamonds)).registerStat();
++    public static Achievement overkill = (new Achievement("achievement.overkill", "overkill", -4, 1, Items.DIAMOND_SWORD, AchievementList.enchantments)).setSpecial().registerStat();
++    public static Achievement bookcase = (new Achievement("achievement.bookcase", "bookcase", -3, 6, Blocks.BOOKSHELF, AchievementList.enchantments)).registerStat();
++    public static Achievement breedCow = (new Achievement("achievement.breedCow", "breedCow", 7, -5, Items.WHEAT, AchievementList.killCow)).registerStat();
++    public static Achievement spawnWither = (new Achievement("achievement.spawnWither", "spawnWither", 7, 12, new ItemStack(Items.SKULL, 1, 1), AchievementList.theEnd2)).registerStat();
++    public static Achievement killWither = (new Achievement("achievement.killWither", "killWither", 7, 10, Items.NETHER_STAR, AchievementList.spawnWither)).registerStat();
++    public static Achievement fullBeacon = (new Achievement("achievement.fullBeacon", "fullBeacon", 7, 8, Blocks.BEACON, AchievementList.killWither)).setSpecial().registerStat();
++    public static Achievement exploreAllBiomes = (new Achievement("achievement.exploreAllBiomes", "exploreAllBiomes", 4, 8, Items.DIAMOND_BOOTS, AchievementList.theEnd)).a(AchievementSet.class).setSpecial().registerStat();
++    public static Achievement overpowered = (new Achievement("achievement.overpowered", "overpowered", 6, 4, new ItemStack(Items.GOLDEN_APPLE, 1, 1), AchievementList.buildBetterPickaxe)).setSpecial().registerStat();
  
 -    public static void a() {}
 +    public static void init() {}
@@ -841,10 +842,10 @@ index af0cc6d0d13eb87dae6ffaef9b7fc7074111c095..1ea49face6a11db062c8107458388af9
          }
  
 diff --git a/src/main/java/net/minecraft/server/AttributeMapServer.java b/src/main/java/net/minecraft/server/AttributeMapServer.java
-index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..1050025373677e7af0ccb891f03572131fd1161d 100644
+index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..f074090311807cb2174f272f8689b845247ea3ec 100644
 --- a/src/main/java/net/minecraft/server/AttributeMapServer.java
 +++ b/src/main/java/net/minecraft/server/AttributeMapServer.java
-@@ -6,33 +6,34 @@ import java.util.HashSet;
+@@ -6,33 +6,36 @@ import java.util.HashSet;
  import java.util.Map;
  import java.util.Set;
  
@@ -858,13 +859,17 @@ index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..1050025373677e7af0ccb891f0357213
  
      public AttributeMapServer() {}
  
-     public AttributeModifiable e(IAttribute iattribute) {
+-    public AttributeModifiable e(IAttribute iattribute) {
 -        return (AttributeModifiable) super.a(iattribute);
++    @Override
++    public AttributeModifiable getAttributeInstance(IAttribute iattribute) {
 +        return (AttributeModifiable) super.getAttributeInstance(iattribute);
      }
  
-     public AttributeModifiable b(String s) {
+-    public AttributeModifiable b(String s) {
 -        AttributeInstance attributeinstance = super.a(s);
++    @Override
++    public AttributeModifiable getAttributeInstanceByName(String s) {
 +        AttributeInstance attributeinstance = super.getAttributeInstanceByName(s);
  
          if (attributeinstance == null) {
@@ -888,7 +893,7 @@ index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..1050025373677e7af0ccb891f0357213
          }
  
          return attributeinstance;
-@@ -45,29 +46,29 @@ public class AttributeMapServer extends AttributeMapBase {
+@@ -45,29 +48,29 @@ public class AttributeMapServer extends AttributeMapBase {
  
      @Override
      public void a(AttributeInstance attributeinstance) {
@@ -899,7 +904,8 @@ index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..1050025373677e7af0ccb891f0357213
          }
  
          for (IAttribute iattribute : this.c.get(attributeinstance.getAttribute())) {
-             AttributeModifiable attributemodifiable = this.e(iattribute);
+-            AttributeModifiable attributemodifiable = this.e(iattribute);
++            AttributeModifiable attributemodifiable = this.getAttributeInstance(iattribute);
  
              if (attributemodifiable != null) {
 -                attributemodifiable.f();
@@ -925,20 +931,19 @@ index 73ad81b01c4393d43aa916ca6975aedfbdd5a2a6..1050025373677e7af0ccb891f0357213
                  hashset.add(attributeinstance);
              }
          }
-@@ -76,12 +77,12 @@ public class AttributeMapServer extends AttributeMapBase {
+@@ -75,13 +78,4 @@ public class AttributeMapServer extends AttributeMapBase {
+         return hashset;
      }
  
-     @Override
+-    @Override
 -    public AttributeInstance a(String s) {
-+    public AttributeInstance getAttributeInstanceByName(String s) {
-         return this.b(s);
-     }
- 
-     @Override
+-        return this.b(s);
+-    }
+-
+-    @Override
 -    public AttributeInstance a(IAttribute iattribute) {
-+    public AttributeInstance getAttributeInstance(IAttribute iattribute) {
-         return this.e(iattribute);
-     }
+-        return this.e(iattribute);
+-    }
  }
 diff --git a/src/main/java/net/minecraft/server/AttributeModifiable.java b/src/main/java/net/minecraft/server/AttributeModifiable.java
 index 5def6e505a01eefdf7c348938dc4c84a05430be2..86d1a1c89bf4ac08942e8ccc488c7127b7670b3b 100644
@@ -48621,7 +48626,7 @@ index 9ed2ba7e3c8195ab4057b671864526f424ecb7d0..04b93e8f306d1a5fd95be97667f62540
                  byte b0 = 0;
  
 diff --git a/src/main/java/net/minecraft/server/EntityChicken.java b/src/main/java/net/minecraft/server/EntityChicken.java
-index 0d279987f2d6af228a5256cb32ee90995a4b708c..6b0533a4e8698a746e6b01d8d64f4196571652f4 100644
+index 0d279987f2d6af228a5256cb32ee90995a4b708c..699930788b47893600f669f5425f5e2d0f91993c 100644
 --- a/src/main/java/net/minecraft/server/EntityChicken.java
 +++ b/src/main/java/net/minecraft/server/EntityChicken.java
 @@ -1,27 +1,28 @@
@@ -48736,7 +48741,7 @@ index 0d279987f2d6af228a5256cb32ee90995a4b708c..6b0533a4e8698a746e6b01d8d64f4196
          this.makeSound("mob.chicken.step", 0.15F, 1.0F);
      }
  
-@@ -89,13 +90,13 @@ public class EntityChicken extends EntityAnimal {
+@@ -89,30 +90,31 @@ public class EntityChicken extends EntityAnimal {
          int j = this.random.nextInt(3) + this.random.nextInt(1 + i);
  
          for (int k = 0; k < j; ++k) {
@@ -48753,7 +48758,10 @@ index 0d279987f2d6af228a5256cb32ee90995a4b708c..6b0533a4e8698a746e6b01d8d64f4196
          }
  
      }
-@@ -104,15 +105,15 @@ public class EntityChicken extends EntityAnimal {
+ 
+-    public EntityChicken b(EntityAgeable entityageable) {
++    @Override
++    public EntityChicken createChild(EntityAgeable entityageable) {
          return new EntityChicken(this.world);
      }
  
@@ -48774,7 +48782,7 @@ index 0d279987f2d6af228a5256cb32ee90995a4b708c..6b0533a4e8698a746e6b01d8d64f4196
          }
  
      }
-@@ -121,36 +122,36 @@ public class EntityChicken extends EntityAnimal {
+@@ -121,39 +123,36 @@ public class EntityChicken extends EntityAnimal {
          return this.isChickenJockey() ? 10 : super.getExpValue(entityhuman);
      }
  
@@ -48823,7 +48831,10 @@ index 0d279987f2d6af228a5256cb32ee90995a4b708c..6b0533a4e8698a746e6b01d8d64f4196
 +        this.chickenJockey = flag;
      }
  
-     public EntityAgeable createChild(EntityAgeable entityageable) {
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityComplexPart.java b/src/main/java/net/minecraft/server/EntityComplexPart.java
 index e4073624a2a58d90a78ec0a744794241a5b2c1c3..ba0671e3479b26ffc9bc6491a190cd8bd1772cfe 100644
 --- a/src/main/java/net/minecraft/server/EntityComplexPart.java
@@ -48878,7 +48889,7 @@ index e4073624a2a58d90a78ec0a744794241a5b2c1c3..ba0671e3479b26ffc9bc6491a190cd8b
      }
  }
 diff --git a/src/main/java/net/minecraft/server/EntityCow.java b/src/main/java/net/minecraft/server/EntityCow.java
-index b5627b7cc28744eb5d702ecb44304e6865cce92e..466d66c7318791201be516bb5dac7947efa9dbd0 100644
+index b5627b7cc28744eb5d702ecb44304e6865cce92e..efff63c6edfa896715127970eab8db801cce0672 100644
 --- a/src/main/java/net/minecraft/server/EntityCow.java
 +++ b/src/main/java/net/minecraft/server/EntityCow.java
 @@ -1,8 +1,9 @@
@@ -48973,7 +48984,7 @@ index b5627b7cc28744eb5d702ecb44304e6865cce92e..466d66c7318791201be516bb5dac7947
          ItemStack itemstack = entityhuman.inventory.getItemInHand();
  
          if (itemstack != null && itemstack.getItem() == Items.BUCKET && !entityhuman.abilities.canInstantlyBuild && !this.isBaby()) {
-@@ -94,7 +95,7 @@ public class EntityCow extends EntityAnimal {
+@@ -94,11 +95,12 @@ public class EntityCow extends EntityAnimal {
  
              return true;
          } else {
@@ -48982,6 +48993,20 @@ index b5627b7cc28744eb5d702ecb44304e6865cce92e..466d66c7318791201be516bb5dac7947
          }
      }
  
+-    public EntityCow b(EntityAgeable entityageable) {
++    @Override
++    public EntityCow createChild(EntityAgeable entityageable) {
+         return new EntityCow(this.world);
+     }
+ 
+@@ -106,7 +108,4 @@ public class EntityCow extends EntityAnimal {
+         return this.length;
+     }
+ 
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityCreature.java b/src/main/java/net/minecraft/server/EntityCreature.java
 index 5ea36f7ebded692c1a79a291e97f01bec227aacb..623424e6ed2ffaf9d84406fafef9eaa5f4bfd95e 100644
 --- a/src/main/java/net/minecraft/server/EntityCreature.java
@@ -62559,7 +62584,7 @@ index 05e4dbc1d130c497e2455d9eb1b339d10cd1527b..083dbf6efaa4742d385e1c2a84d00cec
      }
  }
 diff --git a/src/main/java/net/minecraft/server/EntityMushroomCow.java b/src/main/java/net/minecraft/server/EntityMushroomCow.java
-index fef767c248ab7ce356ae403b25e466cb306bdd73..de83ad2e31e98234544e4b1d0bd7b81fc1e516be 100644
+index fef767c248ab7ce356ae403b25e466cb306bdd73..910f51b2e4bde7c66a56d8f9fc03e3c0ae132081 100644
 --- a/src/main/java/net/minecraft/server/EntityMushroomCow.java
 +++ b/src/main/java/net/minecraft/server/EntityMushroomCow.java
 @@ -2,15 +2,16 @@ package net.minecraft.server;
@@ -62590,7 +62615,7 @@ index fef767c248ab7ce356ae403b25e466cb306bdd73..de83ad2e31e98234544e4b1d0bd7b81f
                  if (this.hasCustomName()) {
                      entitycow.setCustomName(this.getCustomName());
                  }
-@@ -58,11 +59,11 @@ public class EntityMushroomCow extends EntityCow {
+@@ -58,19 +59,12 @@ public class EntityMushroomCow extends EntityCow {
  
              return true;
          } else {
@@ -62600,12 +62625,21 @@ index fef767c248ab7ce356ae403b25e466cb306bdd73..de83ad2e31e98234544e4b1d0bd7b81f
      }
  
 -    public EntityMushroomCow c(EntityAgeable entityageable) {
-+    public EntityMushroomCow c(EntityAgeable entityageable) {  // MCP: createChild
++    @Override
++    public EntityMushroomCow createChild(EntityAgeable entityageable) {
          return new EntityMushroomCow(this.world);
      }
- 
+-
+-    public EntityCow b(EntityAgeable entityageable) {
+-        return this.c(entityageable);
+-    }
+-
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.c(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityOcelot.java b/src/main/java/net/minecraft/server/EntityOcelot.java
-index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa6fbeb851 100644
+index edcb30792a28abf638012df334a2db626b3c4733..3a83bf84faad348ab6cf9304d01a9c52237c2389 100644
 --- a/src/main/java/net/minecraft/server/EntityOcelot.java
 +++ b/src/main/java/net/minecraft/server/EntityOcelot.java
 @@ -2,37 +2,38 @@ package net.minecraft.server;
@@ -62751,7 +62785,7 @@ index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa
                      this.world.broadcastEntityEffect(this, (byte) 6);
                  }
              }
-@@ -146,7 +147,7 @@ public class EntityOcelot extends EntityTameableAnimal {
+@@ -146,10 +147,11 @@ public class EntityOcelot extends EntityTameableAnimal {
              return true;
          }
  
@@ -62759,8 +62793,13 @@ index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa
 +        return super.interact(entityhuman);
      }
  
-     public EntityOcelot b(EntityAgeable entityageable) {
-@@ -161,7 +162,7 @@ public class EntityOcelot extends EntityTameableAnimal {
+-    public EntityOcelot b(EntityAgeable entityageable) {
++    @Override
++    public EntityOcelot createChild(EntityAgeable entityageable) {
+         EntityOcelot entityocelot = new EntityOcelot(this.world);
+ 
+         if (this.isTamed()) {
+@@ -161,7 +163,7 @@ public class EntityOcelot extends EntityTameableAnimal {
          return entityocelot;
      }
  
@@ -62769,7 +62808,7 @@ index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa
          return itemstack != null && itemstack.getItem() == Items.FISH;
      }
  
-@@ -187,15 +188,15 @@ public class EntityOcelot extends EntityTameableAnimal {
+@@ -187,15 +189,15 @@ public class EntityOcelot extends EntityTameableAnimal {
          this.datawatcher.watch(18, Byte.valueOf((byte) i));
      }
  
@@ -62789,7 +62828,7 @@ index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa
                  return false;
              }
  
-@@ -217,14 +218,14 @@ public class EntityOcelot extends EntityTameableAnimal {
+@@ -217,14 +219,14 @@ public class EntityOcelot extends EntityTameableAnimal {
          super.setTamed(flag);
      }
  
@@ -62809,6 +62848,14 @@ index edcb30792a28abf638012df334a2db626b3c4733..614fd602f933e358e35d6277db8a5faa
          }
  
      }
+@@ -244,7 +246,4 @@ public class EntityOcelot extends EntityTameableAnimal {
+         return groupdataentity;
+     }
+ 
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityOwnable.java b/src/main/java/net/minecraft/server/EntityOwnable.java
 index c5d66205b7d34a9546a401c5437a6e3294f04845..51beca79c159050746e368b76d82571d4d1ae864 100644
 --- a/src/main/java/net/minecraft/server/EntityOwnable.java
@@ -62928,7 +62975,7 @@ index ac941849df46829fe954e6b232bddda85e5429b6..e911580d74f02f5ec9273a35db612d9b
      }
  }
 diff --git a/src/main/java/net/minecraft/server/EntityPig.java b/src/main/java/net/minecraft/server/EntityPig.java
-index 3f2ce15ff362a6a992a4252718d8bf55f2aea08e..bad19a2ac6012bf80b816b759470e3fa38367cf8 100644
+index 3f2ce15ff362a6a992a4252718d8bf55f2aea08e..c7e4496b1280a7dbc4ecd5e0b04d2dd6ee72b017 100644
 --- a/src/main/java/net/minecraft/server/EntityPig.java
 +++ b/src/main/java/net/minecraft/server/EntityPig.java
 @@ -2,24 +2,25 @@ package net.minecraft.server;
@@ -63057,7 +63104,7 @@ index 3f2ce15ff362a6a992a4252718d8bf55f2aea08e..bad19a2ac6012bf80b816b759470e3fa
              if (this.hasCustomName()) {
                  entitypigzombie.setCustomName(this.getCustomName());
                  entitypigzombie.setCustomNameVisible(this.getCustomNameVisible());
-@@ -134,10 +135,10 @@ public class EntityPig extends EntityAnimal {
+@@ -134,27 +135,25 @@ public class EntityPig extends EntityAnimal {
          }
      }
  
@@ -63071,7 +63118,10 @@ index 3f2ce15ff362a6a992a4252718d8bf55f2aea08e..bad19a2ac6012bf80b816b759470e3fa
          }
  
      }
-@@ -146,12 +147,12 @@ public class EntityPig extends EntityAnimal {
+ 
+-    public EntityPig b(EntityAgeable entityageable) {
++    @Override
++    public EntityPig createChild(EntityAgeable entityageable) {
          return new EntityPig(this.world);
      }
  
@@ -63086,7 +63136,10 @@ index 3f2ce15ff362a6a992a4252718d8bf55f2aea08e..bad19a2ac6012bf80b816b759470e3fa
 +        return this.aiControlledByPlayer;
      }
  
-     public EntityAgeable createChild(EntityAgeable entityageable) {
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityPigZombie.java b/src/main/java/net/minecraft/server/EntityPigZombie.java
 index d530aa946e6db5a8809b8e1138d75dbf3e22a015..eca81202499daf97bdf4c62a544032443c2d1bc0 100644
 --- a/src/main/java/net/minecraft/server/EntityPigZombie.java
@@ -64667,7 +64720,7 @@ index fa69eafadea380aff012723f0c42ff345ec6b51b..cd36934d3b8d83840f1ffce8bfda40a7
                  try {
                      Entity entity = ((WorldServer) this.world).getEntity(UUID.fromString(this.shooterName));
 diff --git a/src/main/java/net/minecraft/server/EntityRabbit.java b/src/main/java/net/minecraft/server/EntityRabbit.java
-index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75aaee05e3 100644
+index bb47e09aca2163d15e39e7b552d15a2137773b93..e35f5648d57a3e79eacbd448c9f838c1ebbc8bcf 100644
 --- a/src/main/java/net/minecraft/server/EntityRabbit.java
 +++ b/src/main/java/net/minecraft/server/EntityRabbit.java
 @@ -1,76 +1,77 @@
@@ -64982,7 +65035,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
      }
  
      protected void dropDeathLoot(boolean flag, int i) {
-@@ -240,22 +241,22 @@ public class EntityRabbit extends EntityAnimal {
+@@ -240,26 +241,27 @@ public class EntityRabbit extends EntityAnimal {
          int k;
  
          for (k = 0; k < j; ++k) {
@@ -65009,7 +65062,13 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
          return item == Items.CARROT || item == Items.GOLDEN_CARROT || item == Item.getItemOf(Blocks.YELLOW_FLOWER);
      }
  
-@@ -269,8 +270,8 @@ public class EntityRabbit extends EntityAnimal {
+-    public EntityRabbit b(EntityAgeable entityageable) {
++    @Override
++    public EntityRabbit createChild(EntityAgeable entityageable) {
+         EntityRabbit entityrabbit = new EntityRabbit(this.world);
+ 
+         if (entityageable instanceof EntityRabbit) {
+@@ -269,8 +271,8 @@ public class EntityRabbit extends EntityAnimal {
          return entityrabbit;
      }
  
@@ -65020,7 +65079,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
      }
  
      public int getRabbitType() {
-@@ -279,11 +280,11 @@ public class EntityRabbit extends EntityAnimal {
+@@ -279,11 +281,11 @@ public class EntityRabbit extends EntityAnimal {
  
      public void setRabbitType(int i) {
          if (i == 99) {
@@ -65037,7 +65096,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
              if (!this.hasCustomName()) {
                  this.setCustomName(LocaleI18n.get("entity.KillerBunny.name"));
              }
-@@ -298,7 +299,7 @@ public class EntityRabbit extends EntityAnimal {
+@@ -298,7 +300,7 @@ public class EntityRabbit extends EntityAnimal {
          boolean flag = false;
  
          if (object instanceof EntityRabbit.GroupDataRabbit) {
@@ -65046,7 +65105,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
              flag = true;
          } else {
              object = new EntityRabbit.GroupDataRabbit(i);
-@@ -312,17 +313,17 @@ public class EntityRabbit extends EntityAnimal {
+@@ -312,49 +314,45 @@ public class EntityRabbit extends EntityAnimal {
          return (GroupDataEntity) object;
      }
  
@@ -65066,11 +65125,14 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
 +    protected void createEatingParticles() {
          this.world.addParticle(EnumParticle.BLOCK_DUST, this.locX + (double) (this.random.nextFloat() * this.width * 2.0F) - (double) this.width, this.locY + 0.5D + (double) (this.random.nextFloat() * this.length), this.locZ + (double) (this.random.nextFloat() * this.width * 2.0F) - (double) this.width, 0.0D, 0.0D, 0.0D, new int[] { Block.getCombinedId(Blocks.CARROTS.fromLegacyData(7))});
 -        this.bu = 100;
+-    }
+-
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
 +        this.carrotTicks = 100;
      }
  
-     public EntityAgeable createChild(EntityAgeable entityageable) {
-@@ -333,28 +334,28 @@ public class EntityRabbit extends EntityAnimal {
+     static enum EnumRabbitState {
  
          NONE(0.0F, 0.0F, 30, 1), HOP(0.8F, 0.2F, 20, 10), STEP(1.0F, 0.45F, 14, 14), SPRINT(1.75F, 0.4F, 1, 8), ATTACK(2.0F, 0.7F, 7, 8);
  
@@ -65107,7 +65169,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
          }
  
          public int d() {
-@@ -375,77 +376,77 @@ public class EntityRabbit extends EntityAnimal {
+@@ -375,77 +373,77 @@ public class EntityRabbit extends EntityAnimal {
  
      static class PathfinderGoalRabbitPanic extends PathfinderGoalPanic {
  
@@ -65212,7 +65274,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
              Block block = world.getType(blockposition).getBlock();
  
              if (block == Blocks.FARMLAND) {
-@@ -465,48 +466,48 @@ public class EntityRabbit extends EntityAnimal {
+@@ -465,48 +463,48 @@ public class EntityRabbit extends EntityAnimal {
  
      static class PathfinderGoalRabbitAvoidTarget<T extends Entity> extends PathfinderGoalAvoidTarget<T> {
  
@@ -65275,7 +65337,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
          }
  
          public boolean d() {
-@@ -517,10 +518,10 @@ public class EntityRabbit extends EntityAnimal {
+@@ -517,10 +515,10 @@ public class EntityRabbit extends EntityAnimal {
              this.d = flag;
          }
  
@@ -65290,7 +65352,7 @@ index bb47e09aca2163d15e39e7b552d15a2137773b93..f4dd83422d5d49dd13e7bdb37b31ad75
              }
  
          }
-@@ -528,10 +529,10 @@ public class EntityRabbit extends EntityAnimal {
+@@ -528,10 +526,10 @@ public class EntityRabbit extends EntityAnimal {
  
      public static class GroupDataRabbit implements GroupDataEntity {
  
@@ -65360,7 +65422,7 @@ index 141a1ef8d171366300d438bf43f4030daaea60f2..a1bd0da4536c995a227200e44f5eaacd
  
              return flag;
 diff --git a/src/main/java/net/minecraft/server/EntitySheep.java b/src/main/java/net/minecraft/server/EntitySheep.java
-index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..d5908666d44eecceb7855a63410259007b91656a 100644
+index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..bbcd93b7e4dfe69b064c8fa43b10474e983e4c80 100644
 --- a/src/main/java/net/minecraft/server/EntitySheep.java
 +++ b/src/main/java/net/minecraft/server/EntitySheep.java
 @@ -3,17 +3,18 @@ package net.minecraft.server;
@@ -65546,7 +65608,7 @@ index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..d5908666d44eecceb7855a6341025900
          this.makeSound("mob.sheep.step", 0.15F, 1.0F);
      }
  
-@@ -181,7 +182,7 @@ public class EntitySheep extends EntityAnimal {
+@@ -181,21 +182,22 @@ public class EntitySheep extends EntityAnimal {
  
      }
  
@@ -65555,7 +65617,11 @@ index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..d5908666d44eecceb7855a6341025900
          int i = random.nextInt(100);
  
          return i < 5 ? EnumColor.BLACK : (i < 10 ? EnumColor.GRAY : (i < 15 ? EnumColor.SILVER : (i < 18 ? EnumColor.BROWN : (random.nextInt(500) == 0 ? EnumColor.PINK : EnumColor.WHITE))));
-@@ -191,11 +192,11 @@ public class EntitySheep extends EntityAnimal {
+     }
+ 
+-    public EntitySheep b(EntityAgeable entityageable) {
++    @Override
++    public EntitySheep createChild(EntityAgeable entityageable) {
          EntitySheep entitysheep = (EntitySheep) entityageable;
          EntitySheep entitysheep1 = new EntitySheep(this.world);
  
@@ -65569,7 +65635,7 @@ index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..d5908666d44eecceb7855a6341025900
          // CraftBukkit start
          SheepRegrowWoolEvent event = new SheepRegrowWoolEvent((org.bukkit.entity.Sheep) this.getBukkitEntity());
          this.world.getServer().getPluginManager().callEvent(event);
-@@ -212,17 +213,17 @@ public class EntitySheep extends EntityAnimal {
+@@ -212,17 +214,17 @@ public class EntitySheep extends EntityAnimal {
  
      public GroupDataEntity prepare(DifficultyDamageScaler difficultydamagescaler, GroupDataEntity groupdataentity) {
          groupdataentity = super.prepare(difficultydamagescaler, groupdataentity);
@@ -65592,9 +65658,14 @@ index 560cfdb3bc84c91ffcfc1ea2a5cb6d8d65034ec9..d5908666d44eecceb7855a6341025900
          int k;
  
          if (itemstack != null && itemstack.getItem() == Items.DYE) {
-@@ -243,21 +244,21 @@ public class EntitySheep extends EntityAnimal {
+@@ -238,26 +240,22 @@ public class EntitySheep extends EntityAnimal {
+         return 0.95F * this.length;
      }
  
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+-
      static {
 -        EntitySheep.bo.put(EnumColor.WHITE, new float[] { 1.0F, 1.0F, 1.0F});
 -        EntitySheep.bo.put(EnumColor.ORANGE, new float[] { 0.85F, 0.5F, 0.2F});
@@ -68669,7 +68740,7 @@ index 7d1d3a4f371a2b8b923b542b3390e2d4f77c4fe8..ed80a67b405dd00e3be38ad31ca25bd1
      }
  }
 diff --git a/src/main/java/net/minecraft/server/EntityVillager.java b/src/main/java/net/minecraft/server/EntityVillager.java
-index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a492362a7a6 100644
+index f1c905aa0fb964bd728c63b851fa4800a77179ef..6abeee781da839d3f59bd736f0727f0dbc3ff586 100644
 --- a/src/main/java/net/minecraft/server/EntityVillager.java
 +++ b/src/main/java/net/minecraft/server/EntityVillager.java
 @@ -4,25 +4,26 @@ import java.util.Iterator;
@@ -69244,7 +69315,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
                  chatmessage.getChatModifier().setInsertion(this.getUniqueID().toString());
                  return chatmessage;
              } else {
-@@ -486,22 +487,22 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -486,22 +487,23 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
      public GroupDataEntity prepare(DifficultyDamageScaler difficultydamagescaler, GroupDataEntity groupdataentity) {
          groupdataentity = super.prepare(difficultydamagescaler, groupdataentity);
          this.setProfession(this.world.random.nextInt(5));
@@ -69259,7 +69330,9 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
 +        this.isLookingForHome = true;
      }
  
-     public EntityVillager b(EntityAgeable entityageable) {
+-    public EntityVillager b(EntityAgeable entityageable) {
++    @Override
++    public EntityVillager createChild(EntityAgeable entityageable) {
          EntityVillager entityvillager = new EntityVillager(this.world);
  
 -        entityvillager.prepare(this.world.E(new BlockPosition(entityvillager)), (GroupDataEntity) null);
@@ -69272,7 +69345,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
          return false;
      }
  
-@@ -510,8 +511,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -510,8 +512,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
              EntityWitch entitywitch = new EntityWitch(this.world);
  
              entitywitch.setPositionRotation(this.locX, this.locY, this.locZ, this.yaw, this.pitch);
@@ -69283,7 +69356,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              if (this.hasCustomName()) {
                  entitywitch.setCustomName(this.getCustomName());
                  entitywitch.setCustomNameVisible(this.getCustomNameVisible());
-@@ -522,15 +523,15 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -522,15 +524,15 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
          }
      }
  
@@ -69302,7 +69375,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              ItemStack itemstack1 = this.inventory.a(itemstack);
  
              if (itemstack1 == null) {
-@@ -542,25 +543,25 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -542,25 +544,25 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
  
      }
  
@@ -69334,7 +69407,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
          boolean flag = this.getProfession() == 0;
  
          for (int j = 0; j < this.inventory.getSize(); ++j) {
-@@ -580,7 +581,7 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -580,7 +582,7 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
          return false;
      }
  
@@ -69343,7 +69416,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
          for (int i = 0; i < this.inventory.getSize(); ++i) {
              ItemStack itemstack = this.inventory.getItem(i);
  
-@@ -592,8 +593,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -592,8 +594,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
          return false;
      }
  
@@ -69354,8 +69427,14 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              return true;
          } else {
              int j = i - 300;
-@@ -613,32 +614,32 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -607,38 +609,34 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+         }
+     }
  
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+-
      static class MerchantRecipeOptionProcess implements EntityVillager.IMerchantRecipeOption {
  
 -        public ItemStack a;
@@ -69398,7 +69477,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
          }
      }
  
-@@ -646,10 +647,10 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -646,10 +644,10 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
  
          public MerchantRecipeOptionBook() {}
  
@@ -69412,7 +69491,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              int j = 2 + random.nextInt(5 + i * 10) + 3 * i;
  
              if (j > 64) {
-@@ -662,49 +663,49 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -662,49 +660,49 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
  
      static class MerchantRecipeOptionEnchant implements EntityVillager.IMerchantRecipeOption {
  
@@ -69480,7 +69559,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              }
  
              ItemStack itemstack;
-@@ -712,10 +713,10 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -712,10 +710,10 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
  
              if (i < 0) {
                  itemstack = new ItemStack(Items.EMERALD, 1, 0);
@@ -69493,7 +69572,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
              }
  
              merchantrecipelist.add(new MerchantRecipe(itemstack, itemstack1));
-@@ -724,28 +725,28 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -724,28 +722,28 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
  
      static class MerchantRecipeOptionBuy implements EntityVillager.IMerchantRecipeOption {
  
@@ -69531,7 +69610,7 @@ index f1c905aa0fb964bd728c63b851fa4800a77179ef..cf078ec205d9ad378a794ed566199a49
      }
  
      static class MerchantOptionRandomRange extends Tuple<Integer, Integer> {
-@@ -754,8 +755,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
+@@ -754,8 +752,8 @@ public class EntityVillager extends EntityAgeable implements IMerchant, NPC {
              super(Integer.valueOf(i), Integer.valueOf(j));
          }
  
@@ -70342,7 +70421,7 @@ index f0e627bac5b336c285bb549e28a69923b8ed1904..fb6f241adec122572aa686e184dff509
  
      public boolean isCharged() {
 diff --git a/src/main/java/net/minecraft/server/EntityWolf.java b/src/main/java/net/minecraft/server/EntityWolf.java
-index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe5457e67f 100644
+index 931888ba9901d26736e463b952bb9037443c89c9..50583fa824c9794c7d1342e2f7977dc4520137e0 100644
 --- a/src/main/java/net/minecraft/server/EntityWolf.java
 +++ b/src/main/java/net/minecraft/server/EntityWolf.java
 @@ -1,39 +1,40 @@
@@ -70673,7 +70752,17 @@ index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe
          return 8;
      }
  
-@@ -352,7 +353,7 @@ public class EntityWolf extends EntityTameableAnimal {
+@@ -340,7 +341,8 @@ public class EntityWolf extends EntityTameableAnimal {
+         this.datawatcher.watch(20, Byte.valueOf((byte) (enumcolor.getInvColorIndex() & 15)));
+     }
+ 
+-    public EntityWolf b(EntityAgeable entityageable) {
++    @Override
++    public EntityWolf createChild(EntityAgeable entityageable) {
+         EntityWolf entitywolf = new EntityWolf(this.world);
+         String s = this.getOwnerUUID();
+ 
+@@ -352,7 +354,7 @@ public class EntityWolf extends EntityTameableAnimal {
          return entitywolf;
      }
  
@@ -70682,7 +70771,7 @@ index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe
          if (flag) {
              this.datawatcher.watch(19, Byte.valueOf((byte) 1));
          } else {
-@@ -375,7 +376,7 @@ public class EntityWolf extends EntityTameableAnimal {
+@@ -375,7 +377,7 @@ public class EntityWolf extends EntityTameableAnimal {
          }
      }
  
@@ -70691,7 +70780,7 @@ index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe
          return this.datawatcher.getByte(19) == 1;
      }
  
-@@ -383,7 +384,7 @@ public class EntityWolf extends EntityTameableAnimal {
+@@ -383,7 +385,7 @@ public class EntityWolf extends EntityTameableAnimal {
          return !this.isTamed() /*&& this.ticksLived > 2400*/; // CraftBukkit
      }
  
@@ -70700,7 +70789,7 @@ index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe
          if (!(entityliving instanceof EntityCreeper) && !(entityliving instanceof EntityGhast)) {
              if (entityliving instanceof EntityWolf) {
                  EntityWolf entitywolf = (EntityWolf) entityliving;
-@@ -393,14 +394,14 @@ public class EntityWolf extends EntityTameableAnimal {
+@@ -393,17 +395,14 @@ public class EntityWolf extends EntityTameableAnimal {
                  }
              }
  
@@ -70717,7 +70806,10 @@ index 931888ba9901d26736e463b952bb9037443c89c9..261747f6052517d13df8a0c96c792fbe
 +        return !this.isAngry() && super.allowLeashing();
      }
  
-     public EntityAgeable createChild(EntityAgeable entityageable) {
+-    public EntityAgeable createChild(EntityAgeable entityageable) {
+-        return this.b(entityageable);
+-    }
+ }
 diff --git a/src/main/java/net/minecraft/server/EntityZombie.java b/src/main/java/net/minecraft/server/EntityZombie.java
 index 5165f6e66431079ae756a0c967ca8c9cae466a29..8d8dd5016b61cfbf45502f15a33fc6bc42fb02aa 100644
 --- a/src/main/java/net/minecraft/server/EntityZombie.java
@@ -102943,7 +103035,7 @@ index d10cbde6a6a3cb1ab4755aad83c51b5cff6486a4..754eafdda3d332d3ec662c4eb599037f
          } else {
              return false;
 diff --git a/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java b/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
-index d8a02048095bc8590d37176ae4ce03b39fcdfa01..872dfc6122785e69a98db8d8bb58b24790c9e8fb 100644
+index d8a02048095bc8590d37176ae4ce03b39fcdfa01..4cdb4d2cb6b1d43ccc5114dd85f4d1986d007b0e 100644
 --- a/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
 +++ b/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
 @@ -1,36 +1,37 @@
@@ -103070,7 +103162,7 @@ index d8a02048095bc8590d37176ae4ce03b39fcdfa01..872dfc6122785e69a98db8d8bb58b247
 -    private void g() {
 -        EntityVillager entityvillager = this.b.b((EntityAgeable) this.c);
 +    private void giveBirth() {
-+        EntityVillager entityvillager = this.villagerObj.b((EntityAgeable) this.mate);
++        EntityVillager entityvillager = this.villagerObj.createChild((EntityAgeable) this.mate);
  
 -        this.c.setAgeRaw(6000);
 -        this.b.setAgeRaw(6000);
