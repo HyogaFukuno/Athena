@@ -5,9 +5,10 @@ Subject: [PATCH] Deobfuscate NMS members using MCP mappings
 
 Rename residual obfuscated members (a, b, ...) to human-readable MCP
 (Mod Coder Pack) names via type-aware source remapping (Mercury), with
-override-relationship-aware grouping so unrelated same-named members are
-not conflated. Real covariant methods are renamed while their synthetic
-bridge twins stay obfuscated to preserve compilability.
+override-relationship-aware grouping. For covariant-return method pairs,
+the override-chain method is renamed and the standalone covariant twin is
+kept obfuscated with a '// MCP: <name>' comment noting its readable name,
+so the whole set stays compilable.
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
@@ -385,7 +386,7 @@ index 81bd7edb536a8da2bb88b45d7e3cd8c04e8bddf6..8e06d2b09d6fdbadcf7dcfac5229a549
   * Internal API to register channel initialization listeners.
   * <p>
 diff --git a/src/main/java/net/minecraft/server/Achievement.java b/src/main/java/net/minecraft/server/Achievement.java
-index fb00a32157f432031338d9930b1ed7a99660f313..6dd2d4d0df240c9195759ad9113e4a7fc18ba6f1 100644
+index fb00a32157f432031338d9930b1ed7a99660f313..ec0c094f4976ba48bcad9d19b80f67d6933d03f8 100644
 --- a/src/main/java/net/minecraft/server/Achievement.java
 +++ b/src/main/java/net/minecraft/server/Achievement.java
 @@ -1,13 +1,14 @@
@@ -449,8 +450,9 @@ index fb00a32157f432031338d9930b1ed7a99660f313..6dd2d4d0df240c9195759ad9113e4a7f
 +        this.parentAchievement = achievement;
      }
  
-     public Achievement a() {
+-    public Achievement a() {
 -        this.f = true;
++    public Achievement a() {  // MCP: initIndependentStat
 +        this.isIndependent = true;
          return this;
      }
@@ -462,9 +464,11 @@ index fb00a32157f432031338d9930b1ed7a99660f313..6dd2d4d0df240c9195759ad9113e4a7f
          return this;
      }
  
-     public Achievement c() {
-         super.h();
+-    public Achievement c() {
+-        super.h();
 -        AchievementList.e.add(this);
++    public Achievement c() {  // MCP: registerStat
++        super.registerStat();
 +        AchievementList.achievementList.add(this);
          return this;
      }
@@ -497,6 +501,21 @@ index fb00a32157f432031338d9930b1ed7a99660f313..6dd2d4d0df240c9195759ad9113e4a7f
      }
  
      @Override
+@@ -85,12 +86,12 @@ public class Achievement extends Statistic {
+     }
+ 
+     @Override
+-    public Statistic h() {
++    public Statistic registerStat() {
+         return this.c();
+     }
+ 
+     @Override
+-    public Statistic i() {
++    public Statistic initIndependentStat() {
+         return this.a();
+     }
+ }
 diff --git a/src/main/java/net/minecraft/server/AchievementList.java b/src/main/java/net/minecraft/server/AchievementList.java
 index 4c924253bbf0b4e4d6943cb0586d98d04bfe3c9e..0ce24790c811df806a71068082f12ad5d39d219f 100644
 --- a/src/main/java/net/minecraft/server/AchievementList.java
@@ -38970,7 +38989,7 @@ index cbfe88b9ab8861631691bc8793f4726a6528d1c7..9a8b264c5bf2556645523efd340b0627
 +
  public interface Counter {}
 diff --git a/src/main/java/net/minecraft/server/CounterStatistic.java b/src/main/java/net/minecraft/server/CounterStatistic.java
-index 51ec5cafa77c59f737a8c8810f0a62fb33a2e826..11f054379ef5bd44c5dada7635341a6893cd2f25 100644
+index 51ec5cafa77c59f737a8c8810f0a62fb33a2e826..1e86de3904870fb522c4a00c2388aded5f5c31ff 100644
 --- a/src/main/java/net/minecraft/server/CounterStatistic.java
 +++ b/src/main/java/net/minecraft/server/CounterStatistic.java
 @@ -1,5 +1,6 @@
@@ -38980,11 +38999,15 @@ index 51ec5cafa77c59f737a8c8810f0a62fb33a2e826..11f054379ef5bd44c5dada7635341a68
  public class CounterStatistic extends Statistic {
  
      public CounterStatistic(String s, IChatBaseComponent ichatbasecomponent, Counter counter) {
-@@ -13,7 +14,7 @@ public class CounterStatistic extends Statistic {
+@@ -11,9 +12,9 @@ public class CounterStatistic extends Statistic {
+     }
+ 
      @Override
-     public Statistic h() {
-         super.h();
+-    public Statistic h() {
+-        super.h();
 -        StatisticList.c.add(this);
++    public Statistic registerStat() {
++        super.registerStat();
 +        StatisticList.generalStats.add(this);
          return this;
      }
@@ -62536,7 +62559,7 @@ index 05e4dbc1d130c497e2455d9eb1b339d10cd1527b..083dbf6efaa4742d385e1c2a84d00cec
      }
  }
 diff --git a/src/main/java/net/minecraft/server/EntityMushroomCow.java b/src/main/java/net/minecraft/server/EntityMushroomCow.java
-index fef767c248ab7ce356ae403b25e466cb306bdd73..81b02286f5d7dbca9c54d51ac4fa77dc7d4a4dee 100644
+index fef767c248ab7ce356ae403b25e466cb306bdd73..de83ad2e31e98234544e4b1d0bd7b81fc1e516be 100644
 --- a/src/main/java/net/minecraft/server/EntityMushroomCow.java
 +++ b/src/main/java/net/minecraft/server/EntityMushroomCow.java
 @@ -2,15 +2,16 @@ package net.minecraft.server;
@@ -62567,13 +62590,18 @@ index fef767c248ab7ce356ae403b25e466cb306bdd73..81b02286f5d7dbca9c54d51ac4fa77dc
                  if (this.hasCustomName()) {
                      entitycow.setCustomName(this.getCustomName());
                  }
-@@ -58,7 +59,7 @@ public class EntityMushroomCow extends EntityCow {
+@@ -58,11 +59,11 @@ public class EntityMushroomCow extends EntityCow {
  
              return true;
          } else {
 -            return super.a(entityhuman);
 +            return super.interact(entityhuman);
          }
+     }
+ 
+-    public EntityMushroomCow c(EntityAgeable entityageable) {
++    public EntityMushroomCow c(EntityAgeable entityageable) {  // MCP: createChild
+         return new EntityMushroomCow(this.world);
      }
  
 diff --git a/src/main/java/net/minecraft/server/EntityOcelot.java b/src/main/java/net/minecraft/server/EntityOcelot.java
@@ -118764,7 +118792,7 @@ index 3f1f606aa2b0aff755c7657d46eef08eb64781c7..7407553794d65dd8b95328e503ede738
                              // CraftBukkit end
                              flag = true;
 diff --git a/src/main/java/net/minecraft/server/Statistic.java b/src/main/java/net/minecraft/server/Statistic.java
-index 5be70d4ef4ae8743af739100b0e80c6950ad006a..eabb64fa9239f141b8eb2e988685b931638881a3 100644
+index 5be70d4ef4ae8743af739100b0e80c6950ad006a..154eba76edfe00c00be1f1e8afba9f93a3fec3fa 100644
 --- a/src/main/java/net/minecraft/server/Statistic.java
 +++ b/src/main/java/net/minecraft/server/Statistic.java
 @@ -4,67 +4,68 @@ import java.text.DecimalFormat;
@@ -118817,15 +118845,17 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..eabb64fa9239f141b8eb2e988685b931
 +        this(s, ichatbasecomponent, Statistic.simpleStatType);
      }
  
-     public Statistic i() {
+-    public Statistic i() {
 -        this.f = true;
++    public Statistic initIndependentStat() {
 +        this.isIndependent = true;
          return this;
      }
  
-     public Statistic h() {
+-    public Statistic h() {
 -        if (StatisticList.a.containsKey(this.name)) {
 -            throw new RuntimeException("Duplicate stat id: \"" + ((Statistic) StatisticList.a.get(this.name)).a + "\" and \"" + this.a + "\" at id " + this.name);
++    public Statistic registerStat() {
 +        if (StatisticList.oneShotStats.containsKey(this.name)) {
 +            throw new RuntimeException("Duplicate stat id: \"" + ((Statistic) StatisticList.oneShotStats.get(this.name)).statName + "\" and \"" + this.statName + "\" at id " + this.name);
          } else {
@@ -118876,10 +118906,10 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..eabb64fa9239f141b8eb2e988685b931
  
      public Class<? extends IJsonStatistic> l() {
 diff --git a/src/main/java/net/minecraft/server/StatisticList.java b/src/main/java/net/minecraft/server/StatisticList.java
-index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057ccad1ddabf 100644
+index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..9893a17393503d4566ca647286f827d745fd4d9e 100644
 --- a/src/main/java/net/minecraft/server/StatisticList.java
 +++ b/src/main/java/net/minecraft/server/StatisticList.java
-@@ -7,41 +7,42 @@ import java.util.HashSet;
+@@ -7,81 +7,82 @@ import java.util.HashSet;
  import java.util.List;
  import java.util.Map;
  
@@ -118920,41 +118950,79 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
 -    public static Statistic E = (new CounterStatistic("stat.treasureFished", new ChatMessage("stat.treasureFished", new Object[0]))).h();
 -    public static Statistic F = (new CounterStatistic("stat.talkedToVillager", new ChatMessage("stat.talkedToVillager", new Object[0]))).h();
 -    public static Statistic G = (new CounterStatistic("stat.tradedWithVillager", new ChatMessage("stat.tradedWithVillager", new Object[0]))).h();
+-    public static Statistic H = (new CounterStatistic("stat.cakeSlicesEaten", new ChatMessage("stat.cakeSlicesEaten", new Object[0]))).h();
+-    public static Statistic I = (new CounterStatistic("stat.cauldronFilled", new ChatMessage("stat.cauldronFilled", new Object[0]))).h();
+-    public static Statistic J = (new CounterStatistic("stat.cauldronUsed", new ChatMessage("stat.cauldronUsed", new Object[0]))).h();
+-    public static Statistic K = (new CounterStatistic("stat.armorCleaned", new ChatMessage("stat.armorCleaned", new Object[0]))).h();
+-    public static Statistic L = (new CounterStatistic("stat.bannerCleaned", new ChatMessage("stat.bannerCleaned", new Object[0]))).h();
+-    public static Statistic M = (new CounterStatistic("stat.brewingstandInteraction", new ChatMessage("stat.brewingstandInteraction", new Object[0]))).h();
+-    public static Statistic N = (new CounterStatistic("stat.beaconInteraction", new ChatMessage("stat.beaconInteraction", new Object[0]))).h();
+-    public static Statistic O = (new CounterStatistic("stat.dropperInspected", new ChatMessage("stat.dropperInspected", new Object[0]))).h();
+-    public static Statistic P = (new CounterStatistic("stat.hopperInspected", new ChatMessage("stat.hopperInspected", new Object[0]))).h();
+-    public static Statistic Q = (new CounterStatistic("stat.dispenserInspected", new ChatMessage("stat.dispenserInspected", new Object[0]))).h();
+-    public static Statistic R = (new CounterStatistic("stat.noteblockPlayed", new ChatMessage("stat.noteblockPlayed", new Object[0]))).h();
+-    public static Statistic S = (new CounterStatistic("stat.noteblockTuned", new ChatMessage("stat.noteblockTuned", new Object[0]))).h();
+-    public static Statistic T = (new CounterStatistic("stat.flowerPotted", new ChatMessage("stat.flowerPotted", new Object[0]))).h();
+-    public static Statistic U = (new CounterStatistic("stat.trappedChestTriggered", new ChatMessage("stat.trappedChestTriggered", new Object[0]))).h();
+-    public static Statistic V = (new CounterStatistic("stat.enderchestOpened", new ChatMessage("stat.enderchestOpened", new Object[0]))).h();
+-    public static Statistic W = (new CounterStatistic("stat.itemEnchanted", new ChatMessage("stat.itemEnchanted", new Object[0]))).h();
+-    public static Statistic X = (new CounterStatistic("stat.recordPlayed", new ChatMessage("stat.recordPlayed", new Object[0]))).h();
+-    public static Statistic Y = (new CounterStatistic("stat.furnaceInteraction", new ChatMessage("stat.furnaceInteraction", new Object[0]))).h();
+-    public static Statistic Z = (new CounterStatistic("stat.craftingTableInteraction", new ChatMessage("stat.workbenchInteraction", new Object[0]))).h();
+-    public static Statistic aa = (new CounterStatistic("stat.chestOpened", new ChatMessage("stat.chestOpened", new Object[0]))).h();
 +    public static List<Statistic> generalStats = Lists.newArrayList();
 +    public static List<CraftingStatistic> itemStats = Lists.newArrayList();
 +    public static List<CraftingStatistic> objectMineStats = Lists.newArrayList();
-+    public static Statistic leaveGameStat = (new CounterStatistic("stat.leaveGame", new ChatMessage("stat.leaveGame", new Object[0]))).i().h();
-+    public static Statistic minutesPlayedStat = (new CounterStatistic("stat.playOneMinute", new ChatMessage("stat.playOneMinute", new Object[0]), Statistic.timeStatType)).i().h();
-+    public static Statistic timeSinceDeathStat = (new CounterStatistic("stat.timeSinceDeath", new ChatMessage("stat.timeSinceDeath", new Object[0]), Statistic.timeStatType)).i().h();
-+    public static Statistic distanceWalkedStat = (new CounterStatistic("stat.walkOneCm", new ChatMessage("stat.walkOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceCrouchedStat = (new CounterStatistic("stat.crouchOneCm", new ChatMessage("stat.crouchOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceSprintedStat = (new CounterStatistic("stat.sprintOneCm", new ChatMessage("stat.sprintOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceSwumStat = (new CounterStatistic("stat.swimOneCm", new ChatMessage("stat.swimOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceFallenStat = (new CounterStatistic("stat.fallOneCm", new ChatMessage("stat.fallOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceClimbedStat = (new CounterStatistic("stat.climbOneCm", new ChatMessage("stat.climbOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceFlownStat = (new CounterStatistic("stat.flyOneCm", new ChatMessage("stat.flyOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceDoveStat = (new CounterStatistic("stat.diveOneCm", new ChatMessage("stat.diveOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceByMinecartStat = (new CounterStatistic("stat.minecartOneCm", new ChatMessage("stat.minecartOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceByBoatStat = (new CounterStatistic("stat.boatOneCm", new ChatMessage("stat.boatOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceByPigStat = (new CounterStatistic("stat.pigOneCm", new ChatMessage("stat.pigOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic distanceByHorseStat = (new CounterStatistic("stat.horseOneCm", new ChatMessage("stat.horseOneCm", new Object[0]), Statistic.distanceStatType)).i().h();
-+    public static Statistic jumpStat = (new CounterStatistic("stat.jump", new ChatMessage("stat.jump", new Object[0]))).i().h();
-+    public static Statistic dropStat = (new CounterStatistic("stat.drop", new ChatMessage("stat.drop", new Object[0]))).i().h();
-+    public static Statistic damageDealtStat = (new CounterStatistic("stat.damageDealt", new ChatMessage("stat.damageDealt", new Object[0]), Statistic.j)).h();
-+    public static Statistic damageTakenStat = (new CounterStatistic("stat.damageTaken", new ChatMessage("stat.damageTaken", new Object[0]), Statistic.j)).h();
-+    public static Statistic deathsStat = (new CounterStatistic("stat.deaths", new ChatMessage("stat.deaths", new Object[0]))).h();
-+    public static Statistic mobKillsStat = (new CounterStatistic("stat.mobKills", new ChatMessage("stat.mobKills", new Object[0]))).h();
-+    public static Statistic animalsBredStat = (new CounterStatistic("stat.animalsBred", new ChatMessage("stat.animalsBred", new Object[0]))).h();
-+    public static Statistic playerKillsStat = (new CounterStatistic("stat.playerKills", new ChatMessage("stat.playerKills", new Object[0]))).h();
-+    public static Statistic fishCaughtStat = (new CounterStatistic("stat.fishCaught", new ChatMessage("stat.fishCaught", new Object[0]))).h();
-+    public static Statistic junkFishedStat = (new CounterStatistic("stat.junkFished", new ChatMessage("stat.junkFished", new Object[0]))).h();
-+    public static Statistic treasureFishedStat = (new CounterStatistic("stat.treasureFished", new ChatMessage("stat.treasureFished", new Object[0]))).h();
-+    public static Statistic timesTalkedToVillagerStat = (new CounterStatistic("stat.talkedToVillager", new ChatMessage("stat.talkedToVillager", new Object[0]))).h();
-+    public static Statistic timesTradedWithVillagerStat = (new CounterStatistic("stat.tradedWithVillager", new ChatMessage("stat.tradedWithVillager", new Object[0]))).h();
-     public static Statistic H = (new CounterStatistic("stat.cakeSlicesEaten", new ChatMessage("stat.cakeSlicesEaten", new Object[0]))).h();
-     public static Statistic I = (new CounterStatistic("stat.cauldronFilled", new ChatMessage("stat.cauldronFilled", new Object[0]))).h();
-     public static Statistic J = (new CounterStatistic("stat.cauldronUsed", new ChatMessage("stat.cauldronUsed", new Object[0]))).h();
-@@ -67,21 +68,21 @@ public class StatisticList {
++    public static Statistic leaveGameStat = (new CounterStatistic("stat.leaveGame", new ChatMessage("stat.leaveGame", new Object[0]))).initIndependentStat().registerStat();
++    public static Statistic minutesPlayedStat = (new CounterStatistic("stat.playOneMinute", new ChatMessage("stat.playOneMinute", new Object[0]), Statistic.timeStatType)).initIndependentStat().registerStat();
++    public static Statistic timeSinceDeathStat = (new CounterStatistic("stat.timeSinceDeath", new ChatMessage("stat.timeSinceDeath", new Object[0]), Statistic.timeStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceWalkedStat = (new CounterStatistic("stat.walkOneCm", new ChatMessage("stat.walkOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceCrouchedStat = (new CounterStatistic("stat.crouchOneCm", new ChatMessage("stat.crouchOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceSprintedStat = (new CounterStatistic("stat.sprintOneCm", new ChatMessage("stat.sprintOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceSwumStat = (new CounterStatistic("stat.swimOneCm", new ChatMessage("stat.swimOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceFallenStat = (new CounterStatistic("stat.fallOneCm", new ChatMessage("stat.fallOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceClimbedStat = (new CounterStatistic("stat.climbOneCm", new ChatMessage("stat.climbOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceFlownStat = (new CounterStatistic("stat.flyOneCm", new ChatMessage("stat.flyOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceDoveStat = (new CounterStatistic("stat.diveOneCm", new ChatMessage("stat.diveOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceByMinecartStat = (new CounterStatistic("stat.minecartOneCm", new ChatMessage("stat.minecartOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceByBoatStat = (new CounterStatistic("stat.boatOneCm", new ChatMessage("stat.boatOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceByPigStat = (new CounterStatistic("stat.pigOneCm", new ChatMessage("stat.pigOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic distanceByHorseStat = (new CounterStatistic("stat.horseOneCm", new ChatMessage("stat.horseOneCm", new Object[0]), Statistic.distanceStatType)).initIndependentStat().registerStat();
++    public static Statistic jumpStat = (new CounterStatistic("stat.jump", new ChatMessage("stat.jump", new Object[0]))).initIndependentStat().registerStat();
++    public static Statistic dropStat = (new CounterStatistic("stat.drop", new ChatMessage("stat.drop", new Object[0]))).initIndependentStat().registerStat();
++    public static Statistic damageDealtStat = (new CounterStatistic("stat.damageDealt", new ChatMessage("stat.damageDealt", new Object[0]), Statistic.j)).registerStat();
++    public static Statistic damageTakenStat = (new CounterStatistic("stat.damageTaken", new ChatMessage("stat.damageTaken", new Object[0]), Statistic.j)).registerStat();
++    public static Statistic deathsStat = (new CounterStatistic("stat.deaths", new ChatMessage("stat.deaths", new Object[0]))).registerStat();
++    public static Statistic mobKillsStat = (new CounterStatistic("stat.mobKills", new ChatMessage("stat.mobKills", new Object[0]))).registerStat();
++    public static Statistic animalsBredStat = (new CounterStatistic("stat.animalsBred", new ChatMessage("stat.animalsBred", new Object[0]))).registerStat();
++    public static Statistic playerKillsStat = (new CounterStatistic("stat.playerKills", new ChatMessage("stat.playerKills", new Object[0]))).registerStat();
++    public static Statistic fishCaughtStat = (new CounterStatistic("stat.fishCaught", new ChatMessage("stat.fishCaught", new Object[0]))).registerStat();
++    public static Statistic junkFishedStat = (new CounterStatistic("stat.junkFished", new ChatMessage("stat.junkFished", new Object[0]))).registerStat();
++    public static Statistic treasureFishedStat = (new CounterStatistic("stat.treasureFished", new ChatMessage("stat.treasureFished", new Object[0]))).registerStat();
++    public static Statistic timesTalkedToVillagerStat = (new CounterStatistic("stat.talkedToVillager", new ChatMessage("stat.talkedToVillager", new Object[0]))).registerStat();
++    public static Statistic timesTradedWithVillagerStat = (new CounterStatistic("stat.tradedWithVillager", new ChatMessage("stat.tradedWithVillager", new Object[0]))).registerStat();
++    public static Statistic H = (new CounterStatistic("stat.cakeSlicesEaten", new ChatMessage("stat.cakeSlicesEaten", new Object[0]))).registerStat();
++    public static Statistic I = (new CounterStatistic("stat.cauldronFilled", new ChatMessage("stat.cauldronFilled", new Object[0]))).registerStat();
++    public static Statistic J = (new CounterStatistic("stat.cauldronUsed", new ChatMessage("stat.cauldronUsed", new Object[0]))).registerStat();
++    public static Statistic K = (new CounterStatistic("stat.armorCleaned", new ChatMessage("stat.armorCleaned", new Object[0]))).registerStat();
++    public static Statistic L = (new CounterStatistic("stat.bannerCleaned", new ChatMessage("stat.bannerCleaned", new Object[0]))).registerStat();
++    public static Statistic M = (new CounterStatistic("stat.brewingstandInteraction", new ChatMessage("stat.brewingstandInteraction", new Object[0]))).registerStat();
++    public static Statistic N = (new CounterStatistic("stat.beaconInteraction", new ChatMessage("stat.beaconInteraction", new Object[0]))).registerStat();
++    public static Statistic O = (new CounterStatistic("stat.dropperInspected", new ChatMessage("stat.dropperInspected", new Object[0]))).registerStat();
++    public static Statistic P = (new CounterStatistic("stat.hopperInspected", new ChatMessage("stat.hopperInspected", new Object[0]))).registerStat();
++    public static Statistic Q = (new CounterStatistic("stat.dispenserInspected", new ChatMessage("stat.dispenserInspected", new Object[0]))).registerStat();
++    public static Statistic R = (new CounterStatistic("stat.noteblockPlayed", new ChatMessage("stat.noteblockPlayed", new Object[0]))).registerStat();
++    public static Statistic S = (new CounterStatistic("stat.noteblockTuned", new ChatMessage("stat.noteblockTuned", new Object[0]))).registerStat();
++    public static Statistic T = (new CounterStatistic("stat.flowerPotted", new ChatMessage("stat.flowerPotted", new Object[0]))).registerStat();
++    public static Statistic U = (new CounterStatistic("stat.trappedChestTriggered", new ChatMessage("stat.trappedChestTriggered", new Object[0]))).registerStat();
++    public static Statistic V = (new CounterStatistic("stat.enderchestOpened", new ChatMessage("stat.enderchestOpened", new Object[0]))).registerStat();
++    public static Statistic W = (new CounterStatistic("stat.itemEnchanted", new ChatMessage("stat.itemEnchanted", new Object[0]))).registerStat();
++    public static Statistic X = (new CounterStatistic("stat.recordPlayed", new ChatMessage("stat.recordPlayed", new Object[0]))).registerStat();
++    public static Statistic Y = (new CounterStatistic("stat.furnaceInteraction", new ChatMessage("stat.furnaceInteraction", new Object[0]))).registerStat();
++    public static Statistic Z = (new CounterStatistic("stat.craftingTableInteraction", new ChatMessage("stat.workbenchInteraction", new Object[0]))).registerStat();
++    public static Statistic aa = (new CounterStatistic("stat.chestOpened", new ChatMessage("stat.chestOpened", new Object[0]))).registerStat();
+     public static final Statistic[] MINE_BLOCK_COUNT = new Statistic[4096];
+     public static final Statistic[] CRAFT_BLOCK_COUNT = new Statistic[32000];
      public static final Statistic[] USE_ITEM_COUNT = new Statistic[32000];
      public static final Statistic[] BREAK_ITEM_COUNT = new Statistic[32000];
  
@@ -118990,7 +119058,7 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
  
                  if (s != null) {
 -                    StatisticList.CRAFT_BLOCK_COUNT[i] = (new CraftingStatistic("stat.craftItem.", s, new ChatMessage("stat.craftItem", new Object[]{(new ItemStack(item)).C()}), item)).h();
-+                    StatisticList.CRAFT_BLOCK_COUNT[i] = (new CraftingStatistic("stat.craftItem.", s, new ChatMessage("stat.craftItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).h();
++                    StatisticList.CRAFT_BLOCK_COUNT[i] = (new CraftingStatistic("stat.craftItem.", s, new ChatMessage("stat.craftItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).registerStat();
                  }
              }
          }
@@ -119012,7 +119080,7 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
 -                    StatisticList.MINE_BLOCK_COUNT[i] = (new CraftingStatistic("stat.mineBlock.", s, new ChatMessage("stat.mineBlock", new Object[]{(new ItemStack(block)).C()}), item)).h();
 -                    StatisticList.e.add((CraftingStatistic) StatisticList.MINE_BLOCK_COUNT[i]);
 +                if (s != null && block.getEnableStats()) {
-+                    StatisticList.MINE_BLOCK_COUNT[i] = (new CraftingStatistic("stat.mineBlock.", s, new ChatMessage("stat.mineBlock", new Object[]{(new ItemStack(block)).getChatComponent()}), item)).h();
++                    StatisticList.MINE_BLOCK_COUNT[i] = (new CraftingStatistic("stat.mineBlock.", s, new ChatMessage("stat.mineBlock", new Object[]{(new ItemStack(block)).getChatComponent()}), item)).registerStat();
 +                    StatisticList.objectMineStats.add((CraftingStatistic) StatisticList.MINE_BLOCK_COUNT[i]);
                  }
              }
@@ -119031,7 +119099,7 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
  
                  if (s != null) {
 -                    StatisticList.USE_ITEM_COUNT[i] = (new CraftingStatistic("stat.useItem.", s, new ChatMessage("stat.useItem", new Object[]{(new ItemStack(item)).C()}), item)).h();
-+                    StatisticList.USE_ITEM_COUNT[i] = (new CraftingStatistic("stat.useItem.", s, new ChatMessage("stat.useItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).h();
++                    StatisticList.USE_ITEM_COUNT[i] = (new CraftingStatistic("stat.useItem.", s, new ChatMessage("stat.useItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).registerStat();
                      if (!(item instanceof ItemBlock)) {
 -                        StatisticList.d.add((CraftingStatistic) StatisticList.USE_ITEM_COUNT[i]);
 +                        StatisticList.itemStats.add((CraftingStatistic) StatisticList.USE_ITEM_COUNT[i]);
@@ -119053,7 +119121,7 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
  
                  if (s != null && item.usesDurability()) {
 -                    StatisticList.BREAK_ITEM_COUNT[i] = (new CraftingStatistic("stat.breakItem.", s, new ChatMessage("stat.breakItem", new Object[]{(new ItemStack(item)).C()}), item)).h();
-+                    StatisticList.BREAK_ITEM_COUNT[i] = (new CraftingStatistic("stat.breakItem.", s, new ChatMessage("stat.breakItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).h();
++                    StatisticList.BREAK_ITEM_COUNT[i] = (new CraftingStatistic("stat.breakItem.", s, new ChatMessage("stat.breakItem", new Object[]{(new ItemStack(item)).getChatComponent()}), item)).registerStat();
                  }
              }
          }
@@ -119123,7 +119191,8 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
 +    public static Statistic getStatKillEntity(EntityTypes.MonsterEggInfo entitytypes_monsteregginfo) {
 +        String s = EntityTypes.getStringFromID(entitytypes_monsteregginfo.spawnedID);
  
-         return s == null ? null : (new Statistic("stat.killEntity." + s, new ChatMessage("stat.entityKill", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).h();
+-        return s == null ? null : (new Statistic("stat.killEntity." + s, new ChatMessage("stat.entityKill", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).h();
++        return s == null ? null : (new Statistic("stat.killEntity." + s, new ChatMessage("stat.entityKill", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).registerStat();
      }
  
 -    public static Statistic b(EntityTypes.MonsterEggInfo entitytypes_monsteregginfo) {
@@ -119131,7 +119200,8 @@ index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..cbdaeb086190648af2ab6ec9d94057cc
 +    public static Statistic getStatEntityKilledBy(EntityTypes.MonsterEggInfo entitytypes_monsteregginfo) {
 +        String s = EntityTypes.getStringFromID(entitytypes_monsteregginfo.spawnedID);
  
-         return s == null ? null : (new Statistic("stat.entityKilledBy." + s, new ChatMessage("stat.entityKilledBy", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).h();
+-        return s == null ? null : (new Statistic("stat.entityKilledBy." + s, new ChatMessage("stat.entityKilledBy", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).h();
++        return s == null ? null : (new Statistic("stat.entityKilledBy." + s, new ChatMessage("stat.entityKilledBy", new Object[]{new ChatMessage("entity." + s + ".name", new Object[0])}))).registerStat();
      }
  
      public static Statistic getStatistic(String s) {
