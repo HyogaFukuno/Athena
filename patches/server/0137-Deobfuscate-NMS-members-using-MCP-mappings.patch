@@ -29342,10 +29342,10 @@ index 0f6f0528fdbbbc9c6f2ea927b10d9566702e7eb7..b3b6107b44678c8b75c0800cea2b5065
              throw new IndexOutOfBoundsException("The coordinate is out of range");
          }
 diff --git a/src/main/java/net/minecraft/server/CombatEntry.java b/src/main/java/net/minecraft/server/CombatEntry.java
-index a0a1d982d4fbbf9979d044c6163536493c2f4f8d..790e954912247b4b4adc8cc623b8afaf9aa376db 100644
+index a0a1d982d4fbbf9979d044c6163536493c2f4f8d..0aadde0985903615e63f97e10ce0839b68297777 100644
 --- a/src/main/java/net/minecraft/server/CombatEntry.java
 +++ b/src/main/java/net/minecraft/server/CombatEntry.java
-@@ -1,44 +1,45 @@
+@@ -1,44 +1,46 @@
  package net.minecraft.server;
  
 +
@@ -29381,8 +29381,10 @@ index a0a1d982d4fbbf9979d044c6163536493c2f4f8d..790e954912247b4b4adc8cc623b8afaf
 +        return this.damageSrc;
      }
  
-     public float c() {
+-    public float c() {
 -        return this.c;
++    // 命名: 手動 (MCPに可読名なし: searge func_94563_c)
++    public float getDamage() {
 +        return this.damage;
      }
  
@@ -29409,7 +29411,7 @@ index a0a1d982d4fbbf9979d044c6163536493c2f4f8d..790e954912247b4b4adc8cc623b8afaf
      }
  }
 diff --git a/src/main/java/net/minecraft/server/CombatTracker.java b/src/main/java/net/minecraft/server/CombatTracker.java
-index 21fec86ba5c397c9cfbb736333432cac4f58ed0a..da28934535a8ea41f791096e8230ce2d9daf5451 100644
+index 21fec86ba5c397c9cfbb736333432cac4f58ed0a..b21f4ce1ef92bf37b3ef0571388b86cb64b67a9a 100644
 --- a/src/main/java/net/minecraft/server/CombatTracker.java
 +++ b/src/main/java/net/minecraft/server/CombatTracker.java
 @@ -3,10 +3,11 @@ package net.minecraft.server;
@@ -29545,22 +29547,24 @@ index 21fec86ba5c397c9cfbb736333432cac4f58ed0a..da28934535a8ea41f791096e8230ce2d
  
 -        for (CombatEntry combatentry : this.a) {
 -            if (combatentry.a().getEntity() instanceof EntityHuman && (entityhuman == null || combatentry.c() > f1)) {
-+        for (CombatEntry combatentry : this.combatEntries) {
-+            if (combatentry.getDamageSrc().getEntity() instanceof EntityHuman && (entityhuman == null || combatentry.c() > f1)) {
-                 f1 = combatentry.c();
+-                f1 = combatentry.c();
 -                entityhuman = (EntityHuman) combatentry.a().getEntity();
++        for (CombatEntry combatentry : this.combatEntries) {
++            if (combatentry.getDamageSrc().getEntity() instanceof EntityHuman && (entityhuman == null || combatentry.getDamage() > f1)) {
++                f1 = combatentry.getDamage();
 +                entityhuman = (EntityHuman) combatentry.getDamageSrc().getEntity();
              }
  
 -            if (combatentry.a().getEntity() instanceof EntityLiving && (entityliving == null || combatentry.c() > f)) {
-+            if (combatentry.getDamageSrc().getEntity() instanceof EntityLiving && (entityliving == null || combatentry.c() > f)) {
-                 f = combatentry.c();
+-                f = combatentry.c();
 -                entityliving = (EntityLiving) combatentry.a().getEntity();
++            if (combatentry.getDamageSrc().getEntity() instanceof EntityLiving && (entityliving == null || combatentry.getDamage() > f)) {
++                f = combatentry.getDamage();
 +                entityliving = (EntityLiving) combatentry.getDamageSrc().getEntity();
              }
          }
  
-@@ -127,18 +128,18 @@ public class CombatTracker {
+@@ -127,21 +128,21 @@ public class CombatTracker {
          byte b0 = 0;
          float f = 0.0F;
  
@@ -29583,7 +29587,11 @@ index 21fec86ba5c397c9cfbb736333432cac4f58ed0a..da28934535a8ea41f791096e8230ce2d
 +                f = combatentry2.getDamageAmount();
              }
  
-             if (combatentry2.g() != null && (combatentry1 == null || combatentry2.c() > (float) b0)) {
+-            if (combatentry2.g() != null && (combatentry1 == null || combatentry2.c() > (float) b0)) {
++            if (combatentry2.g() != null && (combatentry1 == null || combatentry2.getDamage() > (float) b0)) {
+                 combatentry1 = combatentry2;
+             }
+         }
 @@ -160,32 +161,32 @@ public class CombatTracker {
      }
  
@@ -36924,7 +36932,7 @@ index 2816de678fb2473fdb477bf50c4dc4edbc8df364..8b27c30abd4e132a18da7bf2012146ff
          return bukkitEntity;
      }
 diff --git a/src/main/java/net/minecraft/server/ContainerBeacon.java b/src/main/java/net/minecraft/server/ContainerBeacon.java
-index 9c755fa72bc14f4c2814ca7fa0fbf2cf6e66376d..4c6da1366df380b66a1f18b8411a691127456355 100644
+index 9c755fa72bc14f4c2814ca7fa0fbf2cf6e66376d..8b86061d6352200fc165d1da1da6fb39e18bce32 100644
 --- a/src/main/java/net/minecraft/server/ContainerBeacon.java
 +++ b/src/main/java/net/minecraft/server/ContainerBeacon.java
 @@ -2,10 +2,11 @@ package net.minecraft.server;
@@ -36964,7 +36972,13 @@ index 9c755fa72bc14f4c2814ca7fa0fbf2cf6e66376d..4c6da1366df380b66a1f18b8411a6911
          }
  
      }
-@@ -41,10 +42,10 @@ public class ContainerBeacon extends Container {
+@@ -37,14 +38,15 @@ public class ContainerBeacon extends Container {
+         icrafting.setContainerData(this, this.beacon);
+     }
+ 
+-    public IInventory e() {
++    // 命名: 手動 (MCPに可読名なし: searge func_180611_e)
++    public IInventory getBeacon() {
          return this.beacon;
      }
  
@@ -36978,7 +36992,7 @@ index 9c755fa72bc14f4c2814ca7fa0fbf2cf6e66376d..4c6da1366df380b66a1f18b8411a6911
  
              if (itemstack != null) {
                  entityhuman.drop(itemstack, false);
-@@ -53,52 +54,52 @@ public class ContainerBeacon extends Container {
+@@ -53,52 +55,52 @@ public class ContainerBeacon extends Container {
          }
      }
  
@@ -96953,10 +96967,10 @@ index 00c05385066dc2dafad5fd2fc891295cd65bc2df..09bf584063ea6c810078df4777bb8eb3
      }
  }
 diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java b/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
-index fcd9d89f32a16b5e05e03bb3489068d868d59396..df053fd1051f582c1d0d56c8c1e16dfe848bcc1e 100644
+index fcd9d89f32a16b5e05e03bb3489068d868d59396..28cacc005c919a1d930ea86c0ff9c8fb8ccc83f7 100644
 --- a/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
 +++ b/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
-@@ -2,76 +2,77 @@ package net.minecraft.server;
+@@ -2,76 +2,78 @@ package net.minecraft.server;
  
  import java.io.IOException;
  
@@ -97005,15 +97019,17 @@ index fcd9d89f32a16b5e05e03bb3489068d868d59396..df053fd1051f582c1d0d56c8c1e16dfe
 -        packetdataserializer.writeInt(this.a.x);
 -        packetdataserializer.writeInt(this.a.z);
 -        packetdataserializer.b(this.b.length);
+-
+-        for (PacketPlayOutMultiBlockChange.MultiBlockChangeInfo packetplayoutmultiblockchange_multiblockchangeinfo : this.b) {
+-            packetdataserializer.writeShort(packetplayoutmultiblockchange_multiblockchangeinfo.b());
+-            packetdataserializer.b(Block.d.b(packetplayoutmultiblockchange_multiblockchangeinfo.c()));
 +    public void writePacketData(PacketDataSerializer packetdataserializer) throws IOException {
 +        packetdataserializer.writeInt(this.chunkPosCoord.x);
 +        packetdataserializer.writeInt(this.chunkPosCoord.z);
 +        packetdataserializer.writeVarIntToBuffer(this.changedBlocks.length);
- 
--        for (PacketPlayOutMultiBlockChange.MultiBlockChangeInfo packetplayoutmultiblockchange_multiblockchangeinfo : this.b) {
++
 +        for (PacketPlayOutMultiBlockChange.MultiBlockChangeInfo packetplayoutmultiblockchange_multiblockchangeinfo : this.changedBlocks) {
-             packetdataserializer.writeShort(packetplayoutmultiblockchange_multiblockchangeinfo.b());
--            packetdataserializer.b(Block.d.b(packetplayoutmultiblockchange_multiblockchangeinfo.c()));
++            packetdataserializer.writeShort(packetplayoutmultiblockchange_multiblockchangeinfo.getChunkPosCrammed());
 +            packetdataserializer.writeVarIntToBuffer(Block.BLOCK_STATE_IDS.get(packetplayoutmultiblockchange_multiblockchangeinfo.getBlockState()));
          }
  
@@ -97052,8 +97068,10 @@ index fcd9d89f32a16b5e05e03bb3489068d868d59396..df053fd1051f582c1d0d56c8c1e16dfe
 +            return new BlockPosition(PacketPlayOutMultiBlockChange.this.chunkPosCoord.getBlock(this.chunkPosCrammed >> 12 & 15, this.chunkPosCrammed & 255, this.chunkPosCrammed >> 8 & 15));
          }
  
-         public short b() {
+-        public short b() {
 -            return this.b;
++        // 命名: 手動 (MCPに可読名なし: searge func_180089_b)
++        public short getChunkPosCrammed() {
 +            return this.chunkPosCrammed;
          }
  
@@ -108303,7 +108321,7 @@ index 6a489b4514d565b47d930a6ed1abf94cd863cf54..80e253b11e85d99ebe20461b747abd61
                      return true;
                  }
 diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
-index a4c9ee61ca31700b35250cb014f31ffc413cbf8c..4120ca889f8a54fddbf4930847c960b1bcc05604 100644
+index a4c9ee61ca31700b35250cb014f31ffc413cbf8c..209c14a62aec7dbaa620ddefeb5e4e5abc44ca32 100644
 --- a/src/main/java/net/minecraft/server/PlayerConnection.java
 +++ b/src/main/java/net/minecraft/server/PlayerConnection.java
 @@ -18,12 +18,9 @@ import java.util.concurrent.Callable;
@@ -109906,8 +109924,9 @@ index a4c9ee61ca31700b35250cb014f31ffc413cbf8c..4120ca889f8a54fddbf4930847c960b1
  
                      if (slot.hasItem()) {
 -                        slot.a(1);
+-                        IInventory iinventory = containerbeacon.e();
 +                        slot.decrStackSize(1);
-                         IInventory iinventory = containerbeacon.e();
++                        IInventory iinventory = containerbeacon.getBeacon();
  
 -                        iinventory.b(1, j);
 -                        iinventory.b(2, k);
@@ -117353,7 +117372,7 @@ index 0205f779b067771798d152ddd7edb37451b624c5..6bab62c4ea749d056cd38ec9c822a815
  
              return jsonobject;
 diff --git a/src/main/java/net/minecraft/server/ServerStatisticManager.java b/src/main/java/net/minecraft/server/ServerStatisticManager.java
-index 22c2ffddf2398604ae00cf7b471a80ce1bb15af5..8c410e13c5b1cbdf6df0815db20b44092ec0f5c5 100644
+index 22c2ffddf2398604ae00cf7b471a80ce1bb15af5..717809b413c372d6962860c364b60acca7e53680 100644
 --- a/src/main/java/net/minecraft/server/ServerStatisticManager.java
 +++ b/src/main/java/net/minecraft/server/ServerStatisticManager.java
 @@ -19,69 +19,70 @@ import org.apache.commons.io.FileUtils;
@@ -117459,7 +117478,7 @@ index 22c2ffddf2398604ae00cf7b471a80ce1bb15af5..8c410e13c5b1cbdf6df0815db20b4409
          JsonElement jsonelement = (new JsonParser()).parse(s);
  
          if (!jsonelement.isJsonObject()) {
-@@ -113,12 +114,12 @@ public class ServerStatisticManager extends StatisticManager {
+@@ -113,30 +114,30 @@ public class ServerStatisticManager extends StatisticManager {
                      StatisticWrapper statisticwrapper = new StatisticWrapper();
  
                      if (((JsonElement) entry.getValue()).isJsonPrimitive() && ((JsonElement) entry.getValue()).getAsJsonPrimitive().isNumber()) {
@@ -117473,9 +117492,11 @@ index 22c2ffddf2398604ae00cf7b471a80ce1bb15af5..8c410e13c5b1cbdf6df0815db20b4409
 +                            statisticwrapper.setIntegerValue(jsonobject1.getAsJsonPrimitive("value").getAsInt());
                          }
  
-                         if (jsonobject1.has("progress") && statistic.l() != null) {
-@@ -126,17 +127,17 @@ public class ServerStatisticManager extends StatisticManager {
-                                 Constructor constructor = statistic.l().getConstructor(new Class[0]);
+-                        if (jsonobject1.has("progress") && statistic.l() != null) {
++                        if (jsonobject1.has("progress") && statistic.getSerializable() != null) {
+                             try {
+-                                Constructor constructor = statistic.l().getConstructor(new Class[0]);
++                                Constructor constructor = statistic.getSerializable().getConstructor(new Class[0]);
                                  IJsonStatistic ijsonstatistic = (IJsonStatistic) constructor.newInstance(new Object[0]);
  
 -                                ijsonstatistic.a(jsonobject1.get("progress"));
@@ -118887,10 +118908,10 @@ index 3f1f606aa2b0aff755c7657d46eef08eb64781c7..7407553794d65dd8b95328e503ede738
                              // CraftBukkit end
                              flag = true;
 diff --git a/src/main/java/net/minecraft/server/Statistic.java b/src/main/java/net/minecraft/server/Statistic.java
-index 5be70d4ef4ae8743af739100b0e80c6950ad006a..bbd9ff28b49a7872641f20db8b0df7cc1afbfff8 100644
+index 5be70d4ef4ae8743af739100b0e80c6950ad006a..153f97ff1db7b229c6ab54376865b35ef386061b 100644
 --- a/src/main/java/net/minecraft/server/Statistic.java
 +++ b/src/main/java/net/minecraft/server/Statistic.java
-@@ -4,67 +4,68 @@ import java.text.DecimalFormat;
+@@ -4,67 +4,69 @@ import java.text.DecimalFormat;
  import java.text.NumberFormat;
  import java.util.Locale;
  
@@ -118902,13 +118923,15 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..bbd9ff28b49a7872641f20db8b0df7cc
 -    public boolean f;
 -    private final Counter b;
 -    private final IScoreboardCriteria c;
+-    private Class<? extends IJsonStatistic> d;
+-    private static NumberFormat k = NumberFormat.getIntegerInstance(Locale.US);
+-    public static Counter g = new Counter() {
 +    private final IChatBaseComponent statName;
 +    public boolean isIndependent;
 +    private final Counter type;
 +    private final IScoreboardCriteria objectiveCriteria;
-     private Class<? extends IJsonStatistic> d;
--    private static NumberFormat k = NumberFormat.getIntegerInstance(Locale.US);
--    public static Counter g = new Counter() {
++    // 命名: 手動 (MCPに可読名なし: searge field_150956_d)
++    private Class<? extends IJsonStatistic> serializable;
 +    private static NumberFormat numberFormat = NumberFormat.getIntegerInstance(Locale.US);
 +    public static Counter simpleStatType = new Counter() {
      };
@@ -118985,7 +119008,7 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..bbd9ff28b49a7872641f20db8b0df7cc
  
          ichatbasecomponent1.setChatModifier(ichatbasecomponent.getChatModifier());
          return ichatbasecomponent1;
-@@ -87,18 +88,19 @@ public class Statistic {
+@@ -87,19 +89,21 @@ public class Statistic {
      }
  
      public String toString() {
@@ -118999,16 +119022,21 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..bbd9ff28b49a7872641f20db8b0df7cc
 +        return this.objectiveCriteria;
      }
  
-     public Class<? extends IJsonStatistic> l() {
-         return this.d;
+-    public Class<? extends IJsonStatistic> l() {
+-        return this.d;
++    // 命名: 手動 (MCPに可読名なし: searge func_150954_l)
++    public Class<? extends IJsonStatistic> getSerializable() {
++        return this.serializable;
      }
  
 -    public Statistic b(Class<? extends IJsonStatistic> oclass) {
+-        this.d = oclass;
 +    // 命名: 手動 (MCPに可読名なし: searge func_150953_b)。IJsonStatistic整形クラスを登録するsetter。
 +    public Statistic setSerializable(Class<? extends IJsonStatistic> oclass) {
-         this.d = oclass;
++        this.serializable = oclass;
          return this;
      }
+ }
 diff --git a/src/main/java/net/minecraft/server/StatisticList.java b/src/main/java/net/minecraft/server/StatisticList.java
 index 4f1bafef7e26f530c3bff6a0dd88f1f1cfc149c6..9893a17393503d4566ca647286f827d745fd4d9e 100644
 --- a/src/main/java/net/minecraft/server/StatisticList.java
