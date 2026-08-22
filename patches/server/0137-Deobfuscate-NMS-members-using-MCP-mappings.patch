@@ -386,7 +386,7 @@ index 81bd7edb536a8da2bb88b45d7e3cd8c04e8bddf6..8e06d2b09d6fdbadcf7dcfac5229a549
   * Internal API to register channel initialization listeners.
   * <p>
 diff --git a/src/main/java/net/minecraft/server/Achievement.java b/src/main/java/net/minecraft/server/Achievement.java
-index fb00a32157f432031338d9930b1ed7a99660f313..9a375c5df43df53c62121976e18a920d75643830 100644
+index fb00a32157f432031338d9930b1ed7a99660f313..de41fcc92b79954082e2fc5d134d026b7e87b76d 100644
 --- a/src/main/java/net/minecraft/server/Achievement.java
 +++ b/src/main/java/net/minecraft/server/Achievement.java
 @@ -1,13 +1,14 @@
@@ -410,7 +410,7 @@ index fb00a32157f432031338d9930b1ed7a99660f313..9a375c5df43df53c62121976e18a920d
  
      public Achievement(String s, String s1, int i, int j, Item item, Achievement achievement) {
          this(s, s1, i, j, new ItemStack(item), achievement);
-@@ -19,78 +20,67 @@ public class Achievement extends Statistic {
+@@ -19,78 +20,68 @@ public class Achievement extends Statistic {
  
      public Achievement(String s, String s1, int i, int j, ItemStack itemstack, Achievement achievement) {
          super(s, new ChatMessage("achievement." + s1, new Object[0]));
@@ -500,6 +500,7 @@ index fb00a32157f432031338d9930b1ed7a99660f313..9a375c5df43df53c62121976e18a920d
 -        return this.m;
 -    }
 -
++    // 命名: 手動 (MCPに可読名なし: searge func_150953_b)。
      @Override
 -    public Statistic b(Class oclass) {
 -        return this.a(oclass);
@@ -118886,7 +118887,7 @@ index 3f1f606aa2b0aff755c7657d46eef08eb64781c7..7407553794d65dd8b95328e503ede738
                              // CraftBukkit end
                              flag = true;
 diff --git a/src/main/java/net/minecraft/server/Statistic.java b/src/main/java/net/minecraft/server/Statistic.java
-index 5be70d4ef4ae8743af739100b0e80c6950ad006a..4c935763d067346e25c6a85b8ce0627efdc53bfa 100644
+index 5be70d4ef4ae8743af739100b0e80c6950ad006a..bbd9ff28b49a7872641f20db8b0df7cc1afbfff8 100644
 --- a/src/main/java/net/minecraft/server/Statistic.java
 +++ b/src/main/java/net/minecraft/server/Statistic.java
 @@ -4,67 +4,68 @@ import java.text.DecimalFormat;
@@ -118984,7 +118985,7 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..4c935763d067346e25c6a85b8ce0627e
  
          ichatbasecomponent1.setChatModifier(ichatbasecomponent.getChatModifier());
          return ichatbasecomponent1;
-@@ -87,18 +88,18 @@ public class Statistic {
+@@ -87,18 +88,19 @@ public class Statistic {
      }
  
      public String toString() {
@@ -119003,6 +119004,7 @@ index 5be70d4ef4ae8743af739100b0e80c6950ad006a..4c935763d067346e25c6a85b8ce0627e
      }
  
 -    public Statistic b(Class<? extends IJsonStatistic> oclass) {
++    // 命名: 手動 (MCPに可読名なし: searge func_150953_b)。IJsonStatistic整形クラスを登録するsetter。
 +    public Statistic setSerializable(Class<? extends IJsonStatistic> oclass) {
          this.d = oclass;
          return this;
