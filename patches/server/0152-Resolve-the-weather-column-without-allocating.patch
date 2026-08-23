@@ -1,0 +1,299 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 07:20:33 +0900
+Subject: [PATCH] Resolve the weather column without allocating
+
+The precipitation height is already an int in precipitationHeightMap, but
+getPrecipitationHeight built a BlockPosition just to read getY() off it and
+compare against -999, a second one to return, and one per Y level on the rare
+cache miss. tickIceAndSnow asks for it on a random column of every ticked
+chunk, so on a fixed map it was the largest remaining allocation site outside
+chunk loading - 23 MB/min.
+
+canBlockFreeze and canSnowAt both bail on the biome temperature before touching
+anything else, so on a map with no cold biomes every position built ahead of
+them was thrown away. Both get coordinate forms, and tickIceAndSnow only
+materializes a position inside the branches that actually form ice or snow.
+
+The down-walk uses getTypeAbs rather than the private getType(int,int,int),
+which takes chunk-local coordinates and would silently have read a different
+column.
+
+updateBlocks held a verbatim copy of tickIceAndSnow, guard and all, for the
+non-PandaSpigot chunk-selection path; it now calls the method. Two copies would
+only drift, and this rewrite would otherwise have applied to just one of the
+two paths depending on configuration.
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index baf05b1df2f154b82e13831418cd93986ee5a89e..59b07a522268332c261840a76c9a4fa17784b41c 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -1149,32 +1149,42 @@ public class Chunk {
+     }
+ 
+     public BlockPosition getPrecipitationHeight(BlockPosition blockposition) {
+-        int i = blockposition.getX() & 15;
+-        int j = blockposition.getZ() & 15;
++        return new BlockPosition(blockposition.getX(), this.getPrecipitationHeightY(blockposition.getX(), blockposition.getZ()), blockposition.getZ());
++    }
++
++    // Athena - the height is an int in precipitationHeightMap; hand it back as one.
++    //
++    // The old shape built a BlockPosition just to read getY() off it and compare against -999, a
++    // second one to return, and one per Y level on the rare cache miss. WorldServer.tickIceAndSnow
++    // asks for this on a random column of every ticked chunk, so on the cached path - which is
++    // almost always - those two were pure waste.
++    public int getPrecipitationHeightY(int x, int z) {
++        int i = x & 15;
++        int j = z & 15;
+         int k = i | j << 4;
+-        BlockPosition blockposition1 = new BlockPosition(blockposition.getX(), this.precipitationHeightMap[k], blockposition.getZ());
+ 
+-        if (blockposition1.getY() == -999) {
++        if (this.precipitationHeightMap[k] == -999) {
+             int l = this.getTopFilledSegment() + 15;
+-
+-            blockposition1 = new BlockPosition(blockposition.getX(), l, blockposition.getZ());
+             int i1 = -1;
++            int y = l;
+ 
+-            while (blockposition1.getY() > 0 && i1 == -1) {
+-                Block block = this.getType(blockposition1);
++            while (y > 0 && i1 == -1) {
++                // getTypeAbs, not getType(int,int,int): the latter is private and takes chunk-local
++                // coordinates, so world x/z would silently read a different column
++                Block block = this.getTypeAbs(x, y, z);
+                 Material material = block.getMaterial();
+ 
+                 if (!material.isSolid() && !material.isLiquid()) {
+-                    blockposition1 = blockposition1.down();
++                    --y;
+                 } else {
+-                    i1 = blockposition1.getY() + 1;
++                    i1 = y + 1;
+                 }
+             }
+ 
+             this.precipitationHeightMap[k] = i1;
+         }
+ 
+-        return new BlockPosition(blockposition.getX(), this.precipitationHeightMap[k], blockposition.getZ());
++        return this.precipitationHeightMap[k];
+     }
+ 
+     public void b(boolean flag) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index b92b9e0750cf8c220d86d523b31d056321a99442..4cdd1399132deea8ed9089abc3df4b821c8340e2 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1629,7 +1629,7 @@ public abstract class World implements IBlockAccess {
+     // showed that costing ~14 MB/min, because the collision and material queries run several times
+     // per entity per tick. Each call site owns a fixed slot, so a nested query can never scribble
+     // over the position another one is still iterating with.
+-    private static final int SCRATCH_POS_SLOTS = 15; // Athena - 14 is isBlockFullCube's
++    private static final int SCRATCH_POS_SLOTS = 16; // Athena - 14 is isBlockFullCube's, 15 the weather checks'
+     private static final ThreadLocal<BlockPosition.MutableBlockPosition[]> SCRATCH_POSITIONS = new ThreadLocal<BlockPosition.MutableBlockPosition[]>() {
+         protected BlockPosition.MutableBlockPosition[] initialValue() {
+             BlockPosition.MutableBlockPosition[] slots = new BlockPosition.MutableBlockPosition[SCRATCH_POS_SLOTS];
+@@ -1778,6 +1778,11 @@ public abstract class World implements IBlockAccess {
+         return this.getChunkAtWorldCoords(blockposition).getPrecipitationHeight(blockposition);
+     }
+ 
++    // Athena - coordinate form, so the weather ticks never build a position for the common case
++    public int getPrecipitationHeightY(int x, int z) {
++        return this.getChunkAtWorldCoords(x, z).getPrecipitationHeightY(x, z);
++    }
++
+     public BlockPosition getTopSolidOrLiquidBlock(BlockPosition blockposition) {
+         Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+ 
+@@ -2830,14 +2835,28 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public boolean canBlockFreeze(BlockPosition blockposition, boolean flag) {
+-        BiomeBase biomebase = this.getBiome(blockposition);
+-        float f = biomebase.getFloatTemperature(blockposition);
++        return this.canBlockFreeze(blockposition.getX(), blockposition.getY(), blockposition.getZ(), flag);
++    }
++
++    // Athena start - coordinate forms of the freeze and snow checks.
++    //
++    // Both bail on the temperature test before touching anything else, so on a map with no cold
++    // biomes every position the caller built beforehand was wasted. The scratch position is only
++    // handed to the APIs that still require one (biome lookup, temperature, snow placement check),
++    // none of which retain it.
++    public boolean canBlockFreeze(int x, int y, int z, boolean flag) {
++        BlockPosition.MutableBlockPosition pos = scratchPos(15);
++
++        pos.set(x, y, z);
++
++        BiomeBase biomebase = this.getBiome(pos);
++        float f = biomebase.getFloatTemperature(pos);
+ 
+         if (f > 0.15F) {
+             return false;
+         } else {
+-            if (blockposition.getY() >= 0 && blockposition.getY() < 256 && this.getLightFor(EnumSkyBlock.BLOCK, blockposition) < 10) {
+-                IBlockData iblockdata = this.getType(blockposition);
++            if (y >= 0 && y < 256 && this.getLightFor(EnumSkyBlock.BLOCK, x, y, z) < 10) {
++                IBlockData iblockdata = this.getType(x, y, z);
+                 Block block = iblockdata.getBlock();
+ 
+                 if ((block == Blocks.WATER || block == Blocks.FLOWING_WATER) && ((Integer) iblockdata.get(BlockFluids.LEVEL)).intValue() == 0) {
+@@ -2845,7 +2864,7 @@ public abstract class World implements IBlockAccess {
+                         return true;
+                     }
+ 
+-                    boolean flag1 = this.isWater(blockposition.west()) && this.isWater(blockposition.east()) && this.isWater(blockposition.north()) && this.isWater(blockposition.south());
++                    boolean flag1 = this.isWater(x - 1, y, z) && this.isWater(x + 1, y, z) && this.isWater(x, y, z - 1) && this.isWater(x, y, z + 1);
+ 
+                     if (!flag1) {
+                         return true;
+@@ -2857,23 +2876,31 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
+-    private boolean isWater(BlockPosition blockposition) {
+-        return this.getType(blockposition).getBlock().getMaterial() == Material.WATER;
++    private boolean isWater(int x, int y, int z) {
++        return this.getType(x, y, z).getBlock().getMaterial() == Material.WATER;
+     }
+ 
+     public boolean canSnowAt(BlockPosition blockposition, boolean flag) {
+-        BiomeBase biomebase = this.getBiome(blockposition);
+-        float f = biomebase.getFloatTemperature(blockposition);
++        return this.canSnowAt(blockposition.getX(), blockposition.getY(), blockposition.getZ(), flag);
++    }
++
++    public boolean canSnowAt(int x, int y, int z, boolean flag) {
++        BlockPosition.MutableBlockPosition pos = scratchPos(15);
++
++        pos.set(x, y, z);
++
++        BiomeBase biomebase = this.getBiome(pos);
++        float f = biomebase.getFloatTemperature(pos);
+ 
+         if (f > 0.15F) {
+             return false;
+         } else if (!flag) {
+             return true;
+         } else {
+-            if (blockposition.getY() >= 0 && blockposition.getY() < 256 && this.getLightFor(EnumSkyBlock.BLOCK, blockposition) < 10) {
+-                Block block = this.getType(blockposition).getBlock();
++            if (y >= 0 && y < 256 && this.getLightFor(EnumSkyBlock.BLOCK, x, y, z) < 10) {
++                Block block = this.getType(x, y, z).getBlock();
+ 
+-                if (block.getMaterial() == Material.AIR && Blocks.SNOW_LAYER.canPlace(this, blockposition)) {
++                if (block.getMaterial() == Material.AIR && Blocks.SNOW_LAYER.canPlace(this, pos)) {
+                     return true;
+                 }
+             }
+@@ -2881,6 +2908,7 @@ public abstract class World implements IBlockAccess {
+             return false;
+         }
+     }
++    // Athena end
+ 
+     public boolean checkLight(BlockPosition blockposition) {
+         boolean flag = false;
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index ae9791ed04e023695c7467ad6aaec4aeec4e4654..f14c7ef60a195993450d8ff25694de94e48b4367 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -440,42 +440,10 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 }
+ 
+                 this.methodProfiler.endStartSection("iceandsnow");
+-                if (!this.paperSpigotConfig.disableIceAndSnow && this.random.nextInt(16) == 0) { // PaperSpigot - Disable ice and snow
+-                    this.updateLCG = this.updateLCG * 3 + 1013904223;
+-                    i1 = this.updateLCG >> 2;
+-                    blockposition = this.getPrecipitationHeight(new BlockPosition(k + (i1 & 15), 0, l + (i1 >> 8 & 15)));
+-                    BlockPosition blockposition1 = blockposition.down();
+-
+-                    if (this.canBlockFreezeNoWater(blockposition1)) {
+-                        // CraftBukkit start
+-                        BlockState blockState = this.getWorld().getBlockAt(blockposition1.getX(), blockposition1.getY(), blockposition1.getZ()).getState();
+-                        blockState.setTypeId(Block.getId(Blocks.ICE));
+-
+-                        BlockFormEvent iceBlockForm = new BlockFormEvent(blockState.getBlock(), blockState);
+-                        this.getServer().getPluginManager().callEvent(iceBlockForm);
+-                        if (!iceBlockForm.isCancelled()) {
+-                            blockState.update(true);
+-                        }
+-                        // CraftBukkit end
+-                    }
+-
+-                    if (this.isRaining() && this.canSnowAt(blockposition, true)) {
+-                        // CraftBukkit start
+-                        BlockState blockState = this.getWorld().getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()).getState();
+-                        blockState.setTypeId(Block.getId(Blocks.SNOW_LAYER));
+-
+-                        BlockFormEvent snow = new BlockFormEvent(blockState.getBlock(), blockState);
+-                        this.getServer().getPluginManager().callEvent(snow);
+-                        if (!snow.isCancelled()) {
+-                            blockState.update(true);
+-                        }
+-                        // CraftBukkit end
+-                    }
+-
+-                    if (this.isRaining() && this.getBiome(blockposition1).canRain()) {
+-                        this.getType(blockposition1).getBlock().fillWithRain(this, blockposition1);
+-                    }
+-                }
++                // Athena - this was a verbatim copy of tickIceAndSnow, guard and all. Two copies of
++                // the same weather logic would only drift, and the scalar rewrite would have applied
++                // to just one of the two chunk-selection paths.
++                this.tickIceAndSnow(k, l);
+ 
+                 this.methodProfiler.endStartSection("tickBlocks");
+                 timings.chunkTicksBlocks.startTiming(); // Spigot
+@@ -619,12 +587,16 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         if (!this.paperSpigotConfig.disableIceAndSnow && this.random.nextInt(16) == 0) { // PaperSpigot - Disable ice and snow
+             this.updateLCG = this.updateLCG * 3 + 1013904223;
+             int i1 = this.updateLCG >> 2;
+-            BlockPosition blockposition = this.getPrecipitationHeight(new BlockPosition(k + (i1 & 15), 0, l + (i1 >> 8 & 15)));
+-            BlockPosition blockposition1 = blockposition.down();
+-
+-            if (this.canBlockFreezeNoWater(blockposition1)) {
++            // Athena - resolve the column as plain ints. Both checks below bail on the biome
++            // temperature first, so on a map without cold biomes every position built up front was
++            // thrown away; this runs on a random column of every ticked chunk.
++            int x = k + (i1 & 15);
++            int z = l + (i1 >> 8 & 15);
++            int y = this.getPrecipitationHeightY(x, z);
++
++            if (this.canBlockFreeze(x, y - 1, z, true)) {
+                 // CraftBukkit start
+-                BlockState blockState = this.getWorld().getBlockAt(blockposition1.getX(), blockposition1.getY(), blockposition1.getZ()).getState();
++                BlockState blockState = this.getWorld().getBlockAt(x, y - 1, z).getState();
+                 blockState.setTypeId(Block.getId(Blocks.ICE));
+ 
+                 BlockFormEvent iceBlockForm = new BlockFormEvent(blockState.getBlock(), blockState);
+@@ -635,9 +607,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 // CraftBukkit end
+             }
+ 
+-            if (this.isRaining() && this.canSnowAt(blockposition, true)) {
++            if (this.isRaining() && this.canSnowAt(x, y, z, true)) {
+                 // CraftBukkit start
+-                BlockState blockState = this.getWorld().getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()).getState();
++                BlockState blockState = this.getWorld().getBlockAt(x, y, z).getState();
+                 blockState.setTypeId(Block.getId(Blocks.SNOW_LAYER));
+ 
+                 BlockFormEvent snow = new BlockFormEvent(blockState.getBlock(), blockState);
+@@ -648,8 +620,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 // CraftBukkit end
+             }
+ 
+-            if (this.isRaining() && this.getBiome(blockposition1).canRain()) {
+-                this.getType(blockposition1).getBlock().fillWithRain(this, blockposition1);
++            // Athena - the rain fill needs a real position for fillWithRain, so build it here only
++            if (this.isRaining()) {
++                BlockPosition blockposition1 = new BlockPosition(x, y - 1, z);
++
++                if (this.getBiome(blockposition1).canRain()) {
++                    this.getType(blockposition1).getBlock().fillWithRain(this, blockposition1);
++                }
+             }
+         }
+     }
