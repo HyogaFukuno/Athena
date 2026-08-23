@@ -1,0 +1,349 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 06:18:44 +0900
+Subject: [PATCH] Remove the last AxisAlignedBB and light-propagation
+ allocations
+
+c() was still calling the BlockPosition form of getRawLight for its two seed
+reads, and that form shifted a fresh position per direction and copied
+EnumDirection.values() on every call - 55 MB/min. Taking the coordinates a few
+lines earlier lets both reads use the scalar form, which left the BlockPosition
+version with no callers; a second copy of the propagation rule would only have
+drifted, so it is deleted. markBlocksDirtyVertical gets a coordinate updateLight
+rather than building a position per Y level.
+
+pushOutOfBlocks was the last source of AxisAlignedBB in the server, by two
+separate routes. Its collision-box list was only ever tested for emptiness, so
+hasCollisionBoxes gathers into the shared sink and stops at the first box; and
+isBlockFullCube built a whole box to read getAverageEdgeLength off it, six times
+per tick for every dropped item and experience orb. EntityLiving's teleport
+search used the list the same way and switches over too.
+
+isBlockFullCube can be reached from inside a sink gather, so it takes a scratch
+slot and a bounds buffer of its own rather than borrowing the sink's - sharing
+either would corrupt the enclosing query. hasCollisionBoxes relies on every
+multi-box block having moved to addCollisionBoxes: a block still overriding only
+addCollisionBoxesToList would report no collision at all, so that was checked -
+the legacy override exists nowhere but Block itself.
+
+EnumDirection.random() called values() twice, copying the array twice per call,
+and BlockFluids.checkForMixing copied it once and shifted six positions.
+
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index ca927cf5c3f0692364b4dc7c3d935e9a48ae707a..37082bc079b10152588dc31644fc6532ce4d5b5d 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -148,13 +148,16 @@ public abstract class BlockFluids extends Block {
+     public boolean checkForMixing(World world, BlockPosition blockposition, IBlockData iblockdata) {
+         if (this.material == Material.LAVA) {
+             boolean flag = false;
+-            EnumDirection[] aenumdirection = EnumDirection.values();
+-            int i = aenumdirection.length;
++            // Athena - shared array and coordinate neighbours; values() copied six entries and each
++            // shift() built a position, on a path every lava placement and neighbour update walks
++            int x = blockposition.getX();
++            int y = blockposition.getY();
++            int z = blockposition.getZ();
+ 
+-            for (int j = 0; j < i; ++j) {
+-                EnumDirection enumdirection = aenumdirection[j];
++            for (int j = 0; j < EnumDirection.VALUES.length; ++j) {
++                EnumDirection enumdirection = EnumDirection.VALUES[j];
+ 
+-                if (enumdirection != EnumDirection.DOWN && world.getType(blockposition.shift(enumdirection)).getBlock().getMaterial() == Material.WATER) {
++                if (enumdirection != EnumDirection.DOWN && world.getType(x + enumdirection.getAdjacentX(), y + enumdirection.getAdjacentY(), z + enumdirection.getAdjacentZ()).getBlock().getMaterial() == Material.WATER) {
+                     flag = true;
+                     break;
+                 }
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index e51477437613096f0eda5201f92b35e2bd08021a..8549be24204f31ea43d7fd4c914a8f8b5ba2772f 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -1916,40 +1916,44 @@ public abstract class Entity implements ICommandListener {
+ 
+     public void onKillEntity(EntityLiving entityliving) {}
+ 
++    // Athena - runs every tick for every dropped item and experience orb. The collision boxes were
++    // only tested for emptiness, and each isBlockFullCube built an AxisAlignedBB to read one number
++    // off it; between them this was the last source of AxisAlignedBB allocation in the server.
+     protected boolean pushOutOfBlocks(double d0, double d1, double d2) {
+-        BlockPosition blockposition = new BlockPosition(d0, d1, d2);
+-        double d3 = d0 - (double) blockposition.getX();
+-        double d4 = d1 - (double) blockposition.getY();
+-        double d5 = d2 - (double) blockposition.getZ();
+-        List list = this.world.getCollisionBoxes(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ); // Athena
+-
+-        if (list.isEmpty() && !this.world.isBlockFullCube(blockposition)) {
++        int posX = MathHelper.floor(d0);
++        int posY = MathHelper.floor(d1);
++        int posZ = MathHelper.floor(d2);
++        double d3 = d0 - (double) posX;
++        double d4 = d1 - (double) posY;
++        double d5 = d2 - (double) posZ;
++
++        if (!this.world.hasCollisionBoxes(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.isBlockFullCube(posX, posY, posZ)) {
+             return false;
+         } else {
+             byte b0 = 3;
+             double d6 = 9999.0D;
+ 
+-            if (!this.world.isBlockFullCube(blockposition.west()) && d3 < d6) {
++            if (!this.world.isBlockFullCube(posX - 1, posY, posZ) && d3 < d6) {
+                 d6 = d3;
+                 b0 = 0;
+             }
+ 
+-            if (!this.world.isBlockFullCube(blockposition.east()) && 1.0D - d3 < d6) {
++            if (!this.world.isBlockFullCube(posX + 1, posY, posZ) && 1.0D - d3 < d6) {
+                 d6 = 1.0D - d3;
+                 b0 = 1;
+             }
+ 
+-            if (!this.world.isBlockFullCube(blockposition.up()) && 1.0D - d4 < d6) {
++            if (!this.world.isBlockFullCube(posX, posY + 1, posZ) && 1.0D - d4 < d6) {
+                 d6 = 1.0D - d4;
+                 b0 = 3;
+             }
+ 
+-            if (!this.world.isBlockFullCube(blockposition.north()) && d5 < d6) {
++            if (!this.world.isBlockFullCube(posX, posY, posZ - 1) && d5 < d6) {
+                 d6 = d5;
+                 b0 = 4;
+             }
+ 
+-            if (!this.world.isBlockFullCube(blockposition.south()) && 1.0D - d5 < d6) {
++            if (!this.world.isBlockFullCube(posX, posY, posZ + 1) && 1.0D - d5 < d6) {
+                 d6 = 1.0D - d5;
+                 b0 = 5;
+             }
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 779a3bdfdb6b33a27ac5d66f3304f82915ffc38d..fa24815b4a651836648e965a6d26dc979f1b20c6 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -1276,9 +1276,8 @@ public abstract class EntityLiving extends Entity {
+                 if (i != 0 || j != 0) {
+                     int k = (int) (this.locX + (double) i);
+                     int l = (int) (this.locZ + (double) j);
+-                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.boundingBoxMinX + (double) i, this.boundingBoxMinY + 1.0D, this.boundingBoxMinZ + (double) j, this.boundingBoxMaxX + (double) i, this.boundingBoxMaxY + 1.0D, this.boundingBoxMaxZ + (double) j); // Athena
+-
+-                    if (this.world.getCollisionBoxes(axisalignedbb).isEmpty()) {
++                    // Athena - the boxes were only ever tested for emptiness
++                    if (!this.world.hasCollisionBoxes(this.boundingBoxMinX + (double) i, this.boundingBoxMinY + 1.0D, this.boundingBoxMinZ + (double) j, this.boundingBoxMaxX + (double) i, this.boundingBoxMaxY + 1.0D, this.boundingBoxMaxZ + (double) j)) {
+                         if (World.doesBlockHaveSolidTopSurface((IBlockAccess) this.world, new BlockPosition(k, (int) this.locY, l))) {
+                             this.enderTeleportTo(this.locX + (double) i, this.locY + 1.0D, this.locZ + (double) j);
+                             return;
+diff --git a/src/main/java/net/minecraft/server/EnumDirection.java b/src/main/java/net/minecraft/server/EnumDirection.java
+index 301ddb90f40bd7674f4f45dbd6345d92e4dcddcc..911c7301e1ecfeb515f09922b5d0dd162cec5b95 100644
+--- a/src/main/java/net/minecraft/server/EnumDirection.java
++++ b/src/main/java/net/minecraft/server/EnumDirection.java
+@@ -112,7 +112,7 @@ public enum EnumDirection implements INamable {
+     }
+ 
+     public static EnumDirection random(Random random) {
+-        return values()[random.nextInt(values().length)];
++        return VALUES[random.nextInt(VALUES.length)]; // Athena - values() copied the array, twice
+     }
+ 
+     public String toString() {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index fb7fe89dcf6a1f887ce3fa84556432c0f35e33dc..b92b9e0750cf8c220d86d523b31d056321a99442 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -542,7 +542,7 @@ public abstract class World implements IBlockAccess {
+ 
+         if (!this.worldProvider.getHasNoSky()) {
+             for (i1 = k; i1 <= l; ++i1) {
+-                this.updateLight(EnumSkyBlock.SKY, new BlockPosition(i, i1, j)); // PaperSpigot - Asynchronous lighting updates
++                this.updateLight(EnumSkyBlock.SKY, i, i1, j); // PaperSpigot - Asynchronous lighting updates // Athena - scalar
+             }
+         }
+ 
+@@ -1629,7 +1629,7 @@ public abstract class World implements IBlockAccess {
+     // showed that costing ~14 MB/min, because the collision and material queries run several times
+     // per entity per tick. Each call site owns a fixed slot, so a nested query can never scribble
+     // over the position another one is still iterating with.
+-    private static final int SCRATCH_POS_SLOTS = 14;
++    private static final int SCRATCH_POS_SLOTS = 15; // Athena - 14 is isBlockFullCube's
+     private static final ThreadLocal<BlockPosition.MutableBlockPosition[]> SCRATCH_POSITIONS = new ThreadLocal<BlockPosition.MutableBlockPosition[]>() {
+         protected BlockPosition.MutableBlockPosition[] initialValue() {
+             BlockPosition.MutableBlockPosition[] slots = new BlockPosition.MutableBlockPosition[SCRATCH_POS_SLOTS];
+@@ -1669,10 +1669,52 @@ public abstract class World implements IBlockAccess {
+         return entity.locX > d0 && entity.locX < d2 && entity.locZ > d1 && entity.locZ < d3;
+     }
+ 
+-    // Athena - scalar entry point (see getCubes note)
+-    public List<AxisAlignedBB> getCollisionBoxes(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+-        return this.getCollisionBoxes(new AxisAlignedBB(minX, minY, minZ, maxX, maxY, maxZ));
++    // Athena start - both callers of getCollisionBoxes only ask whether the list came back empty.
++    //
++    // Building the list to answer that meant an ArrayList plus one AxisAlignedBB per solid block in
++    // range, on a path Entity.pushOutOfBlocks walks every tick for every dropped item and experience
++    // orb. This gathers into the shared sink instead and stops at the first box.
++    public boolean hasCollisionBoxes(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(2);
++        CollisionBoxSink sink = collisionSink();
++        int mark = sink.mark();
++
++        try {
++            for (int k1 = i; k1 < j; ++k1) {
++                for (int l1 = i1; l1 < j1; ++l1) {
++                    if (this.isLoaded(blockposition_mutableblockposition.set(k1, 64, l1))) {
++                        for (int i2 = k - 1; i2 < l; ++i2) {
++                            blockposition_mutableblockposition.set(k1, i2, l1);
++                            IBlockData iblockdata;
++
++                            if (k1 >= -30000000 && k1 < 30000000 && l1 >= -30000000 && l1 < 30000000) {
++                                iblockdata = this.getType(blockposition_mutableblockposition);
++                            } else {
++                                iblockdata = Blocks.BEDROCK.getBlockData();
++                            }
++
++                            iblockdata.getBlock().addCollisionBoxes(this, blockposition_mutableblockposition, iblockdata, minX, minY, minZ, maxX, maxY, maxZ, sink, (Entity) null);
++
++                            if (!sink.isEmpty(mark)) {
++                                return true;
++                            }
++                        }
++                    }
++                }
++            }
++
++            return false;
++        } finally {
++            sink.reset(mark);
++        }
+     }
++    // Athena end
+ 
+     public List<AxisAlignedBB> getCollisionBoxes(AxisAlignedBB axisalignedbb) {
+         ArrayList arraylist = Lists.newArrayList();
+@@ -2521,13 +2563,36 @@ public abstract class World implements IBlockAccess {
+         this.tileEntitiesToBeRemoved.add(tileentity);
+     }
+ 
++    // Athena start - answer this from the scalar bounds instead of the legacy wrapper.
++    //
++    // getCollisionBoundingBox builds an AxisAlignedBB purely so the caller can read one number off
++    // it. Entity.pushOutOfBlocks asks this six times per tick for every dropped item and experience
++    // orb, which is where the last AxisAlignedBB allocations in the server were coming from.
+     public boolean isBlockFullCube(BlockPosition blockposition) {
+-        IBlockData iblockdata = this.getType(blockposition);
+-        AxisAlignedBB axisalignedbb = iblockdata.getBlock().getCollisionBoundingBox(this, blockposition, iblockdata);
++        return this.isBlockFullCube(blockposition.getX(), blockposition.getY(), blockposition.getZ());
++    }
++
++    public boolean isBlockFullCube(int x, int y, int z) {
++        // A slot of its own, and a bounds buffer of its own rather than the sink's scratch: this can
++        // be reached from inside a sink gather, and sharing either would corrupt the enclosing query.
++        BlockPosition.MutableBlockPosition pos = scratchPos(14);
+ 
+-        return axisalignedbb != null && axisalignedbb.getAverageEdgeLength() >= 1.0D;
++        pos.set(x, y, z);
++
++        IBlockData iblockdata = this.getType(x, y, z);
++        double[] out = FULL_CUBE_BOUNDS.get();
++
++        return iblockdata.getBlock().getCollisionBounds(this, pos, iblockdata, out)
++            && AxisAlignedBBHelper.averageEdgeLength(out[0], out[1], out[2], out[3], out[4], out[5]) >= 1.0D;
+     }
+ 
++    private static final ThreadLocal<double[]> FULL_CUBE_BOUNDS = new ThreadLocal<double[]>() {
++        protected double[] initialValue() {
++            return new double[6];
++        }
++    };
++    // Athena end
++
+     public static boolean doesBlockHaveSolidTopSurface(IBlockAccess iblockaccess, BlockPosition blockposition) {
+         IBlockData iblockdata = iblockaccess.getType(blockposition);
+         Block block = iblockdata.getBlock();
+@@ -2828,48 +2893,9 @@ public abstract class World implements IBlockAccess {
+         return flag;
+     }
+ 
+-    private int getRawLight(BlockPosition blockposition, EnumSkyBlock enumskyblock) {
+-        if (enumskyblock == EnumSkyBlock.SKY && this.canSeeSky(blockposition)) {
+-            return 15;
+-        } else {
+-            Block block = this.getType(blockposition).getBlock();
+-            int i = enumskyblock == EnumSkyBlock.SKY ? 0 : block.getLightValue();
+-            int j = block.getLightOpacity();
+-
+-            if (j >= 15 && block.getLightValue() > 0) {
+-                j = 1;
+-            }
+-
+-            if (j < 1) {
+-                j = 1;
+-            }
+-
+-            if (j >= 15) {
+-                return 0;
+-            } else if (i >= 14) {
+-                return i;
+-            } else {
+-                EnumDirection[] aenumdirection = EnumDirection.values();
+-                int k = aenumdirection.length;
+-
+-                for (int l = 0; l < k; ++l) {
+-                    EnumDirection enumdirection = aenumdirection[l];
+-                    BlockPosition blockposition1 = blockposition.shift(enumdirection);
+-                    int i1 = this.getLightFor(enumskyblock, blockposition1) - j;
+-
+-                    if (i1 > i) {
+-                        i = i1;
+-                    }
+-
+-                    if (i >= 14) {
+-                        return i;
+-                    }
+-                }
+-
+-                return i;
+-            }
+-        }
+-    }
++    // Athena - the BlockPosition form of getRawLight lived here. It had no callers left once c()
++    // switched to coordinates, and keeping a second copy of the propagation rule invited the two to
++    // drift apart, so it is gone; getRawLight(int, int, int, EnumSkyBlock) above is the only one.
+ 
+     // Athena - scalar entry point for the light flood fill
+     public boolean c(EnumSkyBlock enumskyblock, int x, int y, int z, Chunk chunk, List<Chunk> neighbors) {
+@@ -2890,11 +2916,15 @@ public abstract class World implements IBlockAccess {
+             int j = 0;
+ 
+             this.methodProfiler.startSection("getBrightness");
+-            int k = this.getLightFor(enumskyblock, blockposition);
+-            int l = this.getRawLight(blockposition, enumskyblock);
++            // Athena - take the coordinates first so the two seed reads can use the scalar forms.
++            // The rest of this method was already scalar; these two were the last callers of the
++            // BlockPosition getRawLight, which shifted a fresh position per direction and copied
++            // EnumDirection.values() on every call - 55 MB/min in profiling.
+             int i1 = blockposition.getX();
+             int j1 = blockposition.getY();
+             int k1 = blockposition.getZ();
++            int k = this.getLightFor(enumskyblock, i1, j1, k1);
++            int l = this.getRawLight(i1, j1, k1, enumskyblock);
+             int l1;
+             int i2;
+             int j2;
+@@ -3019,6 +3049,13 @@ public abstract class World implements IBlockAccess {
+         Chunk chunk = this.getChunkIfLoaded(position.getX() >> 4, position.getZ() >> 4);
+         return updateBrightness(enumskyblock, position, chunk);
+     }
++
++    // Athena - coordinate form for markBlocksDirtyVertical, which relights a whole column
++    public boolean updateLight(EnumSkyBlock enumskyblock, int x, int y, int z) {
++        Chunk chunk = this.getChunkIfLoaded(x >> 4, z >> 4);
++
++        return this.updateBrightness(enumskyblock, x, y, z, chunk);
++    }
+     // Athena - scalar entry point. The async path still needs a real position because the task
+     // captures it, so only the (default) synchronous path avoids the allocation.
+     public boolean updateBrightness(EnumSkyBlock enumskyblock, int x, int y, int z, Chunk chunk) {
