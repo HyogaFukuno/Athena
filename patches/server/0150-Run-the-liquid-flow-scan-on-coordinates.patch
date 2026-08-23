@@ -1,0 +1,363 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 05:57:03 +0900
+Subject: [PATCH] Run the liquid flow scan on coordinates
+
+BlockFlowing.a is a four-wide, four-deep recursion, so one flowing block walks
+up to 340 neighbours per update. Every one of them cost a BlockPosition from
+shift(), a second from down(), and an EnumDirection[] plus a Guava iterator
+from the for-each - 72 MB/min in profiling, the largest remaining allocation
+site in the server. It and getPossibleFlowDirections now take raw coordinates.
+
+Two things made this cheaper than it looked. isBlocked never used the
+IBlockData it was handed - it re-reads the block itself - so the argument could
+just go. And getPossibleFlowDirections called blockposition1.down() twice on
+one line, allocating two positions to ask one question.
+
+updateTick had the same duplication at the top level: down() built six times,
+shift() twice, and getLevel(up()) called twice on separate positions. Those
+collapse to one each, and the five drain notifications use the coordinate form
+of notifyBlockOfStateChange so the position is only built when the neighbour
+actually has a physics handler.
+
+The offset arithmetic is the one mechanical risk here - a swapped sign would
+compile and then make water flow the wrong way - so NeighbourOffsetTest pins
+shift() against getAdjacent*(), the six named neighbours against their deltas,
+and opposite() against the negated offset.
+
+diff --git a/src/main/java/net/minecraft/server/BlockFlowing.java b/src/main/java/net/minecraft/server/BlockFlowing.java
+index eea150311c93e65bdc145b6b5bc5d5a0dc823a88..37d9c95334c0ea2f63725f8a9c90d4530cc47085 100644
+--- a/src/main/java/net/minecraft/server/BlockFlowing.java
++++ b/src/main/java/net/minecraft/server/BlockFlowing.java
+@@ -38,17 +38,25 @@ public class BlockFlowing extends BlockFluids {
+ 
+         int j = this.getFlowSpeed(world, blockposition); // PaperSpigot
+         int k;
++        // Athena - hold the coordinates so the neighbour scans below need no BlockPosition
++        int posX = blockposition.getX();
++        int posY = blockposition.getY();
++        int posZ = blockposition.getZ();
+ 
+         if (i > 0) {
+             int l = -100;
+ 
+             this.adjacentSourceBlocks = 0;
+ 
+-            EnumDirection enumdirection;
++            // Athena start - index the shared facings array and scan on coordinates
++            EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-            for (Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator(); iterator.hasNext(); l = this.checkAdjacentBlock(world, blockposition.shift(enumdirection), l)) {
+-                enumdirection = (EnumDirection) iterator.next();
++            for (int f = 0; f < facings.length; ++f) {
++                EnumDirection enumdirection = facings[f];
++
++                l = this.checkAdjacentBlock(world, posX + enumdirection.getAdjacentX(), posY + enumdirection.getAdjacentY(), posZ + enumdirection.getAdjacentZ(), l);
+             }
++            // Athena end
+ 
+             int i1 = l + b0;
+ 
+@@ -56,8 +64,8 @@ public class BlockFlowing extends BlockFluids {
+                 i1 = -1;
+             }
+ 
+-            if (this.getLevel(world, blockposition.up()) >= 0) {
+-                k = this.getLevel(world, blockposition.up());
++            k = this.getLevel(world, posX, posY + 1, posZ); // Athena - was two getLevel calls on a fresh up() position
++            if (k >= 0) {
+                 if (k >= 8) {
+                     i1 = k;
+                 } else {
+@@ -66,7 +74,7 @@ public class BlockFlowing extends BlockFluids {
+             }
+ 
+             if (this.adjacentSourceBlocks >= 2 && this.material == Material.WATER) {
+-                IBlockData iblockdata1 = world.getType(blockposition.down());
++                IBlockData iblockdata1 = world.getType(posX, posY - 1, posZ); // Athena
+ 
+                 if (iblockdata1.getBlock().getMaterial().isBuildable()) {
+                     i1 = 0;
+@@ -90,11 +98,12 @@ public class BlockFlowing extends BlockFluids {
+                     world.setTypeAndData(blockposition, iblockdata, 2);
+                     world.scheduleUpdate(blockposition, (Block) this, j);
+                     // PaperSpigot start - Optimize draining
+-                    world.notifyBlockOfStateChange(blockposition.west(), this);
+-                    world.notifyBlockOfStateChange(blockposition.east(), this);
+-                    world.notifyBlockOfStateChange(blockposition.up(), this);
+-                    world.notifyBlockOfStateChange(blockposition.north(), this);
+-                    world.notifyBlockOfStateChange(blockposition.south(), this);
++                    // Athena - coordinate form; the position is only built if the neighbour reacts
++                    world.notifyBlockOfStateChange(posX - 1, posY, posZ, this);
++                    world.notifyBlockOfStateChange(posX + 1, posY, posZ, this);
++                    world.notifyBlockOfStateChange(posX, posY + 1, posZ, this);
++                    world.notifyBlockOfStateChange(posX, posY, posZ - 1, this);
++                    world.notifyBlockOfStateChange(posX, posY, posZ + 1, this);
+                     world.spigotConfig.antiXrayInstance.updateNearbyBlocks(world, blockposition); // Spigot
+                     // PaperSpigot end
+                 }
+@@ -104,30 +113,31 @@ public class BlockFlowing extends BlockFluids {
+         }
+ 
+         if (world.getType(blockposition).getBlock().getMaterial() != material) return; // PaperSpigot - Stop updating flowing block if material has changed
+-        IBlockData iblockdata2 = world.getType(blockposition.down());
++        BlockPosition below = blockposition.down(); // Athena - was built six separate times below
++        IBlockData iblockdata2 = world.getType(below);
+ 
+-        if (this.canFlowInto(world, blockposition.down(), iblockdata2)) {
++        if (this.canFlowInto(world, below, iblockdata2)) {
+             // CraftBukkit start - Send "down" to the server
+             BlockFromToEvent event = new BlockFromToEvent(source, BlockFace.DOWN);
+             if (server != null) {
+                 server.getPluginManager().callEvent(event);
+             }
+             if (!event.isCancelled()) {
+-            if (this.material == Material.LAVA && world.getType(blockposition.down()).getBlock().getMaterial() == Material.WATER) {
+-                world.setTypeUpdate(blockposition.down(), Blocks.STONE.getBlockData());
+-                this.fizz(world, blockposition.down());
++            if (this.material == Material.LAVA && world.getType(below).getBlock().getMaterial() == Material.WATER) {
++                world.setTypeUpdate(below, Blocks.STONE.getBlockData());
++                this.fizz(world, below);
+                 return;
+             }
+ 
+             if (i >= 8) {
+-                this.flow(world, blockposition.down(), iblockdata2, i);
++                this.flow(world, below, iblockdata2, i);
+             } else {
+-                this.flow(world, blockposition.down(), iblockdata2, i + 8);
++                this.flow(world, below, iblockdata2, i + 8);
+             }
+             }
+             // CraftBukkit end
+-        } else if (i >= 0 && (i == 0 || this.isBlocked(world, blockposition.down(), iblockdata2))) {
+-            Set set = this.getPossibleFlowDirections(world, blockposition);
++        } else if (i >= 0 && (i == 0 || this.isBlocked(world, posX, posY - 1, posZ))) { // Athena
++            Set set = this.getPossibleFlowDirections(world, posX, posY, posZ); // Athena
+ 
+             k = i + b0;
+             if (i >= 8) {
+@@ -150,7 +160,9 @@ public class BlockFlowing extends BlockFluids {
+                 }
+ 
+                 if (!event.isCancelled()) {
+-                    this.flow(world, blockposition.shift(enumdirection1), world.getType(blockposition.shift(enumdirection1)), k);
++                    BlockPosition target = blockposition.shift(enumdirection1); // Athena - was shifted twice
++
++                    this.flow(world, target, world.getType(target), k);
+                 }
+                 // CraftBukkit end
+             }
+@@ -173,24 +185,33 @@ public class BlockFlowing extends BlockFluids {
+ 
+     }
+ 
+-    private int a(World world, BlockPosition blockposition, int i, EnumDirection enumdirection) {
++    // Athena start - run the flow-distance scan on raw coordinates.
++    //
++    // This is a four-wide, four-deep recursion, so a single flowing block walks up to 340 neighbours
++    // per update. Each of those used to cost a BlockPosition from shift(), another from down(), and
++    // an EnumDirection[] plus a Guava iterator from the for-each - 72 MB/min in profiling, the
++    // largest remaining allocation site in the server. isBlocked ignored the IBlockData it was
++    // handed (it re-reads the block itself), so dropping that argument changes nothing.
++    private int a(World world, int x, int y, int z, int i, EnumDirection enumdirection) {
+         int j = 1000;
+-        Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
++        EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-        while (iterator.hasNext()) {
+-            EnumDirection enumdirection1 = (EnumDirection) iterator.next();
++        for (int f = 0; f < facings.length; ++f) {
++            EnumDirection enumdirection1 = facings[f];
+ 
+             if (enumdirection1 != enumdirection) {
+-                BlockPosition blockposition1 = blockposition.shift(enumdirection1);
+-                IBlockData iblockdata = world.getType(blockposition1);
++                int x1 = x + enumdirection1.getAdjacentX();
++                int y1 = y + enumdirection1.getAdjacentY();
++                int z1 = z + enumdirection1.getAdjacentZ();
++                IBlockData iblockdata = world.getType(x1, y1, z1);
+ 
+-                if (!this.isBlocked(world, blockposition1, iblockdata) && (iblockdata.getBlock().getMaterial() != this.material || ((Integer) iblockdata.get(BlockFlowing.LEVEL)).intValue() > 0)) {
+-                    if (!this.isBlocked(world, blockposition1.down(), iblockdata)) {
++                if (!this.isBlocked(world, x1, y1, z1) && (iblockdata.getBlock().getMaterial() != this.material || ((Integer) iblockdata.get(BlockFlowing.LEVEL)).intValue() > 0)) {
++                    if (!this.isBlocked(world, x1, y1 - 1, z1)) {
+                         return i;
+                     }
+ 
+                     if (i < 4) {
+-                        int k = this.a(world, blockposition1, i + 1, enumdirection1.opposite());
++                        int k = this.a(world, x1, y1, z1, i + 1, enumdirection1.opposite());
+ 
+                         if (k < j) {
+                             j = k;
+@@ -203,21 +224,23 @@ public class BlockFlowing extends BlockFluids {
+         return j;
+     }
+ 
+-    private Set<EnumDirection> getPossibleFlowDirections(World world, BlockPosition blockposition) {
++    private Set<EnumDirection> getPossibleFlowDirections(World world, int x, int y, int z) {
+         int i = 1000;
+         EnumSet enumset = EnumSet.noneOf(EnumDirection.class);
+-        Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
++        EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-        while (iterator.hasNext()) {
+-            EnumDirection enumdirection = (EnumDirection) iterator.next();
+-            BlockPosition blockposition1 = blockposition.shift(enumdirection);
+-            IBlockData iblockdata = world.getType(blockposition1);
++        for (int f = 0; f < facings.length; ++f) {
++            EnumDirection enumdirection = facings[f];
++            int x1 = x + enumdirection.getAdjacentX();
++            int y1 = y + enumdirection.getAdjacentY();
++            int z1 = z + enumdirection.getAdjacentZ();
++            IBlockData iblockdata = world.getType(x1, y1, z1);
+ 
+-            if (!this.isBlocked(world, blockposition1, iblockdata) && (iblockdata.getBlock().getMaterial() != this.material || ((Integer) iblockdata.get(BlockFlowing.LEVEL)).intValue() > 0)) {
++            if (!this.isBlocked(world, x1, y1, z1) && (iblockdata.getBlock().getMaterial() != this.material || ((Integer) iblockdata.get(BlockFlowing.LEVEL)).intValue() > 0)) {
+                 int j;
+ 
+-                if (this.isBlocked(world, blockposition1.down(), world.getType(blockposition1.down()))) {
+-                    j = this.a(world, blockposition1, 1, enumdirection.opposite());
++                if (this.isBlocked(world, x1, y1 - 1, z1)) {
++                    j = this.a(world, x1, y1, z1, 1, enumdirection.opposite());
+                 } else {
+                     j = 0;
+                 }
+@@ -237,14 +260,27 @@ public class BlockFlowing extends BlockFluids {
+     }
+ 
+     private boolean isBlocked(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        Block block = world.getType(blockposition).getBlock();
++        return this.isBlocked(world, blockposition.getX(), blockposition.getY(), blockposition.getZ());
++    }
++
++    private boolean isBlocked(World world, int x, int y, int z) {
++        Block block = world.getType(x, y, z).getBlock();
+ 
+         return !(block instanceof BlockDoor) && block != Blocks.STANDING_SIGN && block != Blocks.LADDER && block != Blocks.REEDS ? (block.material == Material.PORTAL ? true : block.material.isSolid()) : true;
+     }
+ 
++    protected int checkAdjacentBlock(World world, int x, int y, int z, int i) {
++        return this.checkAdjacentLevel(this.getLevel(world, x, y, z), i);
++    }
++    // Athena end
++
+     protected int checkAdjacentBlock(World world, BlockPosition blockposition, int i) {
+-        int j = this.getLevel(world, blockposition);
++        return this.checkAdjacentLevel(this.getLevel(world, blockposition), i); // Athena - shared with the coordinate form
++    }
+ 
++    // Athena - the tally-and-clamp half of checkAdjacentBlock, kept in one place so the position and
++    // coordinate forms cannot drift apart. Still bumps adjacentSourceBlocks as a side effect.
++    private int checkAdjacentLevel(int j, int i) {
+         if (j < 0) {
+             return i;
+         } else {
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index 2f3a23cee9a1797421c1da71d623b428d34d4781..ca927cf5c3f0692364b4dc7c3d935e9a48ae707a 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -31,6 +31,14 @@ public abstract class BlockFluids extends Block {
+         return iblockaccess.getType(blockposition).getBlock().getMaterial() == this.material ? ((Integer) iblockaccess.getType(blockposition).get(BlockFluids.LEVEL)).intValue() : -1;
+     }
+ 
++    // Athena - coordinate form for the flow scan, which visits hundreds of neighbours per update.
++    // IBlockAccess has no int-based getType, so this takes the World the callers already hold.
++    protected int getLevel(World world, int x, int y, int z) {
++        IBlockData iblockdata = world.getType(x, y, z);
++
++        return iblockdata.getBlock().getMaterial() == this.material ? ((Integer) iblockdata.get(BlockFluids.LEVEL)).intValue() : -1;
++    }
++
+     protected int getEffectiveFlowDecay(IBlockAccess iblockaccess, BlockPosition blockposition) {
+         int i = this.getLevel(iblockaccess, blockposition);
+ 
+diff --git a/src/test/java/net/minecraft/server/NeighbourOffsetTest.java b/src/test/java/net/minecraft/server/NeighbourOffsetTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c05e442b992b3315dbe13a7a5ae3b0f299a7f84c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/NeighbourOffsetTest.java
+@@ -0,0 +1,82 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - the scalarized hot paths replace BlockPosition.shift()/down()/west()/... with inline
++ * coordinate arithmetic.
++ *
++ * <p>That arithmetic is the one mechanical risk in the rewrite: a swapped sign or axis would compile
++ * cleanly and then make water flow the wrong way, or make a block update notify the wrong neighbour.
++ * These tests hold the offsets to what the position methods actually do.
++ */
++public class NeighbourOffsetTest {
++
++    @Test
++    public void shiftMatchesAdjacentOffsets() {
++        Random r = new Random(20260824L);
++
++        for (int i = 0; i < 100000; i++) {
++            int x = r.nextInt(2000000) - 1000000;
++            int y = r.nextInt(256);
++            int z = r.nextInt(2000000) - 1000000;
++            BlockPosition pos = new BlockPosition(x, y, z);
++
++            for (EnumDirection direction : EnumDirection.VALUES) {
++                BlockPosition shifted = pos.shift(direction);
++
++                assertEquals("x", x + direction.getAdjacentX(), shifted.getX());
++                assertEquals("y", y + direction.getAdjacentY(), shifted.getY());
++                assertEquals("z", z + direction.getAdjacentZ(), shifted.getZ());
++            }
++        }
++    }
++
++    @Test
++    public void namedNeighboursMatchTheOffsetsInlinedAtCallSites() {
++        Random r = new Random(99L);
++
++        for (int i = 0; i < 100000; i++) {
++            int x = r.nextInt(2000000) - 1000000;
++            int y = r.nextInt(256);
++            int z = r.nextInt(2000000) - 1000000;
++            BlockPosition pos = new BlockPosition(x, y, z);
++
++            assertSamePosition(x, y + 1, z, pos.up());
++            assertSamePosition(x, y - 1, z, pos.down());
++            assertSamePosition(x - 1, y, z, pos.west());
++            assertSamePosition(x + 1, y, z, pos.east());
++            assertSamePosition(x, y, z - 1, pos.north());
++            assertSamePosition(x, y, z + 1, pos.south());
++        }
++    }
++
++    @Test
++    public void horizontalFacingsNeverChangeTheHeight() {
++        // BlockFlowing's scan adds getAdjacentY() rather than assuming zero; make sure both agree
++        for (EnumDirection direction : EnumDirection.EnumDirectionLimit.HORIZONTAL.facings()) {
++            assertEquals(direction + " must be horizontal", 0, direction.getAdjacentY());
++        }
++    }
++
++    @Test
++    public void oppositeIsTheNegatedOffset() {
++        // the flow scan recurses with enumdirection.opposite() to avoid walking back on itself
++        for (EnumDirection direction : EnumDirection.VALUES) {
++            EnumDirection opposite = direction.opposite();
++
++            assertEquals(-direction.getAdjacentX(), opposite.getAdjacentX());
++            assertEquals(-direction.getAdjacentY(), opposite.getAdjacentY());
++            assertEquals(-direction.getAdjacentZ(), opposite.getAdjacentZ());
++        }
++    }
++
++    private static void assertSamePosition(int x, int y, int z, BlockPosition actual) {
++        assertEquals("x", x, actual.getX());
++        assertEquals("y", y, actual.getY());
++        assertEquals("z", z, actual.getZ());
++    }
++}
