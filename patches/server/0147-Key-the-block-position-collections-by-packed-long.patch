@@ -1,0 +1,500 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 03:02:29 +0900
+Subject: [PATCH] Key the block-position collections by packed long
+
+The four collections keyed by BlockPosition now use fastutil primitive
+containers keyed by BlockPosition.asLong():
+
+  Chunk.tileEntities            -> Long2ObjectOpenHashMap
+  World.capturedTileEntities    -> Long2ObjectOpenHashMap
+  BlockRedstoneWire.blocksNeedingUpdate -> LongOpenHashSet
+  AntiXray.pendingUpdates       -> LongOpenHashSet
+
+BlockPosition already carried a lossless 26/12/26-bit layout in
+asLong()/fromLong(), so the packing is its own, not a new scheme; pack()
+and unpackX/Y/Z() are added so callers can populate and read these
+collections by coordinate without building a position to hash.
+
+Beyond dropping the position objects the maps used to retain, this
+removes allocations at the call sites: BlockRedstoneWire built six
+positions via shift() on every wire update, and AntiXray's
+updateNearbyBlocks recursed through six neighbour positions per level at
+radius 2. Both now work in ints.
+
+CraftChunk.getTileEntities() needed fixing in the same change: it looped
+over keySet() with an `instanceof BlockPosition` guard, which after this
+would have matched nothing and quietly returned an array of nulls
+instead of failing. It now unpacks the long keys.
+
+Chunk.getTileEntities() returns Long2ObjectMap<TileEntity> - a
+deliberate NMS signature change; every in-tree caller only uses values().
+
+BlockPositionPackTest checks pack/unpack round trips across the full
+coordinate range, agreement with asLong()/fromLong(), and that
+neighbouring positions cannot collide.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockPosition.java b/src/main/java/net/minecraft/server/BlockPosition.java
+index 1ef22fc8ec8dedf8adfc28dc4b11897eb05e5673..6f7cd47a61f608c8e441efae47408ce37d461b57 100644
+--- a/src/main/java/net/minecraft/server/BlockPosition.java
++++ b/src/main/java/net/minecraft/server/BlockPosition.java
+@@ -153,6 +153,25 @@ public class BlockPosition extends BaseBlockPosition {
+         return ((long) this.getX() & BlockPosition.X_MASK) << BlockPosition.X_SHIFT | ((long) this.getY() & BlockPosition.Y_MASK) << BlockPosition.Y_SHIFT | ((long) this.getZ() & BlockPosition.Z_MASK) << 0;
+     }
+ 
++    // Athena start - pack/unpack without building a BlockPosition, so long-keyed collections can be
++    // populated and read by coordinate. Same layout as asLong()/fromLong().
++    public static long pack(int x, int y, int z) {
++        return ((long) x & BlockPosition.X_MASK) << BlockPosition.X_SHIFT | ((long) y & BlockPosition.Y_MASK) << BlockPosition.Y_SHIFT | ((long) z & BlockPosition.Z_MASK) << 0;
++    }
++
++    public static int unpackX(long i) {
++        return (int) (i << 64 - BlockPosition.X_SHIFT - BlockPosition.NUM_X_BITS >> 64 - BlockPosition.NUM_X_BITS);
++    }
++
++    public static int unpackY(long i) {
++        return (int) (i << 64 - BlockPosition.Y_SHIFT - BlockPosition.NUM_Y_BITS >> 64 - BlockPosition.NUM_Y_BITS);
++    }
++
++    public static int unpackZ(long i) {
++        return (int) (i << 64 - BlockPosition.NUM_Z_BITS >> 64 - BlockPosition.NUM_Z_BITS);
++    }
++    // Athena end
++
+     public static BlockPosition fromLong(long i) {
+         int j = (int) (i << 64 - BlockPosition.X_SHIFT - BlockPosition.NUM_X_BITS >> 64 - BlockPosition.NUM_X_BITS);
+         int k = (int) (i << 64 - BlockPosition.Y_SHIFT - BlockPosition.NUM_Y_BITS >> 64 - BlockPosition.NUM_Y_BITS);
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index b7e849533f9ef844e25e8fef4ee8ab9d2fbf417d..363b6dff47e252ec9bdbc06855b9649fdb9c1b81 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -19,7 +19,9 @@ public class BlockRedstoneWire extends Block {
+     public static final BlockStateEnum<BlockRedstoneWire.EnumRedstoneWireConnection> WEST = BlockStateEnum.of("west", BlockRedstoneWire.EnumRedstoneWireConnection.class);
+     public static final BlockStateInteger POWER = BlockStateInteger.of("power", 0, 15);
+     private boolean canProvidePower = true;
+-    private final Set<BlockPosition> blocksNeedingUpdate = Sets.newHashSet();
++    // Athena - packed positions (BlockPosition.asLong). Besides dropping the map's position keys,
++    // this removes the six shift() allocations each wire update used to make.
++    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet blocksNeedingUpdate = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+ 
+     public BlockRedstoneWire() {
+         super(Material.ORIENTABLE);
+@@ -66,15 +68,15 @@ public class BlockRedstoneWire extends Block {
+ 
+     private IBlockData updateSurroundingRedstone(World world, BlockPosition blockposition, IBlockData iblockdata) {
+         iblockdata = this.calculateCurrentChanges(world, blockposition, blockposition, iblockdata);
+-        ArrayList arraylist = Lists.newArrayList(this.blocksNeedingUpdate);
++        // Athena - snapshot the packed keys, then apply physics by coordinate
++        long[] pending = this.blocksNeedingUpdate.toLongArray();
+ 
+         this.blocksNeedingUpdate.clear();
+-        Iterator iterator = arraylist.iterator();
+ 
+-        while (iterator.hasNext()) {
+-            BlockPosition blockposition1 = (BlockPosition) iterator.next();
++        for (int idx = 0; idx < pending.length; ++idx) {
++            long packed = pending[idx];
+ 
+-            world.applyPhysics(blockposition1, this);
++            world.applyPhysics(BlockPosition.unpackX(packed), BlockPosition.unpackY(packed), BlockPosition.unpackZ(packed), this);
+         }
+ 
+         return iblockdata;
+@@ -142,25 +144,25 @@ public class BlockRedstoneWire extends Block {
+                 world.setTypeAndData(blockposition, iblockdata, 2);
+             }
+ 
+-            this.blocksNeedingUpdate.add(blockposition);
++            // Athena - neighbours packed directly; no shift() allocations
++            int wx = blockposition.getX(), wy = blockposition.getY(), wz = blockposition.getZ();
++
++            this.blocksNeedingUpdate.add(blockposition.asLong());
+             // PaperSpigot start - Fix cannons
+             if (world.paperSpigotConfig.fixCannons) {
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.WEST));
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.EAST));
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.DOWN));
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.UP));
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.NORTH));
+-                this.blocksNeedingUpdate.add(blockposition.shift(EnumDirection.SOUTH));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx - 1, wy, wz));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx + 1, wy, wz));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy - 1, wz));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy + 1, wz));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy, wz - 1));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy, wz + 1));
+                 return iblockdata;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
+-            int i1 = aenumdirection.length;
+-
+-            for (int j1 = 0; j1 < i1; ++j1) {
+-                EnumDirection enumdirection1 = aenumdirection[j1];
++            for (int j1 = 0; j1 < EnumDirection.VALUES.length; ++j1) { // Athena - shared array
++                EnumDirection enumdirection1 = EnumDirection.VALUES[j1];
+ 
+-                this.blocksNeedingUpdate.add(blockposition.shift(enumdirection1));
++                this.blocksNeedingUpdate.add(BlockPosition.pack(wx + enumdirection1.getAdjacentX(), wy + enumdirection1.getAdjacentY(), wz + enumdirection1.getAdjacentZ()));
+             }
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 45a064a30b6818e6c6be56eb5b06f6eaa2bf9930..ae1a0d3bd7e0b6d8e647c33cc75a775371cddb64 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -1,6 +1,8 @@
+ package net.minecraft.server;
+ 
+ import com.google.common.base.Predicate;
++import it.unimi.dsi.fastutil.longs.Long2ObjectMap; // Athena - long-keyed tile entities
++import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap; // Athena
+ import com.google.common.collect.Maps;
+ import com.google.common.collect.Queues;
+ import java.util.Arrays;
+@@ -36,7 +38,9 @@ public class Chunk {
+     public final int locX;
+     public final int locZ;
+     private boolean isGapLightingUpdated;
+-    public final Map<BlockPosition, TileEntity> tileEntities;
++    // Athena - keyed by BlockPosition.asLong() instead of by the object, so looking a tile entity
++    // up no longer needs a BlockPosition to hash and the map holds no position objects at all.
++    public final Long2ObjectMap<TileEntity> tileEntities;
+     public final List<Entity>[] entitySlices; // Spigot
+     // PaperSpigot start - track the number of minecarts and items
+     // Keep this synced with entitySlices.add() and entitySlices.remove()
+@@ -137,7 +141,7 @@ public class Chunk {
+         this.blockBiomeArray = new byte[256];
+         this.precipitationHeightMap = new int[256];
+         this.updateSkylightColumns = new boolean[256];
+-        this.tileEntities = Maps.newHashMap();
++        this.tileEntities = new Long2ObjectOpenHashMap<TileEntity>(); // Athena
+         this.queuedLightChecks = 4096;
+         this.tileEntityPosQueue = Queues.newConcurrentLinkedQueue();
+         this.entitySlices = (List[]) (new List[16]); // Spigot
+@@ -835,10 +839,10 @@ public class Chunk {
+         // CraftBukkit start
+         TileEntity tileentity = null;
+         if (world.captureBlockStates) {
+-            tileentity = world.capturedTileEntities.get(blockposition);
++            tileentity = world.capturedTileEntities.get(blockposition.asLong()); // Athena
+         }
+         if (tileentity == null) {
+-            tileentity = (TileEntity) this.tileEntities.get(blockposition);
++            tileentity = this.tileEntities.get(blockposition.asLong()); // Athena
+         }
+         // CraftBukkit end
+ 
+@@ -850,7 +854,7 @@ public class Chunk {
+                 this.tileEntityPosQueue.add(blockposition);
+             }
+         } else if (tileentity.isInvalid()) {
+-            this.tileEntities.remove(blockposition);
++            this.tileEntities.remove(blockposition.asLong()); // Athena
+             return null;
+         }
+ 
+@@ -869,17 +873,17 @@ public class Chunk {
+         tileentity.setWorldObj(this.world);
+         tileentity.setPos(blockposition);
+         if (this.getType(blockposition) instanceof IContainer) {
+-            if (this.tileEntities.containsKey(blockposition)) {
+-                ((TileEntity) this.tileEntities.get(blockposition)).invalidate();
++            if (this.tileEntities.containsKey(blockposition.asLong())) { // Athena
++                this.tileEntities.get(blockposition.asLong()).invalidate();
+             }
+ 
+             tileentity.validate();
+-            this.tileEntities.put(blockposition, tileentity);
++            this.tileEntities.put(blockposition.asLong(), tileentity); // Athena
+             // CraftBukkit start
+             // PaperSpigot start - Remove invalid mob spawner tile entities
+         } else if (this.world.paperSpigotConfig.removeInvalidMobSpawnerTEs && tileentity instanceof TileEntityMobSpawner &&
+                 org.bukkit.craftbukkit.util.CraftMagicNumbers.getMaterial(getType(blockposition)) != org.bukkit.Material.MOB_SPAWNER) {
+-            this.tileEntities.remove(blockposition);
++            this.tileEntities.remove(blockposition.asLong()); // Athena
+             // PaperSpigot end
+         } else {
+             // Paper start
+@@ -897,7 +901,7 @@ public class Chunk {
+ 
+     public void removeTileEntity(BlockPosition blockposition) {
+         if (this.isChunkLoaded) {
+-            TileEntity tileentity = (TileEntity) this.tileEntities.remove(blockposition);
++            TileEntity tileentity = this.tileEntities.remove(blockposition.asLong()); // Athena
+ 
+             if (tileentity != null) {
+                 tileentity.invalidate();
+@@ -1453,7 +1457,7 @@ public class Chunk {
+         }
+     }
+ 
+-    public Map<BlockPosition, TileEntity> getTileEntities() {
++    public Long2ObjectMap<TileEntity> getTileEntities() { // Athena - long-keyed
+         return this.tileEntities;
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ItemStack.java b/src/main/java/net/minecraft/server/ItemStack.java
+index 9652db1dc2b91ee69b5aad3c6342e916f21dc965..108ad90ac0f38b571be493822d0660289e05f792 100644
+--- a/src/main/java/net/minecraft/server/ItemStack.java
++++ b/src/main/java/net/minecraft/server/ItemStack.java
+@@ -190,8 +190,9 @@ public final class ItemStack {
+                     world.notifyAndUpdatePhysics(newblockposition, null, oldBlock, block.getBlock(), updateFlag); // send null chunk as chunk.k() returns false by this point
+                 }
+ 
+-                for (Map.Entry<BlockPosition, TileEntity> e : world.capturedTileEntities.entrySet()) {
+-                    world.setTileEntity(e.getKey(), e.getValue());
++                // Athena - capturedTileEntities is long-keyed now; this runs once per placed block
++                for (it.unimi.dsi.fastutil.longs.Long2ObjectMap.Entry<TileEntity> e : world.capturedTileEntities.long2ObjectEntrySet()) {
++                    world.setTileEntity(BlockPosition.fromLong(e.getLongKey()), e.getValue());
+                 }
+ 
+                 // Special case juke boxes as they update their tile entity. Copied from ItemRecord.
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index a927dd42621885a82aa60d4d041ff7d2ba19279e..68a7482bf725f23712bd69216c9d1786bc05c07e 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -560,6 +560,11 @@ public abstract class World implements IBlockAccess {
+ 
+     }
+ 
++    // Athena - coordinate entry point for callers holding packed positions
++    public void applyPhysics(int x, int y, int z, Block block) {
++        this.applyPhysics(new BlockPosition(x, y, z), block);
++    }
++
+     public void applyPhysics(BlockPosition blockposition, Block block) {
+         this.notifyBlockOfStateChange(blockposition.west(), block);
+         this.notifyBlockOfStateChange(blockposition.east(), block);
+@@ -2392,7 +2397,8 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
+-    public Map<BlockPosition, TileEntity> capturedTileEntities = Maps.newHashMap();
++    // Athena - keyed by BlockPosition.asLong() (see Chunk.tileEntities)
++    public it.unimi.dsi.fastutil.longs.Long2ObjectMap<TileEntity> capturedTileEntities = new it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap<TileEntity>();
+ 
+     public TileEntity getTileEntity(BlockPosition blockposition) {
+         if (!this.isValidLocation(blockposition)) {
+@@ -2401,7 +2407,7 @@ public abstract class World implements IBlockAccess {
+             // CraftBukkit start
+             // PandaSpigot start - Optimize Captured TileEntity Lookup
+             TileEntity tileentity = null;
+-            if (!capturedTileEntities.isEmpty() && (tileentity = capturedTileEntities.get(blockposition)) != null) {
++            if (!capturedTileEntities.isEmpty() && (tileentity = capturedTileEntities.get(blockposition.asLong())) != null) { // Athena
+                 return tileentity;
+             }
+             // PandaSpigot end
+@@ -2445,7 +2451,7 @@ public abstract class World implements IBlockAccess {
+             if (captureBlockStates) {
+                 tileentity.setWorldObj(this);
+                 tileentity.setPos(blockposition);
+-                capturedTileEntities.put(blockposition, tileentity);
++                capturedTileEntities.put(blockposition.asLong(), tileentity); // Athena
+                 return;
+             }
+             // CraftBukkit end
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftChunk.java b/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
+index a034e616d9e222e28ed316b1b08c4613a33f1ebb..4b91ba6bd7ff888c17c2d9a52a2c0329dea5aa43 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
+@@ -108,12 +108,11 @@ public class CraftChunk implements Chunk {
+ 
+         BlockState[] entities = new BlockState[chunk.tileEntities.size()];
+ 
+-        for (Object obj : chunk.tileEntities.keySet().toArray()) {
+-            if (!(obj instanceof BlockPosition)) {
+-                continue;
+-            }
+-
+-            BlockPosition position = (BlockPosition) obj;
++        // Athena - tileEntities is now keyed by BlockPosition.asLong(); unpack the key instead of
++        // casting it. Without this the old `instanceof BlockPosition` check would silently skip
++        // every entry and hand back an array of nulls.
++        for (long key : chunk.tileEntities.keySet().toLongArray()) {
++            BlockPosition position = BlockPosition.fromLong(key);
+             entities[index++] = worldServer.getWorld().getBlockAt(position.getX(), position.getY(), position.getZ()).getState();
+         }
+ 
+diff --git a/src/main/java/org/spigotmc/AntiXray.java b/src/main/java/org/spigotmc/AntiXray.java
+index 0d48157a2bba2a730d3056a69368bae9b89d2b41..61f71cfb5a7973be8346399c822e014d466fa716 100644
+--- a/src/main/java/org/spigotmc/AntiXray.java
++++ b/src/main/java/org/spigotmc/AntiXray.java
+@@ -24,7 +24,8 @@ public class AntiXray
+     private final byte[] replacementOres;
+     // PaperSpigot start
+     public boolean queueUpdates = true;
+-    public final Set<BlockPosition> pendingUpdates = new HashSet<BlockPosition>();
++    // Athena - packed positions (BlockPosition.asLong) instead of position objects
++    public final it.unimi.dsi.fastutil.longs.LongOpenHashSet pendingUpdates = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+     // PaperSpigot end
+ 
+     public AntiXray(SpigotWorldConfig config)
+@@ -60,9 +61,9 @@ public class AntiXray
+         {
+             queueUpdates = false;
+ 
+-            for ( BlockPosition position : pendingUpdates )
++            for ( long packed : pendingUpdates.toLongArray() ) // Athena
+             {
+-                updateNearbyBlocks( world, position );
++                updateNearbyBlocks( world, BlockPosition.unpackX( packed ), BlockPosition.unpackY( packed ), BlockPosition.unpackZ( packed ) );
+             }
+ 
+             pendingUpdates.clear();
+@@ -75,18 +76,24 @@ public class AntiXray
+      * of the given coordinate, revealing them if they are hidden ores.
+      */
+     public void updateNearbyBlocks(World world, BlockPosition position)
++    {
++        updateNearbyBlocks( world, position.getX(), position.getY(), position.getZ() ); // Athena
++    }
++
++    // Athena - coordinate entry point
++    public void updateNearbyBlocks(World world, int x, int y, int z)
+     {
+         if ( world.spigotConfig.antiXray )
+         {
+             // PaperSpigot start
+             if ( queueUpdates )
+             {
+-                pendingUpdates.add( position );
++                pendingUpdates.add( BlockPosition.pack( x, y, z ) );
+                 return;
+             }
+             // PaperSpigot end
+             SpigotTimings.antiXrayUpdateTimer.startTiming();
+-            updateNearbyBlocks( world, position, 2, false ); // 2 is the radius, we shouldn't change it as that would make it exponentially slower
++            updateNearbyBlocks( world, x, y, z, 2, false ); // 2 is the radius, we shouldn't change it as that would make it exponentially slower
+             SpigotTimings.antiXrayUpdateTimer.stopTiming();
+         }
+     }
+@@ -205,30 +212,31 @@ public class AntiXray
+         }
+     }
+ 
+-    private void updateNearbyBlocks(World world, BlockPosition position, int radius, boolean updateSelf)
++    // Athena - integer coordinates; the recursion allocated six positions per level (radius 2)
++    private void updateNearbyBlocks(World world, int x, int y, int z, int radius, boolean updateSelf)
+     {
+         // If the block in question is loaded
+-        if ( world.isLoaded( position ) )
++        if ( world.isLoaded( x, y, z ) )
+         {
+             // Get block id
+-            Block block = world.getType(position).getBlock();
++            Block block = world.getType( x, y, z, false ).getBlock();
+ 
+             // See if it needs update
+             if ( updateSelf && obfuscateBlocks[Block.getId( block )] )
+             {
+-                // Send the update
+-                world.notify( position );
++                // Send the update - notify() needs a real position, and this only fires for ores
++                world.notify( new BlockPosition( x, y, z ) );
+             }
+ 
+             // Check other blocks for updates
+             if ( radius > 0 )
+             {
+-                updateNearbyBlocks( world, position.east(), radius - 1, true );
+-                updateNearbyBlocks( world, position.west(), radius - 1, true );
+-                updateNearbyBlocks( world, position.up(), radius - 1, true );
+-                updateNearbyBlocks( world, position.down(), radius - 1, true );
+-                updateNearbyBlocks( world, position.south(), radius - 1, true );
+-                updateNearbyBlocks( world, position.north(), radius - 1, true );
++                updateNearbyBlocks( world, x + 1, y, z, radius - 1, true );
++                updateNearbyBlocks( world, x - 1, y, z, radius - 1, true );
++                updateNearbyBlocks( world, x, y + 1, z, radius - 1, true );
++                updateNearbyBlocks( world, x, y - 1, z, radius - 1, true );
++                updateNearbyBlocks( world, x, y, z + 1, radius - 1, true );
++                updateNearbyBlocks( world, x, y, z - 1, radius - 1, true );
+             }
+         }
+     }
+diff --git a/src/test/java/net/minecraft/server/BlockPositionPackTest.java b/src/test/java/net/minecraft/server/BlockPositionPackTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..705355fdba4e1beb5725d23052d181c96e280835
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/BlockPositionPackTest.java
+@@ -0,0 +1,78 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - the long-keyed collections (Chunk.tileEntities, World.capturedTileEntities,
++ * BlockRedstoneWire, AntiXray) rely on pack/unpack being an exact round trip over the whole
++ * coordinate range, and on it agreeing with the existing asLong()/fromLong().
++ */
++public class BlockPositionPackTest {
++
++    private static final int MAX_HORIZONTAL = 30000000;
++
++    @Test
++    public void packRoundTripsOverTheCoordinateRange() {
++        Random r = new Random(20260824L);
++
++        for (int i = 0; i < 500000; i++) {
++            int x = r.nextInt(MAX_HORIZONTAL * 2) - MAX_HORIZONTAL;
++            int y = r.nextInt(256);
++            int z = r.nextInt(MAX_HORIZONTAL * 2) - MAX_HORIZONTAL;
++
++            long packed = BlockPosition.pack(x, y, z);
++
++            assertEquals("x round trip", x, BlockPosition.unpackX(packed));
++            assertEquals("y round trip", y, BlockPosition.unpackY(packed));
++            assertEquals("z round trip", z, BlockPosition.unpackZ(packed));
++        }
++    }
++
++    @Test
++    public void packAgreesWithAsLong() {
++        Random r = new Random(4242L);
++
++        for (int i = 0; i < 200000; i++) {
++            int x = r.nextInt(MAX_HORIZONTAL * 2) - MAX_HORIZONTAL;
++            int y = r.nextInt(256);
++            int z = r.nextInt(MAX_HORIZONTAL * 2) - MAX_HORIZONTAL;
++            BlockPosition pos = new BlockPosition(x, y, z);
++
++            assertEquals("pack == asLong", pos.asLong(), BlockPosition.pack(x, y, z));
++
++            BlockPosition back = BlockPosition.fromLong(BlockPosition.pack(x, y, z));
++
++            assertEquals(x, back.getX());
++            assertEquals(y, back.getY());
++            assertEquals(z, back.getZ());
++        }
++    }
++
++    @Test
++    public void distinctPositionsGiveDistinctKeys() {
++        // neighbours in every axis must not collide, or tile entities would overwrite each other
++        int[][] deltas = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
++        int[][] bases = {{0, 0, 0}, {-1, 5, -1}, {1000, 200, -1000}, {-29999999, 0, 29999999}};
++
++        for (int[] base : bases) {
++            long key = BlockPosition.pack(base[0], base[1], base[2]);
++
++            for (int[] d : deltas) {
++                int y = base[1] + d[1];
++
++                if (y < 0 || y > 255) {
++                    continue;
++                }
++
++                long neighbour = BlockPosition.pack(base[0] + d[0], y, base[2] + d[2]);
++
++                if (key == neighbour) {
++                    throw new AssertionError("key collision at " + base[0] + "," + base[1] + "," + base[2]);
++                }
++            }
++        }
++    }
++}

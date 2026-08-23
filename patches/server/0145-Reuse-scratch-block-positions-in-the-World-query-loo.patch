@@ -1,0 +1,145 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 02:38:25 +0900
+Subject: [PATCH] Reuse scratch block positions in the World query loops
+
+Each of these loops allocated a MutableBlockPosition per call, and they
+run several times per entity per tick; a live-server profile attributed
+~14 MB/min of BlockPosition allocation to them.
+
+They now take a per-thread scratch position instead. Every call site owns
+a fixed slot, so a nested query cannot scribble over the position another
+one is still iterating with, and none of these methods is reentrant with
+respect to itself. The position was already reused across each loop, so
+sharing it between calls adds no new aliasing that the old code did not
+already have.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 40e0562ac131c3fe3fd95d1d1b59c2769fe7db01..db572bf02ac33b3dc9704f635035c3df3d60d8a4 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1290,7 +1290,7 @@ public abstract class World implements IBlockAccess {
+         WorldBorder worldborder = this.getWorldBorder();
+         boolean flag = entity.isOutsideBorder();
+         boolean flag1 = this.isInsideBorder(worldborder, entity);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(0); // Athena - reuse a per-thread scratch position
+ 
+         // Spigot start
+         int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
+@@ -1421,7 +1421,7 @@ public abstract class World implements IBlockAccess {
+         boolean flag = entity.isOutsideBorder();
+         boolean flag1 = this.isInsideBorder(worldborder, entity);
+         IBlockData iblockdata = Blocks.STONE.getBlockData();
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(1); // Athena - reuse a per-thread scratch position
+ 
+         // Spigot start
+         int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
+@@ -1515,6 +1515,32 @@ public abstract class World implements IBlockAccess {
+         return arraylist;
+     }
+ 
++
++    // Athena start - reusable scratch block positions.
++    //
++    // These query loops each allocated a MutableBlockPosition per call. Profiling a live server
++    // showed that costing ~14 MB/min, because the collision and material queries run several times
++    // per entity per tick. Each call site owns a fixed slot, so a nested query can never scribble
++    // over the position another one is still iterating with.
++    private static final int SCRATCH_POS_SLOTS = 10;
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition[]> SCRATCH_POSITIONS = new ThreadLocal<BlockPosition.MutableBlockPosition[]>() {
++        protected BlockPosition.MutableBlockPosition[] initialValue() {
++            BlockPosition.MutableBlockPosition[] slots = new BlockPosition.MutableBlockPosition[SCRATCH_POS_SLOTS];
++
++            for (int i = 0; i < slots.length; ++i) {
++                slots[i] = new BlockPosition.MutableBlockPosition();
++            }
++
++            return slots;
++        }
++    };
++
++    /** The calling thread's scratch position for the given call site. Always set() it before use. */
++    private static BlockPosition.MutableBlockPosition scratchPos(int slot) {
++        return SCRATCH_POSITIONS.get()[slot];
++    }
++    // Athena end
++
+     public boolean isInsideBorder(WorldBorder worldborder, Entity entity) {
+         double d0 = worldborder.minX();
+         double d1 = worldborder.minZ();
+@@ -1549,7 +1575,7 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(axisalignedbb.maxY + 1.0D);
+         int i1 = MathHelper.floor(axisalignedbb.minZ);
+         int j1 = MathHelper.floor(axisalignedbb.maxZ + 1.0D);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(2); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+             for (int l1 = i1; l1 < j1; ++l1) {
+@@ -2022,7 +2048,7 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(3); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 <= j; ++k1) {
+             for (int l1 = k; l1 <= l; ++l1) {
+@@ -2051,7 +2077,7 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(4); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 <= j; ++k1) {
+             for (int l1 = k; l1 <= l; ++l1) {
+@@ -2082,7 +2108,7 @@ public abstract class World implements IBlockAccess {
+         int j1 = MathHelper.floor(maxZ + 1.0D);
+ 
+         if (this.isAreaLoaded(i, k, i1, j, l, j1, true)) {
+-            BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++            BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(5); // Athena - reuse a per-thread scratch position
+ 
+             for (int k1 = i; k1 < j; ++k1) {
+                 for (int l1 = k; l1 < l; ++l1) {
+@@ -2118,7 +2144,7 @@ public abstract class World implements IBlockAccess {
+         } else {
+             boolean flag = false;
+             Vec3D vec3d = new Vec3D(0.0D, 0.0D, 0.0D);
+-            BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++            BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(6); // Athena - reuse a per-thread scratch position
+ 
+             for (int k1 = i; k1 < j; ++k1) {
+                 for (int l1 = k; l1 < l; ++l1) {
+@@ -2164,7 +2190,7 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY + 1.0D);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ + 1.0D);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(7); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+             for (int l1 = k; l1 < l; ++l1) {
+@@ -2191,7 +2217,7 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY + 1.0D);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ + 1.0D);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(8); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+             for (int l1 = k; l1 < l; ++l1) {
+@@ -2783,7 +2809,7 @@ public abstract class World implements IBlockAccess {
+                             j3 = MathHelper.abs_int(j2 - j1);
+                             k3 = MathHelper.abs_int(k2 - k1);
+                             if (i3 + j3 + k3 < 17) {
+-                                BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++                                BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(9); // Athena - reuse a per-thread scratch position
+                                 EnumDirection[] aenumdirection = EnumDirection.values();
+                                 int i4 = aenumdirection.length;
+ 
