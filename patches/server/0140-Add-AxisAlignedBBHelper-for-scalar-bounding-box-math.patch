@@ -1,0 +1,298 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 01:19:51 +0900
+Subject: [PATCH] Add AxisAlignedBBHelper for scalar bounding-box math
+
+First step of replacing AxisAlignedBB with six plain doubles on the
+collision hot paths.
+
+Measurements on C2 (OpenJDK 26) and Graal (GraalVM 25) show escape
+analysis cannot remove these boxes: a box stored in a field, passed to a
+non-inlined method, or returned from one is always heap allocated (64
+bytes each) on both JITs. Notably a double[6] "packed" return costs the
+exact same 64 bytes, so returning a box in any form saves nothing.
+
+Hence the split this helper encodes:
+  * operations returning a PRIMITIVE live here (calcX/Y/ZOffset,
+    intersects, isVecInside, averageEdgeLength) - a primitive return is
+    free;
+  * operations producing a box (offset/grow/shrink/addCoord/union) get
+    expanded inline at each call site instead.
+
+AxisAlignedBBHelperTest pins both halves against the original class over
+500k randomized boxes. It also documents a subtle trap the conversion
+must honour: the AxisAlignedBB constructor normalizes via Math.min/max,
+so grow/shrink with a negative delta can SWAP an axis (real code does
+this, e.g. Entity.java grow(-0.1, -0.4, -0.1)); the inline expansion of
+grow/shrink therefore needs the same min/max normalization, while
+offset/addCoord/union always preserve ordering and do not.
+
+No behaviour change yet - nothing calls the helper.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AxisAlignedBBHelper.java b/src/main/java/net/minecraft/server/AxisAlignedBBHelper.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7357769338b8067a9b8fbecde4b721823d0c67be
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AxisAlignedBBHelper.java
+@@ -0,0 +1,119 @@
++package net.minecraft.server;
++
++// Athena - scalar replacement for AxisAlignedBB.
++//
++// Bounding boxes are carried as six plain doubles (minX, minY, minZ, maxX, maxY, maxZ) so that no
++// box object is ever allocated on the movement/collision hot paths. Measurements on both C2 and
++// Graal show that any helper *returning* a box costs exactly as much as the old object did
++// (double[6] is 64 bytes, AxisAlignedBB is 64 bytes) and that escape analysis cannot remove either
++// once the value is stored in a field, passed to a non-inlined method, or returned. Therefore:
++//
++//   * operations that produce a box (offset/grow/shrink/addCoord/union) are expanded inline at the
++//     call site - each component is a one-line expression, and the expansion usually becomes the
++//     argument list of the consumer, so it costs no extra statements;
++//   * only operations that return a PRIMITIVE live here, because a primitive return is free.
++//
++// Every method below mirrors the original AxisAlignedBB logic exactly. In the collision methods the
++// receiver of the old instance method (the box being collided against, e.g. a block box) is passed
++// as the first six parameters, and the old argument (the moving box, e.g. the entity) as the next
++// six - matching `blockBox.calculateXOffset(entityBox, d)`.
++public final class AxisAlignedBBHelper {
++
++    private AxisAlignedBBHelper() {}
++
++    // Mirrors AxisAlignedBB.calculateXOffset(AxisAlignedBB, double).
++    public static double calcXOffset(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                     double oMinX, double oMinY, double oMinZ, double oMaxX, double oMaxY, double oMaxZ,
++                                     double d0) {
++        if (oMaxY > minY && oMinY < maxY && oMaxZ > minZ && oMinZ < maxZ) {
++            if (d0 > 0.0D && oMaxX <= minX) {
++                double d1 = minX - oMaxX;
++
++                if (d1 < d0) {
++                    d0 = d1;
++                }
++            } else if (d0 < 0.0D && oMinX >= maxX) {
++                double d2 = maxX - oMinX;
++
++                if (d2 > d0) {
++                    d0 = d2;
++                }
++            }
++
++            return d0;
++        } else {
++            return d0;
++        }
++    }
++
++    // Mirrors AxisAlignedBB.calculateYOffset(AxisAlignedBB, double).
++    public static double calcYOffset(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                     double oMinX, double oMinY, double oMinZ, double oMaxX, double oMaxY, double oMaxZ,
++                                     double d0) {
++        if (oMaxX > minX && oMinX < maxX && oMaxZ > minZ && oMinZ < maxZ) {
++            if (d0 > 0.0D && oMaxY <= minY) {
++                double d1 = minY - oMaxY;
++
++                if (d1 < d0) {
++                    d0 = d1;
++                }
++            } else if (d0 < 0.0D && oMinY >= maxY) {
++                double d2 = maxY - oMinY;
++
++                if (d2 > d0) {
++                    d0 = d2;
++                }
++            }
++
++            return d0;
++        } else {
++            return d0;
++        }
++    }
++
++    // Mirrors AxisAlignedBB.calculateZOffset(AxisAlignedBB, double).
++    public static double calcZOffset(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                     double oMinX, double oMinY, double oMinZ, double oMaxX, double oMaxY, double oMaxZ,
++                                     double d0) {
++        if (oMaxX > minX && oMinX < maxX && oMaxY > minY && oMinY < maxY) {
++            if (d0 > 0.0D && oMaxZ <= minZ) {
++                double d1 = minZ - oMaxZ;
++
++                if (d1 < d0) {
++                    d0 = d1;
++                }
++            } else if (d0 < 0.0D && oMinZ >= maxZ) {
++                double d2 = maxZ - oMinZ;
++
++                if (d2 > d0) {
++                    d0 = d2;
++                }
++            }
++
++            return d0;
++        } else {
++            return d0;
++        }
++    }
++
++    // Mirrors AxisAlignedBB.intersectsWith(AxisAlignedBB).
++    public static boolean intersects(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                     double oMinX, double oMinY, double oMinZ, double oMaxX, double oMaxY, double oMaxZ) {
++        return oMaxX > minX && oMinX < maxX && oMaxY > minY && oMinY < maxY && oMaxZ > minZ && oMinZ < maxZ;
++    }
++
++    // Mirrors AxisAlignedBB.isVecInside(Vec3D).
++    public static boolean isVecInside(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                      double x, double y, double z) {
++        return x > minX && x < maxX && y > minY && y < maxY && z > minZ && z < maxZ;
++    }
++
++    // Mirrors AxisAlignedBB.getAverageEdgeLength().
++    public static double averageEdgeLength(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        double d0 = maxX - minX;
++        double d1 = maxY - minY;
++        double d2 = maxZ - minZ;
++
++        return (d0 + d1 + d2) / 3.0D;
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AxisAlignedBBHelperTest.java b/src/test/java/net/minecraft/server/AxisAlignedBBHelperTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d25a683695ab73906c3b7064b457d6dce6dc12f1
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AxisAlignedBBHelperTest.java
+@@ -0,0 +1,134 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - proves AxisAlignedBBHelper is bit-identical to the AxisAlignedBB methods it replaces.
++ * The whole scalar conversion rests on this equivalence, so it is checked exhaustively over
++ * randomized boxes including touching/overlapping/degenerate cases.
++ */
++public class AxisAlignedBBHelperTest {
++
++    private static double coord(Random r) {
++        // mix of "grid aligned" and fractional values so touching faces (a common collision case) occur
++        return r.nextInt(4) == 0 ? r.nextInt(5) : (r.nextDouble() - 0.5D) * 6.0D;
++    }
++
++    private static AxisAlignedBB randomBox(Random r) {
++        double x = coord(r), y = coord(r), z = coord(r);
++        double sx = r.nextInt(3) == 0 ? 1.0D : r.nextDouble() * 2.0D;
++        double sy = r.nextInt(3) == 0 ? 1.0D : r.nextDouble() * 2.0D;
++        double sz = r.nextInt(3) == 0 ? 1.0D : r.nextDouble() * 2.0D;
++        return new AxisAlignedBB(x, y, z, x + sx, y + sy, z + sz);
++    }
++
++    private static double delta(Random r) {
++        return (r.nextDouble() - 0.5D) * 2.0D;
++    }
++
++    @Test
++    public void helperMatchesAxisAlignedBB() {
++        Random r = new Random(20260824L);
++
++        for (int i = 0; i < 500000; i++) {
++            AxisAlignedBB self = randomBox(r);   // the box being collided against (old `this`)
++            AxisAlignedBB other = randomBox(r);  // the moving box (old argument)
++            double d = delta(r);
++
++            assertEquals("calcXOffset i=" + i,
++                    self.calculateXOffset(other, d),
++                    AxisAlignedBBHelper.calcXOffset(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ,
++                            other.minX, other.minY, other.minZ, other.maxX, other.maxY, other.maxZ, d),
++                    0.0D);
++
++            assertEquals("calcYOffset i=" + i,
++                    self.calculateYOffset(other, d),
++                    AxisAlignedBBHelper.calcYOffset(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ,
++                            other.minX, other.minY, other.minZ, other.maxX, other.maxY, other.maxZ, d),
++                    0.0D);
++
++            assertEquals("calcZOffset i=" + i,
++                    self.calculateZOffset(other, d),
++                    AxisAlignedBBHelper.calcZOffset(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ,
++                            other.minX, other.minY, other.minZ, other.maxX, other.maxY, other.maxZ, d),
++                    0.0D);
++
++            assertEquals("intersects i=" + i,
++                    self.intersectsWith(other),
++                    AxisAlignedBBHelper.intersects(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ,
++                            other.minX, other.minY, other.minZ, other.maxX, other.maxY, other.maxZ));
++
++            assertEquals("averageEdgeLength i=" + i,
++                    self.getAverageEdgeLength(),
++                    AxisAlignedBBHelper.averageEdgeLength(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ),
++                    0.0D);
++
++            Vec3D v = new Vec3D(coord(r), coord(r), coord(r));
++            assertEquals("isVecInside i=" + i,
++                    self.isVecInside(v),
++                    AxisAlignedBBHelper.isVecInside(self.minX, self.minY, self.minZ, self.maxX, self.maxY, self.maxZ,
++                            v.xCoord, v.yCoord, v.zCoord));
++        }
++    }
++
++    /**
++     * The box-producing operations are expanded inline at each call site instead of being helper
++     * methods (a returned box costs an allocation). These assertions pin the expansion formulas
++     * that the conversion uses, so a mistake in one of them is caught here.
++     */
++    @Test
++    public void inlineExpansionFormulasMatch() {
++        Random r = new Random(7777L);
++
++        for (int i = 0; i < 200000; i++) {
++            AxisAlignedBB b = randomBox(r);
++            double dx = delta(r), dy = delta(r), dz = delta(r);
++
++            // offset(dx, dy, dz)
++            AxisAlignedBB off = b.offset(dx, dy, dz);
++            assertBox("offset i=" + i, off,
++                    b.minX + dx, b.minY + dy, b.minZ + dz, b.maxX + dx, b.maxY + dy, b.maxZ + dz);
++
++            // grow(dx, dy, dz)
++            // NOTE: the AxisAlignedBB constructor normalizes with Math.min/Math.max, so when the
++            // delta is negative enough to invert an axis the bounds are SWAPPED. The inline
++            // expansion must reproduce that, hence the min/max below.
++            AxisAlignedBB grown = b.grow(dx, dy, dz);
++            assertBox("grow i=" + i, grown,
++                    Math.min(b.minX - dx, b.maxX + dx), Math.min(b.minY - dy, b.maxY + dy), Math.min(b.minZ - dz, b.maxZ + dz),
++                    Math.max(b.minX - dx, b.maxX + dx), Math.max(b.minY - dy, b.maxY + dy), Math.max(b.minZ - dz, b.maxZ + dz));
++
++            // shrink(dx, dy, dz) - same normalization caveat as grow
++            AxisAlignedBB shrunk = b.shrink(dx, dy, dz);
++            assertBox("shrink i=" + i, shrunk,
++                    Math.min(b.minX + dx, b.maxX - dx), Math.min(b.minY + dy, b.maxY - dy), Math.min(b.minZ + dz, b.maxZ - dz),
++                    Math.max(b.minX + dx, b.maxX - dx), Math.max(b.minY + dy, b.maxY - dy), Math.max(b.minZ + dz, b.maxZ - dz));
++
++            // addCoord(dx, dy, dz) -> extends the side the motion points at
++            AxisAlignedBB swept = b.addCoord(dx, dy, dz);
++            assertBox("addCoord i=" + i, swept,
++                    b.minX + Math.min(dx, 0.0D), b.minY + Math.min(dy, 0.0D), b.minZ + Math.min(dz, 0.0D),
++                    b.maxX + Math.max(dx, 0.0D), b.maxY + Math.max(dy, 0.0D), b.maxZ + Math.max(dz, 0.0D));
++
++            // union(other)
++            AxisAlignedBB o = randomBox(r);
++            AxisAlignedBB u = b.union(o);
++            assertBox("union i=" + i, u,
++                    Math.min(b.minX, o.minX), Math.min(b.minY, o.minY), Math.min(b.minZ, o.minZ),
++                    Math.max(b.maxX, o.maxX), Math.max(b.maxY, o.maxY), Math.max(b.maxZ, o.maxZ));
++        }
++    }
++
++    private static void assertBox(String msg, AxisAlignedBB actual,
++                                  double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        assertEquals(msg + " minX", actual.minX, minX, 0.0D);
++        assertEquals(msg + " minY", actual.minY, minY, 0.0D);
++        assertEquals(msg + " minZ", actual.minZ, minZ, 0.0D);
++        assertEquals(msg + " maxX", actual.maxX, maxX, 0.0D);
++        assertEquals(msg + " maxY", actual.maxY, maxY, 0.0D);
++        assertEquals(msg + " maxZ", actual.maxZ, maxZ, 0.0D);
++    }
++}

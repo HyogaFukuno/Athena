@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 02:31:53 +0900
+Subject: [PATCH] Remove the last AxisAlignedBB allocations from mob
+ pathfinding
+
+A JFR profile of a live server showed AxisAlignedBB still being allocated
+at ~12 MB/min, and every sample came from the same place:
+NavigationAbstract.onUpdateNavigation, the last caller left on the old
+List<AxisAlignedBB> getCubes. It runs for every pathfinding mob every
+tick. Entity.move itself contributed nothing, confirming the earlier
+conversion works in production.
+
+The same profile also caught a regression of mine: the "cold path only"
+getCollisionBoundingBox wrapper allocated a fresh double[6] per call, and
+that path turned out to be reached hot through the legacy list API -
+20 MB/min of double[]. It now reuses a per-thread scratch array.
+
+Re-profiling under the same conditions: AxisAlignedBB drops to zero
+samples, and double[] falls to 0.5 MB/min, all of it world-gen init.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 87d2d5b7a4beafd70a91f31e8c8521a64b4bdfb6..0d88d40e19fdbbe2bef7b7eb13973ddb603d1784 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -319,8 +319,16 @@ public class Block {
+         }
+     }
+ 
++    // Reusable per-thread scratch: a JFR profile showed this "cold" wrapper being reached from the
++    // legacy list path often enough that a fresh double[6] per call was itself worth 20 MB/min.
++    private static final ThreadLocal<double[]> BOUNDS_SCRATCH = new ThreadLocal<double[]>() {
++        protected double[] initialValue() {
++            return new double[6];
++        }
++    };
++
+     public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        double[] out = new double[6]; // cold path only
++        double[] out = BOUNDS_SCRATCH.get();
+         return this.getCollisionBounds(world, blockposition, iblockdata, out) ? new AxisAlignedBB(out[0], out[1], out[2], out[3], out[4], out[5]) : null;
+     }
+     // Athena end
+diff --git a/src/main/java/net/minecraft/server/NavigationAbstract.java b/src/main/java/net/minecraft/server/NavigationAbstract.java
+index 48afdccc41b7b52b3abc10b95a6b701b1703ba0b..7a27157de44af2609956fec10322e55eabc82520 100644
+--- a/src/main/java/net/minecraft/server/NavigationAbstract.java
++++ b/src/main/java/net/minecraft/server/NavigationAbstract.java
+@@ -149,16 +149,30 @@ public abstract class NavigationAbstract {
+             if (!this.noPath()) {
+                 vec3d = this.currentPath.getPosition((Entity) this.theEntity);
+                 if (vec3d != null) {
+-                    AxisAlignedBB axisalignedbb = (new AxisAlignedBB(vec3d.xCoord, vec3d.yCoord, vec3d.zCoord, vec3d.xCoord, vec3d.yCoord, vec3d.zCoord)).grow(0.5D, 0.5D, 0.5D);
+-                    List list = this.worldObj.getCubes(this.theEntity, axisalignedbb.addCoord(0.0D, -1.0D, 0.0D));
++                    // Athena - scalar collision gathering. This runs for every pathfinding mob every
++                    // tick and was the last caller of the old List<AxisAlignedBB> getCubes; a JFR
++                    // profile showed it accounting for all remaining AxisAlignedBB allocations.
++                    double navMinX = vec3d.xCoord - 0.5D, navMinY = vec3d.yCoord - 0.5D, navMinZ = vec3d.zCoord - 0.5D;
++                    double navMaxX = vec3d.xCoord + 0.5D, navMaxY = vec3d.yCoord + 0.5D, navMaxZ = vec3d.zCoord + 0.5D;
+                     double d0 = -1.0D;
+ 
+-                    axisalignedbb = axisalignedbb.offset(0.0D, 1.0D, 0.0D);
++                    CollisionBoxSink sink = World.collisionSink();
++                    int sinkMark = sink.mark();
+ 
+-                    AxisAlignedBB axisalignedbb1;
++                    try {
++                        // query box: addCoord(0, -1, 0) extends the min side downwards
++                        this.worldObj.getCubes(this.theEntity, navMinX, navMinY - 1.0D, navMinZ, navMaxX, navMaxY, navMaxZ, sink);
+ 
+-                    for (Iterator iterator = list.iterator(); iterator.hasNext(); d0 = axisalignedbb1.calculateYOffset(axisalignedbb, d0)) {
+-                        axisalignedbb1 = (AxisAlignedBB) iterator.next();
++                        // the box the boxes are clamped against: offset(0, 1, 0)
++                        double clampMinY = navMinY + 1.0D;
++                        double clampMaxY = navMaxY + 1.0D;
++
++                        for (int idx = sinkMark, sz = sink.end(); idx < sz; idx += 6) {
++                            d0 = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
++                                    navMinX, clampMinY, navMinZ, navMaxX, clampMaxY, navMaxZ, d0);
++                        }
++                    } finally {
++                        sink.reset(sinkMark);
+                     }
+ 
+                     this.theEntity.getControllerMove().setMoveTo(vec3d.xCoord, vec3d.yCoord + d0, vec3d.zCoord, this.speed);

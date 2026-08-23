@@ -1,0 +1,2390 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 01:43:55 +0900
+Subject: [PATCH] Store entity bounding boxes as six doubles
+
+Entity.boundingBox was an AxisAlignedBB field, so it outlived the tick
+and could never be scalar-replaced: every change to any axis allocated a
+fresh 64-byte box, several times per entity per tick, plus one more for
+each world query built with grow/shrink/offset/addCoord.
+
+Replace the field with boundingBoxMinX..boundingBoxMaxZ and drop
+getBoundingBox() entirely rather than leaving a bridge (a bridge would
+have to allocate a box on every read, which is worse than the status
+quo). setEntityBoundingBox now takes six doubles and keeps the
+CraftBukkit size clamping.
+
+Consumers gained scalar overloads (World entity/material/collision
+queries, Chunk entity queries, WorldBorder.contains, Explosion block
+density, EntityEnderDragon.destroyBlocksInAABB), and the box-producing
+operations are expanded at the call site, reproducing the AxisAlignedBB
+constructor's Math.min/max normalization where a negative delta can
+invert an axis (grow/shrink); offset/addCoord/union preserve ordering
+and need none.
+
+Also converts org.spigotmc.ActivationRange, which rebuilt four boxes for
+every player every tick.
+
+Entity.move now carries every box - including the step-up branch's four
+simultaneous candidates - in local doubles, which cost nothing.
+
+getCubes/getCollisionBoxes keep an AxisAlignedBB internally for now: the
+block collision API still takes one. That is the next step.
+
+Verified: full test suite passes (AxisAlignedBBHelperTest pins the
+scalar math against the original class), server boots on JDK 25 and
+ticks 30s with no exceptions or movement warnings.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockCauldron.java b/src/main/java/net/minecraft/server/BlockCauldron.java
+index ac3fe2a4aa19132cedf0425e19a98282e90df7cd..dbad6cf9d27d1fd6096ea95cf2c3ccc85ebd4f6e 100644
+--- a/src/main/java/net/minecraft/server/BlockCauldron.java
++++ b/src/main/java/net/minecraft/server/BlockCauldron.java
+@@ -50,7 +50,7 @@ public class BlockCauldron extends Block {
+         int i = (Integer) iblockdata.get(BlockCauldron.LEVEL);
+         float f = (float) blockposition.getY() + (6.0F + (float) (3 * i)) / 16.0F;
+ 
+-        if (!world.isClientSide && entity.isBurning() && i > 0 && entity.getBoundingBox().minY <= (double) f) {
++        if (!world.isClientSide && entity.isBurning() && i > 0 && entity.boundingBoxMinY <= (double) f) {
+             entity.extinguish();
+             this.setWaterLevel(world, blockposition, iblockdata, i - 1);
+         }
+diff --git a/src/main/java/net/minecraft/server/BlockSkull.java b/src/main/java/net/minecraft/server/BlockSkull.java
+index a91e038d4421dd79fce635275ab127ce6fbd3ded..e430be4a4eec82bfcc818b8b9d99db0ed067363c 100644
+--- a/src/main/java/net/minecraft/server/BlockSkull.java
++++ b/src/main/java/net/minecraft/server/BlockSkull.java
+@@ -194,7 +194,7 @@ public class BlockSkull extends BlockContainer {
+                 entitywither.setPositionRotation((double) blockposition2.getX() + 0.5D, (double) blockposition2.getY() + 0.55D, (double) blockposition2.getZ() + 0.5D, shapedetector_shapedetectorcollection.getFinger().getAxis() == EnumDirection.EnumAxis.X ? 0.0F : 90.0F, 0.0F);
+                 entitywither.renderYawOffset = shapedetector_shapedetectorcollection.getFinger().getAxis() == EnumDirection.EnumAxis.X ? 0.0F : 90.0F;
+                 entitywither.onGrowingAdult();
+-                Iterator iterator = world.getEntitiesWithinAABB(EntityHuman.class, entitywither.getBoundingBox().grow(50.0D, 50.0D, 50.0D)).iterator();
++                Iterator iterator = world.getEntitiesWithinAABB(EntityHuman.class, Math.min(entitywither.boundingBoxMinX - 50.0D, entitywither.boundingBoxMaxX + 50.0D), Math.min(entitywither.boundingBoxMinY - 50.0D, entitywither.boundingBoxMaxY + 50.0D), Math.min(entitywither.boundingBoxMinZ - 50.0D, entitywither.boundingBoxMaxZ + 50.0D), Math.max(entitywither.boundingBoxMinX - 50.0D, entitywither.boundingBoxMaxX + 50.0D), Math.max(entitywither.boundingBoxMinY - 50.0D, entitywither.boundingBoxMaxY + 50.0D), Math.max(entitywither.boundingBoxMinZ - 50.0D, entitywither.boundingBoxMaxZ + 50.0D)).iterator();
+ 
+                 // CraftBukkit start
+                 if (world.addEntity(entitywither, SpawnReason.BUILD_WITHER)) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 2fbb4d4153ae896afd0c04f589abea2337659662..f62194ead8b73b990d0665a85e5b63987782c539 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -982,9 +982,14 @@ public class Chunk {
+         this.isModified = true;
+     }
+ 
+-    public void getEntitiesWithinAABBForEntity(Entity entity, AxisAlignedBB axisalignedbb, List<Entity> list, Predicate<? super Entity> predicate) {
+-        int i = MathHelper.floor((axisalignedbb.minY - 2.0D) / 16.0D);
+-        int j = MathHelper.floor((axisalignedbb.maxY + 2.0D) / 16.0D);
++    public void getEntitiesWithinAABBForEntity(Entity entity, AxisAlignedBB axisalignedbb, List<Entity> list, Predicate<? super Entity> predicate) { // Athena - delegate to the scalar overload
++        this.getEntitiesWithinAABBForEntity(entity, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, list, predicate);
++    }
++
++    // Athena - scalar overload
++    public void getEntitiesWithinAABBForEntity(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {
++        int i = MathHelper.floor((minY - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxY + 2.0D) / 16.0D);
+ 
+         i = MathHelper.clamp(i, 0, this.entitySlices.length - 1);
+         j = MathHelper.clamp(j, 0, this.entitySlices.length - 1);
+@@ -1004,7 +1009,7 @@ public class Chunk {
+                 while (iterator.hasNext()) {
+                     Entity entity1 = (Entity) iterator.next();
+ 
+-                    if (entity1.getBoundingBox().intersectsWith(axisalignedbb) && entity1 != entity) {
++                    if (AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && entity1 != entity) { // Athena
+                         if (predicate == null || predicate.apply(entity1)) {
+                             list.add(entity1);
+                         }
+@@ -1014,7 +1019,7 @@ public class Chunk {
+                         if (aentity != null) {
+                             for (int l = 0; l < aentity.length; ++l) {
+                                 entity1 = aentity[l];
+-                                if (entity1 != entity && entity1.getBoundingBox().intersectsWith(axisalignedbb) && (predicate == null || predicate.apply(entity1))) {
++                                if (entity1 != entity && AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply(entity1))) { // Athena
+                                     list.add(entity1);
+                                 }
+                             }
+@@ -1026,9 +1031,14 @@ public class Chunk {
+ 
+     }
+ 
+-    public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, List<T> list, Predicate<? super T> predicate) {
+-        int i = MathHelper.floor((axisalignedbb.minY - 2.0D) / 16.0D);
+-        int j = MathHelper.floor((axisalignedbb.maxY + 2.0D) / 16.0D);
++    public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, List<T> list, Predicate<? super T> predicate) { // Athena - delegate to the scalar overload
++        this.getEntitiesOfTypeWithinAAAB(oclass, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, list, predicate);
++    }
++
++    // Athena - scalar overload
++    public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<T> list, Predicate<? super T> predicate) {
++        int i = MathHelper.floor((minY - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxY + 2.0D) / 16.0D);
+ 
+         i = MathHelper.clamp(i, 0, this.entitySlices.length - 1);
+         j = MathHelper.clamp(j, 0, this.entitySlices.length - 1);
+@@ -1050,7 +1060,7 @@ public class Chunk {
+             while (iterator.hasNext()) {
+                 Entity entity = (Entity) iterator.next();
+ 
+-                if (oclass.isInstance(entity) && entity.getBoundingBox().intersectsWith(axisalignedbb) && (predicate == null || predicate.apply((T) entity))) { // CraftBukkit - fix decompile error // Spigot
++                if (oclass.isInstance(entity) && AxisAlignedBBHelper.intersects(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply((T) entity))) { // Athena // CraftBukkit - fix decompile error // Spigot
+                     list.add((T) entity); // Fix decompile error
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/CombatTracker.java b/src/main/java/net/minecraft/server/CombatTracker.java
+index b21f4ce1ef92bf37b3ef0571388b86cb64b67a9a..8a3014dc3d76e480ee94c33b6332e4de5f0c90e5 100644
+--- a/src/main/java/net/minecraft/server/CombatTracker.java
++++ b/src/main/java/net/minecraft/server/CombatTracker.java
+@@ -22,7 +22,7 @@ public class CombatTracker {
+     public void a() {
+         this.j();
+         if (this.fighter.isOnLadder()) {
+-            Block block = this.fighter.world.getType(new BlockPosition(this.fighter.locX, this.fighter.getBoundingBox().minY, this.fighter.locZ)).getBlock();
++            Block block = this.fighter.world.getType(new BlockPosition(this.fighter.locX, this.fighter.boundingBoxMinY, this.fighter.locZ)).getBlock();
+ 
+             if (block == Blocks.LADDER) {
+                 this.h = "ladder";
+diff --git a/src/main/java/net/minecraft/server/ControllerLook.java b/src/main/java/net/minecraft/server/ControllerLook.java
+index b5625b96f328105f77a990b16bf7301346b425b3..8f3f4a63210f11851a639322af2eea80b3cf59e2 100644
+--- a/src/main/java/net/minecraft/server/ControllerLook.java
++++ b/src/main/java/net/minecraft/server/ControllerLook.java
+@@ -20,7 +20,7 @@ public class ControllerLook {
+         if (entity instanceof EntityLiving) {
+             this.posY = entity.locY + (double) entity.getHeadHeight();
+         } else {
+-            this.posY = (entity.getBoundingBox().minY + entity.getBoundingBox().maxY) / 2.0D;
++            this.posY = (entity.boundingBoxMinY + entity.boundingBoxMaxY) / 2.0D;
+         }
+ 
+         this.posZ = entity.locZ;
+diff --git a/src/main/java/net/minecraft/server/ControllerMove.java b/src/main/java/net/minecraft/server/ControllerMove.java
+index 56d4a595dbd2e973798d46578243cbc389752827..3ccf41712f561c93a9ffdbd1d2501f08b575ba65 100644
+--- a/src/main/java/net/minecraft/server/ControllerMove.java
++++ b/src/main/java/net/minecraft/server/ControllerMove.java
+@@ -37,7 +37,7 @@ public class ControllerMove {
+         this.entity.setMoveForward(0.0F);
+         if (this.update) {
+             this.update = false;
+-            int i = MathHelper.floor(this.entity.getBoundingBox().minY + 0.5D);
++            int i = MathHelper.floor(this.entity.boundingBoxMinY + 0.5D);
+             double d0 = this.posX - this.entity.locX;
+             double d1 = this.posZ - this.entity.locZ;
+             double d2 = this.posY - (double) i;
+diff --git a/src/main/java/net/minecraft/server/EmptyChunk.java b/src/main/java/net/minecraft/server/EmptyChunk.java
+index 5f591f7174eb0cafd2e58b5b26ea6741232be754..05a25e5ecc0052acbe6019990d009bd3a8aff351 100644
+--- a/src/main/java/net/minecraft/server/EmptyChunk.java
++++ b/src/main/java/net/minecraft/server/EmptyChunk.java
+@@ -92,9 +92,15 @@ public class EmptyChunk extends Chunk {
+     @Override
+     public void getEntitiesWithinAABBForEntity(Entity entity, AxisAlignedBB axisalignedbb, List<Entity> list, Predicate<? super Entity> predicate) {}
+ 
++    // Athena - scalar overload
++    public void getEntitiesWithinAABBForEntity(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {}
++
+     @Override
+     public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, List<T> list, Predicate<? super T> predicate) {}
+ 
++    // Athena - scalar overload
++    public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<T> list, Predicate<? super T> predicate) {}
++
+     @Override
+     public boolean needsSaving(boolean flag) {
+         return false;
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 193d776a12d2a4b1606090d10ec773f9938b1a2a..80c15c5af494fe2604dc58cb62cef48ceb2e69d9 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -61,7 +61,6 @@ public abstract class Entity implements ICommandListener {
+     };
+     // PandaSpigot end
+ 
+-    private static final AxisAlignedBB ZERO_AABB = new AxisAlignedBB(0.0D, 0.0D, 0.0D, 0.0D, 0.0D, 0.0D);
+     private static int entityCount;
+     private int id;
+     public double renderDistanceWeight;
+@@ -83,7 +82,17 @@ public abstract class Entity implements ICommandListener {
+     public float pitch;
+     public float lastYaw;
+     public float lastPitch;
+-    private AxisAlignedBB boundingBox;
++    // Athena start - the bounding box is stored as six doubles instead of an AxisAlignedBB.
++    // It is a field, so it outlives the tick and can never be scalar-replaced by the JIT; keeping it
++    // as an object meant allocating a fresh 64-byte box every time any axis changed (several times
++    // per entity per tick).
++    public double boundingBoxMinX;
++    public double boundingBoxMinY;
++    public double boundingBoxMinZ;
++    public double boundingBoxMaxX;
++    public double boundingBoxMaxY;
++    public double boundingBoxMaxZ;
++    // Athena end
+     public boolean onGround;
+     public boolean positionChanged;
+     public boolean isCollidedVertically;
+@@ -171,7 +180,9 @@ public abstract class Entity implements ICommandListener {
+     public Entity(World world) {
+         this.id = Entity.entityCount++;
+         this.renderDistanceWeight = 1.0D;
+-        this.boundingBox = Entity.ZERO_AABB;
++        // Athena - zero bounding box (was Entity.ZERO_AABB)
++        this.boundingBoxMinX = this.boundingBoxMinY = this.boundingBoxMinZ = 0.0D;
++        this.boundingBoxMaxX = this.boundingBoxMaxY = this.boundingBoxMaxZ = 0.0D;
+         this.width = 0.6F;
+         this.length = 1.8F;
+         this.nextStepDistance = 1;
+@@ -225,7 +236,7 @@ public abstract class Entity implements ICommandListener {
+ 
+             this.width = f;
+             this.length = f1;
+-            this.setEntityBoundingBox(new AxisAlignedBB(this.getBoundingBox().minX, this.getBoundingBox().minY, this.getBoundingBox().minZ, this.getBoundingBox().minX + (double) this.width, this.getBoundingBox().minY + (double) this.length, this.getBoundingBox().minZ + (double) this.width));
++            this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMinX + (double) this.width, this.boundingBoxMinY + (double) this.length, this.boundingBoxMinZ + (double) this.width); // Athena
+             if (this.width > f2 && !this.justCreated && !this.world.isClientSide) {
+                 this.move((double) (f2 - this.width), 0.0D, (double) (f2 - this.width));
+             }
+@@ -272,7 +283,7 @@ public abstract class Entity implements ICommandListener {
+         float f = this.width / 2.0F;
+         float f1 = this.length;
+ 
+-        this.setEntityBoundingBox(new AxisAlignedBB(d0 - (double) f, d1, d2 - (double) f, d0 + (double) f, d1 + (double) f1, d2 + (double) f));
++        this.setEntityBoundingBox(d0 - (double) f, d1, d2 - (double) f, d0 + (double) f, d1 + (double) f1, d2 + (double) f); // Athena
+     }
+ 
+     public void onUpdate() {
+@@ -425,13 +436,13 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public boolean isOffsetPositionInLiquid(double d0, double d1, double d2) {
+-        AxisAlignedBB axisalignedbb = this.getBoundingBox().offset(d0, d1, d2);
+-
+-        return this.isLiquidPresentInAABB(axisalignedbb);
++        // Athena - offset expanded inline; no box allocated
++        return this.isLiquidPresentInAABB(this.boundingBoxMinX + d0, this.boundingBoxMinY + d1, this.boundingBoxMinZ + d2,
++                this.boundingBoxMaxX + d0, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ + d2);
+     }
+ 
+-    private boolean isLiquidPresentInAABB(AxisAlignedBB axisalignedbb) {
+-        return this.world.getCubes(this, axisalignedbb).isEmpty() && !this.world.containsLiquid(axisalignedbb);
++    private boolean isLiquidPresentInAABB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) { // Athena - scalar
++        return this.world.getCubes(this, minX, minY, minZ, maxX, maxY, maxZ).isEmpty() && !this.world.containsLiquid(minX, minY, minZ, maxX, maxY, maxZ);
+     }
+ 
+     /**
+@@ -449,7 +460,7 @@ public abstract class Entity implements ICommandListener {
+     public void move(double d0, double d1, double d2) {
+         if (this.loadChunks) loadChunks(); // PaperSpigot - Load chunks
+         if (this.noclip) {
+-            this.setEntityBoundingBox(this.getBoundingBox().offset(d0, d1, d2));
++            this.setEntityBoundingBox(this.boundingBoxMinX + d0, this.boundingBoxMinY + d1, this.boundingBoxMinZ + d2, this.boundingBoxMaxX + d0, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ + d2); // Athena
+             this.recalcPosition();
+         } else {
+             // PandaSpigot start - Fix collision detection of entities with blocks, moved back to below
+@@ -495,7 +506,7 @@ public abstract class Entity implements ICommandListener {
+             if (flag) {
+                 double d9;
+ 
+-                for (d9 = 0.05D; d0 != 0.0D && this.world.getCubes(this, this.getBoundingBox().offset(d0, -1.0D, 0.0D)).isEmpty(); d6 = d0) {
++                for (d9 = 0.05D; d0 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ).isEmpty(); d6 = d0) {
+                     if (d0 < d9 && d0 >= -d9) {
+                         d0 = 0.0D;
+                     } else if (d0 > 0.0D) {
+@@ -505,7 +516,7 @@ public abstract class Entity implements ICommandListener {
+                     }
+                 }
+ 
+-                for (; d2 != 0.0D && this.world.getCubes(this, this.getBoundingBox().offset(0.0D, -1.0D, d2)).isEmpty(); d8 = d2) {
++                for (; d2 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2).isEmpty(); d8 = d2) {
+                     if (d2 < d9 && d2 >= -d9) {
+                         d2 = 0.0D;
+                     } else if (d2 > 0.0D) {
+@@ -515,7 +526,7 @@ public abstract class Entity implements ICommandListener {
+                     }
+                 }
+ 
+-                for (; d0 != 0.0D && d2 != 0.0D && this.world.getCubes(this, this.getBoundingBox().offset(d0, -1.0D, d2)).isEmpty(); d8 = d2) {
++                for (; d0 != 0.0D && d2 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2).isEmpty(); d8 = d2) {
+                     if (d0 < d9 && d0 >= -d9) {
+                         d0 = 0.0D;
+                     } else if (d0 > 0.0D) {
+@@ -536,110 +547,140 @@ public abstract class Entity implements ICommandListener {
+             }
+ 
+             // PandaSpigot start - do axis by axis scan if the entity is travelling a large area
+-            AxisAlignedBB totalArea = this.getBoundingBox().addCoord(d0, d1, d2);
+-            double xLength = totalArea.maxX - totalArea.minX;
+-            double yLength = totalArea.maxY - totalArea.minY;
+-            double zLength = totalArea.maxZ - totalArea.minZ;
++            // Athena start - every bounding box in this method is carried as six local doubles.
++            // addCoord/offset are expanded inline (addCoord extends the side the motion points at,
++            // so minX + min(d, 0) and maxX + max(d, 0)); locals cost nothing, whereas each box
++            // object used to be a 64-byte heap allocation the JIT could not remove.
++            double totalMinX = this.boundingBoxMinX + Math.min(d0, 0.0D);
++            double totalMinY = this.boundingBoxMinY + Math.min(d1, 0.0D);
++            double totalMinZ = this.boundingBoxMinZ + Math.min(d2, 0.0D);
++            double totalMaxX = this.boundingBoxMaxX + Math.max(d0, 0.0D);
++            double totalMaxY = this.boundingBoxMaxY + Math.max(d1, 0.0D);
++            double totalMaxZ = this.boundingBoxMaxZ + Math.max(d2, 0.0D);
++            double xLength = totalMaxX - totalMinX;
++            double yLength = totalMaxY - totalMinY;
++            double zLength = totalMaxZ - totalMinZ;
+             boolean axisScan = this.world.pandaSpigotConfig.optimizeTntMovement && xLength * yLength * zLength > 10;
+ 
+-            List list = this.world.getCubes(this, axisScan ? this.getBoundingBox().addCoord(0, d1, 0) : totalArea);
++            List list = axisScan
++                    ? this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ)
++                    : this.world.getCubes(this, totalMinX, totalMinY, totalMinZ, totalMaxX, totalMaxY, totalMaxZ);
+             // PandaSpigot end
+ 
+-            AxisAlignedBB axisalignedbb = this.getBoundingBox();
+-
+-            AxisAlignedBB axisalignedbb1;
++            // pre-move snapshot (was AxisAlignedBB axisalignedbb)
++            double preMinX = this.boundingBoxMinX, preMinY = this.boundingBoxMinY, preMinZ = this.boundingBoxMinZ;
++            double preMaxX = this.boundingBoxMaxX, preMaxY = this.boundingBoxMaxY, preMaxZ = this.boundingBoxMaxZ;
+ 
+-            for (Iterator iterator = list.iterator(); iterator.hasNext(); d1 = axisalignedbb1.calculateYOffset(this.getBoundingBox(), d1)) {
+-                axisalignedbb1 = (AxisAlignedBB) iterator.next();
++            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
++                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
++                d1 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                        this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d1);
+             }
+ 
+-            this.setEntityBoundingBox(this.getBoundingBox().offset(0.0D, d1, 0.0D));
++            this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY + d1, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ);
+             boolean flag1 = this.onGround || d7 != d1 && d7 < 0.0D;
+ 
+-            if (axisScan) list = this.world.getCubes(this, this.getBoundingBox().addCoord(d0, 0, 0)); // PandaSpigot - get x axis blocks
++            if (axisScan) list = this.world.getCubes(this, this.boundingBoxMinX + Math.min(d0, 0.0D), this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX + Math.max(d0, 0.0D), this.boundingBoxMaxY, this.boundingBoxMaxZ); // PandaSpigot - get x axis blocks
+ 
+-            AxisAlignedBB axisalignedbb2;
+-            Iterator iterator1;
+-
+-            for (iterator1 = list.iterator(); iterator1.hasNext(); d0 = axisalignedbb2.calculateXOffset(this.getBoundingBox(), d0)) {
+-                axisalignedbb2 = (AxisAlignedBB) iterator1.next();
++            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
++                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
++                d0 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                        this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d0);
+             }
+ 
+-            this.setEntityBoundingBox(this.getBoundingBox().offset(d0, 0.0D, 0.0D));
++            this.setEntityBoundingBox(this.boundingBoxMinX + d0, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX + d0, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+ 
+-            if (axisScan) list = this.world.getCubes(this, this.getBoundingBox().addCoord(0, 0, d2)); // PandaSpigot - get z axis blocks
++            if (axisScan) list = this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ + Math.min(d2, 0.0D), this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ + Math.max(d2, 0.0D)); // PandaSpigot - get z axis blocks
+ 
+-            for (iterator1 = list.iterator(); iterator1.hasNext(); d2 = axisalignedbb2.calculateZOffset(this.getBoundingBox(), d2)) {
+-                axisalignedbb2 = (AxisAlignedBB) iterator1.next();
++            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
++                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
++                d2 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                        this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d2);
+             }
+ 
+-            this.setEntityBoundingBox(this.getBoundingBox().offset(0.0D, 0.0D, d2));
++            this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ + d2, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ + d2);
++            // Athena end
+             if (this.stepHeight > 0.0F && flag1 && (d6 != d0 || d8 != d2)) {
++                // Athena start - the step-up trial keeps four distinct boxes alive at once (the
++                // pre-move box, the box the main pass produced, and two step candidates that are
++                // compared by travelled distance). As local doubles that costs nothing.
+                 double d10 = d0;
+                 double d11 = d1;
+                 double d12 = d2;
+-                AxisAlignedBB axisalignedbb3 = this.getBoundingBox();
++                // box produced by the main pass (was axisalignedbb3)
++                double postMinX = this.boundingBoxMinX, postMinY = this.boundingBoxMinY, postMinZ = this.boundingBoxMinZ;
++                double postMaxX = this.boundingBoxMaxX, postMaxY = this.boundingBoxMaxY, postMaxZ = this.boundingBoxMaxZ;
+ 
+-                this.setEntityBoundingBox(axisalignedbb);
++                this.setEntityBoundingBox(preMinX, preMinY, preMinZ, preMaxX, preMaxY, preMaxZ);
+                 d1 = (double) this.stepHeight;
+-                List list1 = this.world.getCubes(this, this.getBoundingBox().addCoord(d6, d1, d8));
+-                AxisAlignedBB axisalignedbb4 = this.getBoundingBox();
+-                AxisAlignedBB axisalignedbb5 = axisalignedbb4.addCoord(d6, 0.0D, d8);
++                List list1 = this.world.getCubes(this,
++                        this.boundingBoxMinX + Math.min(d6, 0.0D), this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ + Math.min(d8, 0.0D),
++                        this.boundingBoxMaxX + Math.max(d6, 0.0D), this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ + Math.max(d8, 0.0D));
++
++                // candidate A (was axisalignedbb4), starting from the current box
++                double aMinX = this.boundingBoxMinX, aMinY = this.boundingBoxMinY, aMinZ = this.boundingBoxMinZ;
++                double aMaxX = this.boundingBoxMaxX, aMaxY = this.boundingBoxMaxY, aMaxZ = this.boundingBoxMaxZ;
++                // the swept box the Y pass clamps against (was axisalignedbb5 = axisalignedbb4.addCoord(d6, 0, d8))
++                double sweptMinX = aMinX + Math.min(d6, 0.0D), sweptMinY = aMinY, sweptMinZ = aMinZ + Math.min(d8, 0.0D);
++                double sweptMaxX = aMaxX + Math.max(d6, 0.0D), sweptMaxY = aMaxY, sweptMaxZ = aMaxZ + Math.max(d8, 0.0D);
+                 double d13 = d1;
+ 
+-                AxisAlignedBB axisalignedbb6;
+-
+-                for (Iterator iterator2 = list1.iterator(); iterator2.hasNext(); d13 = axisalignedbb6.calculateYOffset(axisalignedbb5, d13)) {
+-                    axisalignedbb6 = (AxisAlignedBB) iterator2.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d13 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            sweptMinX, sweptMinY, sweptMinZ, sweptMaxX, sweptMaxY, sweptMaxZ, d13);
+                 }
+ 
+-                axisalignedbb4 = axisalignedbb4.offset(0.0D, d13, 0.0D);
++                aMinY += d13; aMaxY += d13;
+                 double d14 = d6;
+ 
+-                AxisAlignedBB axisalignedbb7;
+-
+-                for (Iterator iterator3 = list1.iterator(); iterator3.hasNext(); d14 = axisalignedbb7.calculateXOffset(axisalignedbb4, d14)) {
+-                    axisalignedbb7 = (AxisAlignedBB) iterator3.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d14 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            aMinX, aMinY, aMinZ, aMaxX, aMaxY, aMaxZ, d14);
+                 }
+ 
+-                axisalignedbb4 = axisalignedbb4.offset(d14, 0.0D, 0.0D);
++                aMinX += d14; aMaxX += d14;
+                 double d15 = d8;
+ 
+-                AxisAlignedBB axisalignedbb8;
+-
+-                for (Iterator iterator4 = list1.iterator(); iterator4.hasNext(); d15 = axisalignedbb8.calculateZOffset(axisalignedbb4, d15)) {
+-                    axisalignedbb8 = (AxisAlignedBB) iterator4.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d15 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            aMinX, aMinY, aMinZ, aMaxX, aMaxY, aMaxZ, d15);
+                 }
+ 
+-                axisalignedbb4 = axisalignedbb4.offset(0.0D, 0.0D, d15);
+-                AxisAlignedBB axisalignedbb9 = this.getBoundingBox();
+-                double d16 = d1;
++                aMinZ += d15; aMaxZ += d15;
+ 
+-                AxisAlignedBB axisalignedbb10;
++                // candidate B (was axisalignedbb9), also starting from the current box
++                double bMinX = this.boundingBoxMinX, bMinY = this.boundingBoxMinY, bMinZ = this.boundingBoxMinZ;
++                double bMaxX = this.boundingBoxMaxX, bMaxY = this.boundingBoxMaxY, bMaxZ = this.boundingBoxMaxZ;
++                double d16 = d1;
+ 
+-                for (Iterator iterator5 = list1.iterator(); iterator5.hasNext(); d16 = axisalignedbb10.calculateYOffset(axisalignedbb9, d16)) {
+-                    axisalignedbb10 = (AxisAlignedBB) iterator5.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d16 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d16);
+                 }
+ 
+-                axisalignedbb9 = axisalignedbb9.offset(0.0D, d16, 0.0D);
++                bMinY += d16; bMaxY += d16;
+                 double d17 = d6;
+ 
+-                AxisAlignedBB axisalignedbb11;
+-
+-                for (Iterator iterator6 = list1.iterator(); iterator6.hasNext(); d17 = axisalignedbb11.calculateXOffset(axisalignedbb9, d17)) {
+-                    axisalignedbb11 = (AxisAlignedBB) iterator6.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d17 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d17);
+                 }
+ 
+-                axisalignedbb9 = axisalignedbb9.offset(d17, 0.0D, 0.0D);
++                bMinX += d17; bMaxX += d17;
+                 double d18 = d8;
+ 
+-                AxisAlignedBB axisalignedbb12;
+-
+-                for (Iterator iterator7 = list1.iterator(); iterator7.hasNext(); d18 = axisalignedbb12.calculateZOffset(axisalignedbb9, d18)) {
+-                    axisalignedbb12 = (AxisAlignedBB) iterator7.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d18 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d18);
+                 }
+ 
+-                axisalignedbb9 = axisalignedbb9.offset(0.0D, 0.0D, d18);
++                bMinZ += d18; bMaxZ += d18;
+                 double d19 = d14 * d14 + d15 * d15;
+                 double d20 = d17 * d17 + d18 * d18;
+ 
+@@ -647,27 +688,28 @@ public abstract class Entity implements ICommandListener {
+                     d0 = d14;
+                     d2 = d15;
+                     d1 = -d13;
+-                    this.setEntityBoundingBox(axisalignedbb4);
++                    this.setEntityBoundingBox(aMinX, aMinY, aMinZ, aMaxX, aMaxY, aMaxZ);
+                 } else {
+                     d0 = d17;
+                     d2 = d18;
+                     d1 = -d16;
+-                    this.setEntityBoundingBox(axisalignedbb9);
++                    this.setEntityBoundingBox(bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
+                 }
+ 
+-                AxisAlignedBB axisalignedbb13;
+-
+-                for (Iterator iterator8 = list1.iterator(); iterator8.hasNext(); d1 = axisalignedbb13.calculateYOffset(this.getBoundingBox(), d1)) {
+-                    axisalignedbb13 = (AxisAlignedBB) iterator8.next();
++                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
++                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
++                    d1 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                            this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d1);
+                 }
+ 
+-                this.setEntityBoundingBox(this.getBoundingBox().offset(0.0D, d1, 0.0D));
++                this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY + d1, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ);
+                 if (d10 * d10 + d12 * d12 >= d0 * d0 + d2 * d2) {
+                     d0 = d10;
+                     d1 = d11;
+                     d2 = d12;
+-                    this.setEntityBoundingBox(axisalignedbb3);
++                    this.setEntityBoundingBox(postMinX, postMinY, postMinZ, postMaxX, postMaxY, postMaxZ);
+                 }
++                // Athena end
+             }
+ 
+             this.world.methodProfiler.endSection();
+@@ -773,7 +815,7 @@ public abstract class Entity implements ICommandListener {
+ 
+             boolean flag2 = this.isWet();
+ 
+-            if (this.world.isFlammableWithin(this.getBoundingBox().shrink(0.001D, 0.001D, 0.001D))) {
++            if (this.world.isFlammableWithin(Math.min(this.boundingBoxMinX + 0.001D, this.boundingBoxMaxX - 0.001D), Math.min(this.boundingBoxMinY + 0.001D, this.boundingBoxMaxY - 0.001D), Math.min(this.boundingBoxMinZ + 0.001D, this.boundingBoxMaxZ - 0.001D), Math.max(this.boundingBoxMinX + 0.001D, this.boundingBoxMaxX - 0.001D), Math.max(this.boundingBoxMinY + 0.001D, this.boundingBoxMaxY - 0.001D), Math.max(this.boundingBoxMinZ + 0.001D, this.boundingBoxMaxZ - 0.001D))) { // Athena - shrink expanded inline (min/max mirrors the AxisAlignedBB constructor's normalization)
+                 this.burn(1);
+                 if (!flag2) {
+                     ++this.fireTicks;
+@@ -804,9 +846,9 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     private void recalcPosition() {
+-        this.locX = (this.getBoundingBox().minX + this.getBoundingBox().maxX) / 2.0D;
+-        this.locY = this.getBoundingBox().minY;
+-        this.locZ = (this.getBoundingBox().minZ + this.getBoundingBox().maxZ) / 2.0D;
++        this.locX = (this.boundingBoxMinX + this.boundingBoxMaxX) / 2.0D;
++        this.locY = this.boundingBoxMinY;
++        this.locZ = (this.boundingBoxMinZ + this.boundingBoxMaxZ) / 2.0D;
+     }
+ 
+     protected String getSwimSound() {
+@@ -814,8 +856,8 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     protected void checkBlockCollisions() {
+-        BlockPosition blockposition = new BlockPosition(this.getBoundingBox().minX + 0.001D, this.getBoundingBox().minY + 0.001D, this.getBoundingBox().minZ + 0.001D);
+-        BlockPosition blockposition1 = new BlockPosition(this.getBoundingBox().maxX - 0.001D, this.getBoundingBox().maxY - 0.001D, this.getBoundingBox().maxZ - 0.001D);
++        BlockPosition blockposition = new BlockPosition(this.boundingBoxMinX + 0.001D, this.boundingBoxMinY + 0.001D, this.boundingBoxMinZ + 0.001D);
++        BlockPosition blockposition1 = new BlockPosition(this.boundingBoxMaxX - 0.001D, this.boundingBoxMaxY - 0.001D, this.boundingBoxMaxZ - 0.001D);
+ 
+         if (this.world.areChunksLoadedBetween(blockposition, blockposition1)) {
+             for (int i = blockposition.getX(); i <= blockposition1.getX(); ++i) {
+@@ -919,7 +961,19 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public boolean handleWaterMovement() {
+-        if (this.world.handleMaterialAcceleration(this.getBoundingBox().grow(0.0D, -0.4000000059604645D, 0.0D).shrink(0.001D, 0.001D, 0.001D), Material.WATER, this)) {
++        // Athena - was getBoundingBox().grow(0, -0.4, 0).shrink(0.001, 0.001, 0.001), expanded into
++        // locals so no box is allocated. Each step reproduces the AxisAlignedBB constructor's
++        // min/max normalization, which matters here because both deltas are shrinking.
++        double growY = -0.4000000059604645D;
++        double wMinX = this.boundingBoxMinX, wMaxX = this.boundingBoxMaxX;
++        double wMinY = Math.min(this.boundingBoxMinY - growY, this.boundingBoxMaxY + growY);
++        double wMaxY = Math.max(this.boundingBoxMinY - growY, this.boundingBoxMaxY + growY);
++        double wMinZ = this.boundingBoxMinZ, wMaxZ = this.boundingBoxMaxZ;
++        double sMinX = Math.min(wMinX + 0.001D, wMaxX - 0.001D), sMaxX = Math.max(wMinX + 0.001D, wMaxX - 0.001D);
++        double sMinY = Math.min(wMinY + 0.001D, wMaxY - 0.001D), sMaxY = Math.max(wMinY + 0.001D, wMaxY - 0.001D);
++        double sMinZ = Math.min(wMinZ + 0.001D, wMaxZ - 0.001D), sMaxZ = Math.max(wMinZ + 0.001D, wMaxZ - 0.001D);
++
++        if (this.world.handleMaterialAcceleration(sMinX, sMinY, sMinZ, sMaxX, sMaxY, sMaxZ, Material.WATER, this)) {
+             if (!this.inWater && !this.justCreated) {
+                 this.resetHeight();
+             }
+@@ -942,7 +996,7 @@ public abstract class Entity implements ICommandListener {
+         }
+ 
+         this.makeSound(this.getSplashSound(), f, 1.0F + (this.random.nextFloat() - this.random.nextFloat()) * 0.4F);
+-        float f1 = (float) MathHelper.floor(this.getBoundingBox().minY);
++        float f1 = (float) MathHelper.floor(this.boundingBoxMinY);
+ 
+         int i;
+         float f2;
+@@ -978,7 +1032,7 @@ public abstract class Entity implements ICommandListener {
+         Block block = iblockdata.getBlock();
+ 
+         if (block.getRenderType() != -1) {
+-            this.world.addParticle(EnumParticle.BLOCK_CRACK, this.locX + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, this.getBoundingBox().minY + 0.1D, this.locZ + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, -this.motX * 4.0D, 1.5D, -this.motZ * 4.0D, new int[] { Block.getCombinedId(iblockdata)});
++            this.world.addParticle(EnumParticle.BLOCK_CRACK, this.locX + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, this.boundingBoxMinY + 0.1D, this.locZ + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, -this.motX * 4.0D, 1.5D, -this.motZ * 4.0D, new int[] { Block.getCombinedId(iblockdata)});
+         }
+ 
+     }
+@@ -1005,7 +1059,12 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public boolean isInLava() {
+-        return this.world.isMaterialInBB(this.getBoundingBox().grow(-0.10000000149011612D, -0.4000000059604645D, -0.10000000149011612D), Material.LAVA);
++        // Athena - grow(-0.1, -0.4, -0.1) expanded inline with the constructor's min/max normalization
++        double gx = -0.10000000149011612D, gy = -0.4000000059604645D, gz = -0.10000000149011612D;
++        return this.world.isMaterialInBB(
++                Math.min(this.boundingBoxMinX - gx, this.boundingBoxMaxX + gx), Math.min(this.boundingBoxMinY - gy, this.boundingBoxMaxY + gy), Math.min(this.boundingBoxMinZ - gz, this.boundingBoxMaxZ + gz),
++                Math.max(this.boundingBoxMinX - gx, this.boundingBoxMaxX + gx), Math.max(this.boundingBoxMinY - gy, this.boundingBoxMaxY + gy), Math.max(this.boundingBoxMinZ - gz, this.boundingBoxMaxZ + gz),
++                Material.LAVA);
+     }
+ 
+     public void moveFlying(float f, float f1, float f2) {
+@@ -1618,7 +1677,7 @@ public abstract class Entity implements ICommandListener {
+                 pluginManager.callEvent(dismountEvent);
+                 if (dismountEvent.isCancelled()) return;
+                 // PaperSpigot end
+-                this.setPositionRotation(this.vehicle.locX, this.vehicle.getBoundingBox().minY + (double) this.vehicle.length, this.vehicle.locZ, this.yaw, this.pitch);
++                this.setPositionRotation(this.vehicle.locX, this.vehicle.boundingBoxMinY + (double) this.vehicle.length, this.vehicle.locZ, this.yaw, this.pitch);
+                 this.vehicle.passenger = null;
+             }
+ 
+@@ -1644,7 +1703,7 @@ public abstract class Entity implements ICommandListener {
+                 if (event.isCancelled() || this.vehicle != originalVehicle || (this.vehicle != null && this.vehicle.passenger != originalPassenger)) {
+                     // If we only cancelled the enterevent then we need to put the player in a decent position.
+                     if (exitEvent != null && this.vehicle == originalVehicle && this.vehicle != null && this.vehicle.passenger == originalPassenger) {
+-                        this.setPositionRotation(this.vehicle.locX, this.vehicle.getBoundingBox().minY + (double) this.vehicle.length, this.vehicle.locZ, this.yaw, this.pitch);
++                        this.setPositionRotation(this.vehicle.locX, this.vehicle.boundingBoxMinY + (double) this.vehicle.length, this.vehicle.locZ, this.yaw, this.pitch);
+                         this.vehicle.passenger = null;
+                         this.vehicle = null;
+                     }
+@@ -1836,7 +1895,7 @@ public abstract class Entity implements ICommandListener {
+         double d3 = d0 - (double) blockposition.getX();
+         double d4 = d1 - (double) blockposition.getY();
+         double d5 = d2 - (double) blockposition.getZ();
+-        List list = this.world.getCollisionBoxes(this.getBoundingBox());
++        List list = this.world.getCollisionBoxes(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ); // Athena
+ 
+         if (list.isEmpty() && !this.world.isBlockFullCube(blockposition)) {
+             return false;
+@@ -2193,30 +2252,32 @@ public abstract class Entity implements ICommandListener {
+         return true;
+     }
+ 
+-    public AxisAlignedBB getBoundingBox() {
+-        return this.boundingBox;
+-    }
+-
+-    public void setEntityBoundingBox(AxisAlignedBB axisalignedbb) {
++    // Athena - scalar bounding box setter (replaces setEntityBoundingBox(AxisAlignedBB))
++    public void setEntityBoundingBox(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+         // CraftBukkit start - block invalid bounding boxes
+-        double a = axisalignedbb.minX,
+-                b = axisalignedbb.minY,
+-                c = axisalignedbb.minZ,
+-                d = axisalignedbb.maxX,
+-                e = axisalignedbb.maxY,
+-                f = axisalignedbb.maxZ;
+-        double len = axisalignedbb.maxX - axisalignedbb.minX;
++        double a = minX,
++                b = minY,
++                c = minZ,
++                d = maxX,
++                e = maxY,
++                f = maxZ;
++        double len = maxX - minX;
+         if (len < 0) d = a;
+         if (len > 64) d = a + 64.0;
+ 
+-        len = axisalignedbb.maxY - axisalignedbb.minY;
++        len = maxY - minY;
+         if (len < 0) e = b;
+         if (len > 64) e = b + 64.0;
+ 
+-        len = axisalignedbb.maxZ - axisalignedbb.minZ;
++        len = maxZ - minZ;
+         if (len < 0) f = c;
+         if (len > 64) f = c + 64.0;
+-        this.boundingBox = new AxisAlignedBB(a, b, c, d, e, f);
++        this.boundingBoxMinX = a;
++        this.boundingBoxMinY = b;
++        this.boundingBoxMinZ = c;
++        this.boundingBoxMaxX = d;
++        this.boundingBoxMaxY = e;
++        this.boundingBoxMaxZ = f;
+         // CraftBukkit end
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityAnimal.java b/src/main/java/net/minecraft/server/EntityAnimal.java
+index bd047b362e44a8d97c01de76c045936e6de8fc6c..0d46e0734dfc282cb91c8e54ae2c977c3f0de834 100644
+--- a/src/main/java/net/minecraft/server/EntityAnimal.java
++++ b/src/main/java/net/minecraft/server/EntityAnimal.java
+@@ -68,7 +68,7 @@ public abstract class EntityAnimal extends EntityAgeable implements IAnimal {
+ 
+     public boolean getCanSpawnHere() {
+         int i = MathHelper.floor(this.locX);
+-        int j = MathHelper.floor(this.getBoundingBox().minY);
++        int j = MathHelper.floor(this.boundingBoxMinY);
+         int k = MathHelper.floor(this.locZ);
+         BlockPosition blockposition = new BlockPosition(i, j, k);
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityArmorStand.java b/src/main/java/net/minecraft/server/EntityArmorStand.java
+index a3079760eda6cdf7841b7242f8fbe17977dc288c..3c490fe4ec15c269654df0396302d01355b43c71 100644
+--- a/src/main/java/net/minecraft/server/EntityArmorStand.java
++++ b/src/main/java/net/minecraft/server/EntityArmorStand.java
+@@ -246,7 +246,7 @@ public class EntityArmorStand extends EntityLiving {
+     protected void collideWithEntity(Entity entity) {}
+ 
+     protected void collideWithNearbyEntities() {
+-        List list = this.world.getEntities(this, this.getBoundingBox());
++        List list = this.world.getEntities(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+ 
+         if (list != null && !list.isEmpty()) {
+             for (int i = 0; i < list.size(); ++i) {
+diff --git a/src/main/java/net/minecraft/server/EntityArrow.java b/src/main/java/net/minecraft/server/EntityArrow.java
+index ba8b28d64a5d8c51285432e25e4e7a3a2d106fe1..11e1b749c39e4efaad5a771b0aa97aa41949e386 100644
+--- a/src/main/java/net/minecraft/server/EntityArrow.java
++++ b/src/main/java/net/minecraft/server/EntityArrow.java
+@@ -61,7 +61,7 @@ public class EntityArrow extends Entity implements IProjectile {
+ 
+         this.locY = entityliving.locY + (double) entityliving.getHeadHeight() - 0.10000000149011612D;
+         double d0 = entityliving1.locX - entityliving.locX;
+-        double d1 = entityliving1.getBoundingBox().minY + (double) (entityliving1.length / 3.0F) - this.locY;
++        double d1 = entityliving1.boundingBoxMinY + (double) (entityliving1.length / 3.0F) - this.locY;
+         double d2 = entityliving1.locZ - entityliving.locZ;
+         double d3 = (double) MathHelper.sqrt(d0 * d0 + d2 * d2);
+ 
+@@ -183,7 +183,7 @@ public class EntityArrow extends Entity implements IProjectile {
+             }
+ 
+             Entity entity = null;
+-            List list = this.world.getEntities(this, this.getBoundingBox().addCoord(this.motX, this.motY, this.motZ).grow(1.0D, 1.0D, 1.0D));
++            List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.min(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.min(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D), Math.max(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.max(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.max(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D));
+             double d0 = 0.0D;
+ 
+             int j;
+@@ -194,7 +194,7 @@ public class EntityArrow extends Entity implements IProjectile {
+ 
+                 if (entity1.canBeCollidedWith() && ((entity1 != this.shooter && entity1.passenger != this.shooter) || this.ticksInAir >= 5)) { // PandaSpigot - Projectile Fixes
+                     f1 = 0.3F;
+-                    AxisAlignedBB axisalignedbb1 = entity1.getBoundingBox().grow((double) f1, (double) f1, (double) f1);
++                    AxisAlignedBB axisalignedbb1 = new AxisAlignedBB(entity1.boundingBoxMinX - (double) f1, entity1.boundingBoxMinY - (double) f1, entity1.boundingBoxMinZ - (double) f1, entity1.boundingBoxMaxX + (double) f1, entity1.boundingBoxMaxY + (double) f1, entity1.boundingBoxMaxZ + (double) f1); // Athena
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb1.calculateIntercept(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
+diff --git a/src/main/java/net/minecraft/server/EntityBat.java b/src/main/java/net/minecraft/server/EntityBat.java
+index d7f6fed03f918244eef0031479de2d67243710b7..bea5c712cf8266068df01c9a859b9f92c117cd65 100644
+--- a/src/main/java/net/minecraft/server/EntityBat.java
++++ b/src/main/java/net/minecraft/server/EntityBat.java
+@@ -179,7 +179,7 @@ public class EntityBat extends EntityAmbient {
+ 
+     @Override
+     public boolean getCanSpawnHere() {
+-        BlockPosition blockposition = new BlockPosition(this.locX, this.getBoundingBox().minY, this.locZ);
++        BlockPosition blockposition = new BlockPosition(this.locX, this.boundingBoxMinY, this.locZ);
+ 
+         if (blockposition.getY() >= this.world.getSeaLevel()) {
+             return false;
+diff --git a/src/main/java/net/minecraft/server/EntityBlaze.java b/src/main/java/net/minecraft/server/EntityBlaze.java
+index d3bce5c27d292cd02fc642a7ae0e19aa435a136a..7139fa7ac7764eb2588bfbf7a3ca4c9dd32da0b6 100644
+--- a/src/main/java/net/minecraft/server/EntityBlaze.java
++++ b/src/main/java/net/minecraft/server/EntityBlaze.java
+@@ -183,7 +183,7 @@ public class EntityBlaze extends EntityMonster {
+                 this.blaze.getControllerMove().setMoveTo(entityliving.locX, entityliving.locY, entityliving.locZ, 1.0D);
+             } else if (d0 < 256.0D) {
+                 double d1 = entityliving.locX - this.blaze.locX;
+-                double d2 = entityliving.getBoundingBox().minY + (double) (entityliving.length / 2.0F) - (this.blaze.locY + (double) (this.blaze.length / 2.0F));
++                double d2 = entityliving.boundingBoxMinY + (double) (entityliving.length / 2.0F) - (this.blaze.locY + (double) (this.blaze.length / 2.0F));
+                 double d3 = entityliving.locZ - this.blaze.locZ;
+ 
+                 if (this.c <= 0) {
+diff --git a/src/main/java/net/minecraft/server/EntityBoat.java b/src/main/java/net/minecraft/server/EntityBoat.java
+index c30442033668296a2691313624913440dd2c37b4..7cc9137d9e79b4e353abe1579c39cd7a51550ebe 100644
+--- a/src/main/java/net/minecraft/server/EntityBoat.java
++++ b/src/main/java/net/minecraft/server/EntityBoat.java
+@@ -66,11 +66,11 @@ public class EntityBoat extends Entity {
+     }
+ 
+     public AxisAlignedBB getCollisionBox(Entity entity) {
+-        return entity.getBoundingBox();
++        return new AxisAlignedBB(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ); // Athena
+     }
+ 
+     public AxisAlignedBB getCollisionBoundingBox() {
+-        return this.getBoundingBox();
++        return new AxisAlignedBB(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ); // Athena
+     }
+ 
+     public boolean canBePushed() {
+@@ -176,9 +176,9 @@ public class EntityBoat extends Entity {
+         double d0 = 0.0D;
+ 
+         for (int i = 0; i < b0; ++i) {
+-            double d1 = this.getBoundingBox().minY + (this.getBoundingBox().maxY - this.getBoundingBox().minY) * (double) (i + 0) / (double) b0 - 0.125D;
+-            double d2 = this.getBoundingBox().minY + (this.getBoundingBox().maxY - this.getBoundingBox().minY) * (double) (i + 1) / (double) b0 - 0.125D;
+-            AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.getBoundingBox().minX, d1, this.getBoundingBox().minZ, this.getBoundingBox().maxX, d2, this.getBoundingBox().maxZ);
++            double d1 = this.boundingBoxMinY + (this.boundingBoxMaxY - this.boundingBoxMinY) * (double) (i + 0) / (double) b0 - 0.125D;
++            double d2 = this.boundingBoxMinY + (this.boundingBoxMaxY - this.boundingBoxMinY) * (double) (i + 1) / (double) b0 - 0.125D;
++            AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.boundingBoxMinX, d1, this.boundingBoxMinZ, this.boundingBoxMaxX, d2, this.boundingBoxMaxZ);
+ 
+             if (this.world.isAABBInMaterial(axisalignedbb, Material.WATER)) {
+                 d0 += 1.0D / (double) b0;
+@@ -390,7 +390,7 @@ public class EntityBoat extends Entity {
+             }
+             // CraftBukkit end
+             if (!this.world.isClientSide) {
+-                List list = this.world.getEntities(this, this.getBoundingBox().grow(0.20000000298023224D, 0.0D, 0.20000000298023224D));
++                List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D));
+ 
+                 if (list != null && !list.isEmpty()) {
+                     for (int k1 = 0; k1 < list.size(); ++k1) {
+diff --git a/src/main/java/net/minecraft/server/EntityCreature.java b/src/main/java/net/minecraft/server/EntityCreature.java
+index 623424e6ed2ffaf9d84406fafef9eaa5f4bfd95e..ddbfd211ece601570558956ef63b533c672f449a 100644
+--- a/src/main/java/net/minecraft/server/EntityCreature.java
++++ b/src/main/java/net/minecraft/server/EntityCreature.java
+@@ -28,7 +28,7 @@ public abstract class EntityCreature extends EntityInsentient {
+     }
+ 
+     public boolean getCanSpawnHere() {
+-        return super.getCanSpawnHere() && this.getBlockPathWeight(new BlockPosition(this.locX, this.getBoundingBox().minY, this.locZ)) >= 0.0F;
++        return super.getCanSpawnHere() && this.getBlockPathWeight(new BlockPosition(this.locX, this.boundingBoxMinY, this.locZ)) >= 0.0F;
+     }
+ 
+     public boolean hasPath() {
+diff --git a/src/main/java/net/minecraft/server/EntityEnderDragon.java b/src/main/java/net/minecraft/server/EntityEnderDragon.java
+index a442a5f07a580f83b2619f5b72fee114a2dd00f6..f48a167677ffd61176d02e22dba04ed42c6b8176 100644
+--- a/src/main/java/net/minecraft/server/EntityEnderDragon.java
++++ b/src/main/java/net/minecraft/server/EntityEnderDragon.java
+@@ -165,7 +165,7 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+                             d4 = 10.0D;
+                         }
+ 
+-                        this.targetY = this.target.getBoundingBox().minY + d4;
++                        this.targetY = this.target.boundingBoxMinY + d4;
+                     } else {
+                         this.targetX += this.random.nextGaussian() * 2.0D;
+                         this.targetZ += this.random.nextGaussian() * 2.0D;
+@@ -255,9 +255,9 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+                 this.dragonPartWing2.onUpdate();
+                 this.dragonPartWing2.setPositionRotation(this.locX - (double) (f12 * 4.5F), this.locY + 2.0D, this.locZ - (double) (f11 * 4.5F), 0.0F, 0.0F);
+                 if (!this.world.isClientSide && this.hurtTicks == 0) {
+-                    this.collideWithEntities(this.world.getEntities(this, this.dragonPartWing1.getBoundingBox().grow(4.0D, 2.0D, 4.0D).offset(0.0D, -2.0D, 0.0D)));
+-                    this.collideWithEntities(this.world.getEntities(this, this.dragonPartWing2.getBoundingBox().grow(4.0D, 2.0D, 4.0D).offset(0.0D, -2.0D, 0.0D)));
+-                    this.attackEntitiesInList(this.world.getEntities(this, this.dragonPartHead.getBoundingBox().grow(1.0D, 1.0D, 1.0D)));
++                    this.collideWithEntities(this.world.getEntities(this, Math.min(this.dragonPartWing1.boundingBoxMinX - 4.0D, this.dragonPartWing1.boundingBoxMaxX + 4.0D) + 0.0D, Math.min(this.dragonPartWing1.boundingBoxMinY - 2.0D, this.dragonPartWing1.boundingBoxMaxY + 2.0D) + -2.0D, Math.min(this.dragonPartWing1.boundingBoxMinZ - 4.0D, this.dragonPartWing1.boundingBoxMaxZ + 4.0D) + 0.0D, Math.max(this.dragonPartWing1.boundingBoxMinX - 4.0D, this.dragonPartWing1.boundingBoxMaxX + 4.0D) + 0.0D, Math.max(this.dragonPartWing1.boundingBoxMinY - 2.0D, this.dragonPartWing1.boundingBoxMaxY + 2.0D) + -2.0D, Math.max(this.dragonPartWing1.boundingBoxMinZ - 4.0D, this.dragonPartWing1.boundingBoxMaxZ + 4.0D) + 0.0D));
++                    this.collideWithEntities(this.world.getEntities(this, Math.min(this.dragonPartWing2.boundingBoxMinX - 4.0D, this.dragonPartWing2.boundingBoxMaxX + 4.0D) + 0.0D, Math.min(this.dragonPartWing2.boundingBoxMinY - 2.0D, this.dragonPartWing2.boundingBoxMaxY + 2.0D) + -2.0D, Math.min(this.dragonPartWing2.boundingBoxMinZ - 4.0D, this.dragonPartWing2.boundingBoxMaxZ + 4.0D) + 0.0D, Math.max(this.dragonPartWing2.boundingBoxMinX - 4.0D, this.dragonPartWing2.boundingBoxMaxX + 4.0D) + 0.0D, Math.max(this.dragonPartWing2.boundingBoxMinY - 2.0D, this.dragonPartWing2.boundingBoxMaxY + 2.0D) + -2.0D, Math.max(this.dragonPartWing2.boundingBoxMinZ - 4.0D, this.dragonPartWing2.boundingBoxMaxZ + 4.0D) + 0.0D));
++                    this.attackEntitiesInList(this.world.getEntities(this, Math.min(this.dragonPartHead.boundingBoxMinX - 1.0D, this.dragonPartHead.boundingBoxMaxX + 1.0D), Math.min(this.dragonPartHead.boundingBoxMinY - 1.0D, this.dragonPartHead.boundingBoxMaxY + 1.0D), Math.min(this.dragonPartHead.boundingBoxMinZ - 1.0D, this.dragonPartHead.boundingBoxMaxZ + 1.0D), Math.max(this.dragonPartHead.boundingBoxMinX - 1.0D, this.dragonPartHead.boundingBoxMaxX + 1.0D), Math.max(this.dragonPartHead.boundingBoxMinY - 1.0D, this.dragonPartHead.boundingBoxMaxY + 1.0D), Math.max(this.dragonPartHead.boundingBoxMinZ - 1.0D, this.dragonPartHead.boundingBoxMaxZ + 1.0D)));
+                 }
+ 
+                 double[] adouble = this.getMovementOffsets(5, 1.0F);
+@@ -296,7 +296,7 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+                 }
+ 
+                 if (!this.world.isClientSide) {
+-                    this.slowed = this.destroyBlocksInAABB(this.dragonPartHead.getBoundingBox()) | this.destroyBlocksInAABB(this.dragonPartBody.getBoundingBox());
++                    this.slowed = this.destroyBlocksInAABB(this.dragonPartHead.boundingBoxMinX, this.dragonPartHead.boundingBoxMinY, this.dragonPartHead.boundingBoxMinZ, this.dragonPartHead.boundingBoxMaxX, this.dragonPartHead.boundingBoxMaxY, this.dragonPartHead.boundingBoxMaxZ) | this.destroyBlocksInAABB(this.dragonPartBody.boundingBoxMinX, this.dragonPartBody.boundingBoxMinY, this.dragonPartBody.boundingBoxMinZ, this.dragonPartBody.boundingBoxMaxX, this.dragonPartBody.boundingBoxMaxY, this.dragonPartBody.boundingBoxMaxZ);
+                 }
+ 
+             }
+@@ -327,7 +327,7 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+ 
+         if (this.random.nextInt(10) == 0) {
+             float f = 32.0F;
+-            List list = this.world.getEntitiesWithinAABB(EntityEnderCrystal.class, this.getBoundingBox().grow((double) f, (double) f, (double) f));
++            List list = this.world.getEntitiesWithinAABB(EntityEnderCrystal.class, Math.min(this.boundingBoxMinX - (double) f, this.boundingBoxMaxX + (double) f), Math.min(this.boundingBoxMinY - (double) f, this.boundingBoxMaxY + (double) f), Math.min(this.boundingBoxMinZ - (double) f, this.boundingBoxMaxZ + (double) f), Math.max(this.boundingBoxMinX - (double) f, this.boundingBoxMaxX + (double) f), Math.max(this.boundingBoxMinY - (double) f, this.boundingBoxMaxY + (double) f), Math.max(this.boundingBoxMinZ - (double) f, this.boundingBoxMaxZ + (double) f));
+             EntityEnderCrystal entityendercrystal = null;
+             double d0 = Double.MAX_VALUE;
+             Iterator iterator = list.iterator();
+@@ -348,8 +348,8 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+     }
+ 
+     private void collideWithEntities(List<Entity> list) {
+-        double d0 = (this.dragonPartBody.getBoundingBox().minX + this.dragonPartBody.getBoundingBox().maxX) / 2.0D;
+-        double d1 = (this.dragonPartBody.getBoundingBox().minZ + this.dragonPartBody.getBoundingBox().maxZ) / 2.0D;
++        double d0 = (this.dragonPartBody.boundingBoxMinX + this.dragonPartBody.boundingBoxMaxX) / 2.0D;
++        double d1 = (this.dragonPartBody.boundingBoxMinZ + this.dragonPartBody.boundingBoxMaxZ) / 2.0D;
+         Iterator iterator = list.iterator();
+ 
+         while (iterator.hasNext()) {
+@@ -428,13 +428,18 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+         return (float) MathHelper.wrapAngleTo180_double(d0);
+     }
+ 
+-    private boolean destroyBlocksInAABB(AxisAlignedBB axisalignedbb) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.minY);
+-        int k = MathHelper.floor(axisalignedbb.minZ);
+-        int l = MathHelper.floor(axisalignedbb.maxX);
+-        int i1 = MathHelper.floor(axisalignedbb.maxY);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ);
++    private boolean destroyBlocksInAABB(AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.destroyBlocksInAABB(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    private boolean destroyBlocksInAABB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(minY);
++        int k = MathHelper.floor(minZ);
++        int l = MathHelper.floor(maxX);
++        int i1 = MathHelper.floor(maxY);
++        int j1 = MathHelper.floor(maxZ);
+         boolean flag = false;
+         boolean flag1 = false;
+ 
+@@ -499,9 +504,9 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+                 }
+             }
+             // CraftBukkit end
+-            double d0 = axisalignedbb.minX + (axisalignedbb.maxX - axisalignedbb.minX) * (double) this.random.nextFloat();
+-            double d1 = axisalignedbb.minY + (axisalignedbb.maxY - axisalignedbb.minY) * (double) this.random.nextFloat();
+-            double d2 = axisalignedbb.minZ + (axisalignedbb.maxZ - axisalignedbb.minZ) * (double) this.random.nextFloat();
++            double d0 = minX + (maxX - minX) * (double) this.random.nextFloat();
++            double d1 = minY + (maxY - minY) * (double) this.random.nextFloat();
++            double d2 = minZ + (maxZ - minZ) * (double) this.random.nextFloat();
+ 
+             this.world.addParticle(EnumParticle.EXPLOSION_LARGE, d0, d1, d2, 0.0D, 0.0D, 0.0D, new int[0]);
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityEnderman.java b/src/main/java/net/minecraft/server/EntityEnderman.java
+index 00fef4d0417069b3184c1a973e902316fe14eaf4..899afb9b3702c174df8dc0e3f9bbaf90f750c3d8 100644
+--- a/src/main/java/net/minecraft/server/EntityEnderman.java
++++ b/src/main/java/net/minecraft/server/EntityEnderman.java
+@@ -91,7 +91,7 @@ public class EntityEnderman extends EntityMonster {
+             return false;
+         } else {
+             Vec3D vec3d = entityhuman.getLook(1.0F).normalize();
+-            Vec3D vec3d1 = new Vec3D(this.locX - entityhuman.locX, this.getBoundingBox().minY + (double) (this.length / 2.0F) - (entityhuman.locY + (double) entityhuman.getHeadHeight()), this.locZ - entityhuman.locZ);
++            Vec3D vec3d1 = new Vec3D(this.locX - entityhuman.locX, this.boundingBoxMinY + (double) (this.length / 2.0F) - (entityhuman.locY + (double) entityhuman.getHeadHeight()), this.locZ - entityhuman.locZ);
+             double d0 = vec3d1.lengthVector();
+ 
+             vec3d1 = vec3d1.normalize();
+@@ -148,7 +148,7 @@ public class EntityEnderman extends EntityMonster {
+     }
+ 
+     protected boolean teleportToEntity(Entity entity) {
+-        Vec3D vec3d = new Vec3D(this.locX - entity.locX, this.getBoundingBox().minY + (double) (this.length / 2.0F) - entity.locY + (double) entity.getHeadHeight(), this.locZ - entity.locZ);
++        Vec3D vec3d = new Vec3D(this.locX - entity.locX, this.boundingBoxMinY + (double) (this.length / 2.0F) - entity.locY + (double) entity.getHeadHeight(), this.locZ - entity.locZ);
+ 
+         vec3d = vec3d.normalize();
+         double d0 = 16.0D;
+@@ -197,7 +197,7 @@ public class EntityEnderman extends EntityMonster {
+                 Location to = teleport.getTo();
+                 this.enderTeleportTo(to.getX(), to.getY(), to.getZ());
+                 // CraftBukkit end
+-                if (this.world.getCubes(this, this.getBoundingBox()).isEmpty() && !this.world.containsLiquid(this.getBoundingBox())) {
++                if (this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
+                     flag = true;
+                 }
+             }
+@@ -428,7 +428,7 @@ public class EntityEnderman extends EntityMonster {
+ 
+         public boolean shouldExecute() {
+             double d0 = this.getTargetDistance();
+-            List list = this.taskOwner.world.getEntitiesWithinAABB(EntityHuman.class, this.taskOwner.getBoundingBox().grow(d0, 4.0D, d0), this.targetEntitySelector);
++            List list = this.taskOwner.world.getEntitiesWithinAABB(EntityHuman.class, Math.min(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.min(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.min(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Math.max(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.max(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.max(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), this.targetEntitySelector);
+ 
+             Collections.sort(list, this.theNearestAttackableTargetSorter);
+             if (list.isEmpty()) {
+diff --git a/src/main/java/net/minecraft/server/EntityExperienceOrb.java b/src/main/java/net/minecraft/server/EntityExperienceOrb.java
+index b819fc21e2b3d4fd45ec22c2f5ce7aa1531ded16..99a07d33bba7a5f3724783503900217cec60fbef 100644
+--- a/src/main/java/net/minecraft/server/EntityExperienceOrb.java
++++ b/src/main/java/net/minecraft/server/EntityExperienceOrb.java
+@@ -57,7 +57,7 @@ public class EntityExperienceOrb extends Entity {
+             this.makeSound("random.fizz", 0.4F, 2.0F + this.random.nextFloat() * 0.4F);
+         }
+ 
+-        this.pushOutOfBlocks(this.locX, (this.getBoundingBox().minY + this.getBoundingBox().maxY) / 2.0D, this.locZ);
++        this.pushOutOfBlocks(this.locX, (this.boundingBoxMinY + this.boundingBoxMaxY) / 2.0D, this.locZ);
+         double d0 = 8.0D;
+ 
+         if (this.targetTime < this.xpColor - 20 + this.getId() % 100) {
+@@ -103,7 +103,7 @@ public class EntityExperienceOrb extends Entity {
+         float f = 0.98F;
+ 
+         if (this.onGround) {
+-            f = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.98F;
++            f = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.98F;
+         }
+ 
+         this.motX *= (double) f;
+@@ -122,7 +122,7 @@ public class EntityExperienceOrb extends Entity {
+     }
+ 
+     public boolean handleWaterMovement() {
+-        return this.world.handleMaterialAcceleration(this.getBoundingBox(), Material.WATER, (Entity) this);
++        return this.world.handleMaterialAcceleration(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, Material.WATER, (Entity) this);
+     }
+ 
+     protected void burn(int i) {
+diff --git a/src/main/java/net/minecraft/server/EntityFallingBlock.java b/src/main/java/net/minecraft/server/EntityFallingBlock.java
+index 4c6a508705a04a4a543cd00487702b98d8554142..ec250ed84c6e40a4a7b67d973bb0dacbc015d45f 100644
+--- a/src/main/java/net/minecraft/server/EntityFallingBlock.java
++++ b/src/main/java/net/minecraft/server/EntityFallingBlock.java
+@@ -171,7 +171,7 @@ public class EntityFallingBlock extends Entity {
+             int i = MathHelper.ceiling_float_int(f - 1.0F);
+ 
+             if (i > 0) {
+-                ArrayList arraylist = Lists.newArrayList(this.world.getEntities(this, this.getBoundingBox()));
++                ArrayList arraylist = Lists.newArrayList(this.world.getEntities(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ));
+                 boolean flag = block == Blocks.ANVIL;
+                 DamageSource damagesource = flag ? DamageSource.ANVIL : DamageSource.FALLING_BLOCK;
+                 Iterator iterator = arraylist.iterator();
+diff --git a/src/main/java/net/minecraft/server/EntityFireball.java b/src/main/java/net/minecraft/server/EntityFireball.java
+index 30be0b0e6d244a863f4fadc5f323b1526535833d..77b756960cdcd1d67d8008c574d20327684d850d 100644
+--- a/src/main/java/net/minecraft/server/EntityFireball.java
++++ b/src/main/java/net/minecraft/server/EntityFireball.java
+@@ -101,7 +101,7 @@ public abstract class EntityFireball extends Entity {
+             }
+ 
+             Entity entity = null;
+-            List list = this.world.getEntities(this, this.getBoundingBox().addCoord(this.motX, this.motY, this.motZ).grow(1.0D, 1.0D, 1.0D));
++            List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.min(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.min(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D), Math.max(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.max(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.max(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D));
+             double d0 = 0.0D;
+ 
+             for (int i = 0; i < list.size(); ++i) {
+@@ -109,7 +109,7 @@ public abstract class EntityFireball extends Entity {
+ 
+                 if (entity1.canBeCollidedWith() && ((!entity1.isEntityEqual(this.shooter) && entity1.passenger != this.shooter) || this.ticksInAir >= 25)) { // PandaSpigot - Projectile Fixes
+                     float f = 0.3F;
+-                    AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f, (double) f, (double) f);
++                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(entity1.boundingBoxMinX - (double) f, entity1.boundingBoxMinY - (double) f, entity1.boundingBoxMinZ - (double) f, entity1.boundingBoxMaxX + (double) f, entity1.boundingBoxMaxY + (double) f, entity1.boundingBoxMaxZ + (double) f); // Athena
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb.calculateIntercept(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
+diff --git a/src/main/java/net/minecraft/server/EntityFishingHook.java b/src/main/java/net/minecraft/server/EntityFishingHook.java
+index 9089e51b05505a1d9655e15a5db32db51e54110c..5ad2e1993b2aca47bf9c3da5a6ff51545d609c1e 100644
+--- a/src/main/java/net/minecraft/server/EntityFishingHook.java
++++ b/src/main/java/net/minecraft/server/EntityFishingHook.java
+@@ -117,7 +117,7 @@ public class EntityFishingHook extends Entity {
+                         this.locX = this.hooked.locX;
+                         double d4 = (double) this.hooked.length;
+ 
+-                        this.locY = this.hooked.getBoundingBox().minY + d4 * 0.8D;
++                        this.locY = this.hooked.boundingBoxMinY + d4 * 0.8D;
+                         this.locZ = this.hooked.locZ;
+                         return;
+                     }
+@@ -161,7 +161,7 @@ public class EntityFishingHook extends Entity {
+             }
+ 
+             Entity entity = null;
+-            List list = this.world.getEntities(this, this.getBoundingBox().addCoord(this.motX, this.motY, this.motZ).grow(1.0D, 1.0D, 1.0D));
++            List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.min(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.min(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D), Math.max(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.max(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.max(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D));
+             double d5 = 0.0D;
+ 
+             double d6;
+@@ -171,7 +171,7 @@ public class EntityFishingHook extends Entity {
+ 
+                 if (entity1.canBeCollidedWith() && ((entity1 != this.owner && entity1.passenger != this.owner) || this.ticksInAir >= 5)) { // PandaSpigot - Projectile Fixes
+                     float f = 0.3F;
+-                    AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f, (double) f, (double) f);
++                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(entity1.boundingBoxMinX - (double) f, entity1.boundingBoxMinY - (double) f, entity1.boundingBoxMinZ - (double) f, entity1.boundingBoxMaxX + (double) f, entity1.boundingBoxMaxY + (double) f, entity1.boundingBoxMaxZ + (double) f); // Athena
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb.calculateIntercept(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
+@@ -252,7 +252,7 @@ public class EntityFishingHook extends Entity {
+                 double d8;
+ 
+                 for (int j = 0; j < b0; ++j) {
+-                    AxisAlignedBB axisalignedbb1 = this.getBoundingBox();
++                    AxisAlignedBB axisalignedbb1 = new AxisAlignedBB(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ); // Athena
+                     double d9 = axisalignedbb1.maxY - axisalignedbb1.minY;
+                     double d10 = axisalignedbb1.minY + d9 * (double) j / (double) b0;
+ 
+@@ -296,7 +296,7 @@ public class EntityFishingHook extends Entity {
+                             if (this.ticksCatchableDelay <= 0) {
+                                 this.motY -= 0.20000000298023224D;
+                                 this.makeSound("random.splash", 0.25F, 1.0F + (this.random.nextFloat() - this.random.nextFloat()) * 0.4F);
+-                                f3 = (float) MathHelper.floor(this.getBoundingBox().minY);
++                                f3 = (float) MathHelper.floor(this.boundingBoxMinY);
+                                 worldserver.spawnParticle(EnumParticle.WATER_BUBBLE, this.locX, (double) (f3 + 1.0F), this.locZ, (int) (1.0F + this.width * 20.0F), (double) this.width, 0.0D, (double) this.width, 0.20000000298023224D, new int[0]);
+                                 worldserver.spawnParticle(EnumParticle.WATER_WAKE, this.locX, (double) (f3 + 1.0F), this.locZ, (int) (1.0F + this.width * 20.0F), (double) this.width, 0.0D, (double) this.width, 0.20000000298023224D, new int[0]);
+                                 this.ticksCatchable = MathHelper.nextInt(this.random, 10, 30);
+@@ -306,7 +306,7 @@ public class EntityFishingHook extends Entity {
+                                 f5 = MathHelper.sin(f3);
+                                 f4 = MathHelper.cos(f3);
+                                 d8 = this.locX + (double) (f5 * (float) this.ticksCatchableDelay * 0.1F);
+-                                d12 = (double) ((float) MathHelper.floor(this.getBoundingBox().minY) + 1.0F);
++                                d12 = (double) ((float) MathHelper.floor(this.boundingBoxMinY) + 1.0F);
+                                 d11 = this.locZ + (double) (f4 * (float) this.ticksCatchableDelay * 0.1F);
+                                 block = worldserver.getType(new BlockPosition((int) d8, (int) d12 - 1, (int) d11)).getBlock();
+                                 if (block == Blocks.WATER || block == Blocks.FLOWING_WATER) {
+@@ -336,7 +336,7 @@ public class EntityFishingHook extends Entity {
+                                 f5 = MathHelper.randomFloatClamp(this.random, 0.0F, 360.0F) * 0.017453292F;
+                                 f4 = MathHelper.randomFloatClamp(this.random, 25.0F, 60.0F);
+                                 d8 = this.locX + (double) (MathHelper.sin(f5) * f4 * 0.1F);
+-                                d12 = (double) ((float) MathHelper.floor(this.getBoundingBox().minY) + 1.0F);
++                                d12 = (double) ((float) MathHelper.floor(this.boundingBoxMinY) + 1.0F);
+                                 d11 = this.locZ + (double) (MathHelper.cos(f5) * f4 * 0.1F);
+                                 block = worldserver.getType(new BlockPosition((int) d8, (int) d12 - 1, (int) d11)).getBlock();
+                                 if (block == Blocks.WATER || block == Blocks.FLOWING_WATER) {
+diff --git a/src/main/java/net/minecraft/server/EntityFlying.java b/src/main/java/net/minecraft/server/EntityFlying.java
+index 243d2261c85aaef24bb274895e3c08db1103a330..92602f204c36a8df415eb7cb98f13fe43503842b 100644
+--- a/src/main/java/net/minecraft/server/EntityFlying.java
++++ b/src/main/java/net/minecraft/server/EntityFlying.java
+@@ -31,7 +31,7 @@ public abstract class EntityFlying extends EntityInsentient {
+             float f2 = 0.91F;
+ 
+             if (this.onGround) {
+-                f2 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                f2 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
+             }
+ 
+             float f3 = 0.16277136F / (f2 * f2 * f2);
+@@ -39,7 +39,7 @@ public abstract class EntityFlying extends EntityInsentient {
+             this.moveFlying(f, f1, this.onGround ? 0.1F * f3 : 0.02F);
+             f2 = 0.91F;
+             if (this.onGround) {
+-                f2 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                f2 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
+             }
+ 
+             this.move(this.motX, this.motY, this.motZ);
+diff --git a/src/main/java/net/minecraft/server/EntityGhast.java b/src/main/java/net/minecraft/server/EntityGhast.java
+index 1f8102dbde8711b334a21bcbb02db1eb81e95869..ae66a7c85f0ed42d2bb15daa474b83416c171c5a 100644
+--- a/src/main/java/net/minecraft/server/EntityGhast.java
++++ b/src/main/java/net/minecraft/server/EntityGhast.java
+@@ -157,7 +157,7 @@ public class EntityGhast extends EntityFlying implements IMonster {
+                     double d1 = 4.0D;
+                     Vec3D vec3d = this.parentEntity.getLook(1.0F);
+                     double d2 = entityliving.locX - (this.parentEntity.locX + vec3d.xCoord * d1);
+-                    double d3 = entityliving.getBoundingBox().minY + (double) (entityliving.length / 2.0F) - (0.5D + this.parentEntity.locY + (double) (this.parentEntity.length / 2.0F));
++                    double d3 = entityliving.boundingBoxMinY + (double) (entityliving.length / 2.0F) - (0.5D + this.parentEntity.locY + (double) (this.parentEntity.length / 2.0F));
+                     double d4 = entityliving.locZ - (this.parentEntity.locZ + vec3d.zCoord * d1);
+ 
+                     world.playAuxSFXAtEntity((EntityHuman) null, 1008, new BlockPosition(this.parentEntity), 0);
+@@ -285,7 +285,7 @@ public class EntityGhast extends EntityFlying implements IMonster {
+             double d4 = (d0 - this.parentEntity.locX) / d3;
+             double d5 = (d1 - this.parentEntity.locY) / d3;
+             double d6 = (d2 - this.parentEntity.locZ) / d3;
+-            AxisAlignedBB axisalignedbb = this.parentEntity.getBoundingBox();
++            AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.parentEntity.boundingBoxMinX, this.parentEntity.boundingBoxMinY, this.parentEntity.boundingBoxMinZ, this.parentEntity.boundingBoxMaxX, this.parentEntity.boundingBoxMaxY, this.parentEntity.boundingBoxMaxZ); // Athena
+ 
+             for (int i = 1; (double) i < d3; ++i) {
+                 axisalignedbb = axisalignedbb.offset(d4, d5, d6);
+diff --git a/src/main/java/net/minecraft/server/EntityGuardian.java b/src/main/java/net/minecraft/server/EntityGuardian.java
+index d0fff082f6196ccb2cbbf504caf83cea26b17198..51389313f5a34151165c2d6ef22ce23f443286cc 100644
+--- a/src/main/java/net/minecraft/server/EntityGuardian.java
++++ b/src/main/java/net/minecraft/server/EntityGuardian.java
+@@ -348,7 +348,7 @@ public class EntityGuardian extends EntityMonster {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this) && this.world.getCubes(this, this.getBoundingBox()).isEmpty();
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty();
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityHanging.java b/src/main/java/net/minecraft/server/EntityHanging.java
+index 6873c893caf9841b8db06e17e897b978c388249f..e3d5ebcc1bbfcf592b59fb74d11bd055cef48fbc 100644
+--- a/src/main/java/net/minecraft/server/EntityHanging.java
++++ b/src/main/java/net/minecraft/server/EntityHanging.java
+@@ -84,7 +84,7 @@ public abstract class EntityHanging extends Entity {
+             this.locX = (bb.minX + bb.maxX) / 2.0D;
+             this.locY = (bb.minY + bb.maxY) / 2.0D;
+             this.locZ = (bb.minZ + bb.maxZ) / 2.0D;
+-            this.setEntityBoundingBox(bb);
++            this.setEntityBoundingBox(bb.minX, bb.minY, bb.minZ, bb.maxX, bb.maxY, bb.maxZ); // Athena
+             // CraftBukkit end
+         }
+     }
+@@ -134,7 +134,7 @@ public abstract class EntityHanging extends Entity {
+     }
+ 
+     public boolean survives() {
+-        if (!this.world.getCubes(this, this.getBoundingBox()).isEmpty()) {
++        if (!this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty()) {
+             return false;
+         } else {
+             int i = Math.max(1, this.getWidthPixels() / 16);
+@@ -153,7 +153,7 @@ public abstract class EntityHanging extends Entity {
+                 }
+             }
+ 
+-            List list = this.world.getEntities(this, this.getBoundingBox());
++            List list = this.world.getEntities(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+             Iterator iterator = list.iterator();
+ 
+             Entity entity;
+diff --git a/src/main/java/net/minecraft/server/EntityHorse.java b/src/main/java/net/minecraft/server/EntityHorse.java
+index aef7eb5eb2753052e59116c3d9695ddb270691ba..a6f81cb74e8570ad1b439f1e1b0ab4b393cf69e5 100644
+--- a/src/main/java/net/minecraft/server/EntityHorse.java
++++ b/src/main/java/net/minecraft/server/EntityHorse.java
+@@ -391,7 +391,7 @@ public class EntityHorse extends EntityAnimal implements IInventoryListener {
+     protected EntityHorse getClosestHorse(Entity entity, double d0) {
+         double d1 = Double.MAX_VALUE;
+         Entity entity1 = null;
+-        List list = this.world.getEntitiesInAABBexcluding(entity, entity.getBoundingBox().addCoord(d0, d0, d0), EntityHorse.horseBreedingSelector);
++        List list = this.world.getEntitiesInAABBexcluding(entity, entity.boundingBoxMinX + Math.min(d0, 0.0D), entity.boundingBoxMinY + Math.min(d0, 0.0D), entity.boundingBoxMinZ + Math.min(d0, 0.0D), entity.boundingBoxMaxX + Math.max(d0, 0.0D), entity.boundingBoxMaxY + Math.max(d0, 0.0D), entity.boundingBoxMaxZ + Math.max(d0, 0.0D), EntityHorse.horseBreedingSelector);
+         Iterator iterator = list.iterator();
+ 
+         while (iterator.hasNext()) {
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 6519e20c35916e5c785a71d19b2fedbfe5ece49d..79c8653219dd2714137b43f25c1a080d44f8f9ec 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -423,15 +423,26 @@ public abstract class EntityHuman extends EntityLiving {
+         this.cameraYaw += (f - this.cameraYaw) * 0.4F;
+         this.cameraPitch += (f1 - this.cameraPitch) * 0.8F;
+         if (this.getHealth() > 0.0F && !this.isSpectator()) {
+-            AxisAlignedBB axisalignedbb = null;
++            // Athena - union/grow expanded into six locals; no box allocated
++            double pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ;
+ 
+             if (this.vehicle != null && !this.vehicle.dead) {
+-                axisalignedbb = this.getBoundingBox().union(this.vehicle.getBoundingBox()).grow(1.0D, 0.0D, 1.0D);
++                double uMinX = Math.min(this.boundingBoxMinX, this.vehicle.boundingBoxMinX);
++                double uMinY = Math.min(this.boundingBoxMinY, this.vehicle.boundingBoxMinY);
++                double uMinZ = Math.min(this.boundingBoxMinZ, this.vehicle.boundingBoxMinZ);
++                double uMaxX = Math.max(this.boundingBoxMaxX, this.vehicle.boundingBoxMaxX);
++                double uMaxY = Math.max(this.boundingBoxMaxY, this.vehicle.boundingBoxMaxY);
++                double uMaxZ = Math.max(this.boundingBoxMaxZ, this.vehicle.boundingBoxMaxZ);
++                pushMinX = Math.min(uMinX - 1.0D, uMaxX + 1.0D); pushMaxX = Math.max(uMinX - 1.0D, uMaxX + 1.0D);
++                pushMinY = Math.min(uMinY - 0.0D, uMaxY + 0.0D); pushMaxY = Math.max(uMinY - 0.0D, uMaxY + 0.0D);
++                pushMinZ = Math.min(uMinZ - 1.0D, uMaxZ + 1.0D); pushMaxZ = Math.max(uMinZ - 1.0D, uMaxZ + 1.0D);
+             } else {
+-                axisalignedbb = this.getBoundingBox().grow(1.0D, 0.5D, 1.0D);
++                pushMinX = Math.min(this.boundingBoxMinX - 1.0D, this.boundingBoxMaxX + 1.0D); pushMaxX = Math.max(this.boundingBoxMinX - 1.0D, this.boundingBoxMaxX + 1.0D);
++                pushMinY = Math.min(this.boundingBoxMinY - 0.5D, this.boundingBoxMaxY + 0.5D); pushMaxY = Math.max(this.boundingBoxMinY - 0.5D, this.boundingBoxMaxY + 0.5D);
++                pushMinZ = Math.min(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D); pushMaxZ = Math.max(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D);
+             }
+ 
+-            List list = this.world.getEntities(this, axisalignedbb);
++            List list = this.world.getEntities(this, pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ);
+ 
+             if (this.canBePushed()) { // Spigot: Add this.ae() condition (second !this.isDead near bottom of EntityLiving)
+             for (int i = 0; i < list.size(); ++i) {
+diff --git a/src/main/java/net/minecraft/server/EntityInsentient.java b/src/main/java/net/minecraft/server/EntityInsentient.java
+index e48bc984545ee8f4d1e1953d9091345800e3572b..f29ce73acbea4a5712642cfa67106affb1b828eb 100644
+--- a/src/main/java/net/minecraft/server/EntityInsentient.java
++++ b/src/main/java/net/minecraft/server/EntityInsentient.java
+@@ -340,7 +340,7 @@ public abstract class EntityInsentient extends EntityLiving {
+         super.onLivingUpdate();
+         this.world.methodProfiler.startSection("looting");
+         if (!this.world.isClientSide && this.canPickUpLoot() && !this.aP && this.world.getGameRules().getBoolean("mobGriefing")) {
+-            List list = this.world.getEntitiesWithinAABB(EntityItem.class, this.getBoundingBox().grow(1.0D, 0.0D, 1.0D));
++            List list = this.world.getEntitiesWithinAABB(EntityItem.class, Math.min(this.boundingBoxMinX - 1.0D, this.boundingBoxMaxX + 1.0D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D), Math.max(this.boundingBoxMinX - 1.0D, this.boundingBoxMaxX + 1.0D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D));
+             Iterator iterator = list.iterator();
+ 
+             while (iterator.hasNext()) {
+@@ -520,7 +520,7 @@ public abstract class EntityInsentient extends EntityLiving {
+ 
+             d2 = entityliving.locY + (double) entityliving.getHeadHeight() - (this.locY + (double) this.getHeadHeight());
+         } else {
+-            d2 = (entity.getBoundingBox().minY + entity.getBoundingBox().maxY) / 2.0D - (this.locY + (double) this.getHeadHeight());
++            d2 = (entity.boundingBoxMinY + entity.boundingBoxMaxY) / 2.0D - (this.locY + (double) this.getHeadHeight());
+         }
+ 
+         double d3 = (double) MathHelper.sqrt(d0 * d0 + d1 * d1);
+@@ -550,7 +550,7 @@ public abstract class EntityInsentient extends EntityLiving {
+     }
+ 
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this) && this.world.getCubes(this, this.getBoundingBox()).isEmpty() && !this.world.containsLiquid(this.getBoundingBox());
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     public int getMaxSpawnedInChunk() {
+@@ -889,7 +889,7 @@ public abstract class EntityInsentient extends EntityLiving {
+         if (this.isLeashed && this.leashNBTTag != null) {
+             if (this.leashNBTTag.hasKeyOfType("UUIDMost", 4) && this.leashNBTTag.hasKeyOfType("UUIDLeast", 4)) {
+                 UUID uuid = new UUID(this.leashNBTTag.getLong("UUIDMost"), this.leashNBTTag.getLong("UUIDLeast"));
+-                List list = this.world.getEntitiesWithinAABB(EntityLiving.class, this.getBoundingBox().grow(10.0D, 10.0D, 10.0D));
++                List list = this.world.getEntitiesWithinAABB(EntityLiving.class, Math.min(this.boundingBoxMinX - 10.0D, this.boundingBoxMaxX + 10.0D), Math.min(this.boundingBoxMinY - 10.0D, this.boundingBoxMaxY + 10.0D), Math.min(this.boundingBoxMinZ - 10.0D, this.boundingBoxMaxZ + 10.0D), Math.max(this.boundingBoxMinX - 10.0D, this.boundingBoxMaxX + 10.0D), Math.max(this.boundingBoxMinY - 10.0D, this.boundingBoxMaxY + 10.0D), Math.max(this.boundingBoxMinZ - 10.0D, this.boundingBoxMaxZ + 10.0D));
+                 Iterator iterator = list.iterator();
+ 
+                 while (iterator.hasNext()) {
+diff --git a/src/main/java/net/minecraft/server/EntityIronGolem.java b/src/main/java/net/minecraft/server/EntityIronGolem.java
+index 23d3f57a67374cd0e85ca445ef50322f7033b12e..95f048fe7fc3b0e4224c78d6e648165d03a56a1c 100644
+--- a/src/main/java/net/minecraft/server/EntityIronGolem.java
++++ b/src/main/java/net/minecraft/server/EntityIronGolem.java
+@@ -84,7 +84,7 @@ public class EntityIronGolem extends EntityGolem {
+             Block block = iblockdata.getBlock();
+ 
+             if (block.getMaterial() != Material.AIR) {
+-                this.world.addParticle(EnumParticle.BLOCK_CRACK, this.locX + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, this.getBoundingBox().minY + 0.1D, this.locZ + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, 4.0D * ((double) this.random.nextFloat() - 0.5D), 0.5D, ((double) this.random.nextFloat() - 0.5D) * 4.0D, new int[] { Block.getCombinedId(iblockdata)});
++                this.world.addParticle(EnumParticle.BLOCK_CRACK, this.locX + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, this.boundingBoxMinY + 0.1D, this.locZ + ((double) this.random.nextFloat() - 0.5D) * (double) this.width, 4.0D * ((double) this.random.nextFloat() - 0.5D), 0.5D, ((double) this.random.nextFloat() - 0.5D) * 4.0D, new int[] { Block.getCombinedId(iblockdata)});
+             }
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityItem.java b/src/main/java/net/minecraft/server/EntityItem.java
+index 156fb40d6e6911ddb9f4373fb57fcf7c700cae2f..1b89262f7e0c9e7706254e0bf25ea340380e91c4 100644
+--- a/src/main/java/net/minecraft/server/EntityItem.java
++++ b/src/main/java/net/minecraft/server/EntityItem.java
+@@ -71,7 +71,7 @@ public class EntityItem extends Entity {
+             this.lastY = this.locY;
+             this.lastZ = this.locZ;
+             this.motY -= 0.03999999910593033D;
+-            this.noclip = this.pushOutOfBlocks(this.locX, (this.getBoundingBox().minY + this.getBoundingBox().maxY) / 2.0D, this.locZ);
++            this.noclip = this.pushOutOfBlocks(this.locX, (this.boundingBoxMinY + this.boundingBoxMaxY) / 2.0D, this.locZ);
+             this.move(this.motX, this.motY, this.motZ);
+             boolean flag = (int) this.lastX != (int) this.locX || (int) this.lastY != (int) this.locY || (int) this.lastZ != (int) this.locZ;
+ 
+@@ -91,7 +91,7 @@ public class EntityItem extends Entity {
+             float f = 0.98F;
+ 
+             if (this.onGround) {
+-                f = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.98F;
++                f = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.98F;
+             }
+ 
+             this.motX *= (double) f;
+@@ -147,7 +147,7 @@ public class EntityItem extends Entity {
+     private void searchForOtherItemsNearby() {
+         // Spigot start
+         double radius = world.spigotConfig.itemMerge;
+-        Iterator iterator = this.world.getEntitiesWithinAABB(EntityItem.class, this.getBoundingBox().grow(radius, radius, radius)).iterator();
++        Iterator iterator = this.world.getEntitiesWithinAABB(EntityItem.class, Math.min(this.boundingBoxMinX - radius, this.boundingBoxMaxX + radius), Math.min(this.boundingBoxMinY - radius, this.boundingBoxMaxY + radius), Math.min(this.boundingBoxMinZ - radius, this.boundingBoxMaxZ + radius), Math.max(this.boundingBoxMinX - radius, this.boundingBoxMaxX + radius), Math.max(this.boundingBoxMinY - radius, this.boundingBoxMaxY + radius), Math.max(this.boundingBoxMinZ - radius, this.boundingBoxMaxZ + radius)).iterator();
+         // Spigot end
+ 
+         while (iterator.hasNext()) {
+@@ -208,7 +208,7 @@ public class EntityItem extends Entity {
+     }
+ 
+     public boolean handleWaterMovement() {
+-        if (this.world.handleMaterialAcceleration(this.getBoundingBox(), Material.WATER, (Entity) this)) {
++        if (this.world.handleMaterialAcceleration(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, Material.WATER, (Entity) this)) {
+             if (!this.inWater && !this.justCreated) {
+                 this.resetHeight();
+             }
+diff --git a/src/main/java/net/minecraft/server/EntityLeash.java b/src/main/java/net/minecraft/server/EntityLeash.java
+index 34706fff6d247ce138e531eff91f7baf5003f7ae..9c71868a9c4ec17385074884e289040cc47ba7e0 100644
+--- a/src/main/java/net/minecraft/server/EntityLeash.java
++++ b/src/main/java/net/minecraft/server/EntityLeash.java
+@@ -19,7 +19,7 @@ public class EntityLeash extends EntityHanging {
+         float f1 = 0.1875F;
+         float f2 = 0.25F;
+ 
+-        this.setEntityBoundingBox(new AxisAlignedBB(this.locX - 0.1875D, this.locY - 0.25D + 0.125D, this.locZ - 0.1875D, this.locX + 0.1875D, this.locY + 0.25D + 0.125D, this.locZ + 0.1875D));
++        this.setEntityBoundingBox(this.locX - 0.1875D, this.locY - 0.25D + 0.125D, this.locZ - 0.1875D, this.locX + 0.1875D, this.locY + 0.25D + 0.125D, this.locZ + 0.1875D); // Athena
+     }
+ 
+     protected void entityInit() {
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 598ebfdd8625981195d84ea1a0cfd81685878cb2..779a3bdfdb6b33a27ac5d66f3304f82915ffc38d 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -181,7 +181,7 @@ public abstract class EntityLiving extends Entity {
+         if (this.isAlive()) {
+             if (this.inBlock()) {
+                 this.damageEntity(DamageSource.STUCK, 1.0F);
+-            } else if (flag && !this.world.getWorldBorder().contains(this.getBoundingBox())) {
++            } else if (flag && !this.world.getWorldBorder().contains(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
+                 double d0 = this.world.getWorldBorder().getClosestDistance((Entity) this) + this.world.getWorldBorder().getDamageBuffer();
+ 
+                 if (d0 < 0.0D) {
+@@ -933,7 +933,7 @@ public abstract class EntityLiving extends Entity {
+ 
+     public boolean isOnLadder() {
+         int i = MathHelper.floor(this.locX);
+-        int j = MathHelper.floor(this.getBoundingBox().minY);
++        int j = MathHelper.floor(this.boundingBoxMinY);
+         int k = MathHelper.floor(this.locZ);
+         Block block = this.world.getType(new BlockPosition(i, j, k)).getBlock();
+ 
+@@ -1267,7 +1267,7 @@ public abstract class EntityLiving extends Entity {
+ 
+     public void dismountEntity(Entity entity) {
+         double d0 = entity.locX;
+-        double d1 = entity.getBoundingBox().minY + (double) entity.length;
++        double d1 = entity.boundingBoxMinY + (double) entity.length;
+         double d2 = entity.locZ;
+         byte b0 = 1;
+ 
+@@ -1276,7 +1276,7 @@ public abstract class EntityLiving extends Entity {
+                 if (i != 0 || j != 0) {
+                     int k = (int) (this.locX + (double) i);
+                     int l = (int) (this.locZ + (double) j);
+-                    AxisAlignedBB axisalignedbb = this.getBoundingBox().offset((double) i, 1.0D, (double) j);
++                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.boundingBoxMinX + (double) i, this.boundingBoxMinY + 1.0D, this.boundingBoxMinZ + (double) j, this.boundingBoxMaxX + (double) i, this.boundingBoxMaxY + 1.0D, this.boundingBoxMaxZ + (double) j); // Athena
+ 
+                     if (this.world.getCollisionBoxes(axisalignedbb).isEmpty()) {
+                         if (World.doesBlockHaveSolidTopSurface((IBlockAccess) this.world, new BlockPosition(k, (int) this.locY, l))) {
+@@ -1388,7 +1388,7 @@ public abstract class EntityLiving extends Entity {
+                 float f5 = 0.91F;
+ 
+                 if (this.onGround) {
+-                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
+                 }
+ 
+                 float f6 = 0.16277136F / (f5 * f5 * f5);
+@@ -1402,7 +1402,7 @@ public abstract class EntityLiving extends Entity {
+                 this.moveFlying(f, f1, f3);
+                 f5 = 0.91F;
+                 if (this.onGround) {
+-                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.getBoundingBox().minY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
+                 }
+ 
+                 if (this.isOnLadder()) {
+@@ -1699,7 +1699,7 @@ public abstract class EntityLiving extends Entity {
+     protected void doTick() {}
+ 
+     protected void collideWithNearbyEntities() {
+-        List list = this.world.getEntitiesInAABBexcluding((Entity) this, this.getBoundingBox().grow(0.20000000298023224D, 0.0D, 0.20000000298023224D), Predicates.and(IEntitySelector.NOT_SPECTATING, new Predicate() {
++        List list = this.world.getEntitiesInAABBexcluding((Entity) this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Predicates.and(IEntitySelector.NOT_SPECTATING, new Predicate() {
+             public boolean a(Entity entity) {
+                 return entity.canBePushed();
+             }
+diff --git a/src/main/java/net/minecraft/server/EntityMagmaCube.java b/src/main/java/net/minecraft/server/EntityMagmaCube.java
+index 6dbfc30d609441b6c616d8344630ce46f8103c87..03779e9a2d1b192c5ffe4cdab4d5be54d0efde04 100644
+--- a/src/main/java/net/minecraft/server/EntityMagmaCube.java
++++ b/src/main/java/net/minecraft/server/EntityMagmaCube.java
+@@ -21,7 +21,7 @@ public class EntityMagmaCube extends EntitySlime {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this) && this.world.getCubes(this, this.getBoundingBox()).isEmpty() && !this.world.containsLiquid(this.getBoundingBox());
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+index fe20021fa7d60c8b3b7e6c7e3fdfeafb142ddb77..ce78126706e1d162365bd8f47242e2beca0d66c3 100644
+--- a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
++++ b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+@@ -84,7 +84,7 @@ public abstract class EntityMinecartAbstract extends Entity implements INamableT
+     }
+ 
+     public AxisAlignedBB getCollisionBox(Entity entity) {
+-        return entity.canBePushed() ? entity.getBoundingBox() : null;
++        return entity.canBePushed() ? new AxisAlignedBB(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ) : null; // Athena
+     }
+ 
+     public AxisAlignedBB getCollisionBoundingBox() {
+@@ -326,7 +326,7 @@ public abstract class EntityMinecartAbstract extends Entity implements INamableT
+             }
+             // CraftBukkit end
+ 
+-            Iterator iterator = this.world.getEntities(this, this.getBoundingBox().grow(0.20000000298023224D, 0.0D, 0.20000000298023224D)).iterator();
++            Iterator iterator = this.world.getEntities(this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D)).iterator();
+ 
+             while (iterator.hasNext()) {
+                 Entity entity = (Entity) iterator.next();
+@@ -580,7 +580,7 @@ public abstract class EntityMinecartAbstract extends Entity implements INamableT
+         float f = this.width / 2.0F;
+         float f1 = this.length;
+ 
+-        this.setEntityBoundingBox(new AxisAlignedBB(d0 - (double) f, d1, d2 - (double) f, d0 + (double) f, d1 + (double) f1, d2 + (double) f));
++        this.setEntityBoundingBox(d0 - (double) f, d1, d2 - (double) f, d0 + (double) f, d1 + (double) f1, d2 + (double) f); // Athena
+     }
+ 
+     public Vec3D k(double d0, double d1, double d2) {
+diff --git a/src/main/java/net/minecraft/server/EntityMinecartHopper.java b/src/main/java/net/minecraft/server/EntityMinecartHopper.java
+index 781cb73cc36566d5acd948341316c3663f5334b2..91bfc37f99a6d31249310a376953e3395bbc0a3c 100644
+--- a/src/main/java/net/minecraft/server/EntityMinecartHopper.java
++++ b/src/main/java/net/minecraft/server/EntityMinecartHopper.java
+@@ -113,7 +113,7 @@ public class EntityMinecartHopper extends EntityMinecartContainer implements IHo
+         if (TileEntityHopper.captureDroppedItems((IHopper) this)) {
+             return true;
+         } else {
+-            List list = this.world.getEntitiesWithinAABB(EntityItem.class, this.getBoundingBox().grow(0.25D, 0.0D, 0.25D), IEntitySelector.selectAnything);
++            List list = this.world.getEntitiesWithinAABB(EntityItem.class, Math.min(this.boundingBoxMinX - 0.25D, this.boundingBoxMaxX + 0.25D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.25D, this.boundingBoxMaxZ + 0.25D), Math.max(this.boundingBoxMinX - 0.25D, this.boundingBoxMaxX + 0.25D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.25D, this.boundingBoxMaxZ + 0.25D), IEntitySelector.selectAnything);
+ 
+             if (list.size() > 0) {
+                 TileEntityHopper.putDropInInventoryAllSlots((IInventory) this, (EntityItem) list.get(0));
+diff --git a/src/main/java/net/minecraft/server/EntityMonster.java b/src/main/java/net/minecraft/server/EntityMonster.java
+index 083dbf6efaa4742d385e1c2a84d00cec3512a597..ce1a2a4e33c2e03eddf5c451a12274cdceef8c77 100644
+--- a/src/main/java/net/minecraft/server/EntityMonster.java
++++ b/src/main/java/net/minecraft/server/EntityMonster.java
+@@ -103,7 +103,7 @@ public abstract class EntityMonster extends EntityCreature implements IMonster {
+     }
+ 
+     protected boolean isValidLightLevel() {
+-        BlockPosition blockposition = new BlockPosition(this.locX, this.getBoundingBox().minY, this.locZ);
++        BlockPosition blockposition = new BlockPosition(this.locX, this.boundingBoxMinY, this.locZ);
+ 
+         if (this.world.getLightFor(EnumSkyBlock.SKY, blockposition) > this.random.nextInt(32)) {
+             return false;
+diff --git a/src/main/java/net/minecraft/server/EntityOcelot.java b/src/main/java/net/minecraft/server/EntityOcelot.java
+index 3a83bf84faad348ab6cf9304d01a9c52237c2389..8783dc16395a4335fa74e35e4ea095e35d579e85 100644
+--- a/src/main/java/net/minecraft/server/EntityOcelot.java
++++ b/src/main/java/net/minecraft/server/EntityOcelot.java
+@@ -194,8 +194,8 @@ public class EntityOcelot extends EntityTameableAnimal {
+     }
+ 
+     public boolean canSpawn() {
+-        if (this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this) && this.world.getCubes(this, this.getBoundingBox()).isEmpty() && !this.world.containsLiquid(this.getBoundingBox())) {
+-            BlockPosition blockposition = new BlockPosition(this.locX, this.getBoundingBox().minY, this.locZ);
++        if (this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
++            BlockPosition blockposition = new BlockPosition(this.locX, this.boundingBoxMinY, this.locZ);
+ 
+             if (blockposition.getY() < this.world.getSeaLevel()) {
+                 return false;
+diff --git a/src/main/java/net/minecraft/server/EntityPigZombie.java b/src/main/java/net/minecraft/server/EntityPigZombie.java
+index eca81202499daf97bdf4c62a544032443c2d1bc0..679282c4915caaaa2de53e24f8741fce8d88d130 100644
+--- a/src/main/java/net/minecraft/server/EntityPigZombie.java
++++ b/src/main/java/net/minecraft/server/EntityPigZombie.java
+@@ -80,7 +80,7 @@ public class EntityPigZombie extends EntityZombie {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this) && this.world.getCubes(this, this.getBoundingBox()).isEmpty() && !this.world.containsLiquid(this.getBoundingBox());
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 9b91ad6ef41645048f52f7fd210fb22c7ae47bda..c11d5abea51e9339dfa8ec4a9e040100aa6fc926 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -94,7 +94,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         this.stepHeight = 0.0F;
+         this.setPositionRotation(blockposition, 0.0F, 0.0F);
+ 
+-        while (!worldserver.getCubes(this, this.getBoundingBox()).isEmpty() && this.locY < 255.0D) {
++        while (!worldserver.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && this.locY < 255.0D) {
+             this.setPosition(this.locX, this.locY + 1.0D, this.locZ);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityPotion.java b/src/main/java/net/minecraft/server/EntityPotion.java
+index b64fdca796133b2c8ff2b894b911eef160317d29..f297b6b67c99cfff6d72ec41b80bbb0fc6fb3b08 100644
+--- a/src/main/java/net/minecraft/server/EntityPotion.java
++++ b/src/main/java/net/minecraft/server/EntityPotion.java
+@@ -66,7 +66,7 @@ public class EntityPotion extends EntityProjectile {
+             List list = Items.POTION.getEffects(this.item);
+ 
+             if (true || list != null && !list.isEmpty()) { // CraftBukkit - Call event even if no effects to apply
+-                AxisAlignedBB axisalignedbb = this.getBoundingBox().grow(4.0D, 2.0D, 4.0D);
++                AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.boundingBoxMinX - 4.0D, this.boundingBoxMinY - 2.0D, this.boundingBoxMinZ - 4.0D, this.boundingBoxMaxX + 4.0D, this.boundingBoxMaxY + 2.0D, this.boundingBoxMaxZ + 4.0D); // Athena
+                 List list1 = this.world.getEntitiesWithinAABB(EntityLiving.class, axisalignedbb);
+ 
+                 if (true || !list1.isEmpty()) { // CraftBukkit - Run code even if there are no entities around
+diff --git a/src/main/java/net/minecraft/server/EntityProjectile.java b/src/main/java/net/minecraft/server/EntityProjectile.java
+index cd36934d3b8d83840f1ffce8bfda40a75aa2f1ea..7a1f731ab5cbbc2ff2ecccfa0376e798977c990e 100644
+--- a/src/main/java/net/minecraft/server/EntityProjectile.java
++++ b/src/main/java/net/minecraft/server/EntityProjectile.java
+@@ -120,7 +120,7 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+ 
+         if (!this.world.isClientSide) {
+             Entity entity = null;
+-            List list = this.world.getEntities(this, this.getBoundingBox().addCoord(this.motX, this.motY, this.motZ).grow(1.0D, 1.0D, 1.0D));
++            List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.min(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.min(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D), Math.max(this.boundingBoxMinX + Math.min(this.motX, 0.0D) - 1.0D, this.boundingBoxMaxX + Math.max(this.motX, 0.0D) + 1.0D), Math.max(this.boundingBoxMinY + Math.min(this.motY, 0.0D) - 1.0D, this.boundingBoxMaxY + Math.max(this.motY, 0.0D) + 1.0D), Math.max(this.boundingBoxMinZ + Math.min(this.motZ, 0.0D) - 1.0D, this.boundingBoxMaxZ + Math.max(this.motZ, 0.0D) + 1.0D));
+             double d0 = 0.0D;
+             EntityLiving entityliving = this.getShooter();
+ 
+@@ -129,7 +129,7 @@ public abstract class EntityProjectile extends Entity implements IProjectile {
+ 
+                 if (entity1.canBeCollidedWith() && ((entity1 != entityliving && entity1.passenger != entityliving) || this.ticksInAir >= 5)) { // PandaSpigot - Projectile Fixes
+                     float f = 0.3F;
+-                    AxisAlignedBB axisalignedbb = entity1.getBoundingBox().grow((double) f, (double) f, (double) f);
++                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(entity1.boundingBoxMinX - (double) f, entity1.boundingBoxMinY - (double) f, entity1.boundingBoxMinZ - (double) f, entity1.boundingBoxMaxX + (double) f, entity1.boundingBoxMaxY + (double) f, entity1.boundingBoxMaxZ + (double) f); // Athena
+                     MovingObjectPosition movingobjectposition1 = axisalignedbb.calculateIntercept(vec3d, vec3d1);
+ 
+                     if (movingobjectposition1 != null) {
+diff --git a/src/main/java/net/minecraft/server/EntitySlime.java b/src/main/java/net/minecraft/server/EntitySlime.java
+index 2c41e99d15f890c69d616e062c552e8ab6a5c32a..01a2c371c3c58e67e0c965a2aa2c0e517b4e2583 100644
+--- a/src/main/java/net/minecraft/server/EntitySlime.java
++++ b/src/main/java/net/minecraft/server/EntitySlime.java
+@@ -89,7 +89,7 @@ public class EntitySlime extends EntityInsentient implements IMonster {
+                 double d0 = this.locX + (double) f2;
+                 double d1 = this.locZ + (double) f3;
+ 
+-                world.addParticle(enumparticle, d0, this.getBoundingBox().minY, d1, 0.0D, 0.0D, 0.0D, new int[0]);
++                world.addParticle(enumparticle, d0, this.boundingBoxMinY, d1, 0.0D, 0.0D, 0.0D, new int[0]);
+             }
+ 
+             if (this.makesSoundOnLand()) {
+diff --git a/src/main/java/net/minecraft/server/EntityWaterAnimal.java b/src/main/java/net/minecraft/server/EntityWaterAnimal.java
+index 30d6bb49ec6fbe5e29b986d2dfe5c6b5744dabd6..4062ce74d95886b0dec2e4d614041ff59ed118ff 100644
+--- a/src/main/java/net/minecraft/server/EntityWaterAnimal.java
++++ b/src/main/java/net/minecraft/server/EntityWaterAnimal.java
+@@ -19,7 +19,7 @@ public abstract class EntityWaterAnimal extends EntityInsentient implements IAni
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.getBoundingBox(), (Entity) this);
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityWither.java b/src/main/java/net/minecraft/server/EntityWither.java
+index 74a12952e81a7e929c406e8987f5f6082035ec45..cbc7e95e0599b8654b51a56c9812b46c673f93e9 100644
+--- a/src/main/java/net/minecraft/server/EntityWither.java
++++ b/src/main/java/net/minecraft/server/EntityWither.java
+@@ -253,7 +253,7 @@ public class EntityWither extends EntityMonster implements IRangedEntity {
+                             this.updateWatchedTargetId(i, 0);
+                         }
+                     } else {
+-                        List list = this.world.getEntitiesWithinAABB(EntityLiving.class, this.getBoundingBox().grow(20.0D, 8.0D, 20.0D), Predicates.and(EntityWither.attackEntitySelector, IEntitySelector.NOT_SPECTATING));
++                        List list = this.world.getEntitiesWithinAABB(EntityLiving.class, Math.min(this.boundingBoxMinX - 20.0D, this.boundingBoxMaxX + 20.0D), Math.min(this.boundingBoxMinY - 8.0D, this.boundingBoxMaxY + 8.0D), Math.min(this.boundingBoxMinZ - 20.0D, this.boundingBoxMaxZ + 20.0D), Math.max(this.boundingBoxMinX - 20.0D, this.boundingBoxMaxX + 20.0D), Math.max(this.boundingBoxMinY - 8.0D, this.boundingBoxMaxY + 8.0D), Math.max(this.boundingBoxMinZ - 20.0D, this.boundingBoxMaxZ + 20.0D), Predicates.and(EntityWither.attackEntitySelector, IEntitySelector.NOT_SPECTATING));
+ 
+                         for (int i1 = 0; i1 < 10 && !list.isEmpty(); ++i1) {
+                             EntityLiving entityliving = (EntityLiving) list.get(this.random.nextInt(list.size()));
+@@ -450,7 +450,7 @@ public class EntityWither extends EntityMonster implements IRangedEntity {
+         }
+ 
+         if (!this.world.isClientSide) {
+-            Iterator iterator = this.world.getEntitiesWithinAABB(EntityHuman.class, this.getBoundingBox().grow(50.0D, 100.0D, 50.0D)).iterator();
++            Iterator iterator = this.world.getEntitiesWithinAABB(EntityHuman.class, Math.min(this.boundingBoxMinX - 50.0D, this.boundingBoxMaxX + 50.0D), Math.min(this.boundingBoxMinY - 100.0D, this.boundingBoxMaxY + 100.0D), Math.min(this.boundingBoxMinZ - 50.0D, this.boundingBoxMaxZ + 50.0D), Math.max(this.boundingBoxMinX - 50.0D, this.boundingBoxMaxX + 50.0D), Math.max(this.boundingBoxMinY - 100.0D, this.boundingBoxMaxY + 100.0D), Math.max(this.boundingBoxMinZ - 50.0D, this.boundingBoxMaxZ + 50.0D)).iterator();
+ 
+             while (iterator.hasNext()) {
+                 EntityHuman entityhuman = (EntityHuman) iterator.next();
+diff --git a/src/main/java/net/minecraft/server/EntityWolf.java b/src/main/java/net/minecraft/server/EntityWolf.java
+index 50583fa824c9794c7d1342e2f7977dc4520137e0..6191b9f232afe3b880164a325115c540144b667c 100644
+--- a/src/main/java/net/minecraft/server/EntityWolf.java
++++ b/src/main/java/net/minecraft/server/EntityWolf.java
+@@ -179,7 +179,7 @@ public class EntityWolf extends EntityTameableAnimal {
+             }
+ 
+             if (this.timeWolfIsShaking > 0.4F) {
+-                float f = (float) this.getBoundingBox().minY;
++                float f = (float) this.boundingBoxMinY;
+                 int i = (int) (MathHelper.sin((this.timeWolfIsShaking - 0.4F) * 3.1415927F) * 7.0F);
+ 
+                 for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/EntityZombie.java b/src/main/java/net/minecraft/server/EntityZombie.java
+index 8d8dd5016b61cfbf45502f15a33fc6bc42fb02aa..351479468047aeded7df452e416f9cbceeb95278 100644
+--- a/src/main/java/net/minecraft/server/EntityZombie.java
++++ b/src/main/java/net/minecraft/server/EntityZombie.java
+@@ -185,7 +185,7 @@ public class EntityZombie extends EntityMonster {
+ 
+                     if (World.doesBlockHaveSolidTopSurface((IBlockAccess) this.world, new BlockPosition(i1, j1 - 1, k1)) && !this.world.isLightLevel(new BlockPosition(i1, j1, k1), 10)) { // PandaSpigot - Use isLightLevel
+                         entityzombie.setPosition((double) i1, (double) j1, (double) k1);
+-                        if (!this.world.isPlayerNearby((double) i1, (double) j1, (double) k1, 7.0D) && this.world.checkNoEntityCollision(entityzombie.getBoundingBox(), (Entity) entityzombie) && this.world.getCubes(entityzombie, entityzombie.getBoundingBox()).isEmpty() && !this.world.containsLiquid(entityzombie.getBoundingBox())) {
++                        if (!this.world.isPlayerNearby((double) i1, (double) j1, (double) k1, 7.0D) && this.world.checkNoEntityCollision(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ, (Entity) entityzombie) && this.world.getCubes(entityzombie, entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ)) {
+                             this.world.addEntity(entityzombie, CreatureSpawnEvent.SpawnReason.REINFORCEMENTS); // CraftBukkit
+                             entityzombie.setGoalTarget(entityliving, EntityTargetEvent.TargetReason.REINFORCEMENT_TARGET, true);
+                             entityzombie.prepare(this.world.getDifficultyForLocation(new BlockPosition(entityzombie)), (GroupDataEntity) null);
+@@ -391,7 +391,7 @@ public class EntityZombie extends EntityMonster {
+             if (entityzombie_groupdatazombie.isChild) {
+                 this.setBaby(true);
+                 if ((double) this.world.random.nextFloat() < 0.05D) {
+-                    List list = this.world.getEntitiesWithinAABB(EntityChicken.class, this.getBoundingBox().grow(5.0D, 3.0D, 5.0D), IEntitySelector.IS_STANDALONE);
++                    List list = this.world.getEntitiesWithinAABB(EntityChicken.class, Math.min(this.boundingBoxMinX - 5.0D, this.boundingBoxMaxX + 5.0D), Math.min(this.boundingBoxMinY - 3.0D, this.boundingBoxMaxY + 3.0D), Math.min(this.boundingBoxMinZ - 5.0D, this.boundingBoxMaxZ + 5.0D), Math.max(this.boundingBoxMinX - 5.0D, this.boundingBoxMaxX + 5.0D), Math.max(this.boundingBoxMinY - 3.0D, this.boundingBoxMaxY + 3.0D), Math.max(this.boundingBoxMinZ - 5.0D, this.boundingBoxMaxZ + 5.0D), IEntitySelector.IS_STANDALONE);
+ 
+                     if (!list.isEmpty()) {
+                         EntityChicken entitychicken = (EntityChicken) list.get(0);
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+index fa53f00fe9053b13fdb0e93c388c9ebae9feb28f..527a9ad3e6cc9cb089f7c033f40c10849967543c 100644
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -149,7 +149,7 @@ public class Explosion {
+                         d8 /= d11;
+                         d9 /= d11;
+                         d10 /= d11;
+-                        double d12 = this.getBlockDensity(vec3d, entity.getBoundingBox()); // PaperSpigot - Optimize explosions
++                        double d12 = this.getBlockDensity(vec3d, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ); // PaperSpigot - Optimize explosions
+                         double d13 = (1.0D - d7) * d12;
+ 
+                         // entity.damageEntity(DamageSource.explosion(this), (float) ((int) ((d13 * d13 + d13) / 2.0D * 8.0D * (double) f3 + 1.0D)));+                        // CraftBukkit start
+@@ -319,15 +319,16 @@ public class Explosion {
+     }
+ 
+     // PaperSpigot start - Optimize explosions
+-    private float getBlockDensity(Vec3D vec3d, AxisAlignedBB aabb) {
++    // Athena - scalar bounds instead of an AxisAlignedBB
++    private float getBlockDensity(Vec3D vec3d, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+         if (!this.world.paperSpigotConfig.optimizeExplosions) {
+-            return this.world.getBlockDensity(vec3d, aabb);
++            return this.world.getBlockDensity(vec3d, minX, minY, minZ, maxX, maxY, maxZ);
+         }
+ 
+-        CacheKey key = new CacheKey(this, aabb);
++        CacheKey key = new CacheKey(this, minX, minY, minZ, maxX, maxY, maxZ);
+         Float blockDensity = this.world.explosionDensityCache.get(key);
+         if (blockDensity == null) {
+-            blockDensity = this.world.getBlockDensity(vec3d, aabb);
++            blockDensity = this.world.getBlockDensity(vec3d, minX, minY, minZ, maxX, maxY, maxZ);
+             this.world.explosionDensityCache.put(key, blockDensity);
+         }
+ 
+@@ -340,17 +341,17 @@ public class Explosion {
+         private final double minX, minY, minZ;
+         private final double maxX, maxY, maxZ;
+ 
+-        public CacheKey(Explosion explosion, AxisAlignedBB aabb) {
++        public CacheKey(Explosion explosion, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) { // Athena - scalar bounds
+             this.world = explosion.world;
+             this.posX = explosion.posX;
+             this.posY = explosion.posY;
+             this.posZ = explosion.posZ;
+-            this.minX = aabb.minX;
+-            this.minY = aabb.minY;
+-            this.minZ = aabb.minZ;
+-            this.maxX = aabb.maxX;
+-            this.maxY = aabb.maxY;
+-            this.maxZ = aabb.maxZ;
++            this.minX = minX;
++            this.minY = minY;
++            this.minZ = minZ;
++            this.maxX = maxX;
++            this.maxY = maxY;
++            this.maxZ = maxZ;
+         }
+ 
+         @Override
+diff --git a/src/main/java/net/minecraft/server/ItemBoat.java b/src/main/java/net/minecraft/server/ItemBoat.java
+index 16ed72824c714d3c3bebc00bced4166e3a5afc05..b1ce417233d64d152097c53bd8ee8585538f5747 100644
+--- a/src/main/java/net/minecraft/server/ItemBoat.java
++++ b/src/main/java/net/minecraft/server/ItemBoat.java
+@@ -34,14 +34,14 @@ public class ItemBoat extends Item {
+             Vec3D vec3d2 = entityhuman.getLook(f);
+             boolean flag = false;
+             float f9 = 1.0F;
+-            List list = world.getEntities(entityhuman, entityhuman.getBoundingBox().addCoord(vec3d2.xCoord * d3, vec3d2.yCoord * d3, vec3d2.zCoord * d3).grow((double) f9, (double) f9, (double) f9));
++            List list = world.getEntities(entityhuman, Math.min(entityhuman.boundingBoxMinX + Math.min(vec3d2.xCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxX + Math.max(vec3d2.xCoord * d3, 0.0D) + (double) f9), Math.min(entityhuman.boundingBoxMinY + Math.min(vec3d2.yCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxY + Math.max(vec3d2.yCoord * d3, 0.0D) + (double) f9), Math.min(entityhuman.boundingBoxMinZ + Math.min(vec3d2.zCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxZ + Math.max(vec3d2.zCoord * d3, 0.0D) + (double) f9), Math.max(entityhuman.boundingBoxMinX + Math.min(vec3d2.xCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxX + Math.max(vec3d2.xCoord * d3, 0.0D) + (double) f9), Math.max(entityhuman.boundingBoxMinY + Math.min(vec3d2.yCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxY + Math.max(vec3d2.yCoord * d3, 0.0D) + (double) f9), Math.max(entityhuman.boundingBoxMinZ + Math.min(vec3d2.zCoord * d3, 0.0D) - (double) f9, entityhuman.boundingBoxMaxZ + Math.max(vec3d2.zCoord * d3, 0.0D) + (double) f9));
+ 
+             for (int i = 0; i < list.size(); ++i) {
+                 Entity entity = (Entity) list.get(i);
+ 
+                 if (entity.canBeCollidedWith()) {
+                     float f10 = entity.getCollisionBorderSize();
+-                    AxisAlignedBB axisalignedbb = entity.getBoundingBox().grow((double) f10, (double) f10, (double) f10);
++                    AxisAlignedBB axisalignedbb = new AxisAlignedBB(entity.boundingBoxMinX - (double) f10, entity.boundingBoxMinY - (double) f10, entity.boundingBoxMinZ - (double) f10, entity.boundingBoxMaxX + (double) f10, entity.boundingBoxMaxY + (double) f10, entity.boundingBoxMaxZ + (double) f10); // Athena
+ 
+                     if (axisalignedbb.isVecInside(vec3d)) {
+                         flag = true;
+@@ -70,7 +70,7 @@ public class ItemBoat extends Item {
+                     EntityBoat entityboat = new EntityBoat(world, (double) ((float) blockposition.getX() + 0.5F), (double) ((float) blockposition.getY() + 1.0F), (double) ((float) blockposition.getZ() + 0.5F));
+ 
+                     entityboat.yaw = (float) (((MathHelper.floor((double) (entityhuman.yaw * 4.0F / 360.0F) + 0.5D) & 3) - 1) * 90);
+-                    if (!world.getCubes(entityboat, entityboat.getBoundingBox().grow(-0.1D, -0.1D, -0.1D)).isEmpty()) {
++                    if (!world.getCubes(entityboat, Math.min(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.min(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.min(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D), Math.max(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.max(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.max(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D)).isEmpty()) {
+                         return itemstack;
+                     }
+ 
+diff --git a/src/main/java/net/minecraft/server/Navigation.java b/src/main/java/net/minecraft/server/Navigation.java
+index 58eda993ffd9a3029cf8a36cdc00ffa894d9f507..3f41a5a51d049a1cede710a08fe10fe836ebac9c 100644
+--- a/src/main/java/net/minecraft/server/Navigation.java
++++ b/src/main/java/net/minecraft/server/Navigation.java
+@@ -29,7 +29,7 @@ public class Navigation extends NavigationAbstract {
+ 
+     private int getPathablePosY() {
+         if (this.theEntity.isInWater() && this.getCanSwim()) {
+-            int i = (int) this.theEntity.getBoundingBox().minY;
++            int i = (int) this.theEntity.boundingBoxMinY;
+             Block block = this.worldObj.getType(new BlockPosition(MathHelper.floor(this.theEntity.locX), i, MathHelper.floor(this.theEntity.locZ))).getBlock();
+             int j = 0;
+ 
+@@ -38,13 +38,13 @@ public class Navigation extends NavigationAbstract {
+                 block = this.worldObj.getType(new BlockPosition(MathHelper.floor(this.theEntity.locX), i, MathHelper.floor(this.theEntity.locZ))).getBlock();
+                 ++j;
+                 if (j > 16) {
+-                    return (int) this.theEntity.getBoundingBox().minY;
++                    return (int) this.theEntity.boundingBoxMinY;
+                 }
+             }
+ 
+             return i;
+         } else {
+-            return (int) (this.theEntity.getBoundingBox().minY + 0.5D);
++            return (int) (this.theEntity.boundingBoxMinY + 0.5D);
+         }
+     }
+ 
+@@ -52,7 +52,7 @@ public class Navigation extends NavigationAbstract {
+     protected void removeSunnyPath() {
+         super.removeSunnyPath();
+         if (this.shouldAvoidSun) {
+-            if (this.worldObj.canSeeSky(new BlockPosition(MathHelper.floor(this.theEntity.locX), (int) (this.theEntity.getBoundingBox().minY + 0.5D), MathHelper.floor(this.theEntity.locZ)))) {
++            if (this.worldObj.canSeeSky(new BlockPosition(MathHelper.floor(this.theEntity.locX), (int) (this.theEntity.boundingBoxMinY + 0.5D), MathHelper.floor(this.theEntity.locZ)))) {
+                 return;
+             }
+ 
+diff --git a/src/main/java/net/minecraft/server/Pathfinder.java b/src/main/java/net/minecraft/server/Pathfinder.java
+index 312f93099dd56b57d0805142981b0e741eb83de1..22728ab338e3f8902063727ba1c817295e9ec634 100644
+--- a/src/main/java/net/minecraft/server/Pathfinder.java
++++ b/src/main/java/net/minecraft/server/Pathfinder.java
+@@ -12,7 +12,7 @@ public class Pathfinder {
+     }
+ 
+     public PathEntity createEntityPathTo(IBlockAccess iblockaccess, Entity entity, Entity entity1, float f) {
+-        return this.createEntityPathTo(iblockaccess, entity, entity1.locX, entity1.getBoundingBox().minY, entity1.locZ, f);
++        return this.createEntityPathTo(iblockaccess, entity, entity1.locX, entity1.boundingBoxMinY, entity1.locZ, f);
+     }
+ 
+     public PathEntity createEntityPathTo(IBlockAccess iblockaccess, Entity entity, BlockPosition blockposition, float f) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalArrowAttack.java b/src/main/java/net/minecraft/server/PathfinderGoalArrowAttack.java
+index e5432798558787413daf5fe3076a42f794c6a52b..203723958bff5571611be829730fc31ffde8f98f 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalArrowAttack.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalArrowAttack.java
+@@ -60,7 +60,7 @@ public class PathfinderGoalArrowAttack extends PathfinderGoal {
+ 
+     @Override
+     public void updateTask() {
+-        double d0 = this.entityHost.getDistanceSq(this.attackTarget.locX, this.attackTarget.getBoundingBox().minY, this.attackTarget.locZ);
++        double d0 = this.entityHost.getDistanceSq(this.attackTarget.locX, this.attackTarget.boundingBoxMinY, this.attackTarget.locZ);
+         boolean flag = this.entityHost.getEntitySenses().canSee(this.attackTarget);
+ 
+         if (flag) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
+index f3b96ae1f7fe446f851590f6360c3113546a73b9..fa24d5a9b38639ee208745be1ff4332f6b691367 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
+@@ -44,7 +44,7 @@ public class PathfinderGoalAvoidTarget<T extends Entity> extends PathfinderGoal
+ 
+     @Override
+     public boolean shouldExecute() {
+-        List list = this.theEntity.world.getEntitiesWithinAABB(this.classToAvoid, this.theEntity.getBoundingBox().grow((double) this.avoidDistance, 3.0D, (double) this.avoidDistance), Predicates.and(new Predicate[]{IEntitySelector.NOT_SPECTATING, this.canBeSeenSelector, this.avoidTargetSelector}));
++        List list = this.theEntity.world.getEntitiesWithinAABB(this.classToAvoid, Math.min(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.min(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.min(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.max(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), Predicates.and(new Predicate[]{IEntitySelector.NOT_SPECTATING, this.canBeSeenSelector, this.avoidTargetSelector}));
+ 
+         if (list.isEmpty()) {
+             return false;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+index 7d078b4ca0283efb3c6597e678414dabcc5ee320..066b1ce76d55c5b8bd6203a5359929e0bc1a7a90 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+@@ -50,7 +50,7 @@ public class PathfinderGoalBreed extends PathfinderGoal {
+ 
+     private EntityAnimal getNearbyMate() {
+         float f = 8.0F;
+-        List list = this.theWorld.getEntitiesWithinAABB(this.theAnimal.getClass(), this.theAnimal.getBoundingBox().grow((double) f, (double) f, (double) f));
++        List list = this.theWorld.getEntitiesWithinAABB(this.theAnimal.getClass(), Math.min(this.theAnimal.boundingBoxMinX - (double) f, this.theAnimal.boundingBoxMaxX + (double) f), Math.min(this.theAnimal.boundingBoxMinY - (double) f, this.theAnimal.boundingBoxMaxY + (double) f), Math.min(this.theAnimal.boundingBoxMinZ - (double) f, this.theAnimal.boundingBoxMaxZ + (double) f), Math.max(this.theAnimal.boundingBoxMinX - (double) f, this.theAnimal.boundingBoxMaxX + (double) f), Math.max(this.theAnimal.boundingBoxMinY - (double) f, this.theAnimal.boundingBoxMaxY + (double) f), Math.max(this.theAnimal.boundingBoxMinZ - (double) f, this.theAnimal.boundingBoxMaxZ + (double) f));
+         double d0 = Double.MAX_VALUE;
+         EntityAnimal entityanimal = null;
+         Iterator iterator = list.iterator();
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalFleeSun.java b/src/main/java/net/minecraft/server/PathfinderGoalFleeSun.java
+index 7b57c1fe9fd8a9bfb5855aea266c06fb273ea8f5..01f313ad3efbe3723c9c91c844e3ab1586891784 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalFleeSun.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalFleeSun.java
+@@ -25,7 +25,7 @@ public class PathfinderGoalFleeSun extends PathfinderGoal {
+             return false;
+         } else if (!this.theCreature.isBurning()) {
+             return false;
+-        } else if (!this.theWorld.canSeeSky(new BlockPosition(this.theCreature.locX, this.theCreature.getBoundingBox().minY, this.theCreature.locZ))) {
++        } else if (!this.theWorld.canSeeSky(new BlockPosition(this.theCreature.locX, this.theCreature.boundingBoxMinY, this.theCreature.locZ))) {
+             return false;
+         } else {
+             Vec3D vec3d = this.findPossibleShelter();
+@@ -53,7 +53,7 @@ public class PathfinderGoalFleeSun extends PathfinderGoal {
+ 
+     private Vec3D findPossibleShelter() {
+         Random random = this.theCreature.getRNG();
+-        BlockPosition blockposition = new BlockPosition(this.theCreature.locX, this.theCreature.getBoundingBox().minY, this.theCreature.locZ);
++        BlockPosition blockposition = new BlockPosition(this.theCreature.locX, this.theCreature.boundingBoxMinY, this.theCreature.locZ);
+ 
+         for (int i = 0; i < 10; ++i) {
+             BlockPosition blockposition1 = blockposition.add(random.nextInt(20) - 10, random.nextInt(6) - 3, random.nextInt(20) - 10);
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalFollowOwner.java b/src/main/java/net/minecraft/server/PathfinderGoalFollowOwner.java
+index eeb29df11c4777c2a38d2be24c05c220362fde94..7029fc39de325332ac7d422ab4193037b26c0e27 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalFollowOwner.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalFollowOwner.java
+@@ -81,7 +81,7 @@ public class PathfinderGoalFollowOwner extends PathfinderGoal {
+                         if (this.thePet.getDistanceSqToEntity(this.theOwner) >= 144.0D) {
+                             int i = MathHelper.floor(this.theOwner.locX) - 2;
+                             int j = MathHelper.floor(this.theOwner.locZ) - 2;
+-                            int k = MathHelper.floor(this.theOwner.getBoundingBox().minY);
++                            int k = MathHelper.floor(this.theOwner.boundingBoxMinY);
+ 
+                             for (int l = 0; l <= 4; ++l) {
+                                 for (int i1 = 0; i1 <= 4; ++i1) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalFollowParent.java b/src/main/java/net/minecraft/server/PathfinderGoalFollowParent.java
+index ca370b6254f03dc62ea1354304e5116c248ac762..1911098172e6d802966d86d2b827ad560638202c 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalFollowParent.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalFollowParent.java
+@@ -20,7 +20,7 @@ public class PathfinderGoalFollowParent extends PathfinderGoal {
+         if (this.childAnimal.getAge() >= 0) {
+             return false;
+         } else {
+-            List<EntityAnimal> list = this.childAnimal.world.getEntitiesWithinAABB(this.childAnimal.getClass(), this.childAnimal.getBoundingBox().grow(8.0D, 4.0D, 8.0D));
++            List<EntityAnimal> list = this.childAnimal.world.getEntitiesWithinAABB(this.childAnimal.getClass(), Math.min(this.childAnimal.boundingBoxMinX - 8.0D, this.childAnimal.boundingBoxMaxX + 8.0D), Math.min(this.childAnimal.boundingBoxMinY - 4.0D, this.childAnimal.boundingBoxMaxY + 4.0D), Math.min(this.childAnimal.boundingBoxMinZ - 8.0D, this.childAnimal.boundingBoxMaxZ + 8.0D), Math.max(this.childAnimal.boundingBoxMinX - 8.0D, this.childAnimal.boundingBoxMaxX + 8.0D), Math.max(this.childAnimal.boundingBoxMinY - 4.0D, this.childAnimal.boundingBoxMaxY + 4.0D), Math.max(this.childAnimal.boundingBoxMinZ - 8.0D, this.childAnimal.boundingBoxMaxZ + 8.0D));
+             EntityAnimal entityanimal = null;
+             double d0 = Double.MAX_VALUE;
+ 
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalLookAtPlayer.java b/src/main/java/net/minecraft/server/PathfinderGoalLookAtPlayer.java
+index c2e7f5cb4947a0064689fa0399a24acaa063d0cb..67f56de2cdb2d07d091acf5c9393b9be3a367bbd 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalLookAtPlayer.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalLookAtPlayer.java
+@@ -38,7 +38,7 @@ public class PathfinderGoalLookAtPlayer extends PathfinderGoal {
+             if (this.watchedClass == EntityHuman.class) {
+                 this.closestEntity = this.theWatcher.world.findNearbyPlayer(this.theWatcher, (double) this.maxDistanceForPlayer);
+             } else {
+-                this.closestEntity = this.theWatcher.world.findNearestEntityWithinAABB(this.watchedClass, this.theWatcher.getBoundingBox().grow((double) this.maxDistanceForPlayer, 3.0D, (double) this.maxDistanceForPlayer), (Entity) this.theWatcher);
++                this.closestEntity = this.theWatcher.world.findNearestEntityWithinAABB(this.watchedClass, Math.min(this.theWatcher.boundingBoxMinX - (double) this.maxDistanceForPlayer, this.theWatcher.boundingBoxMaxX + (double) this.maxDistanceForPlayer), Math.min(this.theWatcher.boundingBoxMinY - 3.0D, this.theWatcher.boundingBoxMaxY + 3.0D), Math.min(this.theWatcher.boundingBoxMinZ - (double) this.maxDistanceForPlayer, this.theWatcher.boundingBoxMaxZ + (double) this.maxDistanceForPlayer), Math.max(this.theWatcher.boundingBoxMinX - (double) this.maxDistanceForPlayer, this.theWatcher.boundingBoxMaxX + (double) this.maxDistanceForPlayer), Math.max(this.theWatcher.boundingBoxMinY - 3.0D, this.theWatcher.boundingBoxMaxY + 3.0D), Math.max(this.theWatcher.boundingBoxMinZ - (double) this.maxDistanceForPlayer, this.theWatcher.boundingBoxMaxZ + (double) this.maxDistanceForPlayer), (Entity) this.theWatcher);
+             }
+ 
+             return this.closestEntity != null;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java b/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
+index 4cdb4d2cb6b1d43ccc5114dd85f4d1986d007b0e..c8cb780ce159f5e2aaa0300111b4efb255904395 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalMakeLove.java
+@@ -25,7 +25,7 @@ public class PathfinderGoalMakeLove extends PathfinderGoal {
+             if (this.villageObj == null) {
+                 return false;
+             } else if (this.checkSufficientDoorsPresentForNewVillager() && this.villagerObj.getIsWillingToMate(true)) {
+-                Entity entity = this.worldObj.findNearestEntityWithinAABB(EntityVillager.class, this.villagerObj.getBoundingBox().grow(8.0D, 3.0D, 8.0D), (Entity) this.villagerObj);
++                Entity entity = this.worldObj.findNearestEntityWithinAABB(EntityVillager.class, Math.min(this.villagerObj.boundingBoxMinX - 8.0D, this.villagerObj.boundingBoxMaxX + 8.0D), Math.min(this.villagerObj.boundingBoxMinY - 3.0D, this.villagerObj.boundingBoxMaxY + 3.0D), Math.min(this.villagerObj.boundingBoxMinZ - 8.0D, this.villagerObj.boundingBoxMaxZ + 8.0D), Math.max(this.villagerObj.boundingBoxMinX - 8.0D, this.villagerObj.boundingBoxMaxX + 8.0D), Math.max(this.villagerObj.boundingBoxMinY - 3.0D, this.villagerObj.boundingBoxMaxY + 3.0D), Math.max(this.villagerObj.boundingBoxMinZ - 8.0D, this.villagerObj.boundingBoxMaxZ + 8.0D), (Entity) this.villagerObj);
+ 
+                 if (entity == null) {
+                     return false;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalMeleeAttack.java b/src/main/java/net/minecraft/server/PathfinderGoalMeleeAttack.java
+index 964899b5270dd6d7377683f4ddfbccc21fb75af4..3874bb3814287a2b699b1b5da1bfb98708dcaf1d 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalMeleeAttack.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalMeleeAttack.java
+@@ -67,13 +67,13 @@ public class PathfinderGoalMeleeAttack extends PathfinderGoal {
+         EntityLiving entityliving = this.attacker.getGoalTarget();
+ 
+         this.attacker.getControllerLook().setLookPositionWithEntity(entityliving, 30.0F, 30.0F);
+-        double d0 = this.attacker.getDistanceSq(entityliving.locX, entityliving.getBoundingBox().minY, entityliving.locZ);
++        double d0 = this.attacker.getDistanceSq(entityliving.locX, entityliving.boundingBoxMinY, entityliving.locZ);
+         double d1 = this.a(entityliving);
+ 
+         --this.delayCounter;
+         if ((this.longMemory || this.attacker.getEntitySenses().canSee(entityliving)) && this.delayCounter <= 0 && (this.targetX == 0.0D && this.targetY == 0.0D && this.targetZ == 0.0D || entityliving.getDistanceSq(this.targetX, this.targetY, this.targetZ) >= 1.0D || this.attacker.getRNG().nextFloat() < 0.05F)) {
+             this.targetX = entityliving.locX;
+-            this.targetY = entityliving.getBoundingBox().minY;
++            this.targetY = entityliving.boundingBoxMinY;
+             this.targetZ = entityliving.locZ;
+             this.delayCounter = 4 + this.attacker.getRNG().nextInt(7);
+             if (d0 > 1024.0D) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+index 9de24e05ab36e5eb9df8613e971aee337a40d509..2b603070976c8eb1a78c170b05aafa2a92a9d321 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+@@ -71,7 +71,7 @@ public class PathfinderGoalNearestAttackableTarget<T extends EntityLiving> exten
+             return false;
+         } else {
+             double d0 = this.getTargetDistance();
+-            List list = this.taskOwner.world.getEntitiesWithinAABB(this.targetClass, this.taskOwner.getBoundingBox().grow(d0, 4.0D, d0), Predicates.and(this.targetEntitySelector, IEntitySelector.NOT_SPECTATING));
++            List list = this.taskOwner.world.getEntitiesWithinAABB(this.targetClass, Math.min(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.min(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.min(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Math.max(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.max(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.max(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Predicates.and(this.targetEntitySelector, IEntitySelector.NOT_SPECTATING));
+ 
+             Collections.sort(list, this.theNearestAttackableTargetSorter);
+             if (list.isEmpty()) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTargetInsentient.java b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTargetInsentient.java
+index 3897cac9a49c9c52b0b6728951630ab44150dd19..3f3e790122e0e7c8f42ea663020e1671e44beb18 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTargetInsentient.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTargetInsentient.java
+@@ -43,7 +43,7 @@ public class PathfinderGoalNearestAttackableTargetInsentient extends PathfinderG
+ 
+     public boolean shouldExecute() {
+         double d0 = this.getFollowRange();
+-        List list = this.mob.world.getEntitiesWithinAABB(this.f, this.mob.getBoundingBox().grow(d0, 4.0D, d0), this.c);
++        List list = this.mob.world.getEntitiesWithinAABB(this.f, Math.min(this.mob.boundingBoxMinX - d0, this.mob.boundingBoxMaxX + d0), Math.min(this.mob.boundingBoxMinY - 4.0D, this.mob.boundingBoxMaxY + 4.0D), Math.min(this.mob.boundingBoxMinZ - d0, this.mob.boundingBoxMaxZ + d0), Math.max(this.mob.boundingBoxMinX - d0, this.mob.boundingBoxMaxX + d0), Math.max(this.mob.boundingBoxMinY - 4.0D, this.mob.boundingBoxMaxY + 4.0D), Math.max(this.mob.boundingBoxMinZ - d0, this.mob.boundingBoxMaxZ + d0), this.c);
+ 
+         Collections.sort(list, this.d);
+         if (list.isEmpty()) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalOcelotAttack.java b/src/main/java/net/minecraft/server/PathfinderGoalOcelotAttack.java
+index 74694c3a503e58c9794feaa15451edff35d58f40..794930e0f94791f1038c55a23d160e34c65d42c9 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalOcelotAttack.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalOcelotAttack.java
+@@ -41,7 +41,7 @@ public class PathfinderGoalOcelotAttack extends PathfinderGoal {
+     public void updateTask() {
+         this.theEntity.getControllerLook().setLookPositionWithEntity(this.theVictim, 30.0F, 30.0F);
+         double d0 = (double) (this.theEntity.width * 2.0F * this.theEntity.width * 2.0F);
+-        double d1 = this.theEntity.getDistanceSq(this.theVictim.locX, this.theVictim.getBoundingBox().minY, this.theVictim.locZ);
++        double d1 = this.theEntity.getDistanceSq(this.theVictim.locX, this.theVictim.boundingBoxMinY, this.theVictim.locZ);
+         double d2 = 0.8D;
+ 
+         if (d1 > d0 && d1 < 16.0D) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalOfferFlower.java b/src/main/java/net/minecraft/server/PathfinderGoalOfferFlower.java
+index 53bb67f8bebe64e5c79a44bd35a4ea25315158cc..8baa88429dd3f575b7261b971c3b502b577eb1c6 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalOfferFlower.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalOfferFlower.java
+@@ -19,7 +19,7 @@ public class PathfinderGoalOfferFlower extends PathfinderGoal {
+         } else if (this.theGolem.getRNG().nextInt(8000) != 0) {
+             return false;
+         } else {
+-            this.theVillager = (EntityVillager) this.theGolem.world.findNearestEntityWithinAABB(EntityVillager.class, this.theGolem.getBoundingBox().grow(6.0D, 2.0D, 6.0D), (Entity) this.theGolem);
++            this.theVillager = (EntityVillager) this.theGolem.world.findNearestEntityWithinAABB(EntityVillager.class, Math.min(this.theGolem.boundingBoxMinX - 6.0D, this.theGolem.boundingBoxMaxX + 6.0D), Math.min(this.theGolem.boundingBoxMinY - 2.0D, this.theGolem.boundingBoxMaxY + 2.0D), Math.min(this.theGolem.boundingBoxMinZ - 6.0D, this.theGolem.boundingBoxMaxZ + 6.0D), Math.max(this.theGolem.boundingBoxMinX - 6.0D, this.theGolem.boundingBoxMaxX + 6.0D), Math.max(this.theGolem.boundingBoxMinY - 2.0D, this.theGolem.boundingBoxMaxY + 2.0D), Math.max(this.theGolem.boundingBoxMinZ - 6.0D, this.theGolem.boundingBoxMaxZ + 6.0D), (Entity) this.theGolem);
+             return this.theVillager != null;
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalPlay.java b/src/main/java/net/minecraft/server/PathfinderGoalPlay.java
+index b1c842e9aea6cfec04467fbb08417072f44347a1..26f97a59db35c3e29e7b66ae2995cab2fc2652c2 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalPlay.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalPlay.java
+@@ -23,7 +23,7 @@ public class PathfinderGoalPlay extends PathfinderGoal {
+         } else if (this.villagerObj.getRNG().nextInt(400) != 0) {
+             return false;
+         } else {
+-            List<EntityVillager> list = this.villagerObj.world.getEntitiesWithinAABB(EntityVillager.class, this.villagerObj.getBoundingBox().grow(6.0D, 3.0D, 6.0D));
++            List<EntityVillager> list = this.villagerObj.world.getEntitiesWithinAABB(EntityVillager.class, Math.min(this.villagerObj.boundingBoxMinX - 6.0D, this.villagerObj.boundingBoxMaxX + 6.0D), Math.min(this.villagerObj.boundingBoxMinY - 3.0D, this.villagerObj.boundingBoxMaxY + 3.0D), Math.min(this.villagerObj.boundingBoxMinZ - 6.0D, this.villagerObj.boundingBoxMaxZ + 6.0D), Math.max(this.villagerObj.boundingBoxMinX - 6.0D, this.villagerObj.boundingBoxMaxX + 6.0D), Math.max(this.villagerObj.boundingBoxMinY - 3.0D, this.villagerObj.boundingBoxMaxY + 3.0D), Math.max(this.villagerObj.boundingBoxMinZ - 6.0D, this.villagerObj.boundingBoxMaxZ + 6.0D));
+             double d0 = Double.MAX_VALUE;
+ 
+             for (EntityVillager entityvillager : list) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalTakeFlower.java b/src/main/java/net/minecraft/server/PathfinderGoalTakeFlower.java
+index 01a8cb7fa9fef94770cdd1510245b84ea83fa395..488afb257174721950f1fcea7963be614ba1da0d 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalTakeFlower.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalTakeFlower.java
+@@ -22,7 +22,7 @@ public class PathfinderGoalTakeFlower extends PathfinderGoal {
+         } else if (!this.theVillager.world.isDaytime()) {
+             return false;
+         } else {
+-            List<EntityIronGolem> list = this.theVillager.world.getEntitiesWithinAABB(EntityIronGolem.class, this.theVillager.getBoundingBox().grow(6.0D, 2.0D, 6.0D));
++            List<EntityIronGolem> list = this.theVillager.world.getEntitiesWithinAABB(EntityIronGolem.class, Math.min(this.theVillager.boundingBoxMinX - 6.0D, this.theVillager.boundingBoxMaxX + 6.0D), Math.min(this.theVillager.boundingBoxMinY - 2.0D, this.theVillager.boundingBoxMaxY + 2.0D), Math.min(this.theVillager.boundingBoxMinZ - 6.0D, this.theVillager.boundingBoxMaxZ + 6.0D), Math.max(this.theVillager.boundingBoxMinX - 6.0D, this.theVillager.boundingBoxMaxX + 6.0D), Math.max(this.theVillager.boundingBoxMinY - 2.0D, this.theVillager.boundingBoxMaxY + 2.0D), Math.max(this.theVillager.boundingBoxMinZ - 6.0D, this.theVillager.boundingBoxMaxZ + 6.0D));
+ 
+             if (list.isEmpty()) {
+                 return false;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalTargetNearestPlayer.java b/src/main/java/net/minecraft/server/PathfinderGoalTargetNearestPlayer.java
+index 9c4f1d54f0a67ecdbaf90918b195e1309d219e13..81397cfb594de45e87a49d38fdf0f2ec3d0aeb69 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalTargetNearestPlayer.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalTargetNearestPlayer.java
+@@ -57,7 +57,7 @@ public class PathfinderGoalTargetNearestPlayer extends PathfinderGoal {
+ 
+     public boolean shouldExecute() {
+         double d0 = this.maxTargetRange();
+-        List list = this.entityLiving.world.getEntitiesWithinAABB(EntityHuman.class, this.entityLiving.getBoundingBox().grow(d0, 4.0D, d0), this.predicate);
++        List list = this.entityLiving.world.getEntitiesWithinAABB(EntityHuman.class, Math.min(this.entityLiving.boundingBoxMinX - d0, this.entityLiving.boundingBoxMaxX + d0), Math.min(this.entityLiving.boundingBoxMinY - 4.0D, this.entityLiving.boundingBoxMaxY + 4.0D), Math.min(this.entityLiving.boundingBoxMinZ - d0, this.entityLiving.boundingBoxMaxZ + d0), Math.max(this.entityLiving.boundingBoxMinX - d0, this.entityLiving.boundingBoxMaxX + d0), Math.max(this.entityLiving.boundingBoxMinY - 4.0D, this.entityLiving.boundingBoxMaxY + 4.0D), Math.max(this.entityLiving.boundingBoxMinZ - d0, this.entityLiving.boundingBoxMaxZ + d0), this.predicate);
+ 
+         Collections.sort(list, this.sorter);
+         if (list.isEmpty()) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderNormal.java b/src/main/java/net/minecraft/server/PathfinderNormal.java
+index 56a7f98846120d6f2e4edc2c83b977d7a3332a37..5f74b591759ad4211de582d6580fff16b5e3ff5b 100644
+--- a/src/main/java/net/minecraft/server/PathfinderNormal.java
++++ b/src/main/java/net/minecraft/server/PathfinderNormal.java
+@@ -25,7 +25,7 @@ public class PathfinderNormal extends PathfinderAbstract {
+         int i;
+ 
+         if (this.canSwim && entity.isInWater()) {
+-            i = (int) entity.getBoundingBox().minY;
++            i = (int) entity.boundingBoxMinY;
+             BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition(MathHelper.floor(entity.locX), i, MathHelper.floor(entity.locZ));
+ 
+             for (Block block = this.blockaccess.getType(blockposition_mutableblockposition).getBlock(); block == Blocks.FLOWING_WATER || block == Blocks.WATER; block = this.blockaccess.getType(blockposition_mutableblockposition).getBlock()) {
+@@ -35,10 +35,10 @@ public class PathfinderNormal extends PathfinderAbstract {
+ 
+             this.avoidsWater = false;
+         } else {
+-            i = MathHelper.floor(entity.getBoundingBox().minY + 0.5D);
++            i = MathHelper.floor(entity.boundingBoxMinY + 0.5D);
+         }
+ 
+-        return this.openPoint(MathHelper.floor(entity.getBoundingBox().minX), i, MathHelper.floor(entity.getBoundingBox().minZ));
++        return this.openPoint(MathHelper.floor(entity.boundingBoxMinX), i, MathHelper.floor(entity.boundingBoxMinZ));
+     }
+ 
+     public PathPoint getPathPointToCoords(Entity entity, double d0, double d1, double d2) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderWater.java b/src/main/java/net/minecraft/server/PathfinderWater.java
+index bab78d5c40cfeb6446374af82f0982c3a81d71b9..b24829239d2022f3e2acb163cf87e8cdab5cecc5 100644
+--- a/src/main/java/net/minecraft/server/PathfinderWater.java
++++ b/src/main/java/net/minecraft/server/PathfinderWater.java
+@@ -17,7 +17,7 @@ public class PathfinderWater extends PathfinderAbstract {
+ 
+     @Override
+     public PathPoint getPathPointTo(Entity entity) {
+-        return this.openPoint(MathHelper.floor(entity.getBoundingBox().minX), MathHelper.floor(entity.getBoundingBox().minY + 0.5D), MathHelper.floor(entity.getBoundingBox().minZ));
++        return this.openPoint(MathHelper.floor(entity.boundingBoxMinX), MathHelper.floor(entity.boundingBoxMinY + 0.5D), MathHelper.floor(entity.boundingBoxMinZ));
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 209c14a62aec7dbaa620ddefeb5e4e5abc44ca32..f2f7a8c4b4d46b9bc122f7b6fc6699d98c00ff7e 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -423,7 +423,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     }
+ 
+                     float f4 = 0.0625F;
+-                    boolean flag = worldserver.getCubes(this.player, this.player.getBoundingBox().shrink((double) f4, (double) f4, (double) f4)).isEmpty();
++                    boolean flag = worldserver.getCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4)).isEmpty();
+ 
+                     if (this.player.onGround && !packetplayinflying.isOnGround() && d12 > 0.0D) {
+                         this.player.jump();
+@@ -452,7 +452,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     this.player.setLocation(d7, d8, d9, f2, f3);
+                     this.player.checkMovement(this.player.locX - d0, this.player.locY - d1, this.player.locZ - d2);
+                     if (!this.player.noclip) {
+-                        boolean flag2 = worldserver.getCubes(this.player, this.player.getBoundingBox().shrink((double) f4, (double) f4, (double) f4)).isEmpty();
++                        boolean flag2 = worldserver.getCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4)).isEmpty();
+ 
+                         if (flag && (flag1 || !flag2) && !this.player.isSleeping()) {
+                             this.setPlayerLocation(this.o, this.p, this.q, f2, f3);
+@@ -460,9 +460,16 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         }
+                     }
+ 
+-                    AxisAlignedBB axisalignedbb = this.player.getBoundingBox().grow((double) f4, (double) f4, (double) f4).addCoord(0.0D, -0.55D, 0.0D);
++                    // Athena - grow(f4).addCoord(0, -0.55, 0) expanded into locals; no box allocated
++                    double flyMinX = Math.min(this.player.boundingBoxMinX - (double) f4, this.player.boundingBoxMaxX + (double) f4);
++                    double flyMaxX = Math.max(this.player.boundingBoxMinX - (double) f4, this.player.boundingBoxMaxX + (double) f4);
++                    double flyMinY = Math.min(this.player.boundingBoxMinY - (double) f4, this.player.boundingBoxMaxY + (double) f4);
++                    double flyMaxY = Math.max(this.player.boundingBoxMinY - (double) f4, this.player.boundingBoxMaxY + (double) f4);
++                    double flyMinZ = Math.min(this.player.boundingBoxMinZ - (double) f4, this.player.boundingBoxMaxZ + (double) f4);
++                    double flyMaxZ = Math.max(this.player.boundingBoxMinZ - (double) f4, this.player.boundingBoxMaxZ + (double) f4);
++                    flyMinY += -0.55D; // addCoord with a negative Y extends the min side
+ 
+-                    if (!this.minecraftServer.getAllowFlight() && !this.player.abilities.canFly && !worldserver.checkBlockCollision(axisalignedbb)) {
++                    if (!this.minecraftServer.getAllowFlight() && !this.player.abilities.canFly && !worldserver.checkBlockCollision(flyMinX, flyMinY, flyMinZ, flyMaxX, flyMaxY, flyMaxZ)) {
+                         if (d16 >= -0.03125D) {
+                             ++this.floatingTickCount;
+                             if (this.floatingTickCount > 80) {
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 42459c294dc12fe360db32a7855ac895802c97b9..11231e94ae7cef1dd0b166612fb915040aad79d2 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -608,7 +608,7 @@ public abstract class PlayerList {
+ 
+         worldserver.chunkProviderServer.getChunkAt((int) entityplayer1.locX >> 4, (int) entityplayer1.locZ >> 4);
+ 
+-        while (avoidSuffocation && !worldserver.getCubes(entityplayer1, entityplayer1.getBoundingBox()).isEmpty() && entityplayer1.locY < 256.0D) {
++        while (avoidSuffocation && !worldserver.getCubes(entityplayer1, entityplayer1.boundingBoxMinX, entityplayer1.boundingBoxMinY, entityplayer1.boundingBoxMinZ, entityplayer1.boundingBoxMaxX, entityplayer1.boundingBoxMaxY, entityplayer1.boundingBoxMaxZ).isEmpty() && entityplayer1.locY < 256.0D) {
+             entityplayer1.setPosition(entityplayer1.locX, entityplayer1.locY + 1.0D, entityplayer1.locZ);
+         }
+         // CraftBukkit start
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 11a22dc7c970133a3ced39b4ddc55762a4c49494..ef1ad1e3aa10dbe1d701690b7376d5e134aec169 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1157,7 +1157,7 @@ public abstract class World implements IBlockAccess {
+             EntityExperienceOrb xp = (EntityExperienceOrb) entity;
+             double radius = spigotConfig.expMerge;
+             if (radius > 0) {
+-                List<Entity> entities = this.getEntities(entity, entity.getBoundingBox().grow(radius, radius, radius));
++                List<Entity> entities = this.getEntities(entity, Math.min(entity.boundingBoxMinX - radius, entity.boundingBoxMaxX + radius), Math.min(entity.boundingBoxMinY - radius, entity.boundingBoxMaxY + radius), Math.min(entity.boundingBoxMinZ - radius, entity.boundingBoxMaxZ + radius), Math.max(entity.boundingBoxMinX - radius, entity.boundingBoxMaxX + radius), Math.max(entity.boundingBoxMinY - radius, entity.boundingBoxMaxY + radius), Math.max(entity.boundingBoxMinZ - radius, entity.boundingBoxMaxZ + radius));
+                 for (Entity e : entities) {
+                     if (e instanceof EntityExperienceOrb) {
+                         EntityExperienceOrb loopItem = (EntityExperienceOrb) e;
+@@ -1278,6 +1278,14 @@ public abstract class World implements IBlockAccess {
+         this.worldAccesses.add(iworldaccess);
+     }
+ 
++    // Athena start - scalar entry point. The block collision API still needs a box object, so this
++    // builds one here for now (same single allocation the caller used to make); it disappears once
++    // Block.addCollisionBoxesToList is converted to write into a scalar sink.
++    public List<AxisAlignedBB> getCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        return this.getCubes(entity, new AxisAlignedBB(minX, minY, minZ, maxX, maxY, maxZ));
++    }
++    // Athena end
++
+     public List<AxisAlignedBB> getCubes(Entity entity, AxisAlignedBB axisalignedbb) {
+         ArrayList arraylist = Lists.newArrayList();
+         int i = MathHelper.floor(axisalignedbb.minX);
+@@ -1405,6 +1413,11 @@ public abstract class World implements IBlockAccess {
+         return entity.locX > d0 && entity.locX < d2 && entity.locZ > d1 && entity.locZ < d3;
+     }
+ 
++    // Athena - scalar entry point (see getCubes note)
++    public List<AxisAlignedBB> getCollisionBoxes(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        return this.getCollisionBoxes(new AxisAlignedBB(minX, minY, minZ, maxX, maxY, maxZ));
++    }
++
+     public List<AxisAlignedBB> getCollisionBoxes(AxisAlignedBB axisalignedbb) {
+         ArrayList arraylist = Lists.newArrayList();
+         int i = MathHelper.floor(axisalignedbb.minX);
+@@ -1843,8 +1856,18 @@ public abstract class World implements IBlockAccess {
+         return this.checkNoEntityCollision(axisalignedbb, (Entity) null);
+     }
+ 
++    // Athena - scalar overload
++    public boolean checkNoEntityCollision(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Entity entity) {
++        List list = this.getEntities((Entity) null, minX, minY, minZ, maxX, maxY, maxZ);
++        return this.checkNoEntityCollisionInList(list, entity);
++    }
++
+     public boolean checkNoEntityCollision(AxisAlignedBB axisalignedbb, Entity entity) {
+         List list = this.getEntities((Entity) null, axisalignedbb);
++        return this.checkNoEntityCollisionInList(list, entity);
++    }
++
++    private boolean checkNoEntityCollisionInList(List list, Entity entity) { // Athena - shared body
+ 
+         for (int i = 0; i < list.size(); ++i) {
+             Entity entity1 = (Entity) list.get(i);
+@@ -2090,10 +2113,15 @@ public abstract class World implements IBlockAccess {
+     }
+     // PandaSpigot end
+ 
+-    public float getBlockDensity(Vec3D vec3d, AxisAlignedBB axisalignedbb) {
+-        double d0 = 1.0D / ((axisalignedbb.maxX - axisalignedbb.minX) * 2.0D + 1.0D);
+-        double d1 = 1.0D / ((axisalignedbb.maxY - axisalignedbb.minY) * 2.0D + 1.0D);
+-        double d2 = 1.0D / ((axisalignedbb.maxZ - axisalignedbb.minZ) * 2.0D + 1.0D);
++    public float getBlockDensity(Vec3D vec3d, AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.getBlockDensity(vec3d, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public float getBlockDensity(Vec3D vec3d, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        double d0 = 1.0D / ((maxX - minX) * 2.0D + 1.0D);
++        double d1 = 1.0D / ((maxY - minY) * 2.0D + 1.0D);
++        double d2 = 1.0D / ((maxZ - minZ) * 2.0D + 1.0D);
+         double d3 = (1.0D - Math.floor(1.0D / d0) * d0) / 2.0D;
+         double d4 = (1.0D - Math.floor(1.0D / d2) * d2) / 2.0D;
+ 
+@@ -2104,9 +2132,9 @@ public abstract class World implements IBlockAccess {
+             for (float f = 0.0F; f <= 1.0F; f = (float) ((double) f + d0)) {
+                 for (float f1 = 0.0F; f1 <= 1.0F; f1 = (float) ((double) f1 + d1)) {
+                     for (float f2 = 0.0F; f2 <= 1.0F; f2 = (float) ((double) f2 + d2)) {
+-                        double d5 = axisalignedbb.minX + (axisalignedbb.maxX - axisalignedbb.minX) * (double) f;
+-                        double d6 = axisalignedbb.minY + (axisalignedbb.maxY - axisalignedbb.minY) * (double) f1;
+-                        double d7 = axisalignedbb.minZ + (axisalignedbb.maxZ - axisalignedbb.minZ) * (double) f2;
++                        double d5 = minX + (maxX - minX) * (double) f;
++                        double d6 = minY + (maxY - minY) * (double) f1;
++                        double d7 = minZ + (maxZ - minZ) * (double) f2;
+ 
+                         if (this.rayTrace(new Vec3D(d5 + d3, d6, d7 + d4), vec3d) == null) {
+                             ++i;
+@@ -2785,23 +2813,33 @@ public abstract class World implements IBlockAccess {
+         return null;
+     }
+ 
++    // Athena - scalar overloads for the entity queries
++    public List<Entity> getEntities(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        return this.getEntitiesInAABBexcluding(entity, minX, minY, minZ, maxX, maxY, maxZ, IEntitySelector.NOT_SPECTATING);
++    }
++
+     public List<Entity> getEntities(Entity entity, AxisAlignedBB axisalignedbb) {
+         return this.getEntitiesInAABBexcluding(entity, axisalignedbb, IEntitySelector.NOT_SPECTATING);
+     }
+ 
+-    public List<Entity> getEntitiesInAABBexcluding(Entity entity, AxisAlignedBB axisalignedbb, Predicate<? super Entity> predicate) {
++    public List<Entity> getEntitiesInAABBexcluding(Entity entity, AxisAlignedBB axisalignedbb, Predicate<? super Entity> predicate) { // Athena - delegate to the scalar overload
++        return this.getEntitiesInAABBexcluding(entity, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, predicate);
++    }
++
++    // Athena - scalar overload
++    public List<Entity> getEntitiesInAABBexcluding(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Predicate<? super Entity> predicate) {
+         ArrayList arraylist = Lists.newArrayList();
+-        int i = MathHelper.floor((axisalignedbb.minX - 2.0D) / 16.0D);
+-        int j = MathHelper.floor((axisalignedbb.maxX + 2.0D) / 16.0D);
+-        int k = MathHelper.floor((axisalignedbb.minZ - 2.0D) / 16.0D);
+-        int l = MathHelper.floor((axisalignedbb.maxZ + 2.0D) / 16.0D);
++        int i = MathHelper.floor((minX - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxX + 2.0D) / 16.0D);
++        int k = MathHelper.floor((minZ - 2.0D) / 16.0D);
++        int l = MathHelper.floor((maxZ + 2.0D) / 16.0D);
+ 
+         for (int i1 = i; i1 <= j; ++i1) {
+             for (int j1 = k; j1 <= l; ++j1) {
+                 // PandaSpigot start - Use getChunkIfLoaded
+                 Chunk chunk = this.getChunkIfLoaded(i1, j1);
+                 if (chunk != null) {
+-                    chunk.getEntitiesWithinAABBForEntity(entity, axisalignedbb, arraylist, predicate);
++                    chunk.getEntitiesWithinAABBForEntity(entity, minX, minY, minZ, maxX, maxY, maxZ, arraylist, predicate);
+                 // PandaSpigot end
+                 }
+             }
+@@ -2844,17 +2882,26 @@ public abstract class World implements IBlockAccess {
+         return this.getEntitiesWithinAABB(oclass, axisalignedbb, IEntitySelector.NOT_SPECTATING);
+     }
+ 
+-    public <T extends Entity> List<T> getEntitiesWithinAABB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, Predicate<? super T> predicate) {
+-        int i = MathHelper.floor((axisalignedbb.minX - 2.0D) / 16.0D);
+-        int j = MathHelper.floor((axisalignedbb.maxX + 2.0D) / 16.0D);
+-        int k = MathHelper.floor((axisalignedbb.minZ - 2.0D) / 16.0D);
+-        int l = MathHelper.floor((axisalignedbb.maxZ + 2.0D) / 16.0D);
++    public <T extends Entity> List<T> getEntitiesWithinAABB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, Predicate<? super T> predicate) { // Athena - delegate to the scalar overload
++        return this.getEntitiesWithinAABB(oclass, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, predicate);
++    }
++
++    // Athena - scalar overloads
++    public <T extends Entity> List<T> getEntitiesWithinAABB(Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        return this.getEntitiesWithinAABB(oclass, minX, minY, minZ, maxX, maxY, maxZ, IEntitySelector.NOT_SPECTATING);
++    }
++
++    public <T extends Entity> List<T> getEntitiesWithinAABB(Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Predicate<? super T> predicate) {
++        int i = MathHelper.floor((minX - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxX + 2.0D) / 16.0D);
++        int k = MathHelper.floor((minZ - 2.0D) / 16.0D);
++        int l = MathHelper.floor((maxZ + 2.0D) / 16.0D);
+         ArrayList arraylist = Lists.newArrayList();
+ 
+         for (int i1 = i; i1 <= j; ++i1) {
+             for (int j1 = k; j1 <= l; ++j1) {
+                 if (this.isChunkLoaded(i1, j1, true)) {
+-                    this.getChunkAt(i1, j1).getEntitiesOfTypeWithinAAAB(oclass, axisalignedbb, arraylist, predicate);
++                    this.getChunkAt(i1, j1).getEntitiesOfTypeWithinAAAB(oclass, minX, minY, minZ, maxX, maxY, maxZ, arraylist, predicate);
+                 }
+             }
+         }
+@@ -2862,6 +2909,11 @@ public abstract class World implements IBlockAccess {
+         return arraylist;
+     }
+ 
++    // Athena - scalar overload
++    public <T extends Entity> T findNearestEntityWithinAABB(Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, T t0) {
++        return this.findNearestEntityWithinAABB(oclass, new AxisAlignedBB(minX, minY, minZ, maxX, maxY, maxZ), t0);
++    }
++
+     public <T extends Entity> T findNearestEntityWithinAABB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, T t0) {
+         List list = this.getEntitiesWithinAABB(oclass, axisalignedbb);
+         Entity entity = null;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index 7fc275d2aea78a523854f26d71d8072b80919c0f..ce3c56a1c454826a9a58d15d607c8fc84f6403ab 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -268,7 +268,7 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+     }
+ 
+     public List<org.bukkit.entity.Entity> getNearbyEntities(double x, double y, double z) {
+-        List<Entity> notchEntityList = entity.world.getEntitiesInAABBexcluding(entity, entity.getBoundingBox().grow(x, y, z), null);
++        List<Entity> notchEntityList = entity.world.getEntitiesInAABBexcluding(entity, Math.min(entity.boundingBoxMinX - x, entity.boundingBoxMaxX + x), Math.min(entity.boundingBoxMinY - y, entity.boundingBoxMaxY + y), Math.min(entity.boundingBoxMinZ - z, entity.boundingBoxMaxZ + z), Math.max(entity.boundingBoxMinX - x, entity.boundingBoxMaxX + x), Math.max(entity.boundingBoxMinY - y, entity.boundingBoxMaxY + y), Math.max(entity.boundingBoxMinZ - z, entity.boundingBoxMaxZ + z), null);
+         List<org.bukkit.entity.Entity> bukkitEntityList = new java.util.ArrayList<org.bukkit.entity.Entity>(notchEntityList.size());
+ 
+         for (Entity e : notchEntityList) {
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index a852a7e9efb1410d0c4c75b9a8cbf2ea0a7ae916..e4e403b222dd03de6af98828f199c6ae5734220e 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -3,7 +3,7 @@ package org.spigotmc;
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Set;
+-import net.minecraft.server.AxisAlignedBB;
++import net.minecraft.server.AxisAlignedBBHelper; // Athena
+ import net.minecraft.server.Chunk;
+ import net.minecraft.server.Entity;
+ import net.minecraft.server.EntityAmbient;
+@@ -38,10 +38,12 @@ import co.aikar.timings.SpigotTimings;
+ public class ActivationRange
+ {
+ 
+-    static AxisAlignedBB maxBB = AxisAlignedBB.fromBounds( 0, 0, 0, 0, 0, 0 );
+-    static AxisAlignedBB miscBB = AxisAlignedBB.fromBounds( 0, 0, 0, 0, 0, 0 );
+-    static AxisAlignedBB animalBB = AxisAlignedBB.fromBounds( 0, 0, 0, 0, 0, 0 );
+-    static AxisAlignedBB monsterBB = AxisAlignedBB.fromBounds( 0, 0, 0, 0, 0, 0 );
++    // Athena - the four activation boxes are held as scalars. They were rebuilt for every player
++    // on every tick, so this removes four box allocations per player per tick.
++    static double maxBBMinX, maxBBMinY, maxBBMinZ, maxBBMaxX, maxBBMaxY, maxBBMaxZ;
++    static double miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ;
++    static double animalBBMinX, animalBBMinY, animalBBMinZ, animalBBMaxX, animalBBMaxY, animalBBMaxZ;
++    static double monsterBBMinX, monsterBBMinY, monsterBBMinZ, monsterBBMaxX, monsterBBMaxY, monsterBBMaxZ;
+ 
+     /**
+      * Initializes an entities type on construction to specify what group this
+@@ -115,15 +117,36 @@ public class ActivationRange
+         {
+ 
+             player.activatedTick = MinecraftServer.currentTick;
+-            maxBB = player.getBoundingBox().grow( maxRange, 256, maxRange );
+-            miscBB = player.getBoundingBox().grow( miscActivationRange, 256, miscActivationRange );
+-            animalBB = player.getBoundingBox().grow( animalActivationRange, 256, animalActivationRange );
+-            monsterBB = player.getBoundingBox().grow( monsterActivationRange, 256, monsterActivationRange );
++            // Athena - grow expanded inline (min/max mirrors the AxisAlignedBB constructor)
++            maxBBMinX = Math.min( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
++            maxBBMaxX = Math.max( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
++            maxBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            maxBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            maxBBMinZ = Math.min( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
++            maxBBMaxZ = Math.max( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
++            miscBBMinX = Math.min( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
++            miscBBMaxX = Math.max( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
++            miscBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            miscBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            miscBBMinZ = Math.min( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
++            miscBBMaxZ = Math.max( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
++            animalBBMinX = Math.min( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
++            animalBBMaxX = Math.max( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
++            animalBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            animalBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            animalBBMinZ = Math.min( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
++            animalBBMaxZ = Math.max( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
++            monsterBBMinX = Math.min( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
++            monsterBBMaxX = Math.max( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
++            monsterBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            monsterBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            monsterBBMinZ = Math.min( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
++            monsterBBMaxZ = Math.max( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
+ 
+-            int i = MathHelper.floor( maxBB.minX / 16.0D );
+-            int j = MathHelper.floor( maxBB.maxX / 16.0D );
+-            int k = MathHelper.floor( maxBB.minZ / 16.0D );
+-            int l = MathHelper.floor( maxBB.maxZ / 16.0D );
++            int i = MathHelper.floor( maxBBMinX / 16.0D );
++            int j = MathHelper.floor( maxBBMaxX / 16.0D );
++            int k = MathHelper.floor( maxBBMinZ / 16.0D );
++            int l = MathHelper.floor( maxBBMaxZ / 16.0D );
+ 
+             for ( int i1 = i; i1 <= j; ++i1 )
+             {
+@@ -163,20 +186,20 @@ public class ActivationRange
+                     switch ( entity.activationType )
+                     {
+                         case 1:
+-                            if ( monsterBB.intersectsWith( entity.getBoundingBox() ) )
++                            if ( AxisAlignedBBHelper.intersects( monsterBBMinX, monsterBBMinY, monsterBBMinZ, monsterBBMaxX, monsterBBMaxY, monsterBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }
+                             break;
+                         case 2:
+-                            if ( animalBB.intersectsWith( entity.getBoundingBox() ) )
++                            if ( AxisAlignedBBHelper.intersects( animalBBMinX, animalBBMinY, animalBBMinZ, animalBBMaxX, animalBBMaxY, animalBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }
+                             break;
+                         case 3:
+                         default:
+-                            if ( miscBB.intersectsWith( entity.getBoundingBox() ) )
++                            if ( AxisAlignedBBHelper.intersects( miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }

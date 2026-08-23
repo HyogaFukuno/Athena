@@ -1,0 +1,206 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 01:25:45 +0900
+Subject: [PATCH] Add scalar overloads for World/WorldBorder box queries
+
+Give the block/material queries that only read a box's bounds an overload
+taking the six doubles directly (checkBlockCollision, containsLiquid,
+isFlammableWithin, handleMaterialAcceleration, isMaterialInBB,
+isAABBInMaterial, WorldBorder.contains). The existing AxisAlignedBB
+signatures stay as thin delegates, so nothing changes yet.
+
+This is the groundwork for removing AxisAlignedBB: once callers hold
+their bounds as doubles they can query the world without building a box
+just to be read apart again.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 5394a96b0e457239442934ebd91815b6c46b52e8..11a22dc7c970133a3ced39b4ddc55762a4c49494 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1864,13 +1864,18 @@ public abstract class World implements IBlockAccess {
+         return true;
+     }
+ 
+-    public boolean checkBlockCollision(AxisAlignedBB axisalignedbb) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ);
++    public boolean checkBlockCollision(AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.checkBlockCollision(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean checkBlockCollision(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+ 
+         for (int k1 = i; k1 <= j; ++k1) {
+@@ -1888,13 +1893,18 @@ public abstract class World implements IBlockAccess {
+         return false;
+     }
+ 
+-    public boolean containsLiquid(AxisAlignedBB axisalignedbb) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ);
++    public boolean containsLiquid(AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.containsLiquid(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean containsLiquid(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+ 
+         for (int k1 = i; k1 <= j; ++k1) {
+@@ -1912,13 +1922,18 @@ public abstract class World implements IBlockAccess {
+         return false;
+     }
+ 
+-    public boolean isFlammableWithin(AxisAlignedBB axisalignedbb) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX + 1.0D);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY + 1.0D);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ + 1.0D);
++    public boolean isFlammableWithin(AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.isFlammableWithin(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean isFlammableWithin(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
+ 
+         if (this.isAreaLoaded(i, k, i1, j, l, j1, true)) {
+             BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+@@ -1939,13 +1954,18 @@ public abstract class World implements IBlockAccess {
+         return false;
+     }
+ 
+-    public boolean handleMaterialAcceleration(AxisAlignedBB axisalignedbb, Material material, Entity entity) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX + 1.0D);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY + 1.0D);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ + 1.0D);
++    public boolean handleMaterialAcceleration(AxisAlignedBB axisalignedbb, Material material, Entity entity) { // Athena - delegate to the scalar overload
++        return this.handleMaterialAcceleration(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, material, entity);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean handleMaterialAcceleration(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Material material, Entity entity) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
+ 
+         if (!this.isAreaLoaded(i, k, i1, j, l, j1, true)) {
+             return false;
+@@ -1986,13 +2006,18 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
+-    public boolean isMaterialInBB(AxisAlignedBB axisalignedbb, Material material) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX + 1.0D);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY + 1.0D);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ + 1.0D);
++    public boolean isMaterialInBB(AxisAlignedBB axisalignedbb, Material material) { // Athena - delegate to the scalar overload
++        return this.isMaterialInBB(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, material);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean isMaterialInBB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Material material) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+@@ -2008,13 +2033,18 @@ public abstract class World implements IBlockAccess {
+         return false;
+     }
+ 
+-    public boolean isAABBInMaterial(AxisAlignedBB axisalignedbb, Material material) {
+-        int i = MathHelper.floor(axisalignedbb.minX);
+-        int j = MathHelper.floor(axisalignedbb.maxX + 1.0D);
+-        int k = MathHelper.floor(axisalignedbb.minY);
+-        int l = MathHelper.floor(axisalignedbb.maxY + 1.0D);
+-        int i1 = MathHelper.floor(axisalignedbb.minZ);
+-        int j1 = MathHelper.floor(axisalignedbb.maxZ + 1.0D);
++    public boolean isAABBInMaterial(AxisAlignedBB axisalignedbb, Material material) { // Athena - delegate to the scalar overload
++        return this.isAABBInMaterial(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, material);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean isAABBInMaterial(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Material material) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+@@ -2031,7 +2061,7 @@ public abstract class World implements IBlockAccess {
+                             d0 = (double) (l1 + 1) - (double) j2 / 8.0D;
+                         }
+ 
+-                        if (d0 >= axisalignedbb.minY) {
++                        if (d0 >= minY) {
+                             return true;
+                         }
+                     }
+diff --git a/src/main/java/net/minecraft/server/WorldBorder.java b/src/main/java/net/minecraft/server/WorldBorder.java
+index 288bbc476760deef2b71ae495d7373a0c282e158..475b50640f9f37aa5eb22a26cef2c09aaa57f922 100644
+--- a/src/main/java/net/minecraft/server/WorldBorder.java
++++ b/src/main/java/net/minecraft/server/WorldBorder.java
+@@ -49,8 +49,13 @@ public class WorldBorder {
+         return (double) ((x << 4) + 15) > this.minX() && (double) (x << 4) < this.maxX() && (double) ((z << 4) + 15) > this.minZ() && (double) (z << 4) < this.maxZ(); // PandaSpigot - Fix isInBounds(int x, int z) checking the wrong variable
+     }
+ 
+-    public boolean contains(AxisAlignedBB axisalignedbb) {
+-        return axisalignedbb.maxX > this.minX() && axisalignedbb.minX < this.maxX() && axisalignedbb.maxZ > this.minZ() && axisalignedbb.minZ < this.maxZ();
++    public boolean contains(AxisAlignedBB axisalignedbb) { // Athena - delegate to the scalar overload
++        return this.contains(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ);
++    }
++
++    // Athena - scalar overload: takes the box as six doubles so callers need not allocate one
++    public boolean contains(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        return maxX > this.minX() && minX < this.maxX() && maxZ > this.minZ() && minZ < this.maxZ();
+     }
+ 
+     public double getClosestDistance(Entity entity) {
