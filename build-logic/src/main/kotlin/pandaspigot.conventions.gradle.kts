@@ -13,14 +13,17 @@ repositories {
 group = "com.hpfxd.pandaspigot"
 version = "1.8.8-R0.1-SNAPSHOT"
 
+// Athena start - Java 25 でビルド・実行する (Java 8 互換は不要)
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
 tasks {
     withType<JavaCompile>().configureEach {
         options.encoding = "UTF-8"
-        options.release = 8
-    }
-
-    java {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        options.release = 25
     }
 }
+// Athena end
