@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 22 Aug 2026 20:43:30 +0900
+Subject: [PATCH] Update decompiled tests to use deobfuscated member names
+
+The NMS deobfuscation renamed members that the CraftBukkit test suite
+referenced by their old obfuscated names, breaking compileTestJava.
+Follow the readable names so the full test build (./panda jar) passes:
+
+- DispenserRegistry.c()        -> register()
+- EntitySheep.a(EnumColor)     -> getDyeRgb(EnumColor)
+- ItemDye.a                    -> dyeColors
+- NibbleArray.a(int,byte)      -> setIndex(int,int)
+- NibbleArray.a(int)           -> getFromIndex(int)
+- EnumArt.B/C/D                -> title/sizeX/sizeY
+- MaterialMapColor.a / .L      -> mapColorArray / colorValue
+- AchievementList.e            -> achievementList
+
+All 5392 tests pass.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/test/java/org/bukkit/ArtTest.java b/src/test/java/org/bukkit/ArtTest.java
+index 7f40288922c7a0ba13184cb54b0d1e133e1f1947..3d51864c78f4b11a7324fe3a36ad1aeb39b2c430 100644
+--- a/src/test/java/org/bukkit/ArtTest.java
++++ b/src/test/java/org/bukkit/ArtTest.java
+@@ -24,9 +24,9 @@ public class ArtTest {
+ 
+         for (EnumArt enumArt : EnumArt.values()) {
+             int id = enumArt.ordinal();
+-            String name = enumArt.B;
+-            int width = enumArt.C / UNIT_MULTIPLIER;
+-            int height = enumArt.D / UNIT_MULTIPLIER;
++            String name = enumArt.title;
++            int width = enumArt.sizeX / UNIT_MULTIPLIER;
++            int height = enumArt.sizeY / UNIT_MULTIPLIER;
+ 
+             Art subject = Art.getById(id);
+ 
+diff --git a/src/test/java/org/bukkit/DyeColorsTest.java b/src/test/java/org/bukkit/DyeColorsTest.java
+index f0b889b344af2620f4d6e6d1b23f2d4732fcf75b..af69387af8cada13d1d295f4cdf0d40cfb23b08c 100644
+--- a/src/test/java/org/bukkit/DyeColorsTest.java
++++ b/src/test/java/org/bukkit/DyeColorsTest.java
+@@ -34,7 +34,7 @@ public class DyeColorsTest extends AbstractTestingBase {
+     @Test
+     public void checkColor() {
+         Color color = dye.getColor();
+-        float[] nmsColorArray = EntitySheep.a(EnumColor.fromColorIndex(dye.getWoolData()));
++        float[] nmsColorArray = EntitySheep.getDyeRgb(EnumColor.fromColorIndex(dye.getWoolData()));
+         Color nmsColor = Color.fromRGB((int) (nmsColorArray[0] * 255), (int) (nmsColorArray[1] * 255), (int) (nmsColorArray[2] * 255));
+         assertThat(color, is(nmsColor));
+     }
+@@ -42,7 +42,7 @@ public class DyeColorsTest extends AbstractTestingBase {
+     @Test
+     public void checkFireworkColor() {
+         Color color = dye.getFireworkColor();
+-        int nmsColor = ItemDye.a[dye.getDyeData()];
++        int nmsColor = ItemDye.dyeColors[dye.getDyeData()];
+         assertThat(color, is(Color.fromRGB(nmsColor)));
+     }
+ }
+diff --git a/src/test/java/org/bukkit/NibbleArrayTest.java b/src/test/java/org/bukkit/NibbleArrayTest.java
+index 448c29f17928bf25a4d44490684925d59fb46e27..cd20cd6d5bcae21c9868a215394ae938e1109f7d 100644
+--- a/src/test/java/org/bukkit/NibbleArrayTest.java
++++ b/src/test/java/org/bukkit/NibbleArrayTest.java
+@@ -19,11 +19,11 @@ public class NibbleArrayTest {
+             byte number = (byte) (random.nextInt() & 0xF);
+             
+             classic[i] = number;
+-            nibble.a(i, number);
++            nibble.setIndex(i, number);
+         }
+         
+         for (int i = 0; i < classic.length; i++) {
+-            Assert.assertEquals("Nibble array mismatch", classic[i], nibble.a(i));
++            Assert.assertEquals("Nibble array mismatch", classic[i], nibble.getFromIndex(i));
+         }
+     }
+ }
+diff --git a/src/test/java/org/bukkit/StatisticsAndAchievementsTest.java b/src/test/java/org/bukkit/StatisticsAndAchievementsTest.java
+index 0a6c277ab776426901fa9ccff738b4d811303a7b..44e06a842373c2b9d16478380ce4a38da31910b6 100644
+--- a/src/test/java/org/bukkit/StatisticsAndAchievementsTest.java
++++ b/src/test/java/org/bukkit/StatisticsAndAchievementsTest.java
+@@ -21,7 +21,7 @@ public class StatisticsAndAchievementsTest extends AbstractTestingBase {
+     @SuppressWarnings("unchecked")
+     public void verifyAchievementMapping() throws Throwable {
+         List<Achievement> achievements = Lists.newArrayList(Achievement.values());
+-        for (net.minecraft.server.Achievement achievement : (List<net.minecraft.server.Achievement>) AchievementList.e) {
++        for (net.minecraft.server.Achievement achievement : (List<net.minecraft.server.Achievement>) AchievementList.achievementList) {
+             String name = achievement.name;
+ 
+             String message = String.format("org.bukkit.Achievement is missing: '%s'", name);
+diff --git a/src/test/java/org/bukkit/map/MapTest.java b/src/test/java/org/bukkit/map/MapTest.java
+index 4cb2cf94482627361747e4dbdb053a2c30b38f3c..b782e7b64b82a02e26e94bbe3a1cb56580d4bb70 100644
+--- a/src/test/java/org/bukkit/map/MapTest.java
++++ b/src/test/java/org/bukkit/map/MapTest.java
+@@ -16,7 +16,7 @@ public class MapTest {
+ 
+     @Test
+     public void testColors() {
+-        MaterialMapColor[] nmsColors = MaterialMapColor.a;
++        MaterialMapColor[] nmsColors = MaterialMapColor.mapColorArray;
+         Color[] bukkitColors = MapPalette.colors;
+ 
+         boolean fail = false;
+@@ -24,7 +24,7 @@ public class MapTest {
+             if (nmsColors[i] == null) {
+                 break;
+             }
+-            int rgb = nmsColors[i].L;
++            int rgb = nmsColors[i].colorValue;
+ 
+             int r = (rgb >> 16) & 0xFF;
+             int g = (rgb >> 8) & 0xFF;
+diff --git a/src/test/java/org/bukkit/support/AbstractTestingBase.java b/src/test/java/org/bukkit/support/AbstractTestingBase.java
+index 3a362b75bc459d94c7545eb491d0db797e75e037..cb6cede60ae7e74bf582be086366e25946cdae2c 100644
+--- a/src/test/java/org/bukkit/support/AbstractTestingBase.java
++++ b/src/test/java/org/bukkit/support/AbstractTestingBase.java
+@@ -69,7 +69,7 @@ public abstract class AbstractTestingBase {
+ 
+     @BeforeClass
+     public static void setup() {
+-        DispenserRegistry.c();
++        DispenserRegistry.register();
+         DummyServer.setup();
+         DummyPotions.setup();
+         DummyEnchantments.setup();

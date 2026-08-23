@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 22 Aug 2026 20:28:16 +0900
+Subject: [PATCH] Eliminate hot-path boxing with fastutil primitive collections
+
+Replace boxing java.util.HashMap keyed by Integer/Long on frequently
+executed paths with fastutil primitive-keyed maps:
+
+- EntityLiving.effects: Map<Integer,MobEffect> -> Int2ObjectOpenHashMap.
+  Ticked every tick for every living entity (updatePotionEffects) plus
+  per-tick hasEffect/getEffect checks. Key access now uses the primitive
+  int API and the two hot iteration loops walk values() instead of
+  boxing keySet entries.
+- StructureGenerator.structureMap: Map<Long,StructureStart> ->
+  Long2ObjectOpenHashMap. Long chunk-coord keys are outside the Long
+  cache, so lookups previously allocated a boxed Long every time.
+
+Adds the fastutil dependency. All touched lines marked // Athena.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 5fd93af71de1c39690c5335b94b9cb2b62af14d1..a5e47813a2853283b950748e4f1dc256672568a7 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -44,6 +44,10 @@ dependencies {
+     implementation("org.jline:jline-terminal-jni:3.30.9")
+     // PandaSpigot end
+ 
++    // Athena start
++    implementation("it.unimi.dsi:fastutil:8.5.19")
++    // Athena end
++
+     implementation("net.kyori:adventure-text-serializer-json:$adventureVersion") // PandaSpigot - Adventure
+ 
+     testImplementation("junit:junit:4.11")
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 7e6a514a7e57bce39921a501a4fc3afc7ead8508..598ebfdd8625981195d84ea1a0cfd81685878cb2 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -3,6 +3,8 @@ package net.minecraft.server;
+ import com.google.common.base.Predicate;
+ import com.google.common.base.Predicates;
+ import com.google.common.collect.Maps;
++import it.unimi.dsi.fastutil.ints.Int2ObjectMap; // Athena - boxing真の削除
++import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap; // Athena - boxing真の削除
+ import java.util.Collection;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -37,7 +39,7 @@ public abstract class EntityLiving extends Entity {
+     private static final AttributeModifier sprintingSpeedBoostModifier = (new AttributeModifier(EntityLiving.sprintingSpeedBoostModifierUUID, "Sprinting speed boost", 0.30000001192092896D, 2)).setSaved(false);
+     private AttributeMapBase attributeMap;
+     public CombatTracker combatTracker = new CombatTracker(this);
+-    public final Map<Integer, MobEffect> effects = Maps.newHashMap();
++    public final Int2ObjectMap<MobEffect> effects = new Int2ObjectOpenHashMap<MobEffect>(); // Athena - boxing真の削除: fastutilのint専用Mapでキーのボックス化を排除
+     private final ItemStack[] previousEquipment = new ItemStack[5];
+     public boolean isSwingInProgress;
+     public int swingProgressInt;
+@@ -430,7 +432,7 @@ public abstract class EntityLiving extends Entity {
+                 MobEffect mobeffect = MobEffect.readCustomPotionEffectFromNBT(nbttagcompound1);
+ 
+                 if (mobeffect != null) {
+-                    this.effects.put(Integer.valueOf(mobeffect.getEffectId()), mobeffect);
++                    this.effects.put(mobeffect.getEffectId(), mobeffect); // Athena - boxing真の削除
+                 }
+             }
+         }
+@@ -471,12 +473,11 @@ public abstract class EntityLiving extends Entity {
+     // CraftBukkit end
+ 
+     protected void updatePotionEffects() {
+-        Iterator iterator = this.effects.keySet().iterator();
++        Iterator iterator = this.effects.values().iterator(); // Athena - boxing真の削除: 値イテレータで整数キーのボックス化を回避
+ 
+         isTickingEffects = true; // CraftBukkit
+         while (iterator.hasNext()) {
+-            Integer integer = (Integer) iterator.next();
+-            MobEffect mobeffect = (MobEffect) this.effects.get(integer);
++            MobEffect mobeffect = (MobEffect) iterator.next(); // Athena - boxing真の削除
+ 
+             if (!mobeffect.tick(this)) {
+                 if (!this.world.isClientSide) {
+@@ -553,11 +554,10 @@ public abstract class EntityLiving extends Entity {
+     }
+ 
+     public void removeAllEffects() {
+-        Iterator iterator = this.effects.keySet().iterator();
++        Iterator iterator = this.effects.values().iterator(); // Athena - boxing真の削除: 値イテレータで整数キーのボックス化を回避
+ 
+         while (iterator.hasNext()) {
+-            Integer integer = (Integer) iterator.next();
+-            MobEffect mobeffect = (MobEffect) this.effects.get(integer);
++            MobEffect mobeffect = (MobEffect) iterator.next(); // Athena - boxing真の削除
+ 
+             if (!this.world.isClientSide) {
+                 iterator.remove();
+@@ -573,15 +573,15 @@ public abstract class EntityLiving extends Entity {
+ 
+     public boolean hasEffect(int i) {
+         // CraftBukkit - Add size check for efficiency
+-        return this.effects.size() != 0 && this.effects.containsKey(Integer.valueOf(i));
++        return this.effects.size() != 0 && this.effects.containsKey(i); // Athena - boxing真の削除
+     }
+ 
+     public boolean hasEffect(MobEffectList mobeffectlist) {
+-        return this.effects.containsKey(Integer.valueOf(mobeffectlist.id));
++        return this.effects.containsKey(mobeffectlist.id); // Athena - boxing真の削除
+     }
+ 
+     public MobEffect getEffect(MobEffectList mobeffectlist) {
+-        return (MobEffect) this.effects.get(Integer.valueOf(mobeffectlist.id));
++        return this.effects.get(mobeffectlist.id); // Athena - boxing真の削除
+     }
+ 
+     public void addEffect(MobEffect mobeffect) {
+@@ -593,11 +593,11 @@ public abstract class EntityLiving extends Entity {
+         }
+         // CraftBukkit end
+         if (this.isPotionApplicable(mobeffect)) {
+-            if (this.effects.containsKey(Integer.valueOf(mobeffect.getEffectId()))) {
+-                ((MobEffect) this.effects.get(Integer.valueOf(mobeffect.getEffectId()))).combine(mobeffect);
+-                this.onChangedPotionEffect((MobEffect) this.effects.get(Integer.valueOf(mobeffect.getEffectId())), true);
++            if (this.effects.containsKey(mobeffect.getEffectId())) { // Athena - boxing真の削除
++                this.effects.get(mobeffect.getEffectId()).combine(mobeffect); // Athena - boxing真の削除
++                this.onChangedPotionEffect(this.effects.get(mobeffect.getEffectId()), true); // Athena - boxing真の削除
+             } else {
+-                this.effects.put(Integer.valueOf(mobeffect.getEffectId()), mobeffect);
++                this.effects.put(mobeffect.getEffectId(), mobeffect); // Athena - boxing真の削除
+                 this.onNewPotionEffect(mobeffect);
+             }
+ 
+@@ -627,7 +627,7 @@ public abstract class EntityLiving extends Entity {
+             return;
+         }
+         // CraftBukkit end
+-        MobEffect mobeffect = (MobEffect) this.effects.remove(Integer.valueOf(i));
++        MobEffect mobeffect = this.effects.remove(i); // Athena - boxing真の削除
+ 
+         if (mobeffect != null) {
+             this.onFinishedPotionEffect(mobeffect);
+diff --git a/src/main/java/net/minecraft/server/StructureGenerator.java b/src/main/java/net/minecraft/server/StructureGenerator.java
+index 0a17adf2b94f02ac24c0128289850b026944dbba..cd4ab6cef6a04e715b89678af4e6297ae5c25b90 100644
+--- a/src/main/java/net/minecraft/server/StructureGenerator.java
++++ b/src/main/java/net/minecraft/server/StructureGenerator.java
+@@ -1,6 +1,8 @@
+ package net.minecraft.server;
+ 
+ import com.google.common.collect.Maps;
++import it.unimi.dsi.fastutil.longs.Long2ObjectMap; // Athena - boxing真の削除
++import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap; // Athena - boxing真の削除
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+@@ -11,7 +13,7 @@ import java.util.concurrent.Callable;
+ public abstract class StructureGenerator extends WorldGenBase {
+ 
+     private PersistentStructure structureData;
+-    protected Map<Long, StructureStart> structureMap = Maps.newHashMap();
++    protected Long2ObjectMap<StructureStart> structureMap = new Long2ObjectOpenHashMap<StructureStart>(); // Athena - boxing真の削除: fastutilのlong専用Mapでチャンク座標キーのボックス化(割当)を排除
+ 
+     public StructureGenerator() {}
+ 
+@@ -19,14 +21,14 @@ public abstract class StructureGenerator extends WorldGenBase {
+ 
+     protected final void recursiveGenerate(World world, final int i, final int j, int k, int l, ChunkSnapshot chunksnapshot) {
+         this.initializeStructureData(world);
+-        if (!this.structureMap.containsKey(Long.valueOf(ChunkCoordIntPair.chunkXZ2Int(i, j)))) {
++        if (!this.structureMap.containsKey(ChunkCoordIntPair.chunkXZ2Int(i, j))) { // Athena - boxing真の削除
+             this.rand.nextInt();
+ 
+             try {
+                 if (this.canSpawnStructureAtCoords(i, j)) {
+                     StructureStart structurestart = this.getStructureStart(i, j);
+ 
+-                    this.structureMap.put(Long.valueOf(ChunkCoordIntPair.chunkXZ2Int(i, j)), structurestart);
++                    this.structureMap.put(ChunkCoordIntPair.chunkXZ2Int(i, j), structurestart); // Athena - boxing真の削除
+                     this.setStructureStart(i, j, structurestart);
+                 }
+ 
+@@ -227,7 +229,7 @@ public abstract class StructureGenerator extends WorldGenBase {
+                             StructureStart structurestart = WorldGenFactory.getStructureStart(nbttagcompound1, world);
+ 
+                             if (structurestart != null) {
+-                                this.structureMap.put(Long.valueOf(ChunkCoordIntPair.chunkXZ2Int(i, j)), structurestart);
++                                this.structureMap.put(ChunkCoordIntPair.chunkXZ2Int(i, j), structurestart); // Athena - boxing真の削除
+                             }
+                         }
+                     }
