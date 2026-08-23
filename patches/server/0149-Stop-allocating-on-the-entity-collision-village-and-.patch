@@ -1,0 +1,601 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 05:43:18 +0900
+Subject: [PATCH] Stop allocating on the entity-collision, village and goal
+ scans
+
+Four independent per-tick allocation sites found by JFR:
+
+EnumDirectionLimit.facings() built a fresh array on every call, and it is
+called once per iterator() and once per random(); it now hands out shared
+arrays. They live in a holder class because EnumDirection.<clinit> reaches
+EnumDirectionLimit.<clinit> through EnumAxis's constants while NORTH..DOWN
+are still null - static fields here would silently fill with nulls, so
+EnumDirectionFacingsTest pins that down.
+
+Entity.checkBlockCollisions walked every block the bounding box touches and
+built a BlockPosition for each, though Block.onEntityCollidedWithBlock is an
+empty default that only eleven blocks override. It now skips the position
+unless the block declares hasEntityCollisionHandler(). Only the four-argument
+override counts - BlockStairs and friends override the three-argument variant,
+which this loop never calls.
+
+PersistentVillage.addDoorsAround visits 32*8*32 blocks every tick and keeps
+only the doors; PathfinderGoalGotoTarget.searchForDestination scans O(n^3)
+candidates and keeps at most one. Both now scan with raw ints (a reused
+mutable position in the goal's case) and materialize only what is retained.
+
+Chunk's three horizontal-facing loops are indexed rather than iterated.
+
+Measured over 60s of play: these sites went from 65 MB/min to zero, and no
+AxisAlignedBB or CollisionBoxSink regression appeared alongside them.
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 2ebd972a9ec09d03981fce18921af4e20f47ed94..5afbf410b2dd13f1e43a56c076959f1d3b0b456a 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -616,6 +616,14 @@ public class Block {
+ 
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {}
+ 
++    // Athena - true when this block overrides the four-argument onEntityCollidedWithBlock above.
++    // Entity.checkBlockCollisions walks every block the bounding box touches on every tick, so
++    // skipping the BlockPosition for blocks with the empty default removes nearly all of it.
++    // Declaring that override implies this, and subclasses inherit the override.
++    public boolean hasEntityCollisionHandler() {
++        return false;
++    }
++
+     public int getStrongPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index 19a96d14ede74023567b98efbf4f102f3150de47..859f42f88ffccafec59a4afcd617b05ee6436470 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -214,6 +214,11 @@ public abstract class BlockButtonAbstract extends Block {
+         this.setBlockBounds(0.5F - f, 0.5F - f1, 0.5F - f2, 0.5F + f, 0.5F + f1, 0.5F + f2);
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (!world.isClientSide) {
+             if (this.wooden) {
+diff --git a/src/main/java/net/minecraft/server/BlockCactus.java b/src/main/java/net/minecraft/server/BlockCactus.java
+index 2c7fb4f08892f52cc82b7490b69402c57d9f0162..85d89f2a279e3d0eb0f4da14240d5ebd3236ff5b 100644
+--- a/src/main/java/net/minecraft/server/BlockCactus.java
++++ b/src/main/java/net/minecraft/server/BlockCactus.java
+@@ -98,6 +98,11 @@ public class BlockCactus extends Block {
+         return block == Blocks.CACTUS || block == Blocks.SAND;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         CraftEventFactory.blockDamage = world.getWorld().getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()); // CraftBukkit
+         entity.damageEntity(DamageSource.CACTUS, 1.0F);
+diff --git a/src/main/java/net/minecraft/server/BlockCauldron.java b/src/main/java/net/minecraft/server/BlockCauldron.java
+index 9b23eedbb4be96b697349ed7dc977373f82a9a37..d42bf1ad76e7b53d0b25d47dd741e80939fffacf 100644
+--- a/src/main/java/net/minecraft/server/BlockCauldron.java
++++ b/src/main/java/net/minecraft/server/BlockCauldron.java
+@@ -45,6 +45,11 @@ public class BlockCauldron extends Block {
+         return false;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     @Override
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         int i = (Integer) iblockdata.get(BlockCauldron.LEVEL);
+diff --git a/src/main/java/net/minecraft/server/BlockEnderPortal.java b/src/main/java/net/minecraft/server/BlockEnderPortal.java
+index 22b62eb6a2796c3785622c4c222015bfa67aa443..9140c287d345b8af8d4c1b84cc9d6ed5f98160dc 100644
+--- a/src/main/java/net/minecraft/server/BlockEnderPortal.java
++++ b/src/main/java/net/minecraft/server/BlockEnderPortal.java
+@@ -37,6 +37,11 @@ public class BlockEnderPortal extends BlockContainer {
+         return 0;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (entity.vehicle == null && entity.passenger == null && !world.isClientSide) {
+             // CraftBukkit start - Entity in portal
+diff --git a/src/main/java/net/minecraft/server/BlockMinecartDetector.java b/src/main/java/net/minecraft/server/BlockMinecartDetector.java
+index d240dd1ba70f65453bb5099398b90bcc36fcd57f..66fb944e0dfd0b3388ef3a29a8176983f998e228 100644
+--- a/src/main/java/net/minecraft/server/BlockMinecartDetector.java
++++ b/src/main/java/net/minecraft/server/BlockMinecartDetector.java
+@@ -34,6 +34,11 @@ public class BlockMinecartDetector extends BlockMinecartTrackAbstract {
+         return true;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (!world.isClientSide) {
+             if (!((Boolean) iblockdata.get(BlockMinecartDetector.POWERED)).booleanValue()) {
+diff --git a/src/main/java/net/minecraft/server/BlockPortal.java b/src/main/java/net/minecraft/server/BlockPortal.java
+index e2b807931f534d76ebebfc5b7d677fb6f965160d..1f41bff701c06207eb0c5b57ebfdcf91457dbab1 100644
+--- a/src/main/java/net/minecraft/server/BlockPortal.java
++++ b/src/main/java/net/minecraft/server/BlockPortal.java
+@@ -116,6 +116,11 @@ public class BlockPortal extends BlockHalfTransparent {
+         return 0;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (entity.vehicle == null && entity.passenger == null) {
+             // CraftBukkit start - Entity in portal
+diff --git a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+index 785c4714ef0d04cf5dbb2804f4b941915336db1a..6036718a7c84aef825c59c58f1a0a6a870ff18ed 100644
+--- a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+@@ -92,6 +92,11 @@ public abstract class BlockPressurePlateAbstract extends Block {
+         }
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (!world.isClientSide) {
+             int i = this.getRedstoneStrength(iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockSlowSand.java b/src/main/java/net/minecraft/server/BlockSlowSand.java
+index 9abb33478854015864af577876644690939e89fd..e69374cf47f3881f3b8b04a3eda41260e8070daf 100644
+--- a/src/main/java/net/minecraft/server/BlockSlowSand.java
++++ b/src/main/java/net/minecraft/server/BlockSlowSand.java
+@@ -21,6 +21,11 @@ public class BlockSlowSand extends Block {
+         return true;
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     @Override
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         entity.motX *= 0.4D;
+diff --git a/src/main/java/net/minecraft/server/BlockTNT.java b/src/main/java/net/minecraft/server/BlockTNT.java
+index e6022a4230021c9033c115ab92233063625a5918..7c6099c3dbde2ede4b3e2a84a10b948e59854229 100644
+--- a/src/main/java/net/minecraft/server/BlockTNT.java
++++ b/src/main/java/net/minecraft/server/BlockTNT.java
+@@ -89,6 +89,11 @@ public class BlockTNT extends Block {
+         return super.interact(world, blockposition, iblockdata, entityhuman, enumdirection, f, f1, f2);
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (!world.isClientSide && entity instanceof EntityArrow) {
+             EntityArrow entityarrow = (EntityArrow) entity;
+diff --git a/src/main/java/net/minecraft/server/BlockTripwire.java b/src/main/java/net/minecraft/server/BlockTripwire.java
+index cbb02e2ea86411b2ebe3ead907889e9dc133bbda..985979c9d7da7e484300c5f2c9519a585099efce 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwire.java
++++ b/src/main/java/net/minecraft/server/BlockTripwire.java
+@@ -127,6 +127,11 @@ public class BlockTripwire extends Block {
+ 
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         if (!world.isClientSide) {
+             if (!((Boolean) iblockdata.get(BlockTripwire.POWERED)).booleanValue()) {
+diff --git a/src/main/java/net/minecraft/server/BlockWeb.java b/src/main/java/net/minecraft/server/BlockWeb.java
+index 4cce7d303b84a6e12aff6da180287d129af0c962..92a53ca07b89d3aad3de1bb6935180504eb88ec8 100644
+--- a/src/main/java/net/minecraft/server/BlockWeb.java
++++ b/src/main/java/net/minecraft/server/BlockWeb.java
+@@ -10,6 +10,11 @@ public class BlockWeb extends Block {
+         this.setCreativeTab(CreativeModeTab.tabDecorations);
+     }
+ 
++    // Athena - overrides onEntityCollidedWithBlock; see Block.hasEntityCollisionHandler
++    public boolean hasEntityCollisionHandler() {
++        return true;
++    }
++
+     @Override
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+         entity.setInWeb();
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index ae1a0d3bd7e0b6d8e647c33cc75a775371cddb64..baf05b1df2f154b82e13831418cd93986ee5a89e 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -296,20 +296,23 @@ public class Chunk {
+                         int i1 = this.locZ * 16 + j;
+                         int j1 = Integer.MAX_VALUE;
+ 
+-                        Iterator iterator;
+-                        EnumDirection enumdirection;
++                        // Athena start - index the shared facings array instead of allocating an iterator
++                        EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-                        for (iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator(); iterator.hasNext(); j1 = Math.min(j1, this.world.getChunksLowestHorizon(l + enumdirection.getAdjacentX(), i1 + enumdirection.getAdjacentZ()))) {
+-                            enumdirection = (EnumDirection) iterator.next();
++                        for (int f = 0; f < facings.length; ++f) {
++                            EnumDirection enumdirection = facings[f];
++
++                            j1 = Math.min(j1, this.world.getChunksLowestHorizon(l + enumdirection.getAdjacentX(), i1 + enumdirection.getAdjacentZ()));
+                         }
+ 
+                         this.checkSkylightNeighborHeight(l, i1, j1);
+-                        iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
+ 
+-                        while (iterator.hasNext()) {
+-                            enumdirection = (EnumDirection) iterator.next();
++                        for (int f = 0; f < facings.length; ++f) {
++                            EnumDirection enumdirection = facings[f];
++
+                             this.checkSkylightNeighborHeight(l + enumdirection.getAdjacentX(), i1 + enumdirection.getAdjacentZ(), k);
+                         }
++                        // Athena end
+ 
+                         if (flag) {
+                             this.world.methodProfiler.endSection();
+@@ -424,13 +427,15 @@ public class Chunk {
+             }
+ 
+             if (!this.world.worldProvider.getHasNoSky()) {
+-                Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
++                // Athena start - index the shared facings array instead of allocating an iterator
++                EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-                while (iterator.hasNext()) {
+-                    EnumDirection enumdirection = (EnumDirection) iterator.next();
++                for (int f = 0; f < facings.length; ++f) {
++                    EnumDirection enumdirection = facings[f];
+ 
+                     this.updateSkylightNeighborHeight(j1 + enumdirection.getAdjacentX(), k1 + enumdirection.getAdjacentZ(), i2, j2);
+                 }
++                // Athena end
+ 
+                 this.updateSkylightNeighborHeight(j1, k1, i2, j2);
+             }
+@@ -1350,14 +1355,16 @@ public class Chunk {
+                 }
+ 
+                 if (this.lit) {
+-                    Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
++                    // Athena start - index the shared facings array instead of allocating an iterator
++                    EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+ 
+-                    while (iterator.hasNext()) {
+-                        EnumDirection enumdirection = (EnumDirection) iterator.next();
++                    for (int f = 0; f < facings.length; ++f) {
++                        EnumDirection enumdirection = facings[f];
+                         int k = enumdirection.getAxisDirection() == EnumDirection.EnumAxisDirection.POSITIVE ? 16 : 1;
+ 
+                         this.world.getChunkAtWorldCoords(blockposition.shift(enumdirection, k)).a(enumdirection.opposite());
+                     }
++                    // Athena end
+ 
+                     this.y();
+                 }
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 976d595d06fc0bea853e9a5170f4ff036331f63f..e51477437613096f0eda5201f92b35e2bd08021a 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -863,19 +863,36 @@ public abstract class Entity implements ICommandListener {
+         return "game.neutral.swim";
+     }
+ 
++    // Athena start - only materialize a BlockPosition for blocks that actually react to the collision.
++    //
++    // This runs once per moving entity per tick and used to allocate one BlockPosition per block the
++    // bounding box overlaps - two to eight of them for a typical mob, more for boats and minecarts -
++    // even though Block.onEntityCollidedWithBlock is an empty default that only eleven blocks
++    // override. Profiling attributed 13-17 MB/min to this single loop. The bounds are kept as ints
++    // and the position is built only once a block declares a handler.
+     protected void checkBlockCollisions() {
+-        BlockPosition blockposition = new BlockPosition(this.boundingBoxMinX + 0.001D, this.boundingBoxMinY + 0.001D, this.boundingBoxMinZ + 0.001D);
+-        BlockPosition blockposition1 = new BlockPosition(this.boundingBoxMaxX - 0.001D, this.boundingBoxMaxY - 0.001D, this.boundingBoxMaxZ - 0.001D);
++        int minX = MathHelper.floor(this.boundingBoxMinX + 0.001D);
++        int minY = MathHelper.floor(this.boundingBoxMinY + 0.001D);
++        int minZ = MathHelper.floor(this.boundingBoxMinZ + 0.001D);
++        int maxX = MathHelper.floor(this.boundingBoxMaxX - 0.001D);
++        int maxY = MathHelper.floor(this.boundingBoxMaxY - 0.001D);
++        int maxZ = MathHelper.floor(this.boundingBoxMaxZ - 0.001D);
++
++        if (this.world.isAreaLoaded(minX, minY, minZ, maxX, maxY, maxZ, true)) {
++            for (int i = minX; i <= maxX; ++i) {
++                for (int j = minY; j <= maxY; ++j) {
++                    for (int k = minZ; k <= maxZ; ++k) {
++                        IBlockData iblockdata = this.world.getType(i, j, k); // PandaSpigot
++                        Block block = iblockdata.getBlock();
++
++                        if (!block.hasEntityCollisionHandler()) {
++                            continue;
++                        }
+ 
+-        if (this.world.areChunksLoadedBetween(blockposition, blockposition1)) {
+-            for (int i = blockposition.getX(); i <= blockposition1.getX(); ++i) {
+-                for (int j = blockposition.getY(); j <= blockposition1.getY(); ++j) {
+-                    for (int k = blockposition.getZ(); k <= blockposition1.getZ(); ++k) {
+                         BlockPosition blockposition2 = new BlockPosition(i, j, k);
+-                        IBlockData iblockdata = this.world.getType(i, j, k); // PandaSpigot
+ 
+                         try {
+-                            iblockdata.getBlock().onEntityCollidedWithBlock(this.world, blockposition2, iblockdata, this);
++                            block.onEntityCollidedWithBlock(this.world, blockposition2, iblockdata, this);
+                         } catch (Throwable throwable) {
+                             CrashReport crashreport = CrashReport.makeCrashReport(throwable, "Colliding entity with block");
+                             CrashReportSystemDetails crashreportsystemdetails = crashreport.makeCategory("Block being collided with");
+@@ -889,6 +906,7 @@ public abstract class Entity implements ICommandListener {
+         }
+ 
+     }
++    // Athena end
+ 
+     protected void playStepSound(BlockPosition blockposition, Block block) {
+         Block.StepSound block_stepsound = block.stepSound;
+diff --git a/src/main/java/net/minecraft/server/EnumDirection.java b/src/main/java/net/minecraft/server/EnumDirection.java
+index 57cc21e3c26d5983e4236d0604b2684eeef5deaf..301ddb90f40bd7674f4f45dbd6345d92e4dcddcc 100644
+--- a/src/main/java/net/minecraft/server/EnumDirection.java
++++ b/src/main/java/net/minecraft/server/EnumDirection.java
+@@ -225,18 +225,40 @@ public enum EnumDirection implements INamable {
+ 
+         HORIZONTAL, VERTICAL;
+ 
++        // Athena start - hand out a shared array instead of building one per call.
++        //
++        // facings() was called once per iterator() and once per random(), i.e. several times per
++        // flowing-liquid step and per relight; profiling showed 17 MB/min of EnumDirection[] coming
++        // out of it alone. Nothing in the server writes to the returned array - every caller either
++        // iterates it or indexes it - so a shared instance is safe.
++        //
++        // The arrays live in a holder class rather than in static fields of this enum: EnumAxis's
++        // constants take an EnumDirectionLimit, so EnumDirection.<clinit> triggers EnumAxis.<clinit>
++        // which triggers EnumDirectionLimit.<clinit> while EnumDirection.NORTH and friends are still
++        // null. The holder is only initialized on the first facings() call, well after that.
++        private static final class Facings {
++
++            static final EnumDirection[] HORIZONTAL = {
++                EnumDirection.NORTH, EnumDirection.EAST, EnumDirection.SOUTH, EnumDirection.WEST
++            };
++            static final EnumDirection[] VERTICAL = {
++                EnumDirection.UP, EnumDirection.DOWN
++            };
++        }
++
+         private EnumDirectionLimit() {}
+ 
+         public EnumDirection[] facings() {
+             switch (this) {
+                 case HORIZONTAL:
+-                    return new EnumDirection[]{EnumDirection.NORTH, EnumDirection.EAST, EnumDirection.SOUTH, EnumDirection.WEST};
++                    return Facings.HORIZONTAL;
+                 case VERTICAL:
+-                    return new EnumDirection[]{EnumDirection.UP, EnumDirection.DOWN};
++                    return Facings.VERTICAL;
+                 default:
+                     throw new Error("Someone's been tampering with the universe!");
+             }
+         }
++        // Athena end
+ 
+         public EnumDirection random(Random random) {
+             EnumDirection[] aenumdirection = this.facings();
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalGotoTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalGotoTarget.java
+index a884858ef6ddc1cdaa4e2c12139c2bac6531415a..e137f3cf55afdaa7147374c4ee3e18ece7273117 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalGotoTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalGotoTarget.java
+@@ -11,6 +11,8 @@ public abstract class PathfinderGoalGotoTarget extends PathfinderGoal {
+     protected BlockPosition destinationBlock;
+     private boolean isAboveDestination;
+     private int searchLength;
++    // Athena - reused while scanning candidates in searchForDestination; never escapes that method
++    private final BlockPosition.MutableBlockPosition scanPosition = new BlockPosition.MutableBlockPosition();
+ 
+     public PathfinderGoalGotoTarget(EntityCreature entitycreature, double d0, int i) {
+         this.destinationBlock = BlockPosition.ZERO;
+@@ -65,19 +67,31 @@ public abstract class PathfinderGoalGotoTarget extends PathfinderGoal {
+         return this.isAboveDestination;
+     }
+ 
++    // Athena - scan with a reused mutable position and only materialize the one that is kept.
++    //
++    // The candidate loop visits O(searchLength^3) positions every time the goal re-evaluates and
++    // allocated a BlockPosition for each, yet at most one of them is ever stored in destinationBlock
++    // (24 MB/min in profiling). None of the shouldMoveTo implementations retain the argument - they
++    // read coordinates and, at most, rebind their local to an immutable up() - so handing them the
++    // shared mutable is safe.
+     private boolean searchForDestination() {
+         int i = this.searchLength;
+         boolean flag = true;
+-        BlockPosition blockposition = new BlockPosition(this.theEntity);
++        int baseX = MathHelper.floor(this.theEntity.locX);
++        int baseY = MathHelper.floor(this.theEntity.locY);
++        int baseZ = MathHelper.floor(this.theEntity.locZ);
++        BlockPosition.MutableBlockPosition blockposition1 = this.scanPosition;
+ 
+         for (int j = 0; j <= 1; j = j > 0 ? -j : 1 - j) {
+             for (int k = 0; k < i; ++k) {
+                 for (int l = 0; l <= k; l = l > 0 ? -l : 1 - l) {
+                     for (int i1 = l < k && l > -k ? k : 0; i1 <= k; i1 = i1 > 0 ? -i1 : 1 - i1) {
+-                        BlockPosition blockposition1 = blockposition.add(l, j - 1, i1);
++                        blockposition1.setX(baseX + l);
++                        blockposition1.setY(baseY + j - 1);
++                        blockposition1.setZ(baseZ + i1);
+ 
+                         if (this.theEntity.isWithinHomeDistanceFromPosition(blockposition1) && this.shouldMoveTo(this.theEntity.world, blockposition1)) {
+-                            this.destinationBlock = blockposition1;
++                            this.destinationBlock = new BlockPosition(blockposition1.getX(), blockposition1.getY(), blockposition1.getZ());
+                             return true;
+                         }
+                     }
+diff --git a/src/main/java/net/minecraft/server/PersistentVillage.java b/src/main/java/net/minecraft/server/PersistentVillage.java
+index 5c48dfc4059d41df80c9a9ad3bb69c34abd766fa..3d9b7dce0b2782aebf72ddc4e5154dcd1ded010b 100644
+--- a/src/main/java/net/minecraft/server/PersistentVillage.java
++++ b/src/main/java/net/minecraft/server/PersistentVillage.java
+@@ -123,23 +123,36 @@ public class PersistentVillage extends PersistentBase {
+         byte b1 = 4;
+         byte b2 = 16;
+ 
++        // Athena start - scan with raw ints; only wooden doors get a BlockPosition.
++        //
++        // This runs every tick from tick() -> dropOldestVillagerPosition() and visits 32*8*32 = 8192
++        // blocks, each of which used to cost a BlockPosition (26 MB/min in profiling) while only the
++        // handful that are actually doors are ever used past the type check.
++        int baseX = blockposition.getX();
++        int baseY = blockposition.getY();
++        int baseZ = blockposition.getZ();
++
+         for (int i = -b0; i < b0; ++i) {
+             for (int j = -b1; j < b1; ++j) {
+                 for (int k = -b2; k < b2; ++k) {
+-                    BlockPosition blockposition1 = blockposition.add(i, j, k);
++                    Block block = this.world.getType(baseX + i, baseY + j, baseZ + k).getBlock();
++
++                    if (!(block instanceof BlockDoor) || block.getMaterial() != Material.WOOD) {
++                        continue;
++                    }
+ 
+-                    if (this.isWoodDoor(blockposition1)) {
+-                        VillageDoor villagedoor = this.checkDoorExistence(blockposition1);
++                    BlockPosition blockposition1 = new BlockPosition(baseX + i, baseY + j, baseZ + k);
++                    VillageDoor villagedoor = this.checkDoorExistence(blockposition1);
+ 
+-                        if (villagedoor == null) {
+-                            this.addToNewDoorsList(blockposition1);
+-                        } else {
+-                            villagedoor.a(this.time);
+-                        }
++                    if (villagedoor == null) {
++                        this.addToNewDoorsList(blockposition1);
++                    } else {
++                        villagedoor.a(this.time);
+                     }
+                 }
+             }
+         }
++        // Athena end
+ 
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 546c024372ca0e0a7a6e248eaed64f90b9213059..fb7fe89dcf6a1f887ce3fa84556432c0f35e33dc 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -354,7 +354,7 @@ public abstract class World implements IBlockAccess {
+         return this.isAreaLoaded(structureboundingbox.minX, structureboundingbox.minY, structureboundingbox.minZ, structureboundingbox.maxX, structureboundingbox.maxY, structureboundingbox.maxZ, flag);
+     }
+ 
+-    private boolean isAreaLoaded(int i, int j, int k, int l, int i1, int j1, boolean flag) {
++    public boolean isAreaLoaded(int i, int j, int k, int l, int i1, int j1, boolean flag) { // Athena - was private; Entity.checkBlockCollisions calls it with raw ints
+         if (i1 >= 0 && j < 256) {
+             i >>= 4;
+             k >>= 4;
+diff --git a/src/test/java/net/minecraft/server/EnumDirectionFacingsTest.java b/src/test/java/net/minecraft/server/EnumDirectionFacingsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..61c51dbe22ae1b65d4aedbac8bb95d0d064e6e3c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/EnumDirectionFacingsTest.java
+@@ -0,0 +1,80 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertSame;
++
++import java.util.Iterator;
++import org.junit.Test;
++
++/**
++ * Athena - facings() now hands out shared arrays built in a holder class.
++ *
++ * <p>The holder exists because EnumDirection.&lt;clinit&gt; reaches EnumDirectionLimit.&lt;clinit&gt;
++ * through EnumAxis's constants while NORTH..DOWN are still null. If the arrays were ever moved back
++ * into static fields of the enum they would silently fill with nulls, and every direction-driven
++ * block update would break in a way that no compiler check catches. These tests pin that down.
++ */
++public class EnumDirectionFacingsTest {
++
++    @Test
++    public void horizontalFacingsAreFullyInitialized() {
++        EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
++
++        for (EnumDirection facing : facings) {
++            assertNotNull("class initialization order left a null in HORIZONTAL", facing);
++        }
++
++        assertArrayEquals(new EnumDirection[]{
++            EnumDirection.NORTH, EnumDirection.EAST, EnumDirection.SOUTH, EnumDirection.WEST
++        }, facings);
++    }
++
++    @Test
++    public void verticalFacingsAreFullyInitialized() {
++        EnumDirection[] facings = EnumDirection.EnumDirectionLimit.VERTICAL.facings();
++
++        for (EnumDirection facing : facings) {
++            assertNotNull("class initialization order left a null in VERTICAL", facing);
++        }
++
++        assertArrayEquals(new EnumDirection[]{EnumDirection.UP, EnumDirection.DOWN}, facings);
++    }
++
++    @Test
++    public void facingsIsSharedRatherThanRebuilt() {
++        assertSame(EnumDirection.EnumDirectionLimit.HORIZONTAL.facings(),
++                   EnumDirection.EnumDirectionLimit.HORIZONTAL.facings());
++        assertSame(EnumDirection.EnumDirectionLimit.VERTICAL.facings(),
++                   EnumDirection.EnumDirectionLimit.VERTICAL.facings());
++    }
++
++    @Test
++    public void iterationStillYieldsTheSameOrder() {
++        // the remaining iterator() callers must be unaffected by the array now being shared
++        for (EnumDirection.EnumDirectionLimit limit : EnumDirection.EnumDirectionLimit.values()) {
++            Iterator<EnumDirection> iterator = limit.iterator();
++
++            for (EnumDirection expected : limit.facings()) {
++                assertSame(expected, iterator.next());
++            }
++        }
++    }
++
++    @Test
++    public void everyDirectionBelongsToItsAxisPlane() {
++        // the plane wiring is what forces the holder; verify it still resolves both ways
++        for (EnumDirection direction : EnumDirection.VALUES) {
++            EnumDirection.EnumDirectionLimit plane = direction.getAxis().getPlane();
++            boolean found = false;
++
++            for (EnumDirection facing : plane.facings()) {
++                found |= facing == direction;
++            }
++
++            if (!found) {
++                throw new AssertionError(direction + " is missing from its own plane " + plane);
++            }
++        }
++    }
++}
