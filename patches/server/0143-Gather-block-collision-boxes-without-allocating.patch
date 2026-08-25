@@ -1,0 +1,1566 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 02:03:24 +0900
+Subject: [PATCH] Gather block collision boxes without allocating
+
+World.getCubes returned a List<AxisAlignedBB>, so every solid block in an
+entity's swept volume cost a 64-byte box plus the list. Those boxes were
+built inside Block.getCollisionBoundingBox - a megamorphic call - so
+neither C2 nor Graal could scalar-replace them, and the cost grew
+linearly with the number of blocks scanned.
+
+Collision boxes are now appended to a CollisionBoxSink as six raw doubles
+each. The sink is a reusable per-thread buffer; callers take a mark(),
+fill it, read the region back, and reset(mark), so nested queries (the
+step-up trial in Entity.move runs while the main pass's boxes are still
+live) stack safely instead of needing a second buffer.
+
+Block gains getCollisionBounds(world, pos, state, double[] out) as the
+single source of truth for a block's shape; the 36 blocks that overrode
+getCollisionBoundingBox now override that instead, and the 12 multi-box
+blocks (stairs, fences, panes, ...) override addCollisionBoxes the way
+they used to override addCollisionBoxesToList. getCollisionBoundingBox
+remains for the cold callers that genuinely want an object (item
+placement, arrow impact, block-update checks) and just wraps the scalar
+form.
+
+Callers that only asked "is anything in the way?" now use
+World.hasCubes(entity, six doubles), which needs no list at all.
+
+Verified: full test suite passes; server boots on JDK 25 and ticks 30s
+with no exceptions or movement warnings.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 9402ff3895887160253cabc59d087c71044a6ace..87d2d5b7a4beafd70a91f31e8c8521a64b4bdfb6 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -290,9 +290,40 @@ public class Block {
+ 
+     }
+ 
++    // Athena start - scalar collision shape.
++    //
++    // getCollisionBounds is the single source of truth for a block's collision box: it writes the
++    // six bounds into the caller's array and says whether the block has a box at all. The old
++    // getCollisionBoundingBox is kept for the cold callers that genuinely want an object (item
++    // placement, arrow impact, block-update checks) and simply wraps it.
++    //
++    // addCollisionBoxes is the gathering entry point used by World.getCubes; blocks made of several
++    // boxes (stairs, fences, ...) override it the way they used to override addCollisionBoxesToList.
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) {
++        out[0] = (double) blockposition.getX() + this.minX;
++        out[1] = (double) blockposition.getY() + this.minY;
++        out[2] = (double) blockposition.getZ() + this.minZ;
++        out[3] = (double) blockposition.getX() + this.maxX;
++        out[4] = (double) blockposition.getY() + this.maxY;
++        out[5] = (double) blockposition.getZ() + this.maxZ;
++        return true;
++    }
++
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata,
++                                  double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ,
++                                  CollisionBoxSink sink, Entity entity) {
++        double[] out = sink.scratch();
++
++        if (this.getCollisionBounds(world, blockposition, iblockdata, out)) {
++            sink.addIfIntersects(out[0], out[1], out[2], out[3], out[4], out[5], qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ);
++        }
++    }
++
+     public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return new AxisAlignedBB((double) blockposition.getX() + this.minX, (double) blockposition.getY() + this.minY, (double) blockposition.getZ() + this.minZ, (double) blockposition.getX() + this.maxX, (double) blockposition.getY() + this.maxY, (double) blockposition.getZ() + this.maxZ);
++        double[] out = new double[6]; // cold path only
++        return this.getCollisionBounds(world, blockposition, iblockdata, out) ? new AxisAlignedBB(out[0], out[1], out[2], out[3], out[4], out[5]) : null;
+     }
++    // Athena end
+ 
+     public boolean isOpaqueCube() {
+         return true;
+diff --git a/src/main/java/net/minecraft/server/BlockAir.java b/src/main/java/net/minecraft/server/BlockAir.java
+index fe966279182a6a8d9282da81bb4172e81efb42ee..e9fe30d3ef1b1ca7e02f868229b32820338e92db 100644
+--- a/src/main/java/net/minecraft/server/BlockAir.java
++++ b/src/main/java/net/minecraft/server/BlockAir.java
+@@ -13,8 +13,8 @@ public class BlockAir extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockBanner.java b/src/main/java/net/minecraft/server/BlockBanner.java
+index 3897b8225b8d56a35b78e7e647830f180189f861..a36e5fdd4a7d744d4d8e541628f4f0d890f121e2 100644
+--- a/src/main/java/net/minecraft/server/BlockBanner.java
++++ b/src/main/java/net/minecraft/server/BlockBanner.java
+@@ -22,8 +22,8 @@ public class BlockBanner extends BlockContainer {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockBrewingStand.java b/src/main/java/net/minecraft/server/BlockBrewingStand.java
+index ac41517b1d1019fa9a39b984f7b798e954f6e7e8..f44f2b3992da85f4c1689121b8922762f63640f7 100644
+--- a/src/main/java/net/minecraft/server/BlockBrewingStand.java
++++ b/src/main/java/net/minecraft/server/BlockBrewingStand.java
+@@ -33,11 +33,11 @@ public class BlockBrewingStand extends BlockContainer {
+         return false;
+     }
+ 
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBlockBounds(0.4375F, 0.0F, 0.4375F, 0.5625F, 0.875F, 0.5625F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBoundsForItemRender();
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+     }
+ 
+     public void setBlockBoundsForItemRender() {
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index 8472866b78221f5249a324e6f4bc7a5c118b63d6..fa8ba8a4550c1709edd08a50bc9e20eff06c299f 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -23,8 +23,8 @@ public abstract class BlockButtonAbstract extends Block {
+         this.wooden = flag;
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public int tickRate(World world) {
+diff --git a/src/main/java/net/minecraft/server/BlockCactus.java b/src/main/java/net/minecraft/server/BlockCactus.java
+index aa9825f3710bae8464203586da4d24b9607d8f47..52b542474f57b7ad62e5e7b5425363a4ef5d3130 100644
+--- a/src/main/java/net/minecraft/server/BlockCactus.java
++++ b/src/main/java/net/minecraft/server/BlockCactus.java
+@@ -45,10 +45,16 @@ public class BlockCactus extends Block {
+         }
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         float f = 0.0625F;
+ 
+-        return new AxisAlignedBB((double) ((float) blockposition.getX() + f), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getX() + 1) - f), (double) ((float) (blockposition.getY() + 1) - f), (double) ((float) (blockposition.getZ() + 1) - f));
++        out[0] = Math.min((double) ((float) blockposition.getX() + f), (double) ((float) (blockposition.getX() + 1) - f));
++        out[1] = Math.min((double) blockposition.getY(), (double) ((float) (blockposition.getY() + 1) - f));
++        out[2] = Math.min((double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getZ() + 1) - f));
++        out[3] = Math.max((double) ((float) blockposition.getX() + f), (double) ((float) (blockposition.getX() + 1) - f));
++        out[4] = Math.max((double) blockposition.getY(), (double) ((float) (blockposition.getY() + 1) - f));
++        out[5] = Math.max((double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getZ() + 1) - f));
++        return true;
+     }
+ 
+     public boolean isFullCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockCake.java b/src/main/java/net/minecraft/server/BlockCake.java
+index 1de302218da333906fc5c0cab2f14bb92328b810..c3aa53da91b175d384ab7685cbce3d9b3fdbd4b1 100644
+--- a/src/main/java/net/minecraft/server/BlockCake.java
++++ b/src/main/java/net/minecraft/server/BlockCake.java
+@@ -28,12 +28,18 @@ public class BlockCake extends Block {
+         this.setBlockBounds(f, 0.0F, f, 1.0F - f, f1, 1.0F - f);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         float f = 0.0625F;
+         float f1 = (float) (1 + ((Integer) iblockdata.get(BlockCake.BITES)).intValue() * 2) / 16.0F;
+         float f2 = 0.5F;
+ 
+-        return new AxisAlignedBB((double) ((float) blockposition.getX() + f1), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getX() + 1) - f), (double) ((float) blockposition.getY() + f2), (double) ((float) (blockposition.getZ() + 1) - f));
++        out[0] = Math.min((double) ((float) blockposition.getX() + f1), (double) ((float) (blockposition.getX() + 1) - f));
++        out[1] = Math.min((double) blockposition.getY(), (double) ((float) blockposition.getY() + f2));
++        out[2] = Math.min((double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getZ() + 1) - f));
++        out[3] = Math.max((double) ((float) blockposition.getX() + f1), (double) ((float) (blockposition.getX() + 1) - f));
++        out[4] = Math.max((double) blockposition.getY(), (double) ((float) blockposition.getY() + f2));
++        out[5] = Math.max((double) ((float) blockposition.getZ() + f), (double) ((float) (blockposition.getZ() + 1) - f));
++        return true;
+     }
+ 
+     public boolean isFullCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockCauldron.java b/src/main/java/net/minecraft/server/BlockCauldron.java
+index dbad6cf9d27d1fd6096ea95cf2c3ccc85ebd4f6e..9b23eedbb4be96b697349ed7dc977373f82a9a37 100644
+--- a/src/main/java/net/minecraft/server/BlockCauldron.java
++++ b/src/main/java/net/minecraft/server/BlockCauldron.java
+@@ -14,19 +14,19 @@ public class BlockCauldron extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 0.3125F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         float f = 0.125F;
+ 
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, f, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, f);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(1.0F - f, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 1.0F - f, 1.0F, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBoundsForItemRender();
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockCobbleWall.java b/src/main/java/net/minecraft/server/BlockCobbleWall.java
+index 400618039dc861db4f91435d8058ac9fd34aa5a1..13092514e95f0e4cd9ef24fb6c3cf86aea8e50e3 100644
+--- a/src/main/java/net/minecraft/server/BlockCobbleWall.java
++++ b/src/main/java/net/minecraft/server/BlockCobbleWall.java
+@@ -81,10 +81,10 @@ public class BlockCobbleWall extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+         this.maxY = 1.5D;
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public boolean canConnectTo(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockCocoa.java b/src/main/java/net/minecraft/server/BlockCocoa.java
+index 981ba08d5d5bd68c98f02feebc874a0afb9c297e..d6837c1ee8ec5be2e542a8b2ecc099dab670caa9 100644
+--- a/src/main/java/net/minecraft/server/BlockCocoa.java
++++ b/src/main/java/net/minecraft/server/BlockCocoa.java
+@@ -46,9 +46,9 @@ public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantEl
+         return false;
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockDoor.java b/src/main/java/net/minecraft/server/BlockDoor.java
+index cf4ae32d361fd8db016ca5103af6c7939dcaa8c0..22ef2b5085168446b9c109d320087c66ebd7b8a2 100644
+--- a/src/main/java/net/minecraft/server/BlockDoor.java
++++ b/src/main/java/net/minecraft/server/BlockDoor.java
+@@ -35,9 +35,9 @@ public class BlockDoor extends Block {
+         return false;
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockEnderPortal.java b/src/main/java/net/minecraft/server/BlockEnderPortal.java
+index 716530517927c52fb5774ada39a59b3df159cee0..22b62eb6a2796c3785622c4c222015bfa67aa443 100644
+--- a/src/main/java/net/minecraft/server/BlockEnderPortal.java
++++ b/src/main/java/net/minecraft/server/BlockEnderPortal.java
+@@ -23,7 +23,7 @@ public class BlockEnderPortal extends BlockContainer {
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, f, 1.0F);
+     }
+ 
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {}
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) {} // Athena - scalar collision gathering (no collision)
+ 
+     public boolean isOpaqueCube() {
+         return false;
+diff --git a/src/main/java/net/minecraft/server/BlockEnderPortalFrame.java b/src/main/java/net/minecraft/server/BlockEnderPortalFrame.java
+index 4d4e3363f251e3dcb2ed7d967059e07b8931df7c..d193a74a1e4de9cd2bd48bc1952382a81e809c4a 100644
+--- a/src/main/java/net/minecraft/server/BlockEnderPortalFrame.java
++++ b/src/main/java/net/minecraft/server/BlockEnderPortalFrame.java
+@@ -25,12 +25,12 @@ public class BlockEnderPortalFrame extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 0.8125F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         if ((Boolean) world.getType(blockposition).get(BlockEnderPortalFrame.EYE)) {
+             this.setBlockBounds(0.3125F, 0.8125F, 0.3125F, 0.6875F, 1.0F, 0.6875F);
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+         this.setBlockBoundsForItemRender();
+diff --git a/src/main/java/net/minecraft/server/BlockFence.java b/src/main/java/net/minecraft/server/BlockFence.java
+index aeb0eb4e8141d26c3eae1e1b4c7d4ced213e6336..d3f1af1c47cdd07eb26b1ee04fcd764bc3e76987 100644
+--- a/src/main/java/net/minecraft/server/BlockFence.java
++++ b/src/main/java/net/minecraft/server/BlockFence.java
+@@ -21,7 +21,7 @@ public class BlockFence extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         boolean flag = this.canConnectTo(world, blockposition.north());
+         boolean flag1 = this.canConnectTo(world, blockposition.south());
+         boolean flag2 = this.canConnectTo(world, blockposition.west());
+@@ -41,7 +41,7 @@ public class BlockFence extends Block {
+ 
+         if (flag || flag1) {
+             this.setBlockBounds(f, 0.0F, f2, f1, 1.5F, f3);
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+         f2 = 0.375F;
+@@ -56,7 +56,7 @@ public class BlockFence extends Block {
+ 
+         if (flag2 || flag3 || !flag && !flag1) {
+             this.setBlockBounds(f, 0.0F, f2, f1, 1.5F, f3);
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+         if (flag) {
+diff --git a/src/main/java/net/minecraft/server/BlockFenceGate.java b/src/main/java/net/minecraft/server/BlockFenceGate.java
+index 9e455edd89b8549b7625ebd64c222e903c136db5..c15dffcf1e1a5d1041800f0096a4e2ca1cc76ede 100644
+--- a/src/main/java/net/minecraft/server/BlockFenceGate.java
++++ b/src/main/java/net/minecraft/server/BlockFenceGate.java
+@@ -30,13 +30,29 @@ public class BlockFenceGate extends BlockDirectional {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         if ((Boolean) iblockdata.get(BlockFenceGate.OPEN)) {
+-            return null;
++            return false;
+         } else {
+             EnumDirection.EnumAxis enumdirection_enumaxis = ((EnumDirection) iblockdata.get(BlockFenceGate.FACING)).getAxis();
+ 
+-            return enumdirection_enumaxis == EnumDirection.EnumAxis.Z ? new AxisAlignedBB((double) blockposition.getX(), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + 0.375F), (double) (blockposition.getX() + 1), (double) ((float) blockposition.getY() + 1.5F), (double) ((float) blockposition.getZ() + 0.625F)) : new AxisAlignedBB((double) ((float) blockposition.getX() + 0.375F), (double) blockposition.getY(), (double) blockposition.getZ(), (double) ((float) blockposition.getX() + 0.625F), (double) ((float) blockposition.getY() + 1.5F), (double) (blockposition.getZ() + 1));
++            if (enumdirection_enumaxis == EnumDirection.EnumAxis.Z) {
++                out[0] = (double) blockposition.getX();
++                out[1] = (double) blockposition.getY();
++                out[2] = (double) ((float) blockposition.getZ() + 0.375F);
++                out[3] = (double) (blockposition.getX() + 1);
++                out[4] = (double) ((float) blockposition.getY() + 1.5F);
++                out[5] = (double) ((float) blockposition.getZ() + 0.625F);
++            } else {
++                out[0] = (double) ((float) blockposition.getX() + 0.375F);
++                out[1] = (double) blockposition.getY();
++                out[2] = (double) blockposition.getZ();
++                out[3] = (double) ((float) blockposition.getX() + 0.625F);
++                out[4] = (double) ((float) blockposition.getY() + 1.5F);
++                out[5] = (double) (blockposition.getZ() + 1);
++            }
++
++            return true;
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockFire.java b/src/main/java/net/minecraft/server/BlockFire.java
+index db2ad8c1abbfaa6282dc08598aadf77f6d69b38a..034332bcdae138c99464904bcb2dbcdb3187958a 100644
+--- a/src/main/java/net/minecraft/server/BlockFire.java
++++ b/src/main/java/net/minecraft/server/BlockFire.java
+@@ -93,8 +93,8 @@ public class BlockFire extends Block {
+         this.flammabilities.put(block, Integer.valueOf(j));
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index c8a05249a03d0a3e78e374ed428abd8ff9f864b6..f029d7e7211e798fd05cd67f787e107d4fe1237c 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -55,8 +55,8 @@ public abstract class BlockFluids extends Block {
+         return material == this.material ? false : (enumdirection == EnumDirection.UP ? true : (material == Material.ICE ? false : super.isBlockSolid(iblockaccess, blockposition, enumdirection)));
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public int getRenderType() {
+diff --git a/src/main/java/net/minecraft/server/BlockHopper.java b/src/main/java/net/minecraft/server/BlockHopper.java
+index b0da5ac10006dc07aa74ce0df26ea6fc5d1c9519..1f6072c4b0514598175454dbc40ae0f9f88788ee 100644
+--- a/src/main/java/net/minecraft/server/BlockHopper.java
++++ b/src/main/java/net/minecraft/server/BlockHopper.java
+@@ -28,19 +28,19 @@ public class BlockHopper extends BlockContainer {
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+     }
+ 
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 0.625F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         float f = 0.125F;
+ 
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, f, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, f);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(1.0F - f, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 1.0F - f, 1.0F, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockLadder.java b/src/main/java/net/minecraft/server/BlockLadder.java
+index 29fa83bfe18e249347bfe115816d431fa0280995..32db50b59123aaedc551667cf8706c60aa8d0bc0 100644
+--- a/src/main/java/net/minecraft/server/BlockLadder.java
++++ b/src/main/java/net/minecraft/server/BlockLadder.java
+@@ -12,9 +12,9 @@ public class BlockLadder extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockLever.java b/src/main/java/net/minecraft/server/BlockLever.java
+index 29b6e7e819b4b8b251fba35785698ef57e67dd97..9a6fdbfabb52ba22e1fb020fb889da7396109e30 100644
+--- a/src/main/java/net/minecraft/server/BlockLever.java
++++ b/src/main/java/net/minecraft/server/BlockLever.java
+@@ -16,8 +16,8 @@ public class BlockLever extends Block {
+         this.setCreativeTab(CreativeModeTab.tabRedstone);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+index fc9ee0a2fd3bbb52392c0a8b769cc35b1835e4dd..be173aca86a51cfe4972a9758c88281d9ff8de94 100644
+--- a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+@@ -26,8 +26,8 @@ public abstract class BlockMinecartTrackAbstract extends Block {
+         this.setCreativeTab(CreativeModeTab.tabTransport);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockPiston.java b/src/main/java/net/minecraft/server/BlockPiston.java
+index 0c4852f4c7772dca96d4dc95528778301586b604..fa869f236029e5d961cd47d5fc7e92134a8dc99b 100644
+--- a/src/main/java/net/minecraft/server/BlockPiston.java
++++ b/src/main/java/net/minecraft/server/BlockPiston.java
+@@ -226,14 +226,14 @@ public class BlockPiston extends Block {
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+     }
+ 
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public boolean isFullCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockPistonExtension.java b/src/main/java/net/minecraft/server/BlockPistonExtension.java
+index b01bfd4ae532ff7a199cced3a3b9703981806fc4..856f631bcf0a4f68f80b1f7d3091d68866700e3b 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonExtension.java
++++ b/src/main/java/net/minecraft/server/BlockPistonExtension.java
+@@ -76,11 +76,11 @@ public class BlockPistonExtension extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.applyHeadBounds(iblockdata);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.applyCoreBounds(iblockdata);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockPistonMoving.java b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+index c42f03d352785632235e4225b854634ce2f223d9..9fc068f486aaf4a378e53b632842705f9a048630 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonMoving.java
++++ b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+@@ -108,11 +108,11 @@ public class BlockPistonMoving extends BlockContainer {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         TileEntityPiston tileentitypiston = this.getTileEntity((IBlockAccess) world, blockposition);
+ 
+         if (tileentitypiston == null) {
+-            return null;
++            return false;
+         } else {
+             float f = tileentitypiston.getProgress(0.0F);
+ 
+@@ -120,7 +120,20 @@ public class BlockPistonMoving extends BlockContainer {
+                 f = 1.0F - f;
+             }
+ 
+-            return this.getBoundingBox(world, blockposition, tileentitypiston.getPistonState(), f, tileentitypiston.getFacing());
++            // Athena - unpack the helper's box into the scalar out[] (this is the cold piston path)
++            AxisAlignedBB axisalignedbb = this.getBoundingBox(world, blockposition, tileentitypiston.getPistonState(), f, tileentitypiston.getFacing());
++
++            if (axisalignedbb == null) {
++                return false;
++            }
++
++            out[0] = axisalignedbb.minX;
++            out[1] = axisalignedbb.minY;
++            out[2] = axisalignedbb.minZ;
++            out[3] = axisalignedbb.maxX;
++            out[4] = axisalignedbb.maxY;
++            out[5] = axisalignedbb.maxZ;
++            return true;
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockPlant.java b/src/main/java/net/minecraft/server/BlockPlant.java
+index 5de120bdc59635b855c81972dcb07db2f4449899..48990659ee91cf2083d71bbe5c0251efb72733ac 100644
+--- a/src/main/java/net/minecraft/server/BlockPlant.java
++++ b/src/main/java/net/minecraft/server/BlockPlant.java
+@@ -66,8 +66,8 @@ public class BlockPlant extends Block {
+         return this.canPlaceBlockOn(world.getType(blockposition.down()).getBlock());
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockPortal.java b/src/main/java/net/minecraft/server/BlockPortal.java
+index bf63008726c36087e26215a1fb0789e88c441c94..7586d0d39549964361368997af222dd749c189d9 100644
+--- a/src/main/java/net/minecraft/server/BlockPortal.java
++++ b/src/main/java/net/minecraft/server/BlockPortal.java
+@@ -40,8 +40,8 @@ public class BlockPortal extends BlockHalfTransparent {
+ 
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+index 4da97a17f0d15b1ac38132695203a081a8c71d9d..21e291b2c490af2ffaba14500654bc05e7f01971 100644
+--- a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+@@ -37,8 +37,8 @@ public abstract class BlockPressurePlateAbstract extends Block {
+         return 20;
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index c29b21c68a9743e880f1db9b57d457537f850d8c..b7e849533f9ef844e25e8fef4ee8ab9d2fbf417d 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -48,8 +48,8 @@ public class BlockRedstoneWire extends Block {
+         }
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockReed.java b/src/main/java/net/minecraft/server/BlockReed.java
+index f74e97e67ab3b1c5da2a9d330dea64a8af155381..6b2d18a72d9b5947a909de5825c71c9fe7922cd0 100644
+--- a/src/main/java/net/minecraft/server/BlockReed.java
++++ b/src/main/java/net/minecraft/server/BlockReed.java
+@@ -87,8 +87,8 @@ public class BlockReed extends Block {
+         return this.canPlace(world, blockposition);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public Item getDropType(IBlockData iblockdata, Random random, int i) {
+diff --git a/src/main/java/net/minecraft/server/BlockSign.java b/src/main/java/net/minecraft/server/BlockSign.java
+index 8f24bcae216c32ebfad99d05663f8e69d896aed8..a49f69052a7775f273e10ec99255dc6903830634 100644
+--- a/src/main/java/net/minecraft/server/BlockSign.java
++++ b/src/main/java/net/minecraft/server/BlockSign.java
+@@ -14,8 +14,8 @@ public class BlockSign extends BlockContainer {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockSkull.java b/src/main/java/net/minecraft/server/BlockSkull.java
+index e430be4a4eec82bfcc818b8b9d99db0ed067363c..c2cd7957a1c2ad861b738e47cb18d70fc6b55ebf 100644
+--- a/src/main/java/net/minecraft/server/BlockSkull.java
++++ b/src/main/java/net/minecraft/server/BlockSkull.java
+@@ -69,9 +69,9 @@ public class BlockSkull extends BlockContainer {
+ 
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public IBlockData getPlacedState(World world, BlockPosition blockposition, EnumDirection enumdirection, float f, float f1, float f2, int i, EntityLiving entityliving) {
+diff --git a/src/main/java/net/minecraft/server/BlockSlowSand.java b/src/main/java/net/minecraft/server/BlockSlowSand.java
+index 26d3908db2da6717500813886331c986e60bfcc4..9abb33478854015864af577876644690939e89fd 100644
+--- a/src/main/java/net/minecraft/server/BlockSlowSand.java
++++ b/src/main/java/net/minecraft/server/BlockSlowSand.java
+@@ -9,10 +9,16 @@ public class BlockSlowSand extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         float f = 0.125F;
+ 
+-        return new AxisAlignedBB((double) blockposition.getX(), (double) blockposition.getY(), (double) blockposition.getZ(), (double) (blockposition.getX() + 1), (double) ((float) (blockposition.getY() + 1) - f), (double) (blockposition.getZ() + 1));
++        out[0] = Math.min((double) blockposition.getX(), (double) (blockposition.getX() + 1));
++        out[1] = Math.min((double) blockposition.getY(), (double) ((float) (blockposition.getY() + 1) - f));
++        out[2] = Math.min((double) blockposition.getZ(), (double) (blockposition.getZ() + 1));
++        out[3] = Math.max((double) blockposition.getX(), (double) (blockposition.getX() + 1));
++        out[4] = Math.max((double) blockposition.getY(), (double) ((float) (blockposition.getY() + 1) - f));
++        out[5] = Math.max((double) blockposition.getZ(), (double) (blockposition.getZ() + 1));
++        return true;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockSnow.java b/src/main/java/net/minecraft/server/BlockSnow.java
+index 72532eb39c3ca3f0da266c3d149eebb5ad9532ab..feedf5c57d4bf34757e4b0d9d59b2c57bb5bf331 100644
+--- a/src/main/java/net/minecraft/server/BlockSnow.java
++++ b/src/main/java/net/minecraft/server/BlockSnow.java
+@@ -20,11 +20,17 @@ public class BlockSnow extends Block {
+         return ((Integer) iblockaccess.getType(blockposition).get(BlockSnow.LAYERS)).intValue() < 5;
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         int i = ((Integer) iblockdata.get(BlockSnow.LAYERS)).intValue() - 1;
+         float f = 0.125F;
+ 
+-        return new AxisAlignedBB((double) blockposition.getX() + this.minX, (double) blockposition.getY() + this.minY, (double) blockposition.getZ() + this.minZ, (double) blockposition.getX() + this.maxX, (double) ((float) blockposition.getY() + (float) i * f), (double) blockposition.getZ() + this.maxZ);
++        out[0] = Math.min((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
++        out[1] = Math.min((double) blockposition.getY() + this.minY, (double) ((float) blockposition.getY() + (float) i * f));
++        out[2] = Math.min((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        out[3] = Math.max((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
++        out[4] = Math.max((double) blockposition.getY() + this.minY, (double) ((float) blockposition.getY() + (float) i * f));
++        out[5] = Math.max((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        return true;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockSoil.java b/src/main/java/net/minecraft/server/BlockSoil.java
+index f12b363b56c1605d62b757fb17b60100ea3d3f48..0e860578146b2ed0661c7655b938697fae5560f6 100644
+--- a/src/main/java/net/minecraft/server/BlockSoil.java
++++ b/src/main/java/net/minecraft/server/BlockSoil.java
+@@ -21,8 +21,14 @@ public class BlockSoil extends Block {
+         this.setLightOpacity(255);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return new AxisAlignedBB((double) blockposition.getX(), (double) blockposition.getY(), (double) blockposition.getZ(), (double) (blockposition.getX() + 1), (double) (blockposition.getY() + 1), (double) (blockposition.getZ() + 1));
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        out[0] = Math.min((double) blockposition.getX(), (double) (blockposition.getX() + 1));
++        out[1] = Math.min((double) blockposition.getY(), (double) (blockposition.getY() + 1));
++        out[2] = Math.min((double) blockposition.getZ(), (double) (blockposition.getZ() + 1));
++        out[3] = Math.max((double) blockposition.getX(), (double) (blockposition.getX() + 1));
++        out[4] = Math.max((double) blockposition.getY(), (double) (blockposition.getY() + 1));
++        out[5] = Math.max((double) blockposition.getZ(), (double) (blockposition.getZ() + 1));
++        return true;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockStairs.java b/src/main/java/net/minecraft/server/BlockStairs.java
+index 3d4c967414ebe626c3fbd8f3b36c04dfd2d78e09..2f1b0847b0fcbfa4766ebe95e078866fb01a0ad7 100644
+--- a/src/main/java/net/minecraft/server/BlockStairs.java
++++ b/src/main/java/net/minecraft/server/BlockStairs.java
+@@ -398,14 +398,14 @@ public class BlockStairs extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.setBaseCollisionBounds(world, blockposition);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         boolean flag = this.h(world, blockposition);
+ 
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         if (flag && this.i(world, blockposition)) {
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+diff --git a/src/main/java/net/minecraft/server/BlockStepAbstract.java b/src/main/java/net/minecraft/server/BlockStepAbstract.java
+index 60f025b434a2d7719cbfccd17cb26f66fdaa6066..cbb690cf8e4a3e2d191ac1db41eb398f7fa289f1 100644
+--- a/src/main/java/net/minecraft/server/BlockStepAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockStepAbstract.java
+@@ -53,9 +53,9 @@ public abstract class BlockStepAbstract extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         this.updateShape(world, blockposition);
+-        super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++        super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockThin.java b/src/main/java/net/minecraft/server/BlockThin.java
+index 895f96e80733372ca6b6faa43a907e6816b15c4a..ae0fa94f0b916dee4bd0c86c195c613df0dda311 100644
+--- a/src/main/java/net/minecraft/server/BlockThin.java
++++ b/src/main/java/net/minecraft/server/BlockThin.java
+@@ -40,7 +40,7 @@ public class BlockThin extends Block {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         boolean flag = this.canPaneConnectToBlock(world.getType(blockposition.north()).getBlock());
+         boolean flag1 = this.canPaneConnectToBlock(world.getType(blockposition.south()).getBlock());
+         boolean flag2 = this.canPaneConnectToBlock(world.getType(blockposition.west()).getBlock());
+@@ -49,27 +49,27 @@ public class BlockThin extends Block {
+         if ((!flag2 || !flag3) && (flag2 || flag3 || flag || flag1)) {
+             if (flag2) {
+                 this.setBlockBounds(0.0F, 0.0F, 0.4375F, 0.5F, 1.0F, 0.5625F);
+-                super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++                super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+             } else if (flag3) {
+                 this.setBlockBounds(0.5F, 0.0F, 0.4375F, 1.0F, 1.0F, 0.5625F);
+-                super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++                super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+             }
+         } else {
+             this.setBlockBounds(0.0F, 0.0F, 0.4375F, 1.0F, 1.0F, 0.5625F);
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+         if ((!flag || !flag1) && (flag2 || flag3 || flag || flag1)) {
+             if (flag) {
+                 this.setBlockBounds(0.4375F, 0.0F, 0.0F, 0.5625F, 1.0F, 0.5F);
+-                super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++                super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+             } else if (flag1) {
+                 this.setBlockBounds(0.4375F, 0.0F, 0.5F, 0.5625F, 1.0F, 1.0F);
+-                super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++                super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+             }
+         } else {
+             this.setBlockBounds(0.4375F, 0.0F, 0.0F, 0.5625F, 1.0F, 1.0F);
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockTorch.java b/src/main/java/net/minecraft/server/BlockTorch.java
+index 47bde6bfa468059d84b665369172e0c9f2efb58f..0743b4f2907cec9cd6e13833868b9754a8f35fec 100644
+--- a/src/main/java/net/minecraft/server/BlockTorch.java
++++ b/src/main/java/net/minecraft/server/BlockTorch.java
+@@ -23,8 +23,8 @@ public class BlockTorch extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockTrapdoor.java b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+index 159a3b15327f0e09500b45cf5f09f824391317a7..4407df223920874f6571c865b5f8a347b061627e 100644
+--- a/src/main/java/net/minecraft/server/BlockTrapdoor.java
++++ b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+@@ -33,9 +33,9 @@ public class BlockTrapdoor extends Block {
+         return !((Boolean) iblockaccess.getType(blockposition).get(BlockTrapdoor.OPEN)).booleanValue();
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        return super.getCollisionBoundingBox(world, blockposition, iblockdata);
++        return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockTripwire.java b/src/main/java/net/minecraft/server/BlockTripwire.java
+index eba06b91fbea2d5fba66c2712e84961d153c62f6..83aab012434a67ea66a9d264ea816ada20b36c99 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwire.java
++++ b/src/main/java/net/minecraft/server/BlockTripwire.java
+@@ -29,8 +29,8 @@ public class BlockTripwire extends Block {
+         return iblockdata.set(BlockTripwire.NORTH, Boolean.valueOf(isConnectedTo(iblockaccess, blockposition, iblockdata, EnumDirection.NORTH))).set(BlockTripwire.EAST, Boolean.valueOf(isConnectedTo(iblockaccess, blockposition, iblockdata, EnumDirection.EAST))).set(BlockTripwire.SOUTH, Boolean.valueOf(isConnectedTo(iblockaccess, blockposition, iblockdata, EnumDirection.SOUTH))).set(BlockTripwire.WEST, Boolean.valueOf(isConnectedTo(iblockaccess, blockposition, iblockdata, EnumDirection.WEST)));
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockTripwireHook.java b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+index ed471dea0674540ed010654321ad00013e4c5174..8b241ebea35afb7894378aeadf3ce7dacbf4557b 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwireHook.java
++++ b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+@@ -26,8 +26,8 @@ public class BlockTripwireHook extends Block {
+         return iblockdata.set(BlockTripwireHook.SUSPENDED, Boolean.valueOf(!World.doesBlockHaveSolidTopSurface(iblockaccess, blockposition.down())));
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean isOpaqueCube() {
+diff --git a/src/main/java/net/minecraft/server/BlockVine.java b/src/main/java/net/minecraft/server/BlockVine.java
+index 2811500ea651555244c23a04471a2d12f0d2d805..da5042edf1388815b48c6032496ff1465198f941 100644
+--- a/src/main/java/net/minecraft/server/BlockVine.java
++++ b/src/main/java/net/minecraft/server/BlockVine.java
+@@ -104,8 +104,8 @@ public class BlockVine extends Block {
+         this.setBlockBounds(f1, f2, f3, f4, f5, f6);
+     }
+ 
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     public boolean canPlace(World world, BlockPosition blockposition, EnumDirection enumdirection) {
+diff --git a/src/main/java/net/minecraft/server/BlockWaterLily.java b/src/main/java/net/minecraft/server/BlockWaterLily.java
+index 6f1aca90a47690c8967cf5be99013e16e6db91cc..6a9771965afc0caaabc8242d04bd2f728ed77964 100644
+--- a/src/main/java/net/minecraft/server/BlockWaterLily.java
++++ b/src/main/java/net/minecraft/server/BlockWaterLily.java
+@@ -14,16 +14,22 @@ public class BlockWaterLily extends BlockPlant {
+     }
+ 
+     @Override
+-    public void addCollisionBoxesToList(World world, BlockPosition blockposition, IBlockData iblockdata, AxisAlignedBB axisalignedbb, List<AxisAlignedBB> list, Entity entity) {
++    public void addCollisionBoxes(World world, BlockPosition blockposition, IBlockData iblockdata, double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ, CollisionBoxSink sink, Entity entity) { // Athena - scalar collision gathering
+         if (entity == null || !(entity instanceof EntityBoat)) {
+-            super.addCollisionBoxesToList(world, blockposition, iblockdata, axisalignedbb, list, entity);
++            super.addCollisionBoxes(world, blockposition, iblockdata, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, sink, entity);
+         }
+ 
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return new AxisAlignedBB((double) blockposition.getX() + this.minX, (double) blockposition.getY() + this.minY, (double) blockposition.getZ() + this.minZ, (double) blockposition.getX() + this.maxX, (double) blockposition.getY() + this.maxY, (double) blockposition.getZ() + this.maxZ);
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        out[0] = Math.min((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
++        out[1] = Math.min((double) blockposition.getY() + this.minY, (double) blockposition.getY() + this.maxY);
++        out[2] = Math.min((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        out[3] = Math.max((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
++        out[4] = Math.max((double) blockposition.getY() + this.minY, (double) blockposition.getY() + this.maxY);
++        out[5] = Math.max((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        return true;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockWeb.java b/src/main/java/net/minecraft/server/BlockWeb.java
+index e816c60ff5d61309ca9a3b3d84dc924d300fd10e..4cce7d303b84a6e12aff6da180287d129af0c962 100644
+--- a/src/main/java/net/minecraft/server/BlockWeb.java
++++ b/src/main/java/net/minecraft/server/BlockWeb.java
+@@ -21,8 +21,8 @@ public class BlockWeb extends Block {
+     }
+ 
+     @Override
+-    public AxisAlignedBB getCollisionBoundingBox(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return null;
++    public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
++        return false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/CollisionBoxSink.java b/src/main/java/net/minecraft/server/CollisionBoxSink.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..27c4a6b1c30518083e0f00609b83f04ac56fc27b
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/CollisionBoxSink.java
+@@ -0,0 +1,79 @@
++package net.minecraft.server;
++
++// Athena - collects collision boxes as six raw doubles each, so gathering them allocates nothing.
++//
++// The old path returned a List<AxisAlignedBB>, which meant one 64-byte box object per scanned solid
++// block plus the list itself, every time an entity moved. Boxes were produced inside
++// Block.getCollisionBoundingBox - a megamorphic call - so neither C2 nor Graal could scalar-replace
++// them; measurements showed the cost scaling linearly with the number of blocks scanned.
++//
++// Instances are meant to be reused. Callers take a mark(), fill the sink, read the boxes back, and
++// reset(mark) when done, which makes nested use (Entity.move's step-up trial runs while the main
++// pass's boxes are still live) safe without allocating a second buffer.
++public final class CollisionBoxSink {
++
++    private static final int STRIDE = 6;
++
++    private double[] data = new double[STRIDE * 16];
++    private int size;
++
++    /** Scratch space for a single box, reused so per-block queries need no array of their own. */
++    private final double[] scratch = new double[STRIDE];
++
++    public double[] scratch() {
++        return this.scratch;
++    }
++
++    /** Index to reset() back to once the boxes added after it are no longer needed. */
++    public int mark() {
++        return this.size;
++    }
++
++    public void reset(int mark) {
++        this.size = mark;
++    }
++
++    public void clear() {
++        this.size = 0;
++    }
++
++    /** Exclusive end index, in doubles. Iterate a region as `for (int i = mark; i < end; i += 6)`. */
++    public int end() {
++        return this.size;
++    }
++
++    public boolean isEmpty(int mark) {
++        return this.size == mark;
++    }
++
++    public void add(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        if (this.size + STRIDE > this.data.length) {
++            double[] bigger = new double[this.data.length << 1];
++            System.arraycopy(this.data, 0, bigger, 0, this.size);
++            this.data = bigger;
++        }
++
++        double[] d = this.data;
++        int i = this.size;
++
++        d[i] = minX;
++        d[i + 1] = minY;
++        d[i + 2] = minZ;
++        d[i + 3] = maxX;
++        d[i + 4] = maxY;
++        d[i + 5] = maxZ;
++        this.size = i + STRIDE;
++    }
++
++    /** Adds the box only if it overlaps the query box, mirroring the old intersectsWith filter. */
++    public void addIfIntersects(double minX, double minY, double minZ, double maxX, double maxY, double maxZ,
++                                double qMinX, double qMinY, double qMinZ, double qMaxX, double qMaxY, double qMaxZ) {
++        if (maxX > qMinX && minX < qMaxX && maxY > qMinY && minY < qMaxY && maxZ > qMinZ && minZ < qMaxZ) {
++            this.add(minX, minY, minZ, maxX, maxY, maxZ);
++        }
++    }
++
++    public double get(int index) {
++        return this.data[index];
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 80c15c5af494fe2604dc58cb62cef48ceb2e69d9..976d595d06fc0bea853e9a5170f4ff036331f63f 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -442,7 +442,7 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     private boolean isLiquidPresentInAABB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) { // Athena - scalar
+-        return this.world.getCubes(this, minX, minY, minZ, maxX, maxY, maxZ).isEmpty() && !this.world.containsLiquid(minX, minY, minZ, maxX, maxY, maxZ);
++        return !this.world.hasCubes(this, minX, minY, minZ, maxX, maxY, maxZ) && !this.world.containsLiquid(minX, minY, minZ, maxX, maxY, maxZ);
+     }
+ 
+     /**
+@@ -506,7 +506,7 @@ public abstract class Entity implements ICommandListener {
+             if (flag) {
+                 double d9;
+ 
+-                for (d9 = 0.05D; d0 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ).isEmpty(); d6 = d0) {
++                for (d9 = 0.05D; d0 != 0.0D &&! this.world.hasCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ); d6 = d0) {
+                     if (d0 < d9 && d0 >= -d9) {
+                         d0 = 0.0D;
+                     } else if (d0 > 0.0D) {
+@@ -516,7 +516,7 @@ public abstract class Entity implements ICommandListener {
+                     }
+                 }
+ 
+-                for (; d2 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2).isEmpty(); d8 = d2) {
++                for (; d2 != 0.0D &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2); d8 = d2) {
+                     if (d2 < d9 && d2 >= -d9) {
+                         d2 = 0.0D;
+                     } else if (d2 > 0.0D) {
+@@ -526,7 +526,7 @@ public abstract class Entity implements ICommandListener {
+                     }
+                 }
+ 
+-                for (; d0 != 0.0D && d2 != 0.0D && this.world.getCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2).isEmpty(); d8 = d2) {
++                for (; d0 != 0.0D && d2 != 0.0D &&! this.world.hasCubes(this, this.boundingBoxMinX + d0, this.boundingBoxMinY - 1.0D, this.boundingBoxMinZ + d2, this.boundingBoxMaxX + d0, this.boundingBoxMaxY - 1.0D, this.boundingBoxMaxZ + d2); d8 = d2) {
+                     if (d0 < d9 && d0 >= -d9) {
+                         d0 = 0.0D;
+                     } else if (d0 > 0.0D) {
+@@ -562,39 +562,49 @@ public abstract class Entity implements ICommandListener {
+             double zLength = totalMaxZ - totalMinZ;
+             boolean axisScan = this.world.pandaSpigotConfig.optimizeTntMovement && xLength * yLength * zLength > 10;
+ 
+-            List list = axisScan
+-                    ? this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ)
+-                    : this.world.getCubes(this, totalMinX, totalMinY, totalMinZ, totalMaxX, totalMaxY, totalMaxZ);
++            // Athena - collision boxes are gathered into a reusable scalar sink (six doubles per box)
++            CollisionBoxSink sink = World.collisionSink();
++            int sinkMark = sink.mark();
++
++            try {
++            if (axisScan) {
++                this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ, sink);
++            } else {
++                this.world.getCubes(this, totalMinX, totalMinY, totalMinZ, totalMaxX, totalMaxY, totalMaxZ, sink);
++            }
+             // PandaSpigot end
+ 
+             // pre-move snapshot (was AxisAlignedBB axisalignedbb)
+             double preMinX = this.boundingBoxMinX, preMinY = this.boundingBoxMinY, preMinZ = this.boundingBoxMinZ;
+             double preMaxX = this.boundingBoxMaxX, preMaxY = this.boundingBoxMaxY, preMaxZ = this.boundingBoxMaxZ;
+ 
+-            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
+-                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
+-                d1 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++            for (int idx = sinkMark, sz = sink.end(); idx < sz; idx += 6) {
++                d1 = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                         this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d1);
+             }
+ 
+             this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY + d1, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ);
+             boolean flag1 = this.onGround || d7 != d1 && d7 < 0.0D;
+ 
+-            if (axisScan) list = this.world.getCubes(this, this.boundingBoxMinX + Math.min(d0, 0.0D), this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX + Math.max(d0, 0.0D), this.boundingBoxMaxY, this.boundingBoxMaxZ); // PandaSpigot - get x axis blocks
++            if (axisScan) { // PandaSpigot - get x axis blocks
++                sink.reset(sinkMark);
++                this.world.getCubes(this, this.boundingBoxMinX + Math.min(d0, 0.0D), this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX + Math.max(d0, 0.0D), this.boundingBoxMaxY, this.boundingBoxMaxZ, sink);
++            }
+ 
+-            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
+-                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
+-                d0 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++            for (int idx = sinkMark, sz = sink.end(); idx < sz; idx += 6) {
++                d0 = AxisAlignedBBHelper.calcXOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                         this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d0);
+             }
+ 
+             this.setEntityBoundingBox(this.boundingBoxMinX + d0, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX + d0, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+ 
+-            if (axisScan) list = this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ + Math.min(d2, 0.0D), this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ + Math.max(d2, 0.0D)); // PandaSpigot - get z axis blocks
++            if (axisScan) { // PandaSpigot - get z axis blocks
++                sink.reset(sinkMark);
++                this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ + Math.min(d2, 0.0D), this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ + Math.max(d2, 0.0D), sink);
++            }
+ 
+-            for (int idx = 0, sz = list.size(); idx < sz; ++idx) {
+-                AxisAlignedBB box = (AxisAlignedBB) list.get(idx);
+-                d2 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++            for (int idx = sinkMark, sz = sink.end(); idx < sz; idx += 6) {
++                d2 = AxisAlignedBBHelper.calcZOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                         this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d2);
+             }
+ 
+@@ -613,9 +623,11 @@ public abstract class Entity implements ICommandListener {
+ 
+                 this.setEntityBoundingBox(preMinX, preMinY, preMinZ, preMaxX, preMaxY, preMaxZ);
+                 d1 = (double) this.stepHeight;
+-                List list1 = this.world.getCubes(this,
++                // Athena - the step-up scan stacks on top of the main pass's boxes in the same sink
++                int stepMark = sink.mark();
++                this.world.getCubes(this,
+                         this.boundingBoxMinX + Math.min(d6, 0.0D), this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ + Math.min(d8, 0.0D),
+-                        this.boundingBoxMaxX + Math.max(d6, 0.0D), this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ + Math.max(d8, 0.0D));
++                        this.boundingBoxMaxX + Math.max(d6, 0.0D), this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ + Math.max(d8, 0.0D), sink);
+ 
+                 // candidate A (was axisalignedbb4), starting from the current box
+                 double aMinX = this.boundingBoxMinX, aMinY = this.boundingBoxMinY, aMinZ = this.boundingBoxMinZ;
+@@ -625,27 +637,24 @@ public abstract class Entity implements ICommandListener {
+                 double sweptMaxX = aMaxX + Math.max(d6, 0.0D), sweptMaxY = aMaxY, sweptMaxZ = aMaxZ + Math.max(d8, 0.0D);
+                 double d13 = d1;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d13 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d13 = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             sweptMinX, sweptMinY, sweptMinZ, sweptMaxX, sweptMaxY, sweptMaxZ, d13);
+                 }
+ 
+                 aMinY += d13; aMaxY += d13;
+                 double d14 = d6;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d14 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d14 = AxisAlignedBBHelper.calcXOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             aMinX, aMinY, aMinZ, aMaxX, aMaxY, aMaxZ, d14);
+                 }
+ 
+                 aMinX += d14; aMaxX += d14;
+                 double d15 = d8;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d15 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d15 = AxisAlignedBBHelper.calcZOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             aMinX, aMinY, aMinZ, aMaxX, aMaxY, aMaxZ, d15);
+                 }
+ 
+@@ -656,27 +665,24 @@ public abstract class Entity implements ICommandListener {
+                 double bMaxX = this.boundingBoxMaxX, bMaxY = this.boundingBoxMaxY, bMaxZ = this.boundingBoxMaxZ;
+                 double d16 = d1;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d16 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d16 = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d16);
+                 }
+ 
+                 bMinY += d16; bMaxY += d16;
+                 double d17 = d6;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d17 = AxisAlignedBBHelper.calcXOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d17 = AxisAlignedBBHelper.calcXOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d17);
+                 }
+ 
+                 bMinX += d17; bMaxX += d17;
+                 double d18 = d8;
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d18 = AxisAlignedBBHelper.calcZOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d18 = AxisAlignedBBHelper.calcZOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, d18);
+                 }
+ 
+@@ -696,9 +702,8 @@ public abstract class Entity implements ICommandListener {
+                     this.setEntityBoundingBox(bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
+                 }
+ 
+-                for (int idx = 0, sz = list1.size(); idx < sz; ++idx) {
+-                    AxisAlignedBB box = (AxisAlignedBB) list1.get(idx);
+-                    d1 = AxisAlignedBBHelper.calcYOffset(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
++                for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                    d1 = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
+                             this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, d1);
+                 }
+ 
+@@ -711,6 +716,9 @@ public abstract class Entity implements ICommandListener {
+                 }
+                 // Athena end
+             }
++            } finally {
++                sink.reset(sinkMark); // Athena - release the sink region
++            }
+ 
+             this.world.methodProfiler.endSection();
+             this.world.methodProfiler.startSection("rest");
+diff --git a/src/main/java/net/minecraft/server/EntityEnderman.java b/src/main/java/net/minecraft/server/EntityEnderman.java
+index 899afb9b3702c174df8dc0e3f9bbaf90f750c3d8..189c800b4af810ec7388da9f74221666877fc2dd 100644
+--- a/src/main/java/net/minecraft/server/EntityEnderman.java
++++ b/src/main/java/net/minecraft/server/EntityEnderman.java
+@@ -197,7 +197,7 @@ public class EntityEnderman extends EntityMonster {
+                 Location to = teleport.getTo();
+                 this.enderTeleportTo(to.getX(), to.getY(), to.getZ());
+                 // CraftBukkit end
+-                if (this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
++                if (!this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
+                     flag = true;
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/EntityGhast.java b/src/main/java/net/minecraft/server/EntityGhast.java
+index ae66a7c85f0ed42d2bb15daa474b83416c171c5a..0f61741b95c0838a24d4eaa5bbf2dacdcf00c4d7 100644
+--- a/src/main/java/net/minecraft/server/EntityGhast.java
++++ b/src/main/java/net/minecraft/server/EntityGhast.java
+@@ -285,11 +285,14 @@ public class EntityGhast extends EntityFlying implements IMonster {
+             double d4 = (d0 - this.parentEntity.locX) / d3;
+             double d5 = (d1 - this.parentEntity.locY) / d3;
+             double d6 = (d2 - this.parentEntity.locZ) / d3;
+-            AxisAlignedBB axisalignedbb = new AxisAlignedBB(this.parentEntity.boundingBoxMinX, this.parentEntity.boundingBoxMinY, this.parentEntity.boundingBoxMinZ, this.parentEntity.boundingBoxMaxX, this.parentEntity.boundingBoxMaxY, this.parentEntity.boundingBoxMaxZ); // Athena
++            // Athena - the swept box is stepped along in six locals; no box allocated per step
++            double minX = this.parentEntity.boundingBoxMinX, minY = this.parentEntity.boundingBoxMinY, minZ = this.parentEntity.boundingBoxMinZ;
++            double maxX = this.parentEntity.boundingBoxMaxX, maxY = this.parentEntity.boundingBoxMaxY, maxZ = this.parentEntity.boundingBoxMaxZ;
+ 
+             for (int i = 1; (double) i < d3; ++i) {
+-                axisalignedbb = axisalignedbb.offset(d4, d5, d6);
+-                if (!this.parentEntity.world.getCubes(this.parentEntity, axisalignedbb).isEmpty()) {
++                minX += d4; minY += d5; minZ += d6;
++                maxX += d4; maxY += d5; maxZ += d6;
++                if (this.parentEntity.world.hasCubes(this.parentEntity, minX, minY, minZ, maxX, maxY, maxZ)) {
+                     return false;
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/EntityGuardian.java b/src/main/java/net/minecraft/server/EntityGuardian.java
+index 51389313f5a34151165c2d6ef22ce23f443286cc..373a1be996a87c834c17604a82f0bb425f158e7e 100644
+--- a/src/main/java/net/minecraft/server/EntityGuardian.java
++++ b/src/main/java/net/minecraft/server/EntityGuardian.java
+@@ -348,7 +348,7 @@ public class EntityGuardian extends EntityMonster {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty();
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityHanging.java b/src/main/java/net/minecraft/server/EntityHanging.java
+index e3d5ebcc1bbfcf592b59fb74d11bd055cef48fbc..6dfbc5db10bba405670b1e83bfe6179c47847ec7 100644
+--- a/src/main/java/net/minecraft/server/EntityHanging.java
++++ b/src/main/java/net/minecraft/server/EntityHanging.java
+@@ -134,7 +134,7 @@ public abstract class EntityHanging extends Entity {
+     }
+ 
+     public boolean survives() {
+-        if (!this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty()) {
++        if (this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
+             return false;
+         } else {
+             int i = Math.max(1, this.getWidthPixels() / 16);
+diff --git a/src/main/java/net/minecraft/server/EntityInsentient.java b/src/main/java/net/minecraft/server/EntityInsentient.java
+index f29ce73acbea4a5712642cfa67106affb1b828eb..92ceb5b2772ce38557f9f75b9b6e99ac7a0d75b4 100644
+--- a/src/main/java/net/minecraft/server/EntityInsentient.java
++++ b/src/main/java/net/minecraft/server/EntityInsentient.java
+@@ -550,7 +550,7 @@ public abstract class EntityInsentient extends EntityLiving {
+     }
+ 
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     public int getMaxSpawnedInChunk() {
+diff --git a/src/main/java/net/minecraft/server/EntityMagmaCube.java b/src/main/java/net/minecraft/server/EntityMagmaCube.java
+index 03779e9a2d1b192c5ffe4cdab4d5be54d0efde04..0b351ff1208e994044bb99dd81b9437937317bc8 100644
+--- a/src/main/java/net/minecraft/server/EntityMagmaCube.java
++++ b/src/main/java/net/minecraft/server/EntityMagmaCube.java
+@@ -21,7 +21,7 @@ public class EntityMagmaCube extends EntitySlime {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityOcelot.java b/src/main/java/net/minecraft/server/EntityOcelot.java
+index 8783dc16395a4335fa74e35e4ea095e35d579e85..72a0d8ee55cfe1158149d404bcd5801a97325259 100644
+--- a/src/main/java/net/minecraft/server/EntityOcelot.java
++++ b/src/main/java/net/minecraft/server/EntityOcelot.java
+@@ -194,7 +194,7 @@ public class EntityOcelot extends EntityTameableAnimal {
+     }
+ 
+     public boolean canSpawn() {
+-        if (this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
++        if (this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ)) {
+             BlockPosition blockposition = new BlockPosition(this.locX, this.boundingBoxMinY, this.locZ);
+ 
+             if (blockposition.getY() < this.world.getSeaLevel()) {
+diff --git a/src/main/java/net/minecraft/server/EntityPigZombie.java b/src/main/java/net/minecraft/server/EntityPigZombie.java
+index 679282c4915caaaa2de53e24f8741fce8d88d130..642b12ed7732642f300384554728c25d00cf5270 100644
+--- a/src/main/java/net/minecraft/server/EntityPigZombie.java
++++ b/src/main/java/net/minecraft/server/EntityPigZombie.java
+@@ -80,7 +80,7 @@ public class EntityPigZombie extends EntityZombie {
+ 
+     @Override
+     public boolean canSpawn() {
+-        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) && this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
++        return this.world.checkNoEntityCollision(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ, (Entity) this) &&! this.world.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && !this.world.containsLiquid(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index c11d5abea51e9339dfa8ec4a9e040100aa6fc926..823f266d205cfe6319a50d197388185e371d101e 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -94,7 +94,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         this.stepHeight = 0.0F;
+         this.setPositionRotation(blockposition, 0.0F, 0.0F);
+ 
+-        while (!worldserver.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ).isEmpty() && this.locY < 255.0D) {
++        while (worldserver.hasCubes(this, this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ) && this.locY < 255.0D) {
+             this.setPosition(this.locX, this.locY + 1.0D, this.locZ);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityZombie.java b/src/main/java/net/minecraft/server/EntityZombie.java
+index 351479468047aeded7df452e416f9cbceeb95278..37088c4f13c0dc46b23485e66e7d2baf323948c7 100644
+--- a/src/main/java/net/minecraft/server/EntityZombie.java
++++ b/src/main/java/net/minecraft/server/EntityZombie.java
+@@ -185,7 +185,7 @@ public class EntityZombie extends EntityMonster {
+ 
+                     if (World.doesBlockHaveSolidTopSurface((IBlockAccess) this.world, new BlockPosition(i1, j1 - 1, k1)) && !this.world.isLightLevel(new BlockPosition(i1, j1, k1), 10)) { // PandaSpigot - Use isLightLevel
+                         entityzombie.setPosition((double) i1, (double) j1, (double) k1);
+-                        if (!this.world.isPlayerNearby((double) i1, (double) j1, (double) k1, 7.0D) && this.world.checkNoEntityCollision(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ, (Entity) entityzombie) && this.world.getCubes(entityzombie, entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ).isEmpty() && !this.world.containsLiquid(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ)) {
++                        if (!this.world.isPlayerNearby((double) i1, (double) j1, (double) k1, 7.0D) && this.world.checkNoEntityCollision(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ, (Entity) entityzombie) &&! this.world.hasCubes(entityzombie, entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ) && !this.world.containsLiquid(entityzombie.boundingBoxMinX, entityzombie.boundingBoxMinY, entityzombie.boundingBoxMinZ, entityzombie.boundingBoxMaxX, entityzombie.boundingBoxMaxY, entityzombie.boundingBoxMaxZ)) {
+                             this.world.addEntity(entityzombie, CreatureSpawnEvent.SpawnReason.REINFORCEMENTS); // CraftBukkit
+                             entityzombie.setGoalTarget(entityliving, EntityTargetEvent.TargetReason.REINFORCEMENT_TARGET, true);
+                             entityzombie.prepare(this.world.getDifficultyForLocation(new BlockPosition(entityzombie)), (GroupDataEntity) null);
+diff --git a/src/main/java/net/minecraft/server/ItemBoat.java b/src/main/java/net/minecraft/server/ItemBoat.java
+index b1ce417233d64d152097c53bd8ee8585538f5747..74a7f94c652532dd6428df1bec0297e48be83939 100644
+--- a/src/main/java/net/minecraft/server/ItemBoat.java
++++ b/src/main/java/net/minecraft/server/ItemBoat.java
+@@ -70,7 +70,7 @@ public class ItemBoat extends Item {
+                     EntityBoat entityboat = new EntityBoat(world, (double) ((float) blockposition.getX() + 0.5F), (double) ((float) blockposition.getY() + 1.0F), (double) ((float) blockposition.getZ() + 0.5F));
+ 
+                     entityboat.yaw = (float) (((MathHelper.floor((double) (entityhuman.yaw * 4.0F / 360.0F) + 0.5D) & 3) - 1) * 90);
+-                    if (!world.getCubes(entityboat, Math.min(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.min(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.min(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D), Math.max(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.max(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.max(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D)).isEmpty()) {
++                    if (world.hasCubes(entityboat, Math.min(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.min(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.min(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D), Math.max(entityboat.boundingBoxMinX - -0.1D, entityboat.boundingBoxMaxX + -0.1D), Math.max(entityboat.boundingBoxMinY - -0.1D, entityboat.boundingBoxMaxY + -0.1D), Math.max(entityboat.boundingBoxMinZ - -0.1D, entityboat.boundingBoxMaxZ + -0.1D))) {
+                         return itemstack;
+                     }
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index f2f7a8c4b4d46b9bc122f7b6fc6699d98c00ff7e..b1c404cb77dd1d32846c27446d4e3090792b7957 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -423,7 +423,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     }
+ 
+                     float f4 = 0.0625F;
+-                    boolean flag = worldserver.getCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4)).isEmpty();
++                    boolean flag =! worldserver.hasCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4));
+ 
+                     if (this.player.onGround && !packetplayinflying.isOnGround() && d12 > 0.0D) {
+                         this.player.jump();
+@@ -452,7 +452,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     this.player.setLocation(d7, d8, d9, f2, f3);
+                     this.player.checkMovement(this.player.locX - d0, this.player.locY - d1, this.player.locZ - d2);
+                     if (!this.player.noclip) {
+-                        boolean flag2 = worldserver.getCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4)).isEmpty();
++                        boolean flag2 =! worldserver.hasCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4));
+ 
+                         if (flag && (flag1 || !flag2) && !this.player.isSleeping()) {
+                             this.setPlayerLocation(this.o, this.p, this.q, f2, f3);
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 11231e94ae7cef1dd0b166612fb915040aad79d2..741ebb3d57f990e4bfa631fb862b8b80b88b69db 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -608,7 +608,7 @@ public abstract class PlayerList {
+ 
+         worldserver.chunkProviderServer.getChunkAt((int) entityplayer1.locX >> 4, (int) entityplayer1.locZ >> 4);
+ 
+-        while (avoidSuffocation && !worldserver.getCubes(entityplayer1, entityplayer1.boundingBoxMinX, entityplayer1.boundingBoxMinY, entityplayer1.boundingBoxMinZ, entityplayer1.boundingBoxMaxX, entityplayer1.boundingBoxMaxY, entityplayer1.boundingBoxMaxZ).isEmpty() && entityplayer1.locY < 256.0D) {
++        while (avoidSuffocation && worldserver.hasCubes(entityplayer1, entityplayer1.boundingBoxMinX, entityplayer1.boundingBoxMinY, entityplayer1.boundingBoxMinZ, entityplayer1.boundingBoxMaxX, entityplayer1.boundingBoxMaxY, entityplayer1.boundingBoxMaxZ) && entityplayer1.locY < 256.0D) {
+             entityplayer1.setPosition(entityplayer1.locX, entityplayer1.locY + 1.0D, entityplayer1.locZ);
+         }
+         // CraftBukkit start
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index ef1ad1e3aa10dbe1d701690b7376d5e134aec169..40e0562ac131c3fe3fd95d1d1b59c2769fe7db01 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1278,11 +1278,134 @@ public abstract class World implements IBlockAccess {
+         this.worldAccesses.add(iworldaccess);
+     }
+ 
+-    // Athena start - scalar entry point. The block collision API still needs a box object, so this
+-    // builds one here for now (same single allocation the caller used to make); it disappears once
+-    // Block.addCollisionBoxesToList is converted to write into a scalar sink.
+-    public List<AxisAlignedBB> getCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+-        return this.getCubes(entity, new AxisAlignedBB(minX, minY, minZ, maxX, maxY, maxZ));
++    // Athena start - scalar collision gathering. Boxes are appended to the caller's sink as six
++    // doubles each, so scanning a swept volume allocates nothing at all.
++    public void getCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, CollisionBoxSink sink) {
++        int i = MathHelper.floor(minX);
++        int j = MathHelper.floor(maxX + 1.0D);
++        int k = MathHelper.floor(minY);
++        int l = MathHelper.floor(maxY + 1.0D);
++        int i1 = MathHelper.floor(minZ);
++        int j1 = MathHelper.floor(maxZ + 1.0D);
++        WorldBorder worldborder = this.getWorldBorder();
++        boolean flag = entity.isOutsideBorder();
++        boolean flag1 = this.isInsideBorder(worldborder, entity);
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++
++        // Spigot start
++        int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
++        for ( int chunkx = ( i >> 4 ); chunkx <= ( ( j - 1 ) >> 4 ); chunkx++ )
++        {
++            int cx = chunkx << 4;
++            for ( int chunkz = ( i1 >> 4 ); chunkz <= ( ( j1 - 1 ) >> 4 ); chunkz++ )
++            {
++                Chunk chunk = this.getChunkIfLoaded( chunkx, chunkz );
++                if ( chunk == null )
++                {
++                    // PaperSpigot start
++                    if (entity.loadChunks) {
++                        chunk = ((ChunkProviderServer) entity.world.chunkProvider).getChunkAt(chunkx, chunkz);
++                    } else {
++                        entity.inUnloadedChunk = true; // PaperSpigot - Remove entities in unloaded chunks
++                        continue;
++                    }
++                    // PaperSpigot end
++                }
++                int cz = chunkz << 4;
++                // Compute ranges within chunk
++                int xstart = ( i < cx ) ? cx : i;
++                int xend = ( j < ( cx + 16 ) ) ? j : ( cx + 16 );
++                int zstart = ( i1 < cz ) ? cz : i1;
++                int zend = ( j1 < ( cz + 16 ) ) ? j1 : ( cz + 16 );
++                // Loop through blocks within chunk
++                for ( int x = xstart; x < xend; x++ )
++                {
++                    for ( int z = zstart; z < zend; z++ )
++                    {
++                        for ( int y = ystart; y < l; y++ )
++                        {
++                            BlockPosition blockposition = blockposition_mutableblockposition.set( x, y, z );
++
++                            if (flag && flag1) {
++                                entity.setOutsideBorder(false);
++                            } else if (!flag && !flag1) {
++                                entity.setOutsideBorder(true);
++                            }
++
++                            IBlockData block;
++                            if (!worldborder.contains(blockposition) && flag1) {
++                                block = Blocks.STONE.getBlockData();
++                            } else
++                            {
++                                block = chunk.getBlockData( blockposition );
++                            }
++                            if ( block != null )
++                            {
++                                // PaperSpigot start - FallingBlocks and TNT collide with specific non-collidable blocks
++                                Block b = block.getBlock();
++                                if (entity.world.paperSpigotConfig.fallingBlocksCollideWithSigns && (entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock) && (b instanceof BlockSign || b instanceof BlockFenceGate || b instanceof BlockTorch || b instanceof BlockButtonAbstract || b instanceof BlockLever || b instanceof BlockTripwireHook || b instanceof BlockTripwire || b instanceof BlockChest || b instanceof BlockSlowSand || b instanceof BlockBed || b instanceof BlockEnderChest || b instanceof BlockEnchantmentTable || b instanceof BlockBrewingStand)) {
++                                    sink.addIfIntersects(x, y, z, x + 1.0D, y + 1.0D, z + 1.0D, minX, minY, minZ, maxX, maxY, maxZ);
++                                } else {
++                                    b.addCollisionBoxes(this, blockposition, block, minX, minY, minZ, maxX, maxY, maxZ, sink, entity);
++                                }
++                                // PaperSpigot end
++                            }
++                        }
++                    }
++                }
++            }
++        }
++        // Spigot end
++
++        if (entity instanceof EntityItem) return; // PaperSpigot - Optimize item movement
++        if (entity instanceof EntityTNTPrimed) return; // PandaSpigot - Optimize tnt entity movement
++        if (entity instanceof EntityFallingBlock) return; // PandaSpigot - Optimize falling block movement
++        if (entity instanceof EntityArmorStand) return; // PandaSpigot - Optimize armor stand movement
++
++        double d0 = 0.25D;
++        List list = this.getEntities(entity, minX - d0, minY - d0, minZ - d0, maxX + d0, maxY + d0, maxZ + d0);
++
++        for (int j2 = 0; j2 < list.size(); ++j2) {
++            if (entity.passenger != list && entity.vehicle != list) {
++                AxisAlignedBB axisalignedbb1 = ((Entity) list.get(j2)).getCollisionBoundingBox();
++
++                if (axisalignedbb1 != null) {
++                    sink.addIfIntersects(axisalignedbb1.minX, axisalignedbb1.minY, axisalignedbb1.minZ, axisalignedbb1.maxX, axisalignedbb1.maxY, axisalignedbb1.maxZ, minX, minY, minZ, maxX, maxY, maxZ);
++                }
++
++                axisalignedbb1 = entity.getCollisionBox((Entity) list.get(j2));
++                if (axisalignedbb1 != null) {
++                    sink.addIfIntersects(axisalignedbb1.minX, axisalignedbb1.minY, axisalignedbb1.minZ, axisalignedbb1.maxX, axisalignedbb1.maxY, axisalignedbb1.maxZ, minX, minY, minZ, maxX, maxY, maxZ);
++                }
++            }
++        }
++    }
++
++    /** Convenience wrapper for the cold callers that only ask "is anything in the way?". */
++    public boolean hasCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        CollisionBoxSink sink = collisionSink();
++        int mark = sink.mark();
++
++        try {
++            this.getCubes(entity, minX, minY, minZ, maxX, maxY, maxZ, sink);
++            return !sink.isEmpty(mark);
++        } finally {
++            sink.reset(mark);
++        }
++    }
++
++    private static final ThreadLocal<CollisionBoxSink> COLLISION_SINK = new ThreadLocal<CollisionBoxSink>() {
++        protected CollisionBoxSink initialValue() {
++            return new CollisionBoxSink();
++        }
++    };
++
++    /**
++     * A reusable sink for the calling thread. Take a mark() before filling it and reset(mark) when
++     * finished, so nested collision queries stack instead of clobbering each other.
++     */
++    public static CollisionBoxSink collisionSink() {
++        return COLLISION_SINK.get();
+     }
+     // Athena end
+ 

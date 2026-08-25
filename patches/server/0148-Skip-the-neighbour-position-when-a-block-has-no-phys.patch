@@ -1,0 +1,893 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 03:23:29 +0900
+Subject: [PATCH] Skip the neighbour position when a block has no physics
+ handler
+
+World.applyPhysics probed six neighbours through blockposition.west(),
+east(), and so on, allocating a BlockPosition for each one on every block
+change - redstone, fluid flow, placing and breaking.
+
+A shared mutable position is not safe here: notifyBlockOfStateChange
+hands the position to doPhysics, and a block may schedule an update,
+which stores the reference in NextTickListEntry. Reusing one instance
+would corrupt those entries later.
+
+Instead the probes are now driven by coordinate. Block.doPhysics is empty
+by default, so notifyBlockOfStateChange(x, y, z, block) reads the
+neighbour's state by coordinate and returns immediately unless the block
+declares a physics handler or a plugin is listening for BlockPhysicsEvent
+- no position is built at all for the usual stone, dirt and air
+neighbours. The 46 blocks that implement doPhysics override
+hasPhysicsHandler(), which subclasses inherit.
+
+Behaviour is unchanged: getType(x, y, z) and getType(BlockPosition) both
+resolve to getType(x, y, z, true), and the event still fires for every
+neighbour whenever a listener is registered.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 0d88d40e19fdbbe2bef7b7eb13973ddb603d1784..2ebd972a9ec09d03981fce18921af4e20f47ed94 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -355,6 +355,14 @@ public class Block {
+ 
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {}
+ 
++    // Athena - true when this block actually reacts to a neighbour change. The default doPhysics is
++    // empty, so World.notifyBlockOfStateChange can skip building a BlockPosition entirely for the
++    // overwhelmingly common case of stone/dirt/air neighbours. Declaring doPhysics implies this, and
++    // subclasses inherit the override.
++    public boolean hasPhysicsHandler() {
++        return false;
++    }
++
+     public int tickRate(World world) {
+         return 10;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockBanner.java b/src/main/java/net/minecraft/server/BlockBanner.java
+index a36e5fdd4a7d744d4d8e541628f4f0d890f121e2..01f086ad8a1fc1169ee2867141817f00a910131a 100644
+--- a/src/main/java/net/minecraft/server/BlockBanner.java
++++ b/src/main/java/net/minecraft/server/BlockBanner.java
+@@ -131,6 +131,12 @@ public class BlockBanner extends BlockContainer {
+ 
+         }
+ 
++        // Athena - this block reacts to neighbour changes
++        @Override
++        public boolean hasPhysicsHandler() {
++            return true;
++        }
++
+         @Override
+         public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+             EnumDirection enumdirection = (EnumDirection) iblockdata.get(BlockBanner.BlockWallBanner.FACING);
+diff --git a/src/main/java/net/minecraft/server/BlockBeacon.java b/src/main/java/net/minecraft/server/BlockBeacon.java
+index 8ac9234eae005e286d82e53431400b97a10522c3..0134c42e84dd87b3566928562a4ac87062cbd90e 100644
+--- a/src/main/java/net/minecraft/server/BlockBeacon.java
++++ b/src/main/java/net/minecraft/server/BlockBeacon.java
+@@ -58,6 +58,12 @@ public class BlockBeacon extends BlockContainer {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         TileEntity tileentity = world.getTileEntity(blockposition);
+diff --git a/src/main/java/net/minecraft/server/BlockBed.java b/src/main/java/net/minecraft/server/BlockBed.java
+index 2e0a27c72c8a81b95c1cfcdd48899001cdce1f4b..181f46b27c39f4b854a83108f90c2312b4f1bb8b 100644
+--- a/src/main/java/net/minecraft/server/BlockBed.java
++++ b/src/main/java/net/minecraft/server/BlockBed.java
+@@ -94,6 +94,12 @@ public class BlockBed extends BlockDirectional {
+         this.setBedBounds();
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         EnumDirection enumdirection = (EnumDirection) iblockdata.get(BlockBed.FACING);
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index fa8ba8a4550c1709edd08a50bc9e20eff06c299f..19a96d14ede74023567b98efbf4f102f3150de47 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -68,6 +68,12 @@ public abstract class BlockButtonAbstract extends Block {
+         return a(world, blockposition, enumdirection.opposite()) ? this.getBlockData().set(BlockButtonAbstract.FACING, enumdirection).set(BlockButtonAbstract.POWERED, Boolean.valueOf(false)) : this.getBlockData().set(BlockButtonAbstract.FACING, EnumDirection.DOWN).set(BlockButtonAbstract.POWERED, Boolean.valueOf(false));
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (this.checkForDrop(world, blockposition, iblockdata) && !a(world, blockposition, ((EnumDirection) iblockdata.get(BlockButtonAbstract.FACING)).opposite())) {
+             this.dropBlockAsItem(world, blockposition, iblockdata, 0);
+diff --git a/src/main/java/net/minecraft/server/BlockCactus.java b/src/main/java/net/minecraft/server/BlockCactus.java
+index 52b542474f57b7ad62e5e7b5425363a4ef5d3130..2c7fb4f08892f52cc82b7490b69402c57d9f0162 100644
+--- a/src/main/java/net/minecraft/server/BlockCactus.java
++++ b/src/main/java/net/minecraft/server/BlockCactus.java
+@@ -69,6 +69,12 @@ public class BlockCactus extends Block {
+         return super.canPlace(world, blockposition) ? this.canBlockStay(world, blockposition) : false;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.canBlockStay(world, blockposition)) {
+             world.setAir(blockposition, true);
+diff --git a/src/main/java/net/minecraft/server/BlockCake.java b/src/main/java/net/minecraft/server/BlockCake.java
+index c3aa53da91b175d384ab7685cbce3d9b3fdbd4b1..42e56927b26f2be2af2977cbc112af0b1eb76eeb 100644
+--- a/src/main/java/net/minecraft/server/BlockCake.java
++++ b/src/main/java/net/minecraft/server/BlockCake.java
+@@ -89,6 +89,12 @@ public class BlockCake extends Block {
+         return super.canPlace(world, blockposition) ? this.canBlockStay(world, blockposition) : false;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.canBlockStay(world, blockposition)) {
+             world.setAir(blockposition);
+diff --git a/src/main/java/net/minecraft/server/BlockCarpet.java b/src/main/java/net/minecraft/server/BlockCarpet.java
+index 624e2b402602c6eb9138638d374b560814277ac1..39fe6b6e04d8c4556762e163d4879fa56a79ac8a 100644
+--- a/src/main/java/net/minecraft/server/BlockCarpet.java
++++ b/src/main/java/net/minecraft/server/BlockCarpet.java
+@@ -51,6 +51,12 @@ public class BlockCarpet extends Block {
+         return super.canPlace(world, blockposition) && this.canBlockStay(world, blockposition);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.checkForDrop(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockChest.java b/src/main/java/net/minecraft/server/BlockChest.java
+index 388d11face527f27ba9a81870eeef1e329d2564c..b5b44609a2501da3503cf157e357d0db88969dba 100644
+--- a/src/main/java/net/minecraft/server/BlockChest.java
++++ b/src/main/java/net/minecraft/server/BlockChest.java
+@@ -300,6 +300,12 @@ public class BlockChest extends BlockContainer {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         super.doPhysics(world, blockposition, iblockdata, block);
+         TileEntity tileentity = world.getTileEntity(blockposition);
+diff --git a/src/main/java/net/minecraft/server/BlockCocoa.java b/src/main/java/net/minecraft/server/BlockCocoa.java
+index d6837c1ee8ec5be2e542a8b2ecc099dab670caa9..206ca5c1a23d13d19e913eb9393dd09678e0aed3 100644
+--- a/src/main/java/net/minecraft/server/BlockCocoa.java
++++ b/src/main/java/net/minecraft/server/BlockCocoa.java
+@@ -92,6 +92,12 @@ public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantEl
+         return this.getBlockData().set(BlockCocoa.FACING, enumdirection.opposite()).set(BlockCocoa.AGE, Integer.valueOf(0));
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.canBlockStay(world, blockposition, iblockdata)) {
+             this.dropBlock(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockCommand.java b/src/main/java/net/minecraft/server/BlockCommand.java
+index 03818bc66c35a3f41dda72dab7a1fbf13c493480..56be532a0e2f2711fc65ad8a440b1be9f093064a 100644
+--- a/src/main/java/net/minecraft/server/BlockCommand.java
++++ b/src/main/java/net/minecraft/server/BlockCommand.java
+@@ -18,6 +18,12 @@ public class BlockCommand extends BlockContainer {
+         return new TileEntityCommand();
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             boolean flag = world.isBlockIndirectlyPowered(blockposition);
+diff --git a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+index 195ec0f06e9d44eb35f768c439819f7ad13517ed..fab038353b3e3800c249ee493aad80086b35a4e4 100644
+--- a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+@@ -67,6 +67,12 @@ public abstract class BlockDiodeAbstract extends BlockDirectional {
+         return !this.isPowered(iblockdata) ? 0 : (iblockdata.get(BlockDiodeAbstract.FACING) == enumdirection ? this.getActiveSignal(iblockaccess, blockposition, iblockdata) : 0);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (this.canBlockStay(world, blockposition)) {
+             this.updateState(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockDispenser.java b/src/main/java/net/minecraft/server/BlockDispenser.java
+index 4a053a02c52d4d2daceddde50352c2a755ef8504..0867401d62a69db5d780b6687b4718d88a97349f 100644
+--- a/src/main/java/net/minecraft/server/BlockDispenser.java
++++ b/src/main/java/net/minecraft/server/BlockDispenser.java
+@@ -100,6 +100,12 @@ public class BlockDispenser extends BlockContainer {
+         return (IDispenseBehavior) BlockDispenser.REGISTRY.get(itemstack == null ? null : itemstack.getItem());
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         boolean flag = world.isBlockIndirectlyPowered(blockposition) || world.isBlockIndirectlyPowered(blockposition.up());
+         boolean flag1 = ((Boolean) iblockdata.get(BlockDispenser.TRIGGERED)).booleanValue();
+diff --git a/src/main/java/net/minecraft/server/BlockDoor.java b/src/main/java/net/minecraft/server/BlockDoor.java
+index 22ef2b5085168446b9c109d320087c66ebd7b8a2..af0c685ccac9dd8ef8c09f5391503f0c5d558cdf 100644
+--- a/src/main/java/net/minecraft/server/BlockDoor.java
++++ b/src/main/java/net/minecraft/server/BlockDoor.java
+@@ -125,6 +125,12 @@ public class BlockDoor extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (iblockdata.get(BlockDoor.HALF) == BlockDoor.EnumDoorHalf.UPPER) {
+             BlockPosition blockposition1 = blockposition.down();
+diff --git a/src/main/java/net/minecraft/server/BlockDragonEgg.java b/src/main/java/net/minecraft/server/BlockDragonEgg.java
+index fa8b0e7f878c2b627cec4cd9912372132af35666..4d9d4b8fbdf52bc16d6c2a71de82f3c00bbcb544 100644
+--- a/src/main/java/net/minecraft/server/BlockDragonEgg.java
++++ b/src/main/java/net/minecraft/server/BlockDragonEgg.java
+@@ -16,6 +16,12 @@ public class BlockDragonEgg extends Block {
+         world.scheduleUpdate(blockposition, (Block) this, this.tickRate(world));
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         world.scheduleUpdate(blockposition, (Block) this, this.tickRate(world));
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockFalling.java b/src/main/java/net/minecraft/server/BlockFalling.java
+index 4b101b92c9ec76597df90013f4791d5989ed2612..d4715f8b2a5653df8cb40a85213418ec29684f16 100644
+--- a/src/main/java/net/minecraft/server/BlockFalling.java
++++ b/src/main/java/net/minecraft/server/BlockFalling.java
+@@ -20,6 +20,12 @@ public class BlockFalling extends Block {
+         world.scheduleUpdate(blockposition, (Block) this, this.tickRate(world));
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         world.scheduleUpdate(blockposition, (Block) this, this.tickRate(world));
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockFenceGate.java b/src/main/java/net/minecraft/server/BlockFenceGate.java
+index c15dffcf1e1a5d1041800f0096a4e2ca1cc76ede..776efeb3827fc03e0f8f7b94389f2d1ce931b79f 100644
+--- a/src/main/java/net/minecraft/server/BlockFenceGate.java
++++ b/src/main/java/net/minecraft/server/BlockFenceGate.java
+@@ -108,6 +108,12 @@ public class BlockFenceGate extends BlockDirectional {
+         return true;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+diff --git a/src/main/java/net/minecraft/server/BlockFire.java b/src/main/java/net/minecraft/server/BlockFire.java
+index 034332bcdae138c99464904bcb2dbcdb3187958a..af304ee38dc00459611e27744786ed6263fcbe88 100644
+--- a/src/main/java/net/minecraft/server/BlockFire.java
++++ b/src/main/java/net/minecraft/server/BlockFire.java
+@@ -334,6 +334,12 @@ public class BlockFire extends Block {
+         return World.doesBlockHaveSolidTopSurface((IBlockAccess) world, blockposition.down()) || this.canNeighborCatchFire(world, blockposition);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!World.doesBlockHaveSolidTopSurface((IBlockAccess) world, blockposition.down()) && !this.canNeighborCatchFire(world, blockposition)) {
+             fireExtinguished(world, blockposition); // CraftBukkit - fuel block gone
+diff --git a/src/main/java/net/minecraft/server/BlockFloorSign.java b/src/main/java/net/minecraft/server/BlockFloorSign.java
+index 61c5d7763236190cdbfa07352f003ee97ecb0fc2..5286fa5cb2be89fb1451f5b40d438a6b277042a6 100644
+--- a/src/main/java/net/minecraft/server/BlockFloorSign.java
++++ b/src/main/java/net/minecraft/server/BlockFloorSign.java
+@@ -9,6 +9,12 @@ public class BlockFloorSign extends BlockSign {
+         this.setDefaultState(this.blockStateList.getBlockData().set(BlockFloorSign.ROTATION, 0));
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.getType(blockposition.down()).getBlock().getMaterial().isBuildable()) {
+diff --git a/src/main/java/net/minecraft/server/BlockFlowerPot.java b/src/main/java/net/minecraft/server/BlockFlowerPot.java
+index eedcbcaf7fe259ed2f37edb1c0d01c84f6a0de31..4deb03feba428a48d9bb5ad154d9efa0d5354c3e 100644
+--- a/src/main/java/net/minecraft/server/BlockFlowerPot.java
++++ b/src/main/java/net/minecraft/server/BlockFlowerPot.java
+@@ -83,6 +83,12 @@ public class BlockFlowerPot extends BlockContainer {
+         return super.canPlace(world, blockposition) && World.doesBlockHaveSolidTopSurface((IBlockAccess) world, blockposition.down());
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!World.doesBlockHaveSolidTopSurface((IBlockAccess) world, blockposition.down())) {
+             this.dropBlockAsItem(world, blockposition, iblockdata, 0);
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index f029d7e7211e798fd05cd67f787e107d4fe1237c..2f3a23cee9a1797421c1da71d623b428d34d4781 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -127,6 +127,12 @@ public abstract class BlockFluids extends Block {
+         this.checkForMixing(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.checkForMixing(world, blockposition, iblockdata);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockHopper.java b/src/main/java/net/minecraft/server/BlockHopper.java
+index 1f6072c4b0514598175454dbc40ae0f9f88788ee..815f2c96debfe443d3d1c941bfb7498459f7d9a2 100644
+--- a/src/main/java/net/minecraft/server/BlockHopper.java
++++ b/src/main/java/net/minecraft/server/BlockHopper.java
+@@ -89,6 +89,12 @@ public class BlockHopper extends BlockContainer {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.updateState(world, blockposition, iblockdata);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockLadder.java b/src/main/java/net/minecraft/server/BlockLadder.java
+index 32db50b59123aaedc551667cf8706c60aa8d0bc0..5984b96a18dd9b44d1d499f8e153f7e2be0c22c7 100644
+--- a/src/main/java/net/minecraft/server/BlockLadder.java
++++ b/src/main/java/net/minecraft/server/BlockLadder.java
+@@ -72,6 +72,12 @@ public class BlockLadder extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         EnumDirection enumdirection = (EnumDirection) iblockdata.get(BlockLadder.FACING);
+diff --git a/src/main/java/net/minecraft/server/BlockLever.java b/src/main/java/net/minecraft/server/BlockLever.java
+index 9a6fdbfabb52ba22e1fb020fb889da7396109e30..b883c8bd4fdb2e442fce477dc3c4d29172a32e55 100644
+--- a/src/main/java/net/minecraft/server/BlockLever.java
++++ b/src/main/java/net/minecraft/server/BlockLever.java
+@@ -102,6 +102,12 @@ public class BlockLever extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (this.e(world, blockposition, iblockdata) && !a(world, blockposition, ((BlockLever.EnumLeverPosition) iblockdata.get(BlockLever.FACING)).getFacing().opposite())) {
+             this.dropBlockAsItem(world, blockposition, iblockdata, 0);
+diff --git a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+index be173aca86a51cfe4972a9758c88281d9ff8de94..db66e57036553429f15ee9f0075f86dc2fcee003 100644
+--- a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+@@ -69,6 +69,12 @@ public abstract class BlockMinecartTrackAbstract extends Block {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             BlockMinecartTrackAbstract.EnumTrackPosition blockminecarttrackabstract_enumtrackposition = (BlockMinecartTrackAbstract.EnumTrackPosition) iblockdata.get(this.getShapeProperty());
+diff --git a/src/main/java/net/minecraft/server/BlockNote.java b/src/main/java/net/minecraft/server/BlockNote.java
+index 11f6f98b4b98319db803ac662cc0fe2c12646f3a..f99d908b7daf13e6c61a54a78f37402149e72fae 100644
+--- a/src/main/java/net/minecraft/server/BlockNote.java
++++ b/src/main/java/net/minecraft/server/BlockNote.java
+@@ -13,6 +13,12 @@ public class BlockNote extends BlockContainer {
+         this.setCreativeTab(CreativeModeTab.tabRedstone);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         boolean flag = world.isBlockIndirectlyPowered(blockposition);
+diff --git a/src/main/java/net/minecraft/server/BlockPiston.java b/src/main/java/net/minecraft/server/BlockPiston.java
+index fa869f236029e5d961cd47d5fc7e92134a8dc99b..ee1116d7ae23c4552e9a3c4f0b426fee5fead654 100644
+--- a/src/main/java/net/minecraft/server/BlockPiston.java
++++ b/src/main/java/net/minecraft/server/BlockPiston.java
+@@ -42,6 +42,12 @@ public class BlockPiston extends Block {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             this.checkForMove(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockPistonExtension.java b/src/main/java/net/minecraft/server/BlockPistonExtension.java
+index 856f631bcf0a4f68f80b1f7d3091d68866700e3b..137651e0ed6a1a4793d28f8ffe396e6de275c0a8 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonExtension.java
++++ b/src/main/java/net/minecraft/server/BlockPistonExtension.java
+@@ -146,6 +146,12 @@ public class BlockPistonExtension extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         EnumDirection enumdirection = (EnumDirection) iblockdata.get(BlockPistonExtension.FACING);
+diff --git a/src/main/java/net/minecraft/server/BlockPistonMoving.java b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+index 9fc068f486aaf4a378e53b632842705f9a048630..4f1395b7bf2aeb5c3cdc56ad4fe1c1478ea65852 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonMoving.java
++++ b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+@@ -99,6 +99,12 @@ public class BlockPistonMoving extends BlockContainer {
+         return null;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+diff --git a/src/main/java/net/minecraft/server/BlockPlant.java b/src/main/java/net/minecraft/server/BlockPlant.java
+index 48990659ee91cf2083d71bbe5c0251efb72733ac..e8539bb83b8738f2754d9ea57b55f3c85ff66e32 100644
+--- a/src/main/java/net/minecraft/server/BlockPlant.java
++++ b/src/main/java/net/minecraft/server/BlockPlant.java
+@@ -34,6 +34,12 @@ public class BlockPlant extends Block {
+         return block == Blocks.GRASS || block == Blocks.DIRT || block == Blocks.FARMLAND;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         super.doPhysics(world, blockposition, iblockdata, block);
+         this.checkAndDropBlock(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockPortal.java b/src/main/java/net/minecraft/server/BlockPortal.java
+index 7586d0d39549964361368997af222dd749c189d9..e2b807931f534d76ebebfc5b7d677fb6f965160d 100644
+--- a/src/main/java/net/minecraft/server/BlockPortal.java
++++ b/src/main/java/net/minecraft/server/BlockPortal.java
+@@ -88,6 +88,12 @@ public class BlockPortal extends BlockHalfTransparent {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         EnumDirection.EnumAxis enumdirection_enumaxis = (EnumDirection.EnumAxis) iblockdata.get(BlockPortal.AXIS);
+         BlockPortal.Shape blockportal_shape;
+diff --git a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+index 21e291b2c490af2ffaba14500654bc05e7f01971..785c4714ef0d04cf5dbb2804f4b941915336db1a 100644
+--- a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+@@ -61,6 +61,12 @@ public abstract class BlockPressurePlateAbstract extends Block {
+         return this.canBePlacedOn(world, blockposition.down());
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.canBePlacedOn(world, blockposition.down())) {
+             this.dropBlockAsItem(world, blockposition, iblockdata, 0);
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneLamp.java b/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
+index a2e538f6ddccfd36fe36cdc4d0680d29558b37ea..2703c443b468f2171a9b194e5bdf04a4895d5e7a 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
+@@ -34,6 +34,12 @@ public class BlockRedstoneLamp extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             if (this.isOn && !world.isBlockIndirectlyPowered(blockposition)) {
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+index cf0b0b56166b7fc28c978b1be94b3bdbe870d1f1..5fd1e20f03fba250e3908ad92ea4f3b5dd8874cb 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+@@ -178,6 +178,12 @@ public class BlockRedstoneTorch extends BlockTorch {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.onNeighborChangeInternal(world, blockposition, iblockdata)) {
+             if (this.isOn == this.shouldBeOff(world, blockposition, iblockdata)) {
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index 363b6dff47e252ec9bdbc06855b9649fdb9c1b81..23f93f98c54fad0ae4f869cedaf4b23f8dc2d8d5 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -278,6 +278,12 @@ public class BlockRedstoneWire extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             if (this.canPlace(world, blockposition)) {
+diff --git a/src/main/java/net/minecraft/server/BlockReed.java b/src/main/java/net/minecraft/server/BlockReed.java
+index 6b2d18a72d9b5947a909de5825c71c9fe7922cd0..cd048b3dc1e87255bdcaa9742130a5643267b052 100644
+--- a/src/main/java/net/minecraft/server/BlockReed.java
++++ b/src/main/java/net/minecraft/server/BlockReed.java
+@@ -69,6 +69,12 @@ public class BlockReed extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.checkForDrop(world, blockposition, iblockdata);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockSnow.java b/src/main/java/net/minecraft/server/BlockSnow.java
+index feedf5c57d4bf34757e4b0d9d59b2c57bb5bf331..e7cec560857f6321487d1b934566a615076769f6 100644
+--- a/src/main/java/net/minecraft/server/BlockSnow.java
++++ b/src/main/java/net/minecraft/server/BlockSnow.java
+@@ -62,6 +62,12 @@ public class BlockSnow extends Block {
+         return block != Blocks.ICE && block != Blocks.PACKED_ICE ? (block.getMaterial() == Material.LEAVES ? true : (block == this && ((Integer) iblockdata.get(BlockSnow.LAYERS)).intValue() >= 7 ? true : block.isOpaqueCube() && block.material.isSolid())) : false;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.checkAndDropBlock(world, blockposition, iblockdata);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockSoil.java b/src/main/java/net/minecraft/server/BlockSoil.java
+index 0e860578146b2ed0661c7655b938697fae5560f6..8c8fcb33b9c8b0501df6e4d7aa17956b5365b4c4 100644
+--- a/src/main/java/net/minecraft/server/BlockSoil.java
++++ b/src/main/java/net/minecraft/server/BlockSoil.java
+@@ -115,6 +115,12 @@ public class BlockSoil extends Block {
+         return true;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         super.doPhysics(world, blockposition, iblockdata, block);
+         if (world.getType(blockposition.up()).getBlock().getMaterial().isBuildable()) {
+diff --git a/src/main/java/net/minecraft/server/BlockSponge.java b/src/main/java/net/minecraft/server/BlockSponge.java
+index 93f7bd3a41b0ba4b55e04dcb933d5b916465db99..8e69e99a931e4483f080f9c2ae92e8d4fb7b1126 100644
+--- a/src/main/java/net/minecraft/server/BlockSponge.java
++++ b/src/main/java/net/minecraft/server/BlockSponge.java
+@@ -30,6 +30,12 @@ public class BlockSponge extends Block {
+         this.tryAbsorb(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.tryAbsorb(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockStationary.java b/src/main/java/net/minecraft/server/BlockStationary.java
+index 688a947addbb588c3629162471ca87682c4debfd..57782cacae9bd6fe507443364940fa9dd9851d2c 100644
+--- a/src/main/java/net/minecraft/server/BlockStationary.java
++++ b/src/main/java/net/minecraft/server/BlockStationary.java
+@@ -16,6 +16,12 @@ public class BlockStationary extends BlockFluids {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!this.checkForMixing(world, blockposition, iblockdata)) {
+             this.updateLiquid(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockTNT.java b/src/main/java/net/minecraft/server/BlockTNT.java
+index dfd371a87810215525204f9589ebe3874f688d8e..e6022a4230021c9033c115ab92233063625a5918 100644
+--- a/src/main/java/net/minecraft/server/BlockTNT.java
++++ b/src/main/java/net/minecraft/server/BlockTNT.java
+@@ -20,6 +20,12 @@ public class BlockTNT extends Block {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (world.isBlockIndirectlyPowered(blockposition)) {
+             this.postBreak(world, blockposition, iblockdata.set(BlockTNT.EXPLODE, Boolean.valueOf(true)));
+diff --git a/src/main/java/net/minecraft/server/BlockTorch.java b/src/main/java/net/minecraft/server/BlockTorch.java
+index 0743b4f2907cec9cd6e13833868b9754a8f35fec..40d63c7fac4a5b9137522f89d7997fa0360cf0fc 100644
+--- a/src/main/java/net/minecraft/server/BlockTorch.java
++++ b/src/main/java/net/minecraft/server/BlockTorch.java
+@@ -85,6 +85,12 @@ public class BlockTorch extends Block {
+         this.checkForDrop(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         this.onNeighborChangeInternal(world, blockposition, iblockdata);
+diff --git a/src/main/java/net/minecraft/server/BlockTrapdoor.java b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+index 4407df223920874f6571c865b5f8a347b061627e..e794e489e9c1643daa87cc2e0f72176851c126f5 100644
+--- a/src/main/java/net/minecraft/server/BlockTrapdoor.java
++++ b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+@@ -93,6 +93,12 @@ public class BlockTrapdoor extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide) {
+             BlockPosition blockposition1 = blockposition.shift(((EnumDirection) iblockdata.get(BlockTrapdoor.FACING)).opposite());
+diff --git a/src/main/java/net/minecraft/server/BlockTripwire.java b/src/main/java/net/minecraft/server/BlockTripwire.java
+index 83aab012434a67ea66a9d264ea816ada20b36c99..cbb02e2ea86411b2ebe3ead907889e9dc133bbda 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwire.java
++++ b/src/main/java/net/minecraft/server/BlockTripwire.java
+@@ -45,6 +45,12 @@ public class BlockTripwire extends Block {
+         return Items.STRING;
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         boolean flag = ((Boolean) iblockdata.get(BlockTripwire.SUSPENDED)).booleanValue();
+         boolean flag1 = !World.doesBlockHaveSolidTopSurface((IBlockAccess) world, blockposition.down());
+diff --git a/src/main/java/net/minecraft/server/BlockTripwireHook.java b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+index 8b241ebea35afb7894378aeadf3ce7dacbf4557b..607b6e314c50f5bd8ec99ca57f29392d15cd1af0 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwireHook.java
++++ b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+@@ -72,6 +72,12 @@ public class BlockTripwireHook extends Block {
+         this.a(world, blockposition, iblockdata, false, false, -1, (IBlockData) null);
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (block != this) {
+             if (this.checkForDrop(world, blockposition, iblockdata)) {
+diff --git a/src/main/java/net/minecraft/server/BlockVine.java b/src/main/java/net/minecraft/server/BlockVine.java
+index da5042edf1388815b48c6032496ff1465198f941..9cc2eef6935563e8f9debf183adcd927e2854f73 100644
+--- a/src/main/java/net/minecraft/server/BlockVine.java
++++ b/src/main/java/net/minecraft/server/BlockVine.java
+@@ -156,6 +156,12 @@ public class BlockVine extends Block {
+         }
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         if (!world.isClientSide && !this.recheckGrownSides(world, blockposition, iblockdata)) {
+             this.dropBlockAsItem(world, blockposition, iblockdata, 0);
+diff --git a/src/main/java/net/minecraft/server/BlockWallSign.java b/src/main/java/net/minecraft/server/BlockWallSign.java
+index 89ad4f529a07f864d2ad798e80977ea0f59c4b23..709d0ea53f441369adad6111fe4ae9200394fef8 100644
+--- a/src/main/java/net/minecraft/server/BlockWallSign.java
++++ b/src/main/java/net/minecraft/server/BlockWallSign.java
+@@ -35,6 +35,12 @@ public class BlockWallSign extends BlockSign {
+ 
+     }
+ 
++    // Athena - this block reacts to neighbour changes
++    @Override
++    public boolean hasPhysicsHandler() {
++        return true;
++    }
++
+     @Override
+     public void doPhysics(World world, BlockPosition blockposition, IBlockData iblockdata, Block block) {
+         EnumDirection enumdirection = (EnumDirection) iblockdata.get(BlockWallSign.FACING);
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 68a7482bf725f23712bd69216c9d1786bc05c07e..546c024372ca0e0a7a6e248eaed64f90b9213059 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -560,19 +560,21 @@ public abstract class World implements IBlockAccess {
+ 
+     }
+ 
+-    // Athena - coordinate entry point for callers holding packed positions
+-    public void applyPhysics(int x, int y, int z, Block block) {
+-        this.applyPhysics(new BlockPosition(x, y, z), block);
++    public void applyPhysics(BlockPosition blockposition, Block block) {
++        this.applyPhysics(blockposition.getX(), blockposition.getY(), blockposition.getZ(), block); // Athena
+     }
+ 
+-    public void applyPhysics(BlockPosition blockposition, Block block) {
+-        this.notifyBlockOfStateChange(blockposition.west(), block);
+-        this.notifyBlockOfStateChange(blockposition.east(), block);
+-        this.notifyBlockOfStateChange(blockposition.down(), block);
+-        this.notifyBlockOfStateChange(blockposition.up(), block);
+-        this.notifyBlockOfStateChange(blockposition.north(), block);
+-        this.notifyBlockOfStateChange(blockposition.south(), block);
+-        spigotConfig.antiXrayInstance.updateNearbyBlocks(this, blockposition); // Spigot
++    // Athena - the six neighbour probes used to allocate a BlockPosition each (west()/east()/...);
++    // they are now driven by coordinate and only materialize one when the neighbour actually has a
++    // physics handler.
++    public void applyPhysics(int x, int y, int z, Block block) {
++        this.notifyBlockOfStateChange(x - 1, y, z, block);
++        this.notifyBlockOfStateChange(x + 1, y, z, block);
++        this.notifyBlockOfStateChange(x, y - 1, z, block);
++        this.notifyBlockOfStateChange(x, y + 1, z, block);
++        this.notifyBlockOfStateChange(x, y, z - 1, block);
++        this.notifyBlockOfStateChange(x, y, z + 1, block);
++        spigotConfig.antiXrayInstance.updateNearbyBlocks(this, x, y, z); // Spigot // Athena
+     }
+ 
+     public void notifyNeighborsOfStateExcept(BlockPosition blockposition, Block block, EnumDirection enumdirection) {
+@@ -602,6 +604,25 @@ public abstract class World implements IBlockAccess {
+ 
+     }
+ 
++    // Athena start - coordinate entry point. Reads the neighbour's state by coordinate first and
++    // returns immediately when the block has no doPhysics handler and no plugin is listening for
++    // BlockPhysicsEvent, so the usual stone/dirt/air neighbours cost no BlockPosition at all.
++    public void notifyBlockOfStateChange(int x, int y, int z, final Block block) {
++        if (this.isClientSide) {
++            return;
++        }
++
++        IBlockData iblockdata = this.getType(x, y, z);
++        boolean physicsEvent = this instanceof WorldServer && ((WorldServer) this).hasPhysicsEvent && ((WorldServer) this).getWorld() != null;
++
++        if (!physicsEvent && !iblockdata.getBlock().hasPhysicsHandler()) {
++            return;
++        }
++
++        this.notifyBlockOfStateChange(new BlockPosition(x, y, z), block);
++    }
++    // Athena end
++
+     public void notifyBlockOfStateChange(BlockPosition blockposition, final Block block) {
+         if (!this.isClientSide) {
+             IBlockData iblockdata = this.getType(blockposition);

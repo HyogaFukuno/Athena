@@ -1,0 +1,404 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:06 +0900
+Subject: [PATCH] Run the redstone power queries on coordinates
+
+isBlockIndirectlyPowered built a BlockPosition per direction, and each of those could
+reach getBlockPower, which built six more - up to 42 positions for one query. Hoppers,
+doors, dispensers, TNT, rails, note blocks and redstone lamps all run this on their own
+tick.
+
+The coordinate arithmetic now stays in ints, and a position is materialized only where the
+Block API actually consumes one. hasRedstonePowerHandler() narrows that to the eleven
+classes that override getWeakPower or getStrongPower; every other block inherits the
+constant 0, so building a position to ask it was waste. The flag is a plain "does this
+class override it" question rather than a reuse of isPowerSource(), which is state
+dependent on BlockChest and BlockRedstoneWire and so is not the same question.
+
+A shared scratch position is deliberately not used here: getWeakPower and getStrongPower
+can re-enter these methods, as redstone wire does, so the nesting depth is unbounded and a
+fixed slot would be scribbled over mid-query.
+
+Measured on a live server, the elided call fires about a thousand times a second while a
+redstone circuit runs.
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 5afbf410b2dd13f1e43a56c076959f1d3b0b456a..5f82e68acd65daf05cc4dd3a907bc35bb22cf146 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -628,6 +628,18 @@ public class Block {
+         return 0;
+     }
+ 
++    // Athena - true when this block overrides getWeakPower or getStrongPower.
++    //
++    // World's redstone power queries build a BlockPosition purely to hand it to those two methods.
++    // Every other block inherits the constant 0 above, so for them the position is waste - and the
++    // queries walk all six neighbours of a block, recursing through occluding ones. This is a plain
++    // "does this class override it" flag rather than a reuse of isPowerSource(), because
++    // isPowerSource() is state-dependent on BlockChest and BlockRedstoneWire and so is not the same
++    // question. Declaring either override implies this, and subclasses inherit it.
++    public boolean hasRedstonePowerHandler() {
++        return false;
++    }
++
+     public void setBlockBoundsForItemRender() {}
+ 
+     public void harvestBlock(World world, EntityHuman entityhuman, BlockPosition blockposition, IBlockData iblockdata, TileEntity tileentity) {
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index 859f42f88ffccafec59a4afcd617b05ee6436470..2e88bb6ec934c2f1af04c1891b4d4b67b76afb80 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -166,6 +166,11 @@ public abstract class BlockButtonAbstract extends Block {
+         super.remove(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return ((Boolean) iblockdata.get(BlockButtonAbstract.POWERED)).booleanValue() ? 15 : 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockChest.java b/src/main/java/net/minecraft/server/BlockChest.java
+index b5b44609a2501da3503cf157e357d0db88969dba..5012984923e7b8a3e81b3e757de7d58c167747a9 100644
+--- a/src/main/java/net/minecraft/server/BlockChest.java
++++ b/src/main/java/net/minecraft/server/BlockChest.java
+@@ -394,6 +394,11 @@ public class BlockChest extends BlockContainer {
+         return this.chestType == 1;
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         if (!this.isPowerSource()) {
+             return 0;
+diff --git a/src/main/java/net/minecraft/server/BlockDaylightDetector.java b/src/main/java/net/minecraft/server/BlockDaylightDetector.java
+index 6a2bcbea2681e5831fa6c05491b00960917739c1..f923c4b8c9a29556ad81069d72647b16e0042d94 100644
+--- a/src/main/java/net/minecraft/server/BlockDaylightDetector.java
++++ b/src/main/java/net/minecraft/server/BlockDaylightDetector.java
+@@ -23,6 +23,11 @@ public class BlockDaylightDetector extends BlockContainer {
+         this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 0.375F, 1.0F);
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return ((Integer) iblockdata.get(BlockDaylightDetector.POWER)).intValue();
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+index fab038353b3e3800c249ee493aad80086b35a4e4..baba2cf0b7f547aa0c86334e6219c47b01dff47d 100644
+--- a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+@@ -59,6 +59,11 @@ public abstract class BlockDiodeAbstract extends BlockDirectional {
+         return this.isRepeaterPowered;
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getStrongPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return this.getWeakPower(iblockaccess, blockposition, iblockdata, enumdirection);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockLever.java b/src/main/java/net/minecraft/server/BlockLever.java
+index b883c8bd4fdb2e442fce477dc3c4d29172a32e55..659e2f1a5a541805c668c06d55458fff6d4be877 100644
+--- a/src/main/java/net/minecraft/server/BlockLever.java
++++ b/src/main/java/net/minecraft/server/BlockLever.java
+@@ -200,6 +200,11 @@ public class BlockLever extends Block {
+         super.remove(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return ((Boolean) iblockdata.get(BlockLever.POWERED)).booleanValue() ? 15 : 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockMinecartDetector.java b/src/main/java/net/minecraft/server/BlockMinecartDetector.java
+index 66fb944e0dfd0b3388ef3a29a8176983f998e228..17a2ff8c9cfef619d7c71626532a8065b08629a0 100644
+--- a/src/main/java/net/minecraft/server/BlockMinecartDetector.java
++++ b/src/main/java/net/minecraft/server/BlockMinecartDetector.java
+@@ -55,6 +55,11 @@ public class BlockMinecartDetector extends BlockMinecartTrackAbstract {
+         }
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return ((Boolean) iblockdata.get(BlockMinecartDetector.POWERED)).booleanValue() ? 15 : 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockPowered.java b/src/main/java/net/minecraft/server/BlockPowered.java
+index e6a9fda4df7534430cb20d7796f928f9ebcd71aa..dc4c11e03f345f9aec305a1cb7cd6ecd41ebb56e 100644
+--- a/src/main/java/net/minecraft/server/BlockPowered.java
++++ b/src/main/java/net/minecraft/server/BlockPowered.java
+@@ -13,6 +13,11 @@ public class BlockPowered extends Block {
+     }
+ 
+     @Override
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return 15;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+index 6036718a7c84aef825c59c58f1a0a6a870ff18ed..b2a154f4d6fa54d66b2cacdfde63c31272409265 100644
+--- a/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockPressurePlateAbstract.java
+@@ -164,6 +164,11 @@ public abstract class BlockPressurePlateAbstract extends Block {
+         world.applyPhysics(blockposition.down(), this);
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return this.getRedstoneStrength(iblockdata);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+index 5fd1e20f03fba250e3908ad92ea4f3b5dd8874cb..010d1cdbc65125a523aa52cef4db1055a844f2b1 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+@@ -101,6 +101,11 @@ public class BlockRedstoneTorch extends BlockTorch {
+ 
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return this.isOn && iblockdata.get(BlockRedstoneTorch.FACING) != enumdirection ? 15 : 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index 23f93f98c54fad0ae4f869cedaf4b23f8dc2d8d5..55febdd62dd52a910c1c410531267a31cfd8594d 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -300,6 +300,11 @@ public class BlockRedstoneWire extends Block {
+         return Items.REDSTONE;
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getStrongPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return !this.canProvidePower ? 0 : this.getWeakPower(iblockaccess, blockposition, iblockdata, enumdirection);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockTripwireHook.java b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+index 607b6e314c50f5bd8ec99ca57f29392d15cd1af0..b2a6f896a0f40dcfa1470ada27269fdd2cae67ee 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwireHook.java
++++ b/src/main/java/net/minecraft/server/BlockTripwireHook.java
+@@ -254,6 +254,11 @@ public class BlockTripwireHook extends Block {
+         super.remove(world, blockposition, iblockdata);
+     }
+ 
++    // Athena - overrides getWeakPower/getStrongPower; see Block.hasRedstonePowerHandler
++    public boolean hasRedstonePowerHandler() {
++        return true;
++    }
++
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+         return ((Boolean) iblockdata.get(BlockTripwireHook.POWERED)).booleanValue() ? 15 : 0;
+     }
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 4cdd1399132deea8ed9089abc3df4b821c8340e2..896c9879c54f2af622d7657bee9cad7b68655848 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3360,65 +3360,101 @@ public abstract class World implements IBlockAccess {
+         return iblockdata.getBlock().getStrongPower((IBlockAccess) this, blockposition, iblockdata, enumdirection);
+     }
+ 
+-    public WorldType getWorldType() {
+-        return this.worldData.getType();
++    // Athena start - scalar redstone power queries.
++    //
++    // isBlockIndirectlyPowered and friends built a BlockPosition per direction, and each of those
++    // could reach getBlockPower, which built six more - up to 42 positions for one query. Hoppers,
++    // doors, dispensers, TNT, rails, note blocks and redstone lamps all run this on their own tick.
++    //
++    // The coordinate arithmetic now stays in ints, and a position is materialized only where the
++    // Block API actually consumes one, which hasRedstonePowerHandler() narrows to the handful of
++    // blocks that do not just return 0. A shared scratch position is deliberately not used here:
++    // getWeakPower/getStrongPower can re-enter these methods (redstone wire does), so the nesting
++    // depth is unbounded and a fixed slot would be scribbled over mid-query.
++
++    // Athena - scalar overload
++    public int getBlockPower(int x, int y, int z, EnumDirection enumdirection) {
++        IBlockData iblockdata = this.getType(x, y, z);
++        Block block = iblockdata.getBlock();
++
++        if (!block.hasRedstonePowerHandler()) {
++            return 0;
++        }
++
++        return block.getStrongPower((IBlockAccess) this, new BlockPosition(x, y, z), iblockdata, enumdirection);
+     }
+ 
+-    public int getBlockPower(BlockPosition blockposition) {
+-        byte b0 = 0;
+-        int i = Math.max(b0, this.getBlockPower(blockposition.down(), EnumDirection.DOWN));
++    // Athena - scalar overload
++    public int getBlockFacePower(int x, int y, int z, EnumDirection enumdirection) {
++        IBlockData iblockdata = this.getType(x, y, z);
++        Block block = iblockdata.getBlock();
++
++        if (block.isOccluding()) {
++            return this.getBlockPower(x, y, z);
++        }
++
++        if (!block.hasRedstonePowerHandler()) {
++            return 0;
++        }
++
++        return block.getWeakPower((IBlockAccess) this, new BlockPosition(x, y, z), iblockdata, enumdirection);
++    }
++
++    // Athena - scalar overload
++    public int getBlockPower(int x, int y, int z) {
++        int i = Math.max(0, this.getBlockPower(x, y - 1, z, EnumDirection.DOWN));
+ 
+         if (i >= 15) {
+             return i;
+-        } else {
+-            i = Math.max(i, this.getBlockPower(blockposition.up(), EnumDirection.UP));
+-            if (i >= 15) {
+-                return i;
+-            } else {
+-                i = Math.max(i, this.getBlockPower(blockposition.north(), EnumDirection.NORTH));
+-                if (i >= 15) {
+-                    return i;
+-                } else {
+-                    i = Math.max(i, this.getBlockPower(blockposition.south(), EnumDirection.SOUTH));
+-                    if (i >= 15) {
+-                        return i;
+-                    } else {
+-                        i = Math.max(i, this.getBlockPower(blockposition.west(), EnumDirection.WEST));
+-                        if (i >= 15) {
+-                            return i;
+-                        } else {
+-                            i = Math.max(i, this.getBlockPower(blockposition.east(), EnumDirection.EAST));
+-                            return i >= 15 ? i : i;
+-                        }
+-                    }
+-                }
+-            }
+         }
+-    }
+ 
+-    public boolean isBlockFacePowered(BlockPosition blockposition, EnumDirection enumdirection) {
+-        return this.getBlockFacePower(blockposition, enumdirection) > 0;
+-    }
++        i = Math.max(i, this.getBlockPower(x, y + 1, z, EnumDirection.UP));
++        if (i >= 15) {
++            return i;
++        }
+ 
+-    public int getBlockFacePower(BlockPosition blockposition, EnumDirection enumdirection) {
+-        IBlockData iblockdata = this.getType(blockposition);
+-        Block block = iblockdata.getBlock();
++        i = Math.max(i, this.getBlockPower(x, y, z - 1, EnumDirection.NORTH));
++        if (i >= 15) {
++            return i;
++        }
++
++        i = Math.max(i, this.getBlockPower(x, y, z + 1, EnumDirection.SOUTH));
++        if (i >= 15) {
++            return i;
++        }
++
++        i = Math.max(i, this.getBlockPower(x - 1, y, z, EnumDirection.WEST));
++        if (i >= 15) {
++            return i;
++        }
+ 
+-        return block.isOccluding() ? this.getBlockPower(blockposition) : block.getWeakPower((IBlockAccess) this, blockposition, iblockdata, enumdirection);
++        return Math.max(i, this.getBlockPower(x + 1, y, z, EnumDirection.EAST));
+     }
+ 
+-    public boolean isBlockIndirectlyPowered(BlockPosition blockposition) {
+-        return this.getBlockFacePower(blockposition.down(), EnumDirection.DOWN) > 0 ? true : (this.getBlockFacePower(blockposition.up(), EnumDirection.UP) > 0 ? true : (this.getBlockFacePower(blockposition.north(), EnumDirection.NORTH) > 0 ? true : (this.getBlockFacePower(blockposition.south(), EnumDirection.SOUTH) > 0 ? true : (this.getBlockFacePower(blockposition.west(), EnumDirection.WEST) > 0 ? true : this.getBlockFacePower(blockposition.east(), EnumDirection.EAST) > 0))));
++    // Athena - scalar overload
++    public boolean isBlockFacePowered(int x, int y, int z, EnumDirection enumdirection) {
++        return this.getBlockFacePower(x, y, z, enumdirection) > 0;
++    }
++
++    // Athena - scalar overload
++    public boolean isBlockIndirectlyPowered(int x, int y, int z) {
++        return this.getBlockFacePower(x, y - 1, z, EnumDirection.DOWN) > 0
++                || this.getBlockFacePower(x, y + 1, z, EnumDirection.UP) > 0
++                || this.getBlockFacePower(x, y, z - 1, EnumDirection.NORTH) > 0
++                || this.getBlockFacePower(x, y, z + 1, EnumDirection.SOUTH) > 0
++                || this.getBlockFacePower(x - 1, y, z, EnumDirection.WEST) > 0
++                || this.getBlockFacePower(x + 1, y, z, EnumDirection.EAST) > 0;
+     }
+ 
+-    public int isBlockIndirectlyGettingPowered(BlockPosition blockposition) {
++    // Athena - scalar overload
++    public int isBlockIndirectlyGettingPowered(int x, int y, int z) {
+         int i = 0;
+         EnumDirection[] aenumdirection = EnumDirection.values();
+         int j = aenumdirection.length;
+ 
+-        for (int k = 0; k < j; ++k) {
+-            EnumDirection enumdirection = aenumdirection[k];
+-            int l = this.getBlockFacePower(blockposition.shift(enumdirection), enumdirection);
++        for (int j = 0; j < EnumDirection.VALUES.length; ++j) { // Athena - shared array, values() copies
++            EnumDirection enumdirection = EnumDirection.VALUES[j];
++            int l = this.getBlockFacePower(x + enumdirection.getAdjacentX(), y + enumdirection.getAdjacentY(), z + enumdirection.getAdjacentZ(), enumdirection);
+ 
+             if (l >= 15) {
+                 return 15;
+@@ -3431,6 +3467,32 @@ public abstract class World implements IBlockAccess {
+ 
+         return i;
+     }
++    // Athena end
++
++    public WorldType getWorldType() {
++        return this.worldData.getType();
++    }
++
++    public int getBlockPower(BlockPosition blockposition) { // Athena - delegate to the scalar overload
++        return this.getBlockPower(blockposition.getX(), blockposition.getY(), blockposition.getZ());
++    }
++
++    public boolean isBlockFacePowered(BlockPosition blockposition, EnumDirection enumdirection) {
++        return this.getBlockFacePower(blockposition, enumdirection) > 0;
++    }
++
++
++    public int getBlockFacePower(BlockPosition blockposition, EnumDirection enumdirection) { // Athena - delegate to the scalar overload
++        return this.getBlockFacePower(blockposition.getX(), blockposition.getY(), blockposition.getZ(), enumdirection);
++    }
++
++    public boolean isBlockIndirectlyPowered(BlockPosition blockposition) { // Athena - delegate to the scalar overload
++        return this.isBlockIndirectlyPowered(blockposition.getX(), blockposition.getY(), blockposition.getZ());
++    }
++
++    public int isBlockIndirectlyGettingPowered(BlockPosition blockposition) { // Athena - delegate to the scalar overload
++        return this.isBlockIndirectlyGettingPowered(blockposition.getX(), blockposition.getY(), blockposition.getZ());
++    }
+ 
+     public EntityHuman findNearbyPlayer(Entity entity, double d0) {
+         return this.findNearbyPlayer(entity.locX, entity.locY, entity.locZ, d0);

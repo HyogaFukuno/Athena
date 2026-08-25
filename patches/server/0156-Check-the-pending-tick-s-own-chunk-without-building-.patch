@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:05 +0900
+Subject: [PATCH] Check the pending tick's own chunk without building positions
+
+updateBlockTick and tickUpdates asked areChunksLoadedBetween whether a box around the
+entry was loaded, passing corners built with BlockPosition.add. On the two zero-radius
+calls that box is a single block, so both positions existed only to be read back apart -
+and the one in tickUpdates ran once per pending entry per tick, which the tickNextTickCap
+lets reach ten thousand entries on a world with flowing liquids.
+
+All three now call the scalar isAreaLoaded that areChunksLoadedBetween delegates to.
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index f14c7ef60a195993450d8ff25694de94e48b4367..c1b545747c7a91c4139972d59650cc286944b832 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -691,7 +691,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         if (this.scheduledUpdatesAreImmediate && block.getMaterial() != Material.AIR) {
+             if (block.requiresUpdates()) {
+                 b0 = 8;
+-                if (this.areChunksLoadedBetween(nextticklistentry.position.add(-b0, -b0, -b0), nextticklistentry.position.add(b0, b0, b0))) {
++                // Athena - expand areChunksLoadedBetween into the scalar isAreaLoaded it delegates
++                // to. The two add() calls only existed to carry the corners of a fixed-radius box.
++                if (this.isAreaLoaded(nextticklistentry.position.getX() - b0, nextticklistentry.position.getY() - b0, nextticklistentry.position.getZ() - b0, nextticklistentry.position.getX() + b0, nextticklistentry.position.getY() + b0, nextticklistentry.position.getZ() + b0, true)) {
+                     IBlockData iblockdata = this.getType(nextticklistentry.position);
+ 
+                     if (iblockdata.getBlock().getMaterial() != Material.AIR && iblockdata.getBlock() == nextticklistentry.getBlock()) {
+@@ -705,7 +707,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             i = 1;
+         }
+ 
+-        if (this.areChunksLoadedBetween(blockposition.add(-b0, -b0, -b0), blockposition.add(b0, b0, b0))) {
++        // Athena - b0 is always 0 on this path (the b0 = 8 branch above returns), so this asked
++        // whether the entry's own chunk was loaded while allocating two BlockPositions to say so.
++        if (this.isAreaLoaded(blockposition.getX() - b0, blockposition.getY() - b0, blockposition.getZ() - b0, blockposition.getX() + b0, blockposition.getY() + b0, blockposition.getZ() + b0, true)) {
+             if (block.getMaterial() != Material.AIR) {
+                 nextticklistentry.setScheduledTime((long) i + this.worldData.getTime());
+                 nextticklistentry.setPriority(j);
+@@ -820,7 +824,10 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                     iterator.remove();
+                     byte b0 = 0;
+ 
+-                    if (this.areChunksLoadedBetween(nextticklistentry.position.add(-b0, -b0, -b0), nextticklistentry.position.add(b0, b0, b0))) {
++                    // Athena - same zero-radius check as above, but on the hot path: this ran
++                    // once per pending tick entry per tick, so it was two BlockPositions per
++                    // scheduled block update.
++                    if (this.isAreaLoaded(nextticklistentry.position.getX() - b0, nextticklistentry.position.getY() - b0, nextticklistentry.position.getZ() - b0, nextticklistentry.position.getX() + b0, nextticklistentry.position.getY() + b0, nextticklistentry.position.getZ() + b0, true)) {
+                         IBlockData iblockdata = this.getType(nextticklistentry.position);
+                         co.aikar.timings.Timing timing = iblockdata.getBlock().getTiming(); // Spigot
+                         timing.startTiming(); // Spigot

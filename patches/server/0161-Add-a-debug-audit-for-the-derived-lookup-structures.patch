@@ -1,0 +1,319 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:09 +0900
+Subject: [PATCH] Add a debug audit for the derived lookup structures
+
+Three of the preceding changes replace a linear scan with a structure kept in step by
+hand, and one replaces a virtual call with a predicate that claims to know the call's
+result. None of them can be checked from a heap dump: the chunk queue is empty whenever a
+player stands still, and the pending-tick list is empty at every point outside tickUpdates
+by construction.
+
+AthenaIndexAudit re-derives each structure where it is actually populated, every tick, and
+logs a warning with a stack trace if it ever disagrees. The pending-tick check runs inside
+tickUpdates for that reason. The power check runs on the elided path only, so it audits
+exactly the calls the optimization skips.
+
+It is off unless pandaspigot.yml sets debugVerifyAthenaIndexes. The summary shouts when
+nothing audited has been non-empty yet, because a run that never exercises the changed
+paths otherwise looks identical to a clean one.
+
+Verified on a live server: the chunk queue reached 431 entries and the pending-tick list
+ten thousand, the elided power call fired 31928 times, and no structure diverged. Removing
+one mirror update by hand made the audit report it 240 times, so it is not a check that
+can only pass.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index f55f8a575ed662ed809132420558886008da2cb3..e33c6052b6d59dbe17d1323b61afb9d3bc594647 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -131,4 +131,15 @@ public class PandaSpigotConfig {
+ 
+     @Comment("Protect spawn from explosions")
+     public boolean betterSpawnProtection = true;
++
++    // Athena start - index consistency audit
++    @Comment("DEBUG ONLY. Verifies, every tick, that the derived lookup structures Athena added\n" +
++        "still agree with the collections they mirror:\n" +
++        "  - EntityPlayer.queuedChunks vs chunkCoordIntPairQueue\n" +
++        "  - WorldServer.pendingTickListEntriesThisTickSet vs pendingTickListEntriesThisTick\n" +
++        "  - Block.hasRedstonePowerHandler() vs what getWeakPower/getStrongPower actually return\n" +
++        "Any disagreement is logged as a warning with a stack trace. This costs real time and\n" +
++        "allocates on the redstone path, so leave it off outside of testing.")
++    public boolean debugVerifyAthenaIndexes = false;
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..33d03961f136a6cff3e033d9b1767ebc4da10fa3
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -0,0 +1,170 @@
++package net.minecraft.server;
++
++import com.hpfxd.pandaspigot.config.PandaSpigotConfig;
++import java.util.Collection;
++import java.util.Set;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena - temporary runtime audit for the derived lookup structures this fork added.
++//
++// Three of the optimizations replace a linear scan with a structure kept in sync by hand, and one
++// replaces a virtual call with a predicate that claims to know the call's result:
++//
++//   #3  EntityPlayer.queuedChunks           mirrors chunkCoordIntPairQueue
++//   #5  WorldServer.pendingTickListEntries- mirrors pendingTickListEntriesThisTick
++//         ThisTickSet
++//   #6  Block.hasRedstonePowerHandler()     claims getWeakPower/getStrongPower return 0
++//
++// A heap dump cannot check any of these: the chunk queue is empty whenever a player is standing
++// still, and the pending-tick list is empty at every point outside tickUpdates by construction.
++// This audit checks them where they are actually populated, every tick, and shouts if they ever
++// disagree. It is off unless pandaspigot.yml sets debugVerifyAthenaIndexes, and is meant to be
++// deleted once the changes have been exercised in anger.
++public final class AthenaIndexAudit {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena/IndexAudit");
++
++    /** Ticks between progress summaries. */
++    private static final int SUMMARY_INTERVAL = 600;
++    /** Distinct problems reported before we stop repeating ourselves. */
++    private static final int MAX_REPORTS = 20;
++
++    private static long queueChecks;
++    private static long queueChecksNonEmpty;
++    private static int queueMaxSize;
++
++    private static long pendingChecks;
++    private static long pendingChecksNonEmpty;
++    private static int pendingMaxSize;
++
++    private static long powerChecks;
++    private static long powerChecksSkippedBlocks;
++
++    private static long mismatches;
++    private static int reports;
++    private static int lastSummaryTick;
++
++    private AthenaIndexAudit() {}
++
++    public static boolean enabled() {
++        PandaSpigotConfig config = PandaSpigotConfig.get();
++
++        return config != null && config.debugVerifyAthenaIndexes;
++    }
++
++    // ------------------------------------------------------------------ #3
++
++    /** Rebuilds what the index should hold and compares. Called once per player per tick. */
++    public static void auditChunkQueue(EntityPlayer player, Collection<ChunkCoordIntPair> queue, ChunkCoordQueueIndex index) {
++        ChunkCoordQueueIndex expected = ChunkCoordQueueIndex.derivedFrom(queue);
++        int listSize = 0;
++
++        for (ChunkCoordIntPair pair : queue) {
++            if (pair != null) {
++                ++listSize;
++            }
++        }
++
++        ++queueChecks;
++        if (listSize > 0) {
++            ++queueChecksNonEmpty;
++            if (listSize > queueMaxSize) {
++                queueMaxSize = listSize;
++            }
++        }
++
++        if (!index.matches(expected)) {
++            report("chunkCoordIntPairQueue index diverged for " + player.getName()
++                    + " (queue=" + listSize + " entries, index=" + index.size() + " keys)"
++                    + index.describeDifference(expected));
++        }
++    }
++
++    // ------------------------------------------------------------------ #5
++
++    /**
++     * Compares the pending-tick list with its membership mirror. Called from inside tickUpdates,
++     * which is the only place the list is ever non-empty.
++     *
++     * @param phase where in tickUpdates we are, so a report says which half broke it
++     */
++    public static void auditPendingTicks(WorldServer world, String phase, Collection<NextTickListEntry> list, Set<NextTickListEntry> mirror) {
++        int size = list.size();
++
++        ++pendingChecks;
++        if (size > 0) {
++            ++pendingChecksNonEmpty;
++            if (size > pendingMaxSize) {
++                pendingMaxSize = size;
++            }
++        }
++
++        // The list is fed exclusively from pendingTickListEntriesTreeSet, a Set, so it should hold
++        // no two entries equal by NextTickListEntry.equals. Comparing sizes as well as membership
++        // catches a duplicate slipping in, which would silently break the mirror's remove().
++        if (size != mirror.size() || !mirror.containsAll(list)) {
++            report("pendingTickListEntriesThisTick mirror diverged in " + world.getWorld().getName()
++                    + " at " + phase + " (list=" + size + ", mirror=" + mirror.size() + ")");
++        }
++    }
++
++    // ------------------------------------------------------------------ #6
++
++    /**
++     * Verifies the claim hasRedstonePowerHandler() makes: that a block which does not declare it
++     * really does return 0 from getWeakPower/getStrongPower. Called on the skipped path only, so
++     * it audits exactly the calls the optimization elides.
++     */
++    public static void auditSkippedPower(World world, Block block, BlockPosition position, IBlockData data, EnumDirection direction, boolean strong) {
++        ++powerChecks;
++        ++powerChecksSkippedBlocks;
++
++        int actual = strong
++                ? block.getStrongPower(world, position, data, direction)
++                : block.getWeakPower(world, position, data, direction);
++
++        if (actual != 0) {
++            report("Block " + block.getClass().getName() + " returned " + actual + " from "
++                    + (strong ? "getStrongPower" : "getWeakPower") + " at " + position
++                    + " but does not declare hasRedstonePowerHandler(); the scalar power query "
++                    + "substituted 0 for it");
++        }
++    }
++
++    // ------------------------------------------------------------------
++
++    private static void report(String message) {
++        ++mismatches;
++        if (reports++ < MAX_REPORTS) {
++            LOGGER.warn("MISMATCH: {}", message, new Throwable("audit stack"));
++            if (reports == MAX_REPORTS) {
++                LOGGER.warn("Further mismatch reports will be counted but not logged.");
++            }
++        }
++    }
++
++    /** Total divergences seen. Exposed for AthenaIndexAuditTest. */
++    static long mismatchCount() {
++        return mismatches;
++    }
++
++    /** Called once per server tick, after every world has ticked. */
++    public static void tickSummary(int currentTick) {
++        if (currentTick - lastSummaryTick < SUMMARY_INTERVAL) {
++            return;
++        }
++
++        lastSummaryTick = currentTick;
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={} | mismatches={}",
++                queueChecks, queueChecksNonEmpty, queueMaxSize,
++                pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
++                powerChecksSkippedBlocks,
++                mismatches);
++
++        if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0) {
++            LOGGER.warn("No audited structure has been non-empty yet - the test is not exercising "
++                    + "the changed paths. Move across chunk borders, run a redstone circuit, and let mobs spawn.");
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index e79b2b531252426541a771603493b8eed4707bdd..14671e171fac7f75771ee052d131df7c8906b552 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -60,6 +60,10 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         return this.queuedChunks.contains(pair);
+     }
+ 
++    /** Athena - debug audit hook; see AthenaIndexAudit. */
++    public void auditQueuedChunks() {
++        AthenaIndexAudit.auditChunkQueue(this, this.chunkCoordIntPairQueue, this.queuedChunks);
++    }
+     // Athena end
+     public final java.util.Deque<Integer> removeQueue = new java.util.ArrayDeque<>(); // PandaSpigot
+     private final ServerStatisticManager statsFile;
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 6bb3c29fe098a4aa9de9cab62ad1e0d3cb25ca11..75223a753c3a57453bf1b7cedc8f31e3f5dff1c6 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -941,12 +941,26 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 worldserver.timings.tracker.stopTiming(); // Spigot
+                 this.methodProfiler.endSection();
+                 this.methodProfiler.endSection();
++                // Athena start - index consistency audit; see AthenaIndexAudit
++                if (AthenaIndexAudit.enabled()) {
++                    for (EntityHuman player : worldserver.players) {
++                        if (player instanceof EntityPlayer) {
++                            ((EntityPlayer) player).auditQueuedChunks();
++                        }
++                    }
++                }
++                // Athena end
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
+             // } // CraftBukkit
+ 
+             // this.i[i][this.ticks % 100] = System.nanoTime() - j; // CraftBukkit
+         }
+ 
++        // Athena - index consistency audit summary
++        if (AthenaIndexAudit.enabled()) {
++            AthenaIndexAudit.tickSummary(this.ticks);
++        }
++
+         this.methodProfiler.endStartSection("connection");
+         SpigotTimings.connectionTimer.startTiming(); // Spigot
+         this.aq().networkTick();
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index a7400f922595f5073698a1f9402e1e9d7fd239a4..0b800906f5cb7c82f4761619df31ef43c5cf590c 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3378,6 +3378,10 @@ public abstract class World implements IBlockAccess {
+         Block block = iblockdata.getBlock();
+ 
+         if (!block.hasRedstonePowerHandler()) {
++            if (AthenaIndexAudit.enabled()) { // Athena - prove the skipped call really would have returned 0
++                AthenaIndexAudit.auditSkippedPower(this, block, new BlockPosition(x, y, z), iblockdata, enumdirection, true);
++            }
++
+             return 0;
+         }
+ 
+@@ -3394,6 +3398,10 @@ public abstract class World implements IBlockAccess {
+         }
+ 
+         if (!block.hasRedstonePowerHandler()) {
++            if (AthenaIndexAudit.enabled()) { // Athena - prove the skipped call really would have returned 0
++                AthenaIndexAudit.auditSkippedPower(this, block, new BlockPosition(x, y, z), iblockdata, enumdirection, false);
++            }
++
+             return 0;
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 06d43b4d2b6b50458aeb832569b1a85b51445ef9..68e29003b3a03360a67534d0d76e438d9dd61be4 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -830,6 +830,10 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 // PaperSpigot end
+ 
+                 this.methodProfiler.endSection();
++                // Athena - audit the mirror where the list is actually populated
++                if (AthenaIndexAudit.enabled()) {
++                    AthenaIndexAudit.auditPendingTicks(this, "after fill", this.pendingTickListEntriesThisTick, this.pendingTickListEntriesThisTickSet);
++                }
+                 this.methodProfiler.startSection("ticking");
+                 timings.scheduledBlocksTicking.startTiming(); // Spigot
+                 Iterator iterator = this.pendingTickListEntriesThisTick.iterator();
+@@ -867,6 +871,10 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 timings.scheduledBlocksTicking.stopTiming(); // Spigot
+ 
+                 this.methodProfiler.endSection();
++                // Athena - after the ticking loop both must have drained together
++                if (AthenaIndexAudit.enabled()) {
++                    AthenaIndexAudit.auditPendingTicks(this, "after ticking", this.pendingTickListEntriesThisTick, this.pendingTickListEntriesThisTickSet);
++                }
+                 this.pendingTickListEntriesThisTick.clear();
+                 this.pendingTickListEntriesThisTickSet.clear(); // Athena - keep the membership mirror in sync
+                 return !this.pendingTickListEntriesTreeSet.isEmpty();

@@ -1,0 +1,488 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 11:52:26 +0900
+Subject: [PATCH] Keep the loaded creature counts as a running total
+
+SpawnerCreature asked, once per creature type on every tick of every
+world, for the sum of chunk.entityCount over every loaded chunk - and
+PandaSpigot answered it by walking the whole chunk map. With a few
+thousand chunks loaded that is a few thousand hash lookups four times a
+tick, and a live capture put it at 5.2% of the main thread during chunk
+generation.
+
+ChunkCreatureCensus mirrors that sum incrementally. It keys on the
+creature Class rather than on EnumCreatureType, so it tracks whatever
+Chunk.entityCount tracks even if two creature types ever shared a class.
+It is maintained at the five places the provider's chunk map is mutated,
+and wherever Chunk adjusts a count for a chunk that is currently in that
+map.
+
+The four counts are still read one at a time. Precomputing them together
+would be wrong: entities spawned during one creature type's pass are
+visible to the next pass's count today, and a plugin reacting to the
+spawn can add anything at all.
+
+Whether every call site was found is not something a unit test can see,
+so debugVerifyAthenaIndexes now rebuilds the sum from every loaded chunk
+each tick and compares. Summoning and killing 72 entities across all
+four creature types over 5400 audited ticks reported no divergence;
+deleting one of the two adjustment calls and repeating produced 1180
+mismatches naming the exact class and the exact drift, so the check is
+one that can fail.
+
+ChunkCreatureCensusTest covers the container itself, including that a
+count returning to zero is forgotten rather than left as a zero entry -
+otherwise every audit tick would report a difference that is not there.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index c928873f271b533e3b96e054cef3abb2bd2d0356..256e99caf40a9a7afb99ba7bd9bda262931fa76e 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -139,6 +139,7 @@ public class PandaSpigotConfig {
+         "  - WorldServer.pendingTickListEntriesThisTickSet vs pendingTickListEntriesThisTick\n" +
+         "  - Block.hasRedstonePowerHandler() vs what getWeakPower/getStrongPower actually return\n" +
+         "  - the chunk the light queries reuse vs the one the chunk provider would hand back\n" +
++        "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk\n" +
+         "Any disagreement is logged as a warning with a stack trace. This costs real time and\n" +
+         "allocates on the redstone path, so leave it off outside of testing.")
+     public boolean debugVerifyAthenaIndexes = false;
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index eca7a7c159098495faa7d2185b145b9351ebfe8a..e9a7cfd591a7627d10f0e859cd687c0a3f23c90b 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -43,6 +43,9 @@ public final class AthenaIndexAudit {
+ 
+     private static long lightChunkChecks;
+ 
++    private static long censusChecks;
++    private static long censusChecksNonEmpty;
++
+     private static long mismatches;
+     private static int reports;
+     private static int lastSummaryTick;
+@@ -134,6 +137,31 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    // ------------------------------------------------------------------ census
++
++    /**
++     * Rebuilds the creature census from every loaded chunk and compares. Called once per world per
++     * tick, which is exactly as often as SpawnerCreature used to do this walk four times over - so
++     * with the audit on, this costs rather more than the optimization saves.
++     */
++    public static void auditCreatureCensus(WorldServer world) {
++        ChunkCreatureCensus tracked = world.chunkProviderServer.creatureCensus;
++        ChunkCreatureCensus expected = ChunkCreatureCensus.derivedFrom(world.chunkProviderServer.chunks.values());
++
++        ++censusChecks;
++        for (EnumCreatureType type : EnumCreatureType.VALUES) {
++            if (expected.count(type.getCreatureClass()) != 0) {
++                ++censusChecksNonEmpty;
++                break;
++            }
++        }
++
++        if (!tracked.matches(expected)) {
++            report("creature census diverged in " + world.getWorld().getName()
++                    + tracked.describeDifference(expected));
++        }
++    }
++
+     // ------------------------------------------------------------------ light
+ 
+     /**
+@@ -180,11 +208,12 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={} | mismatches={}",
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty) | mismatches={}",
+                 queueChecks, queueChecksNonEmpty, queueMaxSize,
+                 pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
+                 powerChecksSkippedBlocks,
+                 lightChunkChecks,
++                censusChecks, censusChecksNonEmpty,
+                 mismatches);
+ 
+         if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0 && lightChunkChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 9f8d070f44a485c3d3e1e0eab7268d3f6056a18e..b6a4ba1c2ea460f2fac2226f6fc3d3ab3daa7d42 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -58,6 +58,9 @@ public class Chunk {
+     private int queuedLightChecks;
+     private ConcurrentLinkedQueue<BlockPosition> tileEntityPosQueue;
+     protected gnu.trove.map.hash.TObjectIntHashMap<Class> entityCount = new gnu.trove.map.hash.TObjectIntHashMap<Class>(); // Spigot
++    // Athena - true while this chunk's tally is folded into the world's creature census. Set only
++    // by ChunkCreatureCensus, at the points where the chunk enters or leaves the provider's map.
++    boolean inCreatureCensus;
+     // PaperSpigot start - Asynchronous light updates
+     public AtomicInteger pendingLightUpdates = new AtomicInteger();
+     public long lightUpdateTime;
+@@ -795,6 +798,7 @@ public class Chunk {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+                 this.entityCount.adjustOrPutValue( creatureType.getCreatureClass(), 1, 1 );
++                if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), 1 ); // Athena - keep the world total in step
+             }
+         }
+         // Spigot end
+@@ -834,6 +838,7 @@ public class Chunk {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+                 this.entityCount.adjustValue( creatureType.getCreatureClass(), -1 );
++                if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), -1 ); // Athena - keep the world total in step
+             }
+         }
+         // Spigot end
+diff --git a/src/main/java/net/minecraft/server/ChunkCreatureCensus.java b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..32e8915d9bd0d9462859e2d97c888b44f088a0cd
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+@@ -0,0 +1,115 @@
++package net.minecraft.server;
++
++import gnu.trove.map.hash.TObjectIntHashMap;
++import java.util.Collection;
++
++/**
++ * Athena - running total of the per-chunk creature counts across a world's loaded chunks.
++ *
++ * <p>SpawnerCreature needs, once per creature type and once per tick, the sum of
++ * {@code chunk.entityCount.get(creatureClass)} over every chunk in ChunkProviderServer's map.
++ * PandaSpigot computed that by walking the whole map, so a world holding a few thousand chunks
++ * paid a few thousand hash lookups four times a tick. A live capture put it at 5.2% of the main
++ * thread during chunk generation.
++ *
++ * <p>This mirrors the same sum incrementally. It deliberately keys on the creature Class rather
++ * than on EnumCreatureType, so that it tracks whatever Chunk.entityCount tracks: if two creature
++ * types ever shared a class, Chunk would count an entity twice under that key and so would this.
++ *
++ * <p>The mirror is maintained at exactly two kinds of place:
++ * <ul>
++ *   <li>a chunk entering or leaving ChunkProviderServer.chunks, which adds or subtracts that
++ *       chunk's whole tally - see {@link #chunkAdded} and {@link #chunkRemoved};</li>
++ *   <li>Chunk.addEntity and Chunk.removeEntityAtIndex adjusting a count while the chunk is in the
++ *       map - see {@link #adjust}.</li>
++ * </ul>
++ *
++ * <p>A missed call site would leave the total drifting away from the truth, which is why
++ * debugVerifyAthenaIndexes recomputes the sum every tick and compares. See AthenaIndexAudit.
++ */
++public final class ChunkCreatureCensus {
++
++    private final TObjectIntHashMap<Class> counts = new TObjectIntHashMap<Class>();
++
++    /** The sum for one creature class. Zero when nothing of that class is loaded. */
++    public int count(Class creatureClass) {
++        return this.counts.get(creatureClass);
++    }
++
++    /** Applies one chunk-level change. Called only while the chunk is in the provider's map. */
++    public void adjust(Class creatureClass, int delta) {
++        if (delta == 0) {
++            return;
++        }
++
++        int now = this.counts.adjustOrPutValue(creatureClass, delta, delta);
++
++        if (now == 0) {
++            this.counts.remove(creatureClass);
++        }
++    }
++
++    /** Folds a chunk's whole tally in as it enters the map. */
++    public void chunkAdded(Chunk chunk) {
++        if (chunk.inCreatureCensus) {
++            return;
++        }
++
++        chunk.inCreatureCensus = true;
++        this.fold(chunk, 1);
++    }
++
++    /** Takes a chunk's whole tally back out as it leaves the map. */
++    public void chunkRemoved(Chunk chunk) {
++        if (!chunk.inCreatureCensus) {
++            return;
++        }
++
++        chunk.inCreatureCensus = false;
++        this.fold(chunk, -1);
++    }
++
++    private void fold(Chunk chunk, int sign) {
++        for (Object key : chunk.entityCount.keys()) {
++            this.adjust((Class) key, sign * chunk.entityCount.get(key));
++        }
++    }
++
++    /** Rebuilds the sum from scratch. For the audit, and for tests. */
++    public static ChunkCreatureCensus derivedFrom(Collection<Chunk> chunks) {
++        ChunkCreatureCensus census = new ChunkCreatureCensus();
++
++        for (Chunk chunk : chunks) {
++            for (Object key : chunk.entityCount.keys()) {
++                census.adjust((Class) key, chunk.entityCount.get(key));
++            }
++        }
++
++        return census;
++    }
++
++    public boolean matches(ChunkCreatureCensus other) {
++        return this.counts.equals(other.counts);
++    }
++
++    public String describeDifference(ChunkCreatureCensus expected) {
++        StringBuilder builder = new StringBuilder();
++
++        for (Object key : expected.counts.keys()) {
++            int want = expected.counts.get(key);
++            int have = this.counts.get(key);
++
++            if (want != have) {
++                builder.append("\n  ").append(((Class) key).getName()).append(": tracked ").append(have).append(", actual ").append(want);
++            }
++        }
++
++        for (Object key : this.counts.keys()) {
++            if (!expected.counts.containsKey(key)) {
++                builder.append("\n  ").append(((Class) key).getName()).append(": tracked ").append(this.counts.get(key)).append(", actual 0");
++            }
++        }
++
++        return builder.toString();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index e73cfad7f711cea12a73676015243b0ed70c87e3..61a06d2ed5b22c07544f2e76fb02c4828f213547 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -111,6 +111,9 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     // CraftBukkit start - Add async variant, provide compatibility
++    // Athena - running total of the per-chunk creature counts; see ChunkCreatureCensus.
++    public final ChunkCreatureCensus creatureCensus = new ChunkCreatureCensus();
++
+     public Chunk getChunkIfLoaded(int x, int z) {
+         return chunks.get(LongHash.toLong(x, z));
+     }
+@@ -177,6 +180,7 @@ public class ChunkProviderServer implements IChunkProvider {
+             }
+ 
+             this.chunks.put(key, chunk); // PandaSpigot - Reuse key
++            this.creatureCensus.chunkAdded(chunk); // Athena - fold the chunk's tally in
+             
+             chunk.addEntities();
+             
+@@ -388,6 +392,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                         this.saveChunk(chunk);
+                         this.saveChunkNOP(chunk);
+                         this.chunks.remove(chunkcoordinates); // CraftBukkit
++                        this.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
+                     // }
+                     // PandaSpigot end
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 75223a753c3a57453bf1b7cedc8f31e3f5dff1c6..b448a7e98eff8e3f2b7a3ec4f4cbb479cdbf6153 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -948,6 +948,8 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                             ((EntityPlayer) player).auditQueuedChunks();
+                         }
+                     }
++
++                    AthenaIndexAudit.auditCreatureCensus(worldserver);
+                 }
+                 // Athena end
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
+diff --git a/src/main/java/net/minecraft/server/SpawnerCreature.java b/src/main/java/net/minecraft/server/SpawnerCreature.java
+index ab376e08b043f768ac3a5d4a4cc0bad072f1aa60..04884fe489e8932753e5b753249fc30d9ae9a461 100644
+--- a/src/main/java/net/minecraft/server/SpawnerCreature.java
++++ b/src/main/java/net/minecraft/server/SpawnerCreature.java
+@@ -27,11 +27,10 @@ public final class SpawnerCreature {
+     {
+         // PandaSpigot start - use entire world, not just active chunks. Spigot broke vanilla expectations.
+         if (true) {
+-            int sum = 0;
+-            for (Chunk c : server.chunkProviderServer.chunks.values()) {
+-                sum += c.entityCount.get(oClass);
+-            }
+-            return sum;
++            // Athena - the sum this used to walk every loaded chunk for is now kept as a running
++            // total. Walking the map cost 5.2% of the main thread in a live capture, because it
++            // happened once per creature type on every tick of every world.
++            return server.chunkProviderServer.creatureCensus.count(oClass);
+         }
+         // PandaSpigot end
+         int i = 0;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 6fe910636772fa691e0c63ab0dedeebf53db3482..075213a56d008fa59af7ea84467782fb2631b035 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -190,6 +190,12 @@ public abstract class World implements IBlockAccess {
+         return ((ChunkProviderServer) this.chunkProvider).getChunkIfLoaded(x, z);
+     }
+ 
++    // Athena - the census mirrors the provider's chunk map, so it lives with the map; see
++    // ChunkCreatureCensus.
++    public ChunkCreatureCensus getCreatureCensus() {
++        return ((ChunkProviderServer) this.chunkProvider).creatureCensus;
++    }
++
+     protected World(IDataManager idatamanager, WorldData worlddata, WorldProvider worldprovider, MethodProfiler methodprofiler, boolean flag, ChunkGenerator gen, org.bukkit.World.Environment env) {
+         this.spigotConfig = new org.spigotmc.SpigotWorldConfig( worlddata.getName() ); // Spigot
+         this.paperSpigotConfig = new org.github.paperspigot.PaperSpigotWorldConfig( worlddata.getName() ); // PaperSpigot
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index a0273ef26226cbdda135b717680794d01cc0e09c..db6afb638e6d780deedbc7dd7600d4613e3567de 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -222,6 +222,7 @@ public class CraftWorld implements World {
+ 
+         world.chunkProviderServer.unloadQueue.remove(x, z);
+         world.chunkProviderServer.chunks.remove(LongHash.toLong(x, z));
++        world.chunkProviderServer.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
+ 
+         return true;
+     }
+@@ -294,6 +295,7 @@ public class CraftWorld implements World {
+     private void chunkLoadPostProcess(net.minecraft.server.Chunk chunk, int cx, int cz) {
+         if (chunk != null) {
+             world.chunkProviderServer.chunks.put(LongHash.toLong(cx, cz), chunk);
++            world.chunkProviderServer.creatureCensus.chunkAdded(chunk); // Athena - fold the chunk's tally in
+ 
+             chunk.addEntities();
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+index 51d1dfa34624a7d57334bdd99652892a79a137ff..f5ce20c4e6133f141be2ceac00e2ff5a72f24280 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+@@ -47,6 +47,7 @@ class ChunkIOProvider implements AsynchronousExecutor.CallBackProvider<QueuedChu
+         queuedChunk.loader.loadEntities(chunk, queuedChunk.compound.getCompound("Level"), queuedChunk.world);
+         chunk.setLastSaved(queuedChunk.provider.world.getTime());
+         queuedChunk.provider.chunks.put(LongHash.toLong(queuedChunk.x, queuedChunk.z), chunk);
++        queuedChunk.provider.creatureCensus.chunkAdded(chunk); // Athena - fold the chunk's tally in
+         chunk.addEntities();
+ 
+         if (queuedChunk.provider.chunkProvider != null) {
+diff --git a/src/test/java/net/minecraft/server/ChunkCreatureCensusTest.java b/src/test/java/net/minecraft/server/ChunkCreatureCensusTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..377d2113d92ae3764a1ee3547845caac8d49cd62
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/ChunkCreatureCensusTest.java
+@@ -0,0 +1,109 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - the creature census keeps a running total of what SpawnerCreature used to sum by walking
++ * every loaded chunk.
++ *
++ * <p>These tests cover the container: that a stream of adjustments lands on the same numbers a
++ * fresh sum would, that a count returning to zero is forgotten rather than left as a zero entry,
++ * and that matches() actually compares contents. Whether every call site that changes
++ * Chunk.entityCount also calls adjust() is not something a unit test can see - that is what the
++ * debugVerifyAthenaIndexes audit checks on a live server, by rebuilding the sum every tick.
++ */
++public class ChunkCreatureCensusTest {
++
++    // Stand-ins for the creature classes. The census only ever uses them as identities.
++    private static final Class<?>[] CLASSES = {String.class, Integer.class, Long.class, Double.class};
++
++    @Test
++    public void countsStartAtZero() {
++        ChunkCreatureCensus census = new ChunkCreatureCensus();
++
++        for (Class<?> c : CLASSES) {
++            assertEquals(0, census.count(c));
++        }
++    }
++
++    @Test
++    public void aCountBackAtZeroIsForgotten() {
++        // Left as an explicit zero entry, the map would never compare equal to a freshly derived
++        // one, and every audit tick would report a mismatch that is not really there.
++        ChunkCreatureCensus census = new ChunkCreatureCensus();
++
++        census.adjust(String.class, 3);
++        census.adjust(String.class, -3);
++
++        assertEquals(0, census.count(String.class));
++        assertTrue("a census back at zero should equal an empty one", census.matches(new ChunkCreatureCensus()));
++    }
++
++    @Test
++    public void matchesComparesContentsNotIdentity() {
++        ChunkCreatureCensus a = new ChunkCreatureCensus();
++        ChunkCreatureCensus b = new ChunkCreatureCensus();
++
++        a.adjust(String.class, 5);
++        assertFalse(a.matches(b));
++
++        b.adjust(String.class, 5);
++        assertTrue(a.matches(b));
++
++        b.adjust(Integer.class, 1);
++        assertFalse(a.matches(b));
++    }
++
++    @Test
++    public void describeDifferenceNamesBothDirections() {
++        ChunkCreatureCensus tracked = new ChunkCreatureCensus();
++        ChunkCreatureCensus actual = new ChunkCreatureCensus();
++
++        tracked.adjust(String.class, 2);   // tracked too low
++        actual.adjust(String.class, 7);
++        tracked.adjust(Integer.class, 4);  // tracked something that is not there
++
++        String message = tracked.describeDifference(actual);
++
++        assertTrue(message, message.contains("java.lang.String: tracked 2, actual 7"));
++        assertTrue(message, message.contains("java.lang.Integer: tracked 4, actual 0"));
++    }
++
++    @Test
++    public void staysInStepWithAFullRecount() {
++        // Drive a long random sequence of adjustments through the census while keeping the same
++        // numbers by hand, and compare after every step.
++        ChunkCreatureCensus census = new ChunkCreatureCensus();
++        Map<Class<?>, Integer> reference = new HashMap<Class<?>, Integer>();
++        Random random = new Random(20260824L);
++
++        for (int step = 0; step < 20000; ++step) {
++            Class<?> c = CLASSES[random.nextInt(CLASSES.length)];
++            int have = reference.containsKey(c) ? reference.get(c) : 0;
++            // Counts are sums of per-chunk tallies, so they never go negative in practice; keep the
++            // generated deltas inside that range.
++            int delta = random.nextInt(7) - 3;
++
++            if (have + delta < 0) {
++                delta = -have;
++            }
++
++            census.adjust(c, delta);
++            reference.put(c, have + delta);
++
++            for (Class<?> each : CLASSES) {
++                int want = reference.containsKey(each) ? reference.get(each) : 0;
++
++                assertEquals("diverged at step " + step + " for " + each.getSimpleName(),
++                        want, census.count(each));
++            }
++        }
++    }
++}

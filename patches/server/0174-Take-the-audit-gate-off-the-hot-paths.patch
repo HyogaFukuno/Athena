@@ -1,0 +1,151 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 10:33:05 +0900
+Subject: [PATCH] Take the audit gate off the hot paths
+
+AthenaIndexAudit.enabled() read PandaSpigotConfig.get() and then a field
+on it - two loads and a null check that the JIT cannot fold, on paths
+that run millions of times a tick. A live capture caught it as a leaf
+frame inside the chunk memo, which is meant to be four field loads and
+nothing else. It is now a static that PandaSpigotConfig publishes on
+startup and on reload, so the gate costs one load when it is off.
+
+The memo's own audit hook is removed outright. It checked the memo
+against the map on every hit, but the one mistake it could have caught -
+a memo outliving its map entry - went undetected across 5.2 million
+deliberately broken hits, because the window is a few instructions wide.
+Correctness rests on the isLoaded() test instead, and a check that
+cannot fail is not worth carrying on the hottest read on the server.
+
+The 625-chunk generation benchmark cannot see a difference either way
+(6.47-6.78s against 6.51-6.68s, overlapping), so this rests on doing
+strictly less work rather than on a measurement. The chunk memo is
+exercised far harder by a player moving through loaded chunks than by
+generation, which is where the capture found it.
+
+Verified with debugVerifyAthenaIndexes on that the audit still arms from
+the new gate: 2.9 million light checks and 3600 census checks, no
+mismatches.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 256e99caf40a9a7afb99ba7bd9bda262931fa76e..2e53163296bbe20a49c26c0676f09371b86df92b 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -63,6 +63,9 @@ public class PandaSpigotConfig {
+             
+             root.set(config); // update backing node
+             loader.save(root);
++
++            // Athena - publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
++            net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
+             
+             // call after save
+             initWorlds(worldsNode);
+@@ -138,8 +141,8 @@ public class PandaSpigotConfig {
+         "  - EntityPlayer.queuedChunks vs chunkCoordIntPairQueue\n" +
+         "  - WorldServer.pendingTickListEntriesThisTickSet vs pendingTickListEntriesThisTick\n" +
+         "  - Block.hasRedstonePowerHandler() vs what getWeakPower/getStrongPower actually return\n" +
+-        "  - the chunk the light queries reuse vs the one the chunk provider would hand back\n" +
+         "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk\n" +
++        "  - the chunk the light queries reuse vs the one the chunk provider would hand back\n" +
+         "Any disagreement is logged as a warning with a stack trace. This costs real time and\n" +
+         "allocates on the redstone path, so leave it off outside of testing.")
+     public boolean debugVerifyAthenaIndexes = false;
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 594a8d7fd7de4b6486dc3c270f92f02e605a95c1..618634f12f444a7145720afbbf33cc9a816bf51c 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -46,7 +46,6 @@ public final class AthenaIndexAudit {
+     private static long censusChecks;
+     private static long censusChecksNonEmpty;
+ 
+-    private static long memoHits;
+ 
+     private static long mismatches;
+     private static int reports;
+@@ -54,10 +53,20 @@ public final class AthenaIndexAudit {
+ 
+     private AthenaIndexAudit() {}
+ 
+-    public static boolean enabled() {
+-        PandaSpigotConfig config = PandaSpigotConfig.get();
++    // Athena - a plain static, refreshed by PandaSpigotConfig.init on startup and on reload.
++    //
++    // This used to read PandaSpigotConfig.get() and then a field on it: two loads and a null check,
++    // none of which the JIT can fold away, on paths that run millions of times a tick. A live
++    // capture caught it as a leaf frame inside the chunk memo. One static load is what the audit
++    // costs when it is off, which is nearly always.
++    private static volatile boolean enabled;
+ 
+-        return config != null && config.debugVerifyAthenaIndexes;
++    public static void setEnabled(boolean value) {
++        enabled = value;
++    }
++
++    public static boolean enabled() {
++        return enabled;
+     }
+ 
+     // ------------------------------------------------------------------ #3
+@@ -139,24 +148,6 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
+-    // ------------------------------------------------------------------ chunk memo
+-
+-    /**
+-     * Verifies that a hit on ChunkProviderServer's one-entry memo is the chunk the map still holds.
+-     * The memo confirms coordinates against the chunk itself, so the only way it can be wrong is by
+-     * outliving the map entry - which is what this looks for.
+-     */
+-    public static void auditChunkMemo(World world, int x, int z, Chunk memo, Chunk fromMap) {
+-        ++memoHits;
+-
+-        if (memo != fromMap) {
+-            report("chunk memo is stale at " + x + ", " + z + " in " + world.getWorld().getName()
+-                    + " (memo has " + System.identityHashCode(memo) + ", map has "
+-                    + (fromMap == null ? "nothing - the chunk was unloaded" : String.valueOf(System.identityHashCode(fromMap)))
+-                    + "); block reads would be answered from a chunk that is no longer loaded");
+-        }
+-    }
+-
+     // ------------------------------------------------------------------ census
+ 
+     /**
+@@ -228,13 +219,12 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty), chunkMemo={} | mismatches={}",
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty) | mismatches={}",
+                 queueChecks, queueChecksNonEmpty, queueMaxSize,
+                 pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
+                 powerChecksSkippedBlocks,
+                 lightChunkChecks,
+                 censusChecks, censusChecksNonEmpty,
+-                memoHits,
+                 mismatches);
+ 
+         if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0 && lightChunkChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 27e9c31a71017eb710168d6ebc9de9a1ef11ff76..82bd492e1abbfa3d07b6110c5aa8fe2f28033e99 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -251,10 +251,11 @@ public class ChunkProviderServer implements IChunkProvider {
+         Chunk cached = this.lastChunk;
+ 
+         if (cached != null && cached.locX == i && cached.locZ == j && cached.isLoaded()) {
+-            if (AthenaIndexAudit.enabled()) { // Athena - debug audit hook; see AthenaIndexAudit
+-                AthenaIndexAudit.auditChunkMemo(this.world, i, j, cached, (Chunk) this.chunks.get(LongHash.toLong(i, j)));
+-            }
+-
++            // Athena - no audit hook here on purpose. It used to check the memo against the map on
++            // every hit, but the one mistake it could have caught - a memo outliving its map entry -
++            // went undetected across 5.2 million deliberately broken hits, because the window is a
++            // few instructions wide. Correctness rests on the isLoaded() test above instead, and a
++            // check that cannot fail is not worth carrying on the hottest read on the server.
+             return cached;
+         }
+         // Athena end

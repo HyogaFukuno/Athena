@@ -1,0 +1,202 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 20:22:12 +0900
+Subject: [PATCH] Read the block state id off the state
+
+Block.BLOCK_STATE_IDS.get went through RegistryID's IdentityHashMap and
+then dereferenced the boxed Integer it stores. ChunkSection.setType does
+that for every block placed, so world generation does it millions of
+times: a live capture put RegistryID.get at 9.1% of the main thread, the
+largest single cost on it.
+
+Swapping the map for fastutil's Reference2IntOpenHashMap was measured
+first and made no difference - 4.5 ns against 4.4 ns uniform, and 3.0 ns
+against 2.6 ns on a worldgen-like access pattern where a handful of
+states dominate. Identity hashing is the cost, not the boxing. Reading
+the id straight off the state is 0.5 ns.
+
+So the state now carries its own id. Block's registration loop is the
+only place BLOCK_STATE_IDS is ever written, and it fills the field in
+the same iteration. The field starts at -1, which is the answer
+RegistryID.get gives for a state it does not hold, so a state that never
+reaches that loop still reads correctly. Anything that is not a
+BlockDataAbstract - which nothing in the server is - falls back to the
+map.
+
+Every caller stores the result somewhere durable; the id ChunkSection
+keeps is what ends up in the region file. A state that missed the
+assignment would silently write the wrong block, so the registration
+loop now walks the whole registry afterwards and refuses to start if any
+state disagrees. That costs microseconds, once.
+
+Verified by generating 625 chunks from a fixed seed and comparing every
+stored field against a build from before this series: no differences,
+across every block of every section.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 5f82e68acd65daf05cc4dd3a907bc35bb22cf146..587f41e465e013e074b3499dcef360540404f972 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -10,6 +10,15 @@ public class Block {
+     private static final MinecraftKey AIR_ID = new MinecraftKey("air");
+     public static final RegistryBlocks<MinecraftKey, Block> REGISTRY = new RegistryBlocks(Block.AIR_ID);
+     public static final RegistryID<IBlockData> BLOCK_STATE_IDS = new RegistryID();
++
++    // Athena - the id BLOCK_STATE_IDS holds for this state, read off the state itself where it can
++    // be. Anything that is not a BlockDataAbstract, which nothing in the server is, falls back to
++    // the map and gets the same answer. See BlockDataAbstract.athenaStateId.
++    public static int getStateId(IBlockData iblockdata) {
++        return iblockdata instanceof BlockDataAbstract
++                ? ((BlockDataAbstract) iblockdata).athenaStateId
++                : Block.BLOCK_STATE_IDS.get(iblockdata);
++    }
+     private CreativeModeTab creativeTab;
+     public static final Block.StepSound soundTypeStone = new Block.StepSound("stone", 1.0F, 1.0F);
+     public static final Block.StepSound soundTypeWood = new Block.StepSound("wood", 1.0F, 1.0F);
+@@ -1040,9 +1049,36 @@ public class Block {
+                 int i = Block.REGISTRY.getIDForObject(block13) << 4 | block13.toLegacyData(iblockdata);
+ 
+                 Block.BLOCK_STATE_IDS.put(iblockdata, i);
++                // Athena start - mirror the id onto the state; see BlockDataAbstract.athenaStateId
++                if (iblockdata instanceof BlockDataAbstract) {
++                    ((BlockDataAbstract) iblockdata).athenaStateId = i;
++                }
++                // Athena end
++            }
++        }
++
++        // Athena start - confirm the mirrored ids, once, over every state that was registered.
++        //
++        // getStateId answers from a field instead of the map, and every caller of it stores the
++        // result somewhere durable - the id ChunkSection keeps is what ends up in the region file.
++        // A state that missed the assignment above would silently write the wrong block. Checking
++        // the whole registry here costs microseconds at startup and rules that out for good.
++        int mismatched = 0;
++
++        for (IBlockData iblockdata : Block.BLOCK_STATE_IDS) {
++            if (Block.getStateId(iblockdata) != Block.BLOCK_STATE_IDS.get(iblockdata)) {
++                if (++mismatched <= 10) {
++                    org.apache.logging.log4j.LogManager.getLogger().error("Athena: block state " + iblockdata + " reports id " + Block.getStateId(iblockdata)
++                            + " but is registered as " + Block.BLOCK_STATE_IDS.get(iblockdata));
++                }
+             }
+         }
+ 
++        if (mismatched != 0) {
++            throw new IllegalStateException("Athena: " + mismatched + " block states carry the wrong id; "
++                    + "saving a world now would corrupt it");
++        }
++        // Athena end
+     }
+ 
+     private static void registerBlock(int i, MinecraftKey minecraftkey, Block block) {
+diff --git a/src/main/java/net/minecraft/server/BlockDataAbstract.java b/src/main/java/net/minecraft/server/BlockDataAbstract.java
+index 731a0ce138af611e785e60cf05d22cfc1d8431a5..90a472fa7808a057f1ab16f9dcd778e697e15526 100644
+--- a/src/main/java/net/minecraft/server/BlockDataAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockDataAbstract.java
+@@ -28,6 +28,20 @@ public abstract class BlockDataAbstract implements IBlockData {
+         }
+     };
+ 
++    // Athena start - the id this state is registered under in Block.BLOCK_STATE_IDS.
++    //
++    // Looking that up went through RegistryID's IdentityHashMap and then dereferenced the boxed
++    // Integer it stores. ChunkSection.setType does it for every block placed, so world generation
++    // does it millions of times; a live capture put RegistryID.get at 9.1% of the main thread, the
++    // largest single cost on it.
++    //
++    // Set by Block's registration loop, which is the only place BLOCK_STATE_IDS is ever written.
++    // It starts at -1 - the same answer RegistryID.get gives for a state it does not hold - so a
++    // state that never reaches that loop still reads correctly. Measured 2.6-4.5 ns for the map
++    // lookup against 0.5 ns for the field.
++    int athenaStateId = -1;
++    // Athena end
++
+     public BlockDataAbstract() {}
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 787811331add2d06b50188a771efa8990348881d..03cd825bcadb0c1f8bffc62354ca7a36d058a9d3 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -58,7 +58,7 @@ public class ChunkSection {
+             }
+         }
+ 
+-        this.blockIds[j << 8 | k << 4 | i] = (char) Block.BLOCK_STATE_IDS.get(iblockdata);
++        this.blockIds[j << 8 | k << 4 | i] = (char) Block.getStateId(iblockdata); // Athena - read the id off the state
+         isDirty = true; // PaperSpigot
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkSnapshot.java b/src/main/java/net/minecraft/server/ChunkSnapshot.java
+index b3b6107b44678c8b75c0800cea2b506514554661..55480a2a27551544c171a025f2da1ae12b8f8e8f 100644
+--- a/src/main/java/net/minecraft/server/ChunkSnapshot.java
++++ b/src/main/java/net/minecraft/server/ChunkSnapshot.java
+@@ -34,7 +34,7 @@ public class ChunkSnapshot {
+ 
+     public void setBlockState(int i, IBlockData iblockdata) {
+         if (i >= 0 && i < this.data.length) {
+-            this.data[i] = (short) Block.BLOCK_STATE_IDS.get(iblockdata);
++            this.data[i] = (short) Block.getStateId(iblockdata); // Athena - read the id off the state
+         } else {
+             throw new IndexOutOfBoundsException("The coordinate is out of range");
+         }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutBlockChange.java b/src/main/java/net/minecraft/server/PacketPlayOutBlockChange.java
+index 414f01a6aee09b21db4ee373bfd57573c8a4d0ae..957ef77ffc4d7d9e25cf235daebc91b04a53ac3a 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutBlockChange.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutBlockChange.java
+@@ -24,7 +24,7 @@ public class PacketPlayOutBlockChange implements Packet<PacketListenerPlayOut> {
+     @Override
+     public void writePacketData(PacketDataSerializer packetdataserializer) throws IOException {
+         packetdataserializer.writeBlockPos(this.blockPosition);
+-        packetdataserializer.writeVarIntToBuffer(Block.BLOCK_STATE_IDS.get(this.block));
++        packetdataserializer.writeVarIntToBuffer(Block.getStateId(this.block)); // Athena - read the id off the state
+     }
+ 
+     public void processPacket(PacketListenerPlayOut packetlistenerplayout) {
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java b/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
+index 28cacc005c919a1d930ea86c0ff9c8fb8ccc83f7..94c075bc6668da0477836e82648b0c99e20216d8 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMultiBlockChange.java
+@@ -39,7 +39,7 @@ public class PacketPlayOutMultiBlockChange implements Packet<PacketListenerPlayO
+ 
+         for (PacketPlayOutMultiBlockChange.MultiBlockChangeInfo packetplayoutmultiblockchange_multiblockchangeinfo : this.changedBlocks) {
+             packetdataserializer.writeShort(packetplayoutmultiblockchange_multiblockchangeinfo.getChunkPosCrammed());
+-            packetdataserializer.writeVarIntToBuffer(Block.BLOCK_STATE_IDS.get(packetplayoutmultiblockchange_multiblockchangeinfo.getBlockState()));
++            packetdataserializer.writeVarIntToBuffer(Block.getStateId(packetplayoutmultiblockchange_multiblockchangeinfo.getBlockState())); // Athena - read the id off the state
+         }
+ 
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/generator/CustomChunkGenerator.java b/src/main/java/org/bukkit/craftbukkit/generator/CustomChunkGenerator.java
+index 2e8fdecb42344b61f26a74585d0411665d731895..563e0535e0e075dc0042080aa5091138aa7db3ac 100644
+--- a/src/main/java/org/bukkit/craftbukkit/generator/CustomChunkGenerator.java
++++ b/src/main/java/org/bukkit/craftbukkit/generator/CustomChunkGenerator.java
+@@ -97,7 +97,7 @@ public class CustomChunkGenerator extends InternalChunkGenerator {
+                     short[] bdata = xbtypes[sec];
+                     for (int i = 0; i < bdata.length; i++) {
+                         Block b = Block.getById(bdata[i]);
+-                        secBlkID[i] = (char) Block.BLOCK_STATE_IDS.get(b.getBlockData());
++                        secBlkID[i] = (char) Block.getStateId(b.getBlockData()) /* Athena - read the id off the state */;
+                     }
+                     // Build chunk section
+                     csect[sec] = new ChunkSection(sec << 4, true, secBlkID);
+@@ -120,7 +120,7 @@ public class CustomChunkGenerator extends InternalChunkGenerator {
+                         char[] secBlkID = new char[4096]; // Allocate block ID bytes
+                         for (int i = 0; i < secBlkID.length; i++) {
+                             Block b = Block.getById(btypes[sec][i] & 0xFF);
+-                            secBlkID[i] = (char) Block.BLOCK_STATE_IDS.get(b.getBlockData());
++                            secBlkID[i] = (char) Block.getStateId(b.getBlockData()) /* Athena - read the id off the state */;
+                         }
+                         csect[sec] = new ChunkSection(sec << 4, true, secBlkID);
+                     }
+@@ -157,7 +157,7 @@ public class CustomChunkGenerator extends InternalChunkGenerator {
+                                         }
+                                         
+                                         Block b = Block.getById(blk & 0xFF);
+-                                        csbytes[(cy << 8) | (cz << 4) | cx] = (char) Block.BLOCK_STATE_IDS.get(b.getBlockData());
++                                        csbytes[(cy << 8) | (cz << 4) | cx] = (char) Block.getStateId(b.getBlockData()) /* Athena - read the id off the state */;
+                                     }
+                                 }
+                             }

@@ -1,0 +1,334 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 10:09:31 +0900
+Subject: [PATCH] Track which pathfinder goals are running with a flag
+
+onUpdateTasks asked executingTaskEntries.contains() once per task entry,
+and canUse asked it again for every other entry - twice per entry, since
+canUse is called on both sides of the restart check. A mob with n goals
+and m of them running did O(n*n*m) reference comparisons every third
+tick, for every mob in every loaded chunk.
+
+The list is only touched inside this class - two removes in the goal
+setup, one add, and one iterator removal - so a flag on the entry
+answers the same question in a single load. The entry can never be in
+the list twice, because the add is only reached after the entry has been
+removed or was never in it.
+
+A live capture put the goal selector at 8 of the 30 samples that landed
+anywhere in entity ticking, the largest cluster there.
+
+PathfinderGoalSelectorTest drives the real selector and a transcription
+of the original algorithm over the same goals for 400 ticks across 60
+randomised goal sets, and requires an identical sequence of
+startExecuting, resetTask and updateTask calls. The goals answer from
+the tick number alone rather than from state of their own, so both runs
+see the same inputs however far the implementations diverge. Dropping
+either half of the flag maintenance fails both tests.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+index d3cd0c389ec289923d03e048c2daba42432047fa..b00ec49ccefab40ce58285e8d0e4520254d995b4 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+@@ -34,9 +34,10 @@ public class PathfinderGoalSelector {
+             PathfinderGoal pathfindergoal1 = pathfindergoalselector_pathfindergoalselectoritem.action;
+ 
+             if (pathfindergoal1 == pathfindergoal) {
+-                if (this.executingTaskEntries.contains(pathfindergoalselector_pathfindergoalselectoritem)) {
++                if (pathfindergoalselector_pathfindergoalselectoritem.executing) { // Athena - flag instead of a scan
+                     pathfindergoal1.resetTask();
+                     this.executingTaskEntries.remove(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.executing = false; // Athena
+                 }
+ 
+                 iterator.remove();
+@@ -55,7 +56,7 @@ public class PathfinderGoalSelector {
+ 
+             while (iterator.hasNext()) {
+                 pathfindergoalselector_pathfindergoalselectoritem = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
+-                boolean flag = this.executingTaskEntries.contains(pathfindergoalselector_pathfindergoalselectoritem);
++                boolean flag = pathfindergoalselector_pathfindergoalselectoritem.executing; // Athena - flag instead of a scan
+ 
+                 if (flag) {
+                     if (this.canUse(pathfindergoalselector_pathfindergoalselectoritem) && this.canContinue(pathfindergoalselector_pathfindergoalselectoritem)) {
+@@ -64,11 +65,13 @@ public class PathfinderGoalSelector {
+ 
+                     pathfindergoalselector_pathfindergoalselectoritem.action.resetTask();
+                     this.executingTaskEntries.remove(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.executing = false; // Athena
+                 }
+ 
+                 if (this.canUse(pathfindergoalselector_pathfindergoalselectoritem) && pathfindergoalselector_pathfindergoalselectoritem.action.shouldExecute()) {
+                     pathfindergoalselector_pathfindergoalselectoritem.action.startExecuting();
+                     this.executingTaskEntries.add(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.executing = true; // Athena
+                 }
+             }
+         } else {
+@@ -79,6 +82,7 @@ public class PathfinderGoalSelector {
+                 if (!this.canContinue(pathfindergoalselector_pathfindergoalselectoritem)) {
+                     pathfindergoalselector_pathfindergoalselectoritem.action.resetTask();
+                     iterator.remove();
++                    pathfindergoalselector_pathfindergoalselectoritem.executing = false; // Athena
+                 }
+             }
+         }
+@@ -109,11 +113,11 @@ public class PathfinderGoalSelector {
+ 
+             if (pathfindergoalselector_pathfindergoalselectoritem1 != pathfindergoalselector_pathfindergoalselectoritem) {
+                 if (pathfindergoalselector_pathfindergoalselectoritem.priority >= pathfindergoalselector_pathfindergoalselectoritem1.priority) {
+-                    if (!this.areTasksCompatible(pathfindergoalselector_pathfindergoalselectoritem, pathfindergoalselector_pathfindergoalselectoritem1) && this.executingTaskEntries.contains(pathfindergoalselector_pathfindergoalselectoritem1)) {
++                    if (!this.areTasksCompatible(pathfindergoalselector_pathfindergoalselectoritem, pathfindergoalselector_pathfindergoalselectoritem1) && pathfindergoalselector_pathfindergoalselectoritem1.executing) { // Athena - flag instead of a scan
+                         ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
+                         return false;
+                     }
+-                } else if (!pathfindergoalselector_pathfindergoalselectoritem1.action.isInterruptible() && this.executingTaskEntries.contains(pathfindergoalselector_pathfindergoalselectoritem1)) {
++                } else if (!pathfindergoalselector_pathfindergoalselectoritem1.action.isInterruptible() && pathfindergoalselector_pathfindergoalselectoritem1.executing) { // Athena - flag instead of a scan
+                     ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
+                     return false;
+                 }
+@@ -131,6 +135,15 @@ public class PathfinderGoalSelector {
+ 
+         public PathfinderGoal action;
+         public int priority;
++        // Athena - mirrors membership in executingTaskEntries.
++        //
++        // onUpdateTasks asked executingTaskEntries.contains() once per task entry and canUse asked
++        // it again for every other entry, so a mob with n goals and m of them running did O(n*n*m)
++        // reference comparisons every third tick. The list is only ever touched in this class -
++        // two removes, one add, and one iterator removal - so a flag on the entry answers the same
++        // question in one load. The entry can never be in the list twice: the add below is only
++        // reached after the entry has been removed or was never in it.
++        boolean executing;
+ 
+         public PathfinderGoalSelectorItem(int i, PathfinderGoal pathfindergoal) {
+             this.priority = i;
+diff --git a/src/test/java/net/minecraft/server/PathfinderGoalSelectorTest.java b/src/test/java/net/minecraft/server/PathfinderGoalSelectorTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..59e6ed426917d8a4c27948e4a1c59c13aee18c59
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/PathfinderGoalSelectorTest.java
+@@ -0,0 +1,221 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - PathfinderGoalSelector answers "is this task running?" from a flag on the task entry
++ * instead of scanning executingTaskEntries.
++ *
++ * <p>The test drives the real selector and a transcription of the original algorithm over the same
++ * goals and requires an identical sequence of startExecuting / resetTask / updateTask calls. The
++ * goals answer from the tick number alone rather than from any state of their own, so both runs
++ * see the same inputs no matter how the two implementations diverge.
++ */
++public class PathfinderGoalSelectorTest {
++
++    /** A goal whose answers depend only on its index and the current tick. */
++    private static class ScriptedGoal extends PathfinderGoal {
++
++        private final int index;
++        private final boolean interruptible;
++        private final boolean[] script;
++        private final List<String> log;
++        private int tick;
++
++        ScriptedGoal(int index, int mutexBits, boolean interruptible, boolean[] script, List<String> log) {
++            this.index = index;
++            this.interruptible = interruptible;
++            this.script = script;
++            this.log = log;
++            this.setMutexBits(mutexBits);
++        }
++
++        void setTick(int tick) {
++            this.tick = tick;
++        }
++
++        @Override
++        public boolean shouldExecute() {
++            return this.script[this.tick % this.script.length];
++        }
++
++        @Override
++        public boolean isInterruptible() {
++            return this.interruptible;
++        }
++
++        @Override
++        public void startExecuting() {
++            this.log.add("start:" + this.index);
++        }
++
++        @Override
++        public void resetTask() {
++            this.log.add("reset:" + this.index);
++        }
++
++        @Override
++        public void updateTask() {
++            this.log.add("update:" + this.index);
++        }
++    }
++
++    /** The original algorithm, transcribed. */
++    private static class ReferenceSelector {
++
++        private static class Item {
++            final PathfinderGoal action;
++            final int priority;
++
++            Item(int priority, PathfinderGoal action) {
++                this.priority = priority;
++                this.action = action;
++            }
++        }
++
++        private final List<Item> taskEntries = new ArrayList<Item>();
++        private final List<Item> executingTaskEntries = new ArrayList<Item>();
++        private int tickCount;
++        private final int tickRate = 3;
++
++        void addTask(int priority, PathfinderGoal goal) {
++            this.taskEntries.add(new Item(priority, goal));
++        }
++
++        void onUpdateTasks() {
++            if (this.tickCount++ % this.tickRate == 0) {
++                for (Item item : this.taskEntries) {
++                    boolean flag = this.executingTaskEntries.contains(item);
++
++                    if (flag) {
++                        if (this.canUse(item) && item.action.continueExecuting()) {
++                            continue;
++                        }
++
++                        item.action.resetTask();
++                        this.executingTaskEntries.remove(item);
++                    }
++
++                    if (this.canUse(item) && item.action.shouldExecute()) {
++                        item.action.startExecuting();
++                        this.executingTaskEntries.add(item);
++                    }
++                }
++            } else {
++                java.util.Iterator<Item> iterator = this.executingTaskEntries.iterator();
++
++                while (iterator.hasNext()) {
++                    Item item = iterator.next();
++
++                    if (!item.action.continueExecuting()) {
++                        item.action.resetTask();
++                        iterator.remove();
++                    }
++                }
++            }
++
++            for (Item item : this.executingTaskEntries) {
++                item.action.updateTask();
++            }
++        }
++
++        private boolean canUse(Item item) {
++            for (Item other : this.taskEntries) {
++                if (other != item) {
++                    if (item.priority >= other.priority) {
++                        if ((item.action.getMutexBits() & other.action.getMutexBits()) != 0
++                                && this.executingTaskEntries.contains(other)) {
++                            return false;
++                        }
++                    } else if (!other.action.isInterruptible() && this.executingTaskEntries.contains(other)) {
++                        return false;
++                    }
++                }
++            }
++
++            return true;
++        }
++    }
++
++    private static final int GOALS = 7;
++
++    private void runSeed(long seed) {
++        Random random = new Random(seed);
++        int[] priorities = new int[GOALS];
++        int[] mutex = new int[GOALS];
++        boolean[] interruptible = new boolean[GOALS];
++        boolean[][] scripts = new boolean[GOALS][];
++
++        for (int i = 0; i < GOALS; ++i) {
++            priorities[i] = random.nextInt(4);
++            mutex[i] = random.nextInt(8);
++            interruptible[i] = random.nextBoolean();
++            scripts[i] = new boolean[11 + random.nextInt(7)];
++            for (int j = 0; j < scripts[i].length; ++j) {
++                scripts[i][j] = random.nextInt(3) != 0;
++            }
++        }
++
++        List<String> actualLog = new ArrayList<String>();
++        List<String> expectedLog = new ArrayList<String>();
++
++        PathfinderGoalSelector actual = new PathfinderGoalSelector(new MethodProfiler());
++        ReferenceSelector expected = new ReferenceSelector();
++        ScriptedGoal[] actualGoals = new ScriptedGoal[GOALS];
++        ScriptedGoal[] expectedGoals = new ScriptedGoal[GOALS];
++
++        for (int i = 0; i < GOALS; ++i) {
++            actualGoals[i] = new ScriptedGoal(i, mutex[i], interruptible[i], scripts[i], actualLog);
++            expectedGoals[i] = new ScriptedGoal(i, mutex[i], interruptible[i], scripts[i], expectedLog);
++            actual.addTask(priorities[i], actualGoals[i]);
++            expected.addTask(priorities[i], expectedGoals[i]);
++        }
++
++        for (int tick = 0; tick < 400; ++tick) {
++            for (int i = 0; i < GOALS; ++i) {
++                actualGoals[i].setTick(tick);
++                expectedGoals[i].setTick(tick);
++            }
++
++            actual.onUpdateTasks();
++            expected.onUpdateTasks();
++
++            assertEquals("diverged at tick " + tick + " with seed " + seed, expectedLog, actualLog);
++        }
++
++        // A run that never starts anything would pass trivially.
++        org.junit.Assert.assertTrue("seed " + seed + " never ran a goal", expectedLog.size() > 50);
++    }
++
++    @Test
++    public void matchesTheOriginalAlgorithm() {
++        for (long seed = 0; seed < 60; ++seed) {
++            runSeed(seed);
++        }
++    }
++
++    @Test
++    public void removingARunningTaskResetsItAndStopsTicking() {
++        List<String> log = new ArrayList<String>();
++        PathfinderGoalSelector selector = new PathfinderGoalSelector(new MethodProfiler());
++        ScriptedGoal goal = new ScriptedGoal(0, 0, true, new boolean[] {true}, log);
++
++        selector.addTask(1, goal);
++        selector.onUpdateTasks();
++        assertEquals("[start:0, update:0]", log.toString());
++
++        // removeTask reads the flag to decide whether to reset; if the flag were not being set on
++        // add, this would silently skip the reset and leave the goal thinking it is still running.
++        selector.removeTask(goal);
++        assertEquals("[start:0, update:0, reset:0]", log.toString());
++
++        log.clear();
++        selector.onUpdateTasks();
++        assertEquals("[]", log.toString());
++    }
++}

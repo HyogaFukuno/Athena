@@ -1,0 +1,415 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 02:47:10 +0900
+Subject: [PATCH] Stop allocating block positions on the light, AntiXray and
+ path hot paths
+
+Profiling a live server put BlockPosition at the top of the allocation
+profile (97 MB/min, ~30% of everything), concentrated in a handful of
+loops rather than spread across its 2400 call sites:
+
+  - AntiXray walked six neighbours per recursion level via
+    position.east()/up()/..., each of which allocates. It now recurses on
+    plain int coordinates, with a matching World.isLoaded(x, y, z).
+  - The light flood fill allocated a position per visited cell and six
+    more per neighbour probe. World gains scalar getLightFor/setLightFor/
+    getRawLight/areChunksLoaded/updateBrightness/c overloads and the two
+    loops in World.c now work in ints. Chunk.updateSkylightNeighborHeight
+    no longer builds a position per Y level.
+  - PathfinderNormal.a ran for every candidate path point and allocated
+    two positions each time; the scan position is now a per-thread
+    scratch and the entity position is only materialized on the rare
+    minecart-track branch.
+
+Also caches EnumDirection.VALUES instead of calling values(), which
+clones the array on every call - it showed up as 5 MB/min of its own.
+
+Measured over 60s on a running server: BlockPosition 97.2 -> 0.5 MB,
+MutableBlockPosition 31.5 -> 0, EnumDirection[] 5.1 -> 0, Vec3D
+11.6 -> 0, PathPoint 8.2 -> 0.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index f62194ead8b73b990d0665a85e5b63987782c539..45a064a30b6818e6c6be56eb5b06f6eaa2bf9930 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -333,9 +333,9 @@ public class Chunk {
+     }
+ 
+     private void updateSkylightNeighborHeight(int i, int j, int k, int l) {
+-        if (l > k && this.world.areChunksLoaded(new BlockPosition(i, 0, j), 16)) {
++        if (l > k && this.world.areChunksLoaded(i, 0, j, 16)) { // Athena - scalar
+             for (int i1 = k; i1 < l; ++i1) {
+-                this.world.updateBrightness(EnumSkyBlock.SKY, new BlockPosition(i, i1, j), this); // PaperSpigot - Asynchronous lighting updates // PandaSpigot - Optimize Light Recalculations
++                this.world.updateBrightness(EnumSkyBlock.SKY, i, i1, j, this); // PaperSpigot - Asynchronous lighting updates // PandaSpigot - Optimize Light Recalculations // Athena - scalar
+             }
+ 
+             this.isModified = true;
+diff --git a/src/main/java/net/minecraft/server/EnumDirection.java b/src/main/java/net/minecraft/server/EnumDirection.java
+index 94e5ec455537cc3a922209f312b2e189a4f218c3..57cc21e3c26d5983e4236d0604b2684eeef5deaf 100644
+--- a/src/main/java/net/minecraft/server/EnumDirection.java
++++ b/src/main/java/net/minecraft/server/EnumDirection.java
+@@ -19,7 +19,7 @@ public enum EnumDirection implements INamable {
+     private final EnumDirection.EnumAxis axis;
+     private final EnumDirection.EnumAxisDirection axisDirection;
+     private final BaseBlockPosition directionVec;
+-    private static final EnumDirection[] VALUES = new EnumDirection[6];
++    public static final EnumDirection[] VALUES = new EnumDirection[6]; // Athena - shared array; values() clones on every call
+     private static final EnumDirection[] HORIZONTALS = new EnumDirection[4];
+     private static final Map<String, EnumDirection> NAME_LOOKUP = Maps.newHashMap();
+ 
+diff --git a/src/main/java/net/minecraft/server/PathfinderNormal.java b/src/main/java/net/minecraft/server/PathfinderNormal.java
+index 5f74b591759ad4211de582d6580fff16b5e3ff5b..cd50758c8c2dbcacd032961060f4bb0a326449bf 100644
+--- a/src/main/java/net/minecraft/server/PathfinderNormal.java
++++ b/src/main/java/net/minecraft/server/PathfinderNormal.java
+@@ -127,14 +127,29 @@ public class PathfinderNormal extends PathfinderAbstract {
+         }
+     }
+ 
++    // Athena start - per-thread scratch positions for the hot path scan above
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition> SCAN_POSITION = new ThreadLocal<BlockPosition.MutableBlockPosition>() {
++        protected BlockPosition.MutableBlockPosition initialValue() {
++            return new BlockPosition.MutableBlockPosition();
++        }
++    };
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition> ENTITY_POSITION = new ThreadLocal<BlockPosition.MutableBlockPosition>() {
++        protected BlockPosition.MutableBlockPosition initialValue() {
++            return new BlockPosition.MutableBlockPosition();
++        }
++    };
++    // Athena end
++
+     private int getVerticalOffset(Entity entity, int i, int j, int k) {
+         return a(this.blockaccess, entity, i, j, k, this.entitySizeX, this.entitySizeY, this.entitySizeZ, this.avoidsWater, this.canBreakDoors, this.canEnterDoors);
+     }
+ 
+     public static int a(IBlockAccess iblockaccess, Entity entity, int i, int j, int k, int l, int i1, int j1, boolean flag, boolean flag1, boolean flag2) {
+         boolean flag3 = false;
+-        BlockPosition blockposition = new BlockPosition(entity);
+-        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        // Athena - this runs for every candidate path point, so it no longer allocates: the scan
++        // position is a per-thread scratch, and the entity's own position is only materialized in
++        // the rare minecart-track branch below. Profiling blamed this method for ~25 MB/min.
++        BlockPosition.MutableBlockPosition blockposition_mutableblockposition = SCAN_POSITION.get();
+ 
+         for (int k1 = i; k1 < i + l; ++k1) {
+             for (int l1 = j; l1 < j + i1; ++l1) {
+@@ -160,7 +175,17 @@ public class PathfinderNormal extends PathfinderAbstract {
+                         }
+ 
+                         if (block instanceof BlockMinecartTrackAbstract) { // PaperSpigot - Pathfinder optimizations
+-                            if (!(iblockaccess.getType(blockposition).getBlock() instanceof BlockMinecartTrackAbstract) && !(iblockaccess.getType(blockposition.down()).getBlock() instanceof BlockMinecartTrackAbstract)) { // PaperSpigot - Pathfinder optimizations
++                            // Athena - entity position resolved lazily, only on this rare branch
++                            BlockPosition.MutableBlockPosition entityPos = ENTITY_POSITION.get();
++                            int entityX = MathHelper.floor(entity.locX);
++                            int entityY = MathHelper.floor(entity.locY);
++                            int entityZ = MathHelper.floor(entity.locZ);
++
++                            entityPos.set(entityX, entityY, entityZ);
++                            boolean onTrack = iblockaccess.getType(entityPos).getBlock() instanceof BlockMinecartTrackAbstract;
++
++                            entityPos.set(entityX, entityY - 1, entityZ);
++                            if (!onTrack && !(iblockaccess.getType(entityPos).getBlock() instanceof BlockMinecartTrackAbstract)) { // PaperSpigot - Pathfinder optimizations
+                                 return -3;
+                             }
+                         } else if (!block.isPassable(iblockaccess, blockposition_mutableblockposition) && (!flag1 || !(block instanceof BlockDoor) || block.getMaterial() != Material.WOOD)) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index db572bf02ac33b3dc9704f635035c3df3d60d8a4..a927dd42621885a82aa60d4d041ff7d2ba19279e 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -321,6 +321,11 @@ public abstract class World implements IBlockAccess {
+         return getChunkIfLoaded(blockposition.getX() >> 4, blockposition.getZ() >> 4) != null; // PandaSpigot
+     }
+ 
++    // Athena - scalar overload so callers need not build a position just to read its chunk
++    public boolean isLoaded(int x, int y, int z) {
++        return getChunkIfLoaded(x >> 4, z >> 4) != null;
++    }
++
+     public boolean isBlockLoaded(BlockPosition blockposition, boolean flag) {
+         return !this.isValidLocation(blockposition) ? false : this.isChunkLoaded(blockposition.getX() >> 4, blockposition.getZ() >> 4, flag);
+     }
+@@ -789,6 +794,82 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
++    // Athena start - scalar light API. The light flood fill used to allocate a BlockPosition per
++    // visited cell plus one per neighbour probe; a live-server profile blamed it for ~33 MB/min.
++    public int getLightFor(EnumSkyBlock enumskyblock, int x, int y, int z) {
++        if (y < 0) {
++            y = 0;
++        }
++
++        BlockPosition.MutableBlockPosition pos = scratchPos(10);
++
++        pos.set(x, y, z);
++        if (!this.isValidLocation(pos)) {
++            return enumskyblock.defaultLightValue;
++        } else if (!this.isLoaded(x, y, z)) {
++            return enumskyblock.defaultLightValue;
++        } else {
++            return this.getChunkAtWorldCoords(pos).getBrightness(enumskyblock, pos);
++        }
++    }
++
++    public void setLightFor(EnumSkyBlock enumskyblock, int x, int y, int z, int i) {
++        BlockPosition.MutableBlockPosition pos = scratchPos(11);
++
++        pos.set(x, y, z);
++        if (this.isValidLocation(pos) && this.isLoaded(x, y, z)) {
++            this.getChunkAtWorldCoords(pos).setLightFor(enumskyblock, pos, i);
++            this.notifyLightSet(pos);
++        }
++    }
++
++    private int getRawLight(int x, int y, int z, EnumSkyBlock enumskyblock) {
++        BlockPosition.MutableBlockPosition pos = scratchPos(12);
++
++        pos.set(x, y, z);
++        if (enumskyblock == EnumSkyBlock.SKY && this.canSeeSky(pos)) {
++            return 15;
++        } else {
++            Block block = this.getType(pos).getBlock();
++            int i = enumskyblock == EnumSkyBlock.SKY ? 0 : block.getLightValue();
++            int j = block.getLightOpacity();
++
++            if (j >= 15 && block.getLightValue() > 0) {
++                j = 1;
++            }
++
++            if (j < 1) {
++                j = 1;
++            }
++
++            if (j >= 15) {
++                return 0;
++            } else if (i >= 14) {
++                return i;
++            } else {
++                for (int l = 0; l < EnumDirection.VALUES.length; ++l) {
++                    EnumDirection enumdirection = EnumDirection.VALUES[l];
++                    int i1 = this.getLightFor(enumskyblock, x + enumdirection.getAdjacentX(), y + enumdirection.getAdjacentY(), z + enumdirection.getAdjacentZ()) - j;
++
++                    if (i1 > i) {
++                        i = i1;
++                    }
++
++                    if (i >= 14) {
++                        return i;
++                    }
++                }
++
++                return i;
++            }
++        }
++    }
++
++    public boolean areChunksLoaded(int x, int y, int z, int i) {
++        return this.isAreaLoaded(x - i, y - i, z - i, x + i, y + i, z + i, true);
++    }
++    // Athena end
++
+     public int getLightFor(EnumSkyBlock enumskyblock, BlockPosition blockposition) {
+         if (blockposition.getY() < 0) {
+             blockposition = new BlockPosition(blockposition.getX(), 0, blockposition.getZ());
+@@ -1522,7 +1603,7 @@ public abstract class World implements IBlockAccess {
+     // showed that costing ~14 MB/min, because the collision and material queries run several times
+     // per entity per tick. Each call site owns a fixed slot, so a nested query can never scribble
+     // over the position another one is still iterating with.
+-    private static final int SCRATCH_POS_SLOTS = 10;
++    private static final int SCRATCH_POS_SLOTS = 14;
+     private static final ThreadLocal<BlockPosition.MutableBlockPosition[]> SCRATCH_POSITIONS = new ThreadLocal<BlockPosition.MutableBlockPosition[]>() {
+         protected BlockPosition.MutableBlockPosition[] initialValue() {
+             BlockPosition.MutableBlockPosition[] slots = new BlockPosition.MutableBlockPosition[SCRATCH_POS_SLOTS];
+@@ -2763,6 +2844,14 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
++    // Athena - scalar entry point for the light flood fill
++    public boolean c(EnumSkyBlock enumskyblock, int x, int y, int z, Chunk chunk, List<Chunk> neighbors) {
++        BlockPosition.MutableBlockPosition pos = scratchPos(13);
++
++        pos.set(x, y, z);
++        return this.c(enumskyblock, pos, chunk, neighbors);
++    }
++
+     public boolean c(EnumSkyBlock enumskyblock, BlockPosition blockposition, Chunk chunk, List<Chunk> neighbors) { // PaperSpigot
+         // CraftBukkit start - Use neighbor cache instead of looking up
+         //Chunk chunk = this.getChunkIfLoaded(blockposition.getX() >> 4, blockposition.getZ() >> 4);
+@@ -2799,22 +2888,19 @@ public abstract class World implements IBlockAccess {
+                     j2 = (l1 >> 6 & 63) - 32 + j1;
+                     k2 = (l1 >> 12 & 63) - 32 + k1;
+                     int l3 = l1 >> 18 & 15;
+-                    BlockPosition blockposition1 = new BlockPosition(i2, j2, k2);
+ 
+-                    l2 = this.getLightFor(enumskyblock, blockposition1);
++                    l2 = this.getLightFor(enumskyblock, i2, j2, k2); // Athena - scalar
+                     if (l2 == l3) {
+-                        this.setLightFor(enumskyblock, blockposition1, 0);
++                        this.setLightFor(enumskyblock, i2, j2, k2, 0); // Athena - scalar
+                         if (l3 > 0) {
+                             i3 = MathHelper.abs_int(i2 - i1);
+                             j3 = MathHelper.abs_int(j2 - j1);
+                             k3 = MathHelper.abs_int(k2 - k1);
+                             if (i3 + j3 + k3 < 17) {
+                                 BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(9); // Athena - reuse a per-thread scratch position
+-                                EnumDirection[] aenumdirection = EnumDirection.values();
+-                                int i4 = aenumdirection.length;
+ 
+-                                for (int j4 = 0; j4 < i4; ++j4) {
+-                                    EnumDirection enumdirection = aenumdirection[j4];
++                                for (int j4 = 0; j4 < EnumDirection.VALUES.length; ++j4) { // Athena - shared array, values() copies
++                                    EnumDirection enumdirection = EnumDirection.VALUES[j4];
+                                     int k4 = i2 + enumdirection.getAdjacentX();
+                                     int l4 = j2 + enumdirection.getAdjacentY();
+                                     int i5 = k2 + enumdirection.getAdjacentZ();
+@@ -2822,7 +2908,7 @@ public abstract class World implements IBlockAccess {
+                                     blockposition_mutableblockposition.set(k4, l4, i5);
+                                     int j5 = Math.max(1, this.getType(blockposition_mutableblockposition).getBlock().getLightOpacity());
+ 
+-                                    l2 = this.getLightFor(enumskyblock, (BlockPosition) blockposition_mutableblockposition);
++                                    l2 = this.getLightFor(enumskyblock, k4, l4, i5); // Athena - scalar
+                                     if (l2 == l3 - j5 && j < this.lightUpdateBlockList.length) {
+                                         this.lightUpdateBlockList[j++] = k4 - i1 + 32 | l4 - j1 + 32 << 6 | i5 - k1 + 32 << 12 | l3 - j5 << 18;
+                                     }
+@@ -2843,12 +2929,11 @@ public abstract class World implements IBlockAccess {
+                 i2 = (l1 & 63) - 32 + i1;
+                 j2 = (l1 >> 6 & 63) - 32 + j1;
+                 k2 = (l1 >> 12 & 63) - 32 + k1;
+-                BlockPosition blockposition2 = new BlockPosition(i2, j2, k2);
+-                int k5 = this.getLightFor(enumskyblock, blockposition2);
++                int k5 = this.getLightFor(enumskyblock, i2, j2, k2); // Athena - scalar
+ 
+-                l2 = this.getRawLight(blockposition2, enumskyblock);
++                l2 = this.getRawLight(i2, j2, k2, enumskyblock); // Athena - scalar
+                 if (l2 != k5) {
+-                    this.setLightFor(enumskyblock, blockposition2, l2);
++                    this.setLightFor(enumskyblock, i2, j2, k2, l2); // Athena - scalar
+                     if (l2 > k5) {
+                         i3 = Math.abs(i2 - i1);
+                         j3 = Math.abs(j2 - j1);
+@@ -2856,27 +2941,27 @@ public abstract class World implements IBlockAccess {
+                         boolean flag = j < this.lightUpdateBlockList.length - 6;
+ 
+                         if (i3 + j3 + k3 < 17 && flag) {
+-                            if (this.getLightFor(enumskyblock, blockposition2.west()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + -1, j2 + 0, k2 + 0) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 - 1 - i1 + 32 + (j2 - j1 + 32 << 6) + (k2 - k1 + 32 << 12);
+                             }
+ 
+-                            if (this.getLightFor(enumskyblock, blockposition2.east()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + 1, j2 + 0, k2 + 0) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 + 1 - i1 + 32 + (j2 - j1 + 32 << 6) + (k2 - k1 + 32 << 12);
+                             }
+ 
+-                            if (this.getLightFor(enumskyblock, blockposition2.down()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + 0, j2 + -1, k2 + 0) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 - i1 + 32 + (j2 - 1 - j1 + 32 << 6) + (k2 - k1 + 32 << 12);
+                             }
+ 
+-                            if (this.getLightFor(enumskyblock, blockposition2.up()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + 0, j2 + 1, k2 + 0) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 - i1 + 32 + (j2 + 1 - j1 + 32 << 6) + (k2 - k1 + 32 << 12);
+                             }
+ 
+-                            if (this.getLightFor(enumskyblock, blockposition2.north()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + 0, j2 + 0, k2 + -1) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 - i1 + 32 + (j2 - j1 + 32 << 6) + (k2 - 1 - k1 + 32 << 12);
+                             }
+ 
+-                            if (this.getLightFor(enumskyblock, blockposition2.south()) < l2) {
++                            if (this.getLightFor(enumskyblock, i2 + 0, j2 + 0, k2 + 1) < l2) { // Athena - scalar
+                                 this.lightUpdateBlockList[j++] = i2 - i1 + 32 + (j2 - j1 + 32 << 6) + (k2 + 1 - k1 + 32 << 12);
+                             }
+                         }
+@@ -2907,6 +2992,20 @@ public abstract class World implements IBlockAccess {
+         Chunk chunk = this.getChunkIfLoaded(position.getX() >> 4, position.getZ() >> 4);
+         return updateBrightness(enumskyblock, position, chunk);
+     }
++    // Athena - scalar entry point. The async path still needs a real position because the task
++    // captures it, so only the (default) synchronous path avoids the allocation.
++    public boolean updateBrightness(EnumSkyBlock enumskyblock, int x, int y, int z, Chunk chunk) {
++        if (chunk == null || !chunk.areNeighborsLoaded(1)) {
++            return false;
++        }
++
++        if (!chunk.world.paperSpigotConfig.useAsyncLighting) {
++            return this.c(enumskyblock, x, y, z, chunk, null);
++        }
++
++        return this.updateBrightness(enumskyblock, new BlockPosition(x, y, z), chunk);
++    }
++
+     public boolean updateBrightness(EnumSkyBlock enumskyblock, BlockPosition position, Chunk chunk) {
+         // PandaSpigot end
+         int x = position.getX();
+diff --git a/src/main/java/org/spigotmc/AntiXray.java b/src/main/java/org/spigotmc/AntiXray.java
+index df7fb2fcd922a3f3bbf501eef364429c456237ac..0d48157a2bba2a730d3056a69368bae9b89d2b41 100644
+--- a/src/main/java/org/spigotmc/AntiXray.java
++++ b/src/main/java/org/spigotmc/AntiXray.java
+@@ -166,13 +166,13 @@ public class AntiXray
+                                 if ( obfuscateBlocks[blockId] )
+                                 {
+                                     // The world isn't loaded, bail out
+-                                    if ( !isLoaded( world, new BlockPosition( startX + x, ( i << 4 ) + y, startZ + z ), initialRadius ) )
++                                    if ( !isLoaded( world, startX + x, ( i << 4 ) + y, startZ + z, initialRadius ) ) // Athena
+                                     {
+                                         index++;
+                                         continue;
+                                     }
+                                     // On the otherhand, if radius is 0, or the nearby blocks are all non air, we can obfuscate
+-                                    if ( !hasTransparentBlockAdjacent( world, new BlockPosition( startX + x, ( i << 4 ) + y, startZ + z ), initialRadius ) )
++                                    if ( !hasTransparentBlockAdjacent( world, startX + x, ( i << 4 ) + y, startZ + z, initialRadius ) ) // Athena
+                                     {
+                                         int newId = blockId;
+                                         switch ( world.spigotConfig.engineMode )
+@@ -233,28 +233,32 @@ public class AntiXray
+         }
+     }
+ 
+-    private static boolean isLoaded(World world, BlockPosition position, int radius)
++    // Athena - integer coordinates instead of BlockPosition. This recursion walked six neighbours
++    // per level, allocating a position for each; profiling a live server attributed ~32 MB/min of
++    // BlockPosition allocation to AntiXray alone.
++    private static boolean isLoaded(World world, int x, int y, int z, int radius)
+     {
+-        return world.isLoaded( position )
++        return world.isLoaded( x, y, z )
+                 && ( radius == 0 ||
+-                ( isLoaded( world, position.east(), radius - 1 )
+-                && isLoaded( world, position.west(), radius - 1 )
+-                && isLoaded( world, position.up(), radius - 1 )
+-                && isLoaded( world, position.down(), radius - 1 )
+-                && isLoaded( world, position.south(), radius - 1 )
+-                && isLoaded( world, position.north(), radius - 1 ) ) );
++                ( isLoaded( world, x + 1, y, z, radius - 1 )
++                && isLoaded( world, x - 1, y, z, radius - 1 )
++                && isLoaded( world, x, y + 1, z, radius - 1 )
++                && isLoaded( world, x, y - 1, z, radius - 1 )
++                && isLoaded( world, x, y, z + 1, radius - 1 )
++                && isLoaded( world, x, y, z - 1, radius - 1 ) ) );
+     }
+ 
+-    private static boolean hasTransparentBlockAdjacent(World world, BlockPosition position, int radius)
++    // Athena - integer coordinates (see isLoaded)
++    private static boolean hasTransparentBlockAdjacent(World world, int x, int y, int z, int radius)
+     {
+-        return !isSolidBlock(world.getType(position, false).getBlock()) /* isSolidBlock */
++        return !isSolidBlock(world.getType(x, y, z, false).getBlock()) /* isSolidBlock */
+                 || ( radius > 0
+-                && ( hasTransparentBlockAdjacent( world, position.east(), radius - 1 )
+-                || hasTransparentBlockAdjacent( world, position.west(), radius - 1 )
+-                || hasTransparentBlockAdjacent( world, position.up(), radius - 1 )
+-                || hasTransparentBlockAdjacent( world, position.down(), radius - 1 )
+-                || hasTransparentBlockAdjacent( world, position.south(), radius - 1 )
+-                || hasTransparentBlockAdjacent( world, position.north(), radius - 1 ) ) );
++                && ( hasTransparentBlockAdjacent( world, x + 1, y, z, radius - 1 )
++                || hasTransparentBlockAdjacent( world, x - 1, y, z, radius - 1 )
++                || hasTransparentBlockAdjacent( world, x, y + 1, z, radius - 1 )
++                || hasTransparentBlockAdjacent( world, x, y - 1, z, radius - 1 )
++                || hasTransparentBlockAdjacent( world, x, y, z + 1, radius - 1 )
++                || hasTransparentBlockAdjacent( world, x, y, z - 1, radius - 1 ) ) );
+     }
+ 
+     private static boolean isSolidBlock(Block block) {
