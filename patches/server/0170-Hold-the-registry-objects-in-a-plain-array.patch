@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 20:40:58 +0900
+Subject: [PATCH] Hold the registry objects in a plain array
+
+getByValue is the id-to-object direction of Block.BLOCK_STATE_IDS, which
+ChunkSection.getType goes through for every block read. A live capture
+put it at 5.1% of the main thread, with ArrayList.get and
+ArrayList.elementData showing the same sample count underneath it.
+
+Going through an ArrayList costs one more hop: load its elementData
+pointer, then index the array. On a working set of a few hundred
+sections' worth of block ids - large enough that the pointer table and
+the state objects fall out of cache, which is the situation that
+actually matters here - holding the array directly measured 1.67 ns
+against 1.52 ns per lookup.
+
+That is about 9% of the lookup, so roughly half a percent of the main
+thread. Small, and worth being explicit about: a hot-cache microbenchmark
+put it at 0.70 ns against 0.54 ns, which would have been the wrong number
+to reason from.
+
+put grows the array to exactly i + 1, the length the ArrayList's padding
+loop produced, so getByValue's range check keeps answering null for the
+same out-of-range ids as before.
+
+RegistryMaterials builds on this too, so the block, item and entity
+registries get it as well.
+
+Verified by generating 625 chunks from a fixed seed and comparing every
+stored field against a build from before this series: no differences.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/RegistryID.java b/src/main/java/net/minecraft/server/RegistryID.java
+index 6d1f0d8ca5c40af8ed0b13783d5657f6d7333b09..1649718a538d10c43343da687341a880e0c13219 100644
+--- a/src/main/java/net/minecraft/server/RegistryID.java
++++ b/src/main/java/net/minecraft/server/RegistryID.java
+@@ -2,27 +2,33 @@ package net.minecraft.server;
+ 
+ import com.google.common.base.Predicates;
+ import com.google.common.collect.Iterators;
+-import com.google.common.collect.Lists;
++import java.util.Arrays;
+ import java.util.IdentityHashMap;
+ import java.util.Iterator;
+-import java.util.List;
+ 
+ 
+ public class RegistryID<T> implements Registry<T> {
+ 
+     private final IdentityHashMap<T, Integer> identityMap = new IdentityHashMap(512);
+-    private final List<T> objectList = Lists.newArrayList();
++    // Athena - was an ArrayList. getByValue is the id-to-object direction of Block.BLOCK_STATE_IDS,
++    // which ChunkSection.getType goes through for every block read; a live capture put it at 5.1%
++    // of the main thread. Going through an ArrayList means loading its elementData pointer before
++    // the array itself, one more hop on a path that is already waiting on memory. Holding the array
++    // directly measured 1.67 ns -> 1.52 ns per lookup on a section-sized working set.
++    private Object[] objects = new Object[0];
+ 
+     public RegistryID() {}
+ 
+     public void put(T t0, int i) {
+         this.identityMap.put(t0, i);
+ 
+-        while (this.objectList.size() <= i) {
+-            this.objectList.add(null);
++        // Athena - grow to exactly i + 1, the length the ArrayList's padding loop produced, so
++        // getByValue's range check keeps answering the same way for ids past the end.
++        if (i >= this.objects.length) {
++            this.objects = Arrays.copyOf(this.objects, i + 1);
+         }
+ 
+-        this.objectList.set(i, t0);
++        this.objects[i] = t0;
+     }
+ 
+     public int get(T t0) {
+@@ -32,10 +38,12 @@ public class RegistryID<T> implements Registry<T> {
+     }
+ 
+     public final T getByValue(int i) {
+-        return (T) (i >= 0 && i < this.objectList.size() ? this.objectList.get(i) : null);
++        Object[] objects = this.objects; // Athena - one load, then index it
++
++        return (T) (i >= 0 && i < objects.length ? objects[i] : null);
+     }
+ 
+     public Iterator<T> iterator() {
+-        return Iterators.filter(this.objectList.iterator(), Predicates.notNull());
++        return (Iterator<T>) Iterators.filter(Iterators.forArray(this.objects), Predicates.notNull());
+     }
+ }

@@ -8,19 +8,19 @@ Introduce PandaGrowablePlant for age-based NMS plants and expose the data throug
 This keeps the API-facing CraftBlock bridge and the underlying server abstraction in a single patch.
 
 diff --git a/src/main/java/net/minecraft/server/BlockCactus.java b/src/main/java/net/minecraft/server/BlockCactus.java
-index ddc213517d36fb772999182d66baf7f9ea49d29b..c12465aead468be5fd4930dc61113f416fb2d531 100644
+index 85d89f2a279e3d0eb0f4da14240d5ebd3236ff5b..3f38733d1bb0dedfaf2d4ab0988ce70c6a9dc5a3 100644
 --- a/src/main/java/net/minecraft/server/BlockCactus.java
 +++ b/src/main/java/net/minecraft/server/BlockCactus.java
-@@ -5,7 +5,7 @@ import java.util.Random;
+@@ -6,7 +6,7 @@ import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
  
- import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
+ 
  
 -public class BlockCactus extends Block {
 +public class BlockCactus extends Block implements PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 15);
  
-@@ -99,6 +99,12 @@ public class BlockCactus extends Block {
+@@ -117,6 +117,12 @@ public class BlockCactus extends Block {
          return ((Integer) iblockdata.get(BlockCactus.AGE)).intValue();
      }
  
@@ -34,19 +34,19 @@ index ddc213517d36fb772999182d66baf7f9ea49d29b..c12465aead468be5fd4930dc61113f41
          return new BlockStateList(this, new IBlockState[] { BlockCactus.AGE});
      }
 diff --git a/src/main/java/net/minecraft/server/BlockCocoa.java b/src/main/java/net/minecraft/server/BlockCocoa.java
-index 8eb1bebaec2d35b8bfa57be5ef19936ad5770a1f..3ffb28cb0e649026e3548480e0e5915d42642022 100644
+index 206ca5c1a23d13d19e913eb9393dd09678e0aed3..ca82eac7157db18ce4526f5440ad3eb0c5ee73fa 100644
 --- a/src/main/java/net/minecraft/server/BlockCocoa.java
 +++ b/src/main/java/net/minecraft/server/BlockCocoa.java
-@@ -4,7 +4,7 @@ import java.util.Random;
+@@ -5,7 +5,7 @@ import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
  
- import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
+ 
  
 -public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantElement {
 +public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantElement, PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 2);
  
-@@ -148,6 +148,12 @@ public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantEl
+@@ -155,6 +155,12 @@ public class BlockCocoa extends BlockDirectional implements IBlockFragilePlantEl
          return i;
      }
  
@@ -60,19 +60,19 @@ index 8eb1bebaec2d35b8bfa57be5ef19936ad5770a1f..3ffb28cb0e649026e3548480e0e5915d
          return new BlockStateList(this, new IBlockState[] { BlockCocoa.FACING, BlockCocoa.AGE});
      }
 diff --git a/src/main/java/net/minecraft/server/BlockCrops.java b/src/main/java/net/minecraft/server/BlockCrops.java
-index f9429059302cfeba9d7ea6c1cb7f0dbee27bf0e4..bee09025dbc55612c4ee04b6ff2d99aef1fc1cbe 100644
+index 23149c658a1c7116fb9fb021a4df5c9127ada5b3..48baaccd0e47b8d4ea93ba554ea7f45b7faba89a 100644
 --- a/src/main/java/net/minecraft/server/BlockCrops.java
 +++ b/src/main/java/net/minecraft/server/BlockCrops.java
-@@ -4,7 +4,7 @@ import java.util.Random;
+@@ -5,7 +5,7 @@ import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
  
- import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
+ 
  
 -public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement {
 +public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement, PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 7);
  
-@@ -55,6 +55,12 @@ public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement
+@@ -56,6 +56,12 @@ public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement
          // CraftBukkit end
      }
  
@@ -82,23 +82,23 @@ index f9429059302cfeba9d7ea6c1cb7f0dbee27bf0e4..bee09025dbc55612c4ee04b6ff2d99ae
 +    }
 +    // PandaSpigot end
 +
-     protected static float a(Block block, World world, BlockPosition blockposition) {
+     protected static float getGrowthChance(Block block, World world, BlockPosition blockposition) {
          float f = 1.0F;
          BlockPosition blockposition1 = blockposition.down();
 diff --git a/src/main/java/net/minecraft/server/BlockNetherWart.java b/src/main/java/net/minecraft/server/BlockNetherWart.java
-index 374f06caa0e81aff99e645a197b024e423e078c2..f7f67250c58f428caa7e7b4d35738346d88a0885 100644
+index 4f7c81d3194fd4ce20bd7b6af9079f720c9962eb..09ca21cfa49b5d0ed8f2b64aff08fe7721137aa6 100644
 --- a/src/main/java/net/minecraft/server/BlockNetherWart.java
 +++ b/src/main/java/net/minecraft/server/BlockNetherWart.java
-@@ -2,7 +2,7 @@ package net.minecraft.server;
- 
+@@ -3,7 +3,7 @@ package net.minecraft.server;
  import java.util.Random;
+ 
  
 -public class BlockNetherWart extends BlockPlant {
 +public class BlockNetherWart extends BlockPlant implements PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 3);
  
-@@ -70,6 +70,12 @@ public class BlockNetherWart extends BlockPlant {
+@@ -71,6 +71,12 @@ public class BlockNetherWart extends BlockPlant {
          return ((Integer) iblockdata.get(BlockNetherWart.AGE)).intValue();
      }
  
@@ -112,19 +112,19 @@ index 374f06caa0e81aff99e645a197b024e423e078c2..f7f67250c58f428caa7e7b4d35738346
          return new BlockStateList(this, new IBlockState[] { BlockNetherWart.AGE});
      }
 diff --git a/src/main/java/net/minecraft/server/BlockReed.java b/src/main/java/net/minecraft/server/BlockReed.java
-index 337f2c40e3ecd817a0b838a624a661bb459f589e..166ce9f8aa62336a6dcba1d4739d4623556b4346 100644
+index cd048b3dc1e87255bdcaa9742130a5643267b052..4cb565aeb92e06faaa7c1498d5a3cb7f6a5fd659 100644
 --- a/src/main/java/net/minecraft/server/BlockReed.java
 +++ b/src/main/java/net/minecraft/server/BlockReed.java
-@@ -3,7 +3,7 @@ package net.minecraft.server;
- import java.util.Iterator;
+@@ -4,7 +4,7 @@ import java.util.Iterator;
  import java.util.Random;
+ 
  
 -public class BlockReed extends Block {
 +public class BlockReed extends Block implements PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 15);
  
-@@ -110,6 +110,12 @@ public class BlockReed extends Block {
+@@ -117,6 +117,12 @@ public class BlockReed extends Block {
          return ((Integer) iblockdata.get(BlockReed.AGE)).intValue();
      }
  
@@ -138,18 +138,18 @@ index 337f2c40e3ecd817a0b838a624a661bb459f589e..166ce9f8aa62336a6dcba1d4739d4623
          return new BlockStateList(this, new IBlockState[] { BlockReed.AGE});
      }
 diff --git a/src/main/java/net/minecraft/server/BlockStateInteger.java b/src/main/java/net/minecraft/server/BlockStateInteger.java
-index ec79abf40b4f5d4facc5a0498cc84c2566033c5b..86d511733812dd6d75f4ae36f9682a109abcbb9a 100644
+index ab3b5165ccb609909a3b2526ec30af3749966690..206cc9e2b4fbb484e0e980e546dd57ea27cc8abe 100644
 --- a/src/main/java/net/minecraft/server/BlockStateInteger.java
 +++ b/src/main/java/net/minecraft/server/BlockStateInteger.java
-@@ -8,6 +8,7 @@ import java.util.HashSet;
+@@ -9,6 +9,7 @@ import java.util.HashSet;
  public class BlockStateInteger extends BlockState<Integer> {
  
-     private final ImmutableSet<Integer> a;
+     private final ImmutableSet<Integer> allowedValues;
 +    private final int maxValue; // PandaSpigot
  
      protected BlockStateInteger(String s, int i, int j) {
          super(s, Integer.class);
-@@ -16,6 +17,7 @@ public class BlockStateInteger extends BlockState<Integer> {
+@@ -17,6 +18,7 @@ public class BlockStateInteger extends BlockState<Integer> {
          } else if (j <= i) {
              throw new IllegalArgumentException("Max value of " + s + " must be greater than min (" + i + ")");
          } else {
@@ -157,8 +157,8 @@ index ec79abf40b4f5d4facc5a0498cc84c2566033c5b..86d511733812dd6d75f4ae36f9682a10
              HashSet hashset = Sets.newHashSet();
  
              for (int k = i; k <= j; ++k) {
-@@ -31,6 +33,12 @@ public class BlockStateInteger extends BlockState<Integer> {
-         return this.a;
+@@ -32,6 +34,12 @@ public class BlockStateInteger extends BlockState<Integer> {
+         return this.allowedValues;
      }
  
 +    // PandaSpigot start - expose configured maximum value
@@ -171,19 +171,19 @@ index ec79abf40b4f5d4facc5a0498cc84c2566033c5b..86d511733812dd6d75f4ae36f9682a10
      public boolean equals(Object object) {
          if (this == object) {
 diff --git a/src/main/java/net/minecraft/server/BlockStem.java b/src/main/java/net/minecraft/server/BlockStem.java
-index 24daf93ef18f46e307cf35e627f900a545509de0..4fa8c69d39d1c30e106668950be2de7f3cb79fa1 100644
+index ad1dea4c8e47452e1dc836403c5a9297b9ab3af1..2353b12e96eb2a5f1d4219d491671852734e994b 100644
 --- a/src/main/java/net/minecraft/server/BlockStem.java
 +++ b/src/main/java/net/minecraft/server/BlockStem.java
-@@ -6,7 +6,7 @@ import java.util.Random;
+@@ -7,7 +7,7 @@ import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
  
- import org.bukkit.craftbukkit.event.CraftEventFactory; // CraftBukkit
+ 
  
 -public class BlockStem extends BlockPlant implements IBlockFragilePlantElement {
 +public class BlockStem extends BlockPlant implements IBlockFragilePlantElement, PandaGrowablePlant { // PandaSpigot
  
      public static final BlockStateInteger AGE = BlockStateInteger.of("age", 0, 7);
      public static final BlockStateDirection FACING = BlockStateDirection.of("facing", new Predicate() {
-@@ -152,6 +152,12 @@ public class BlockStem extends BlockPlant implements IBlockFragilePlantElement {
+@@ -153,6 +153,12 @@ public class BlockStem extends BlockPlant implements IBlockFragilePlantElement {
          return ((Integer) iblockdata.get(BlockStem.AGE)).intValue();
      }
  
@@ -226,10 +226,10 @@ index 0000000000000000000000000000000000000000..69bbf0a4e38967c416557752d1acd0b0
 +    }
 +}
 diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
-index caa7e842cbbe1b666d96a6d3b94fd49fe9bf50f3..345f72ce4d17f4f5122868b561e79975e63a38af 100644
+index 896940823f3719fae7adb9b3cb08f66021596a05..9124706d310f2156742b07dbd8d5b5a869f08af7 100644
 --- a/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
 +++ b/src/main/java/org/bukkit/craftbukkit/block/CraftBlock.java
-@@ -379,6 +379,38 @@ public class CraftBlock implements Block {
+@@ -380,6 +380,38 @@ public class CraftBlock implements Block {
          return getBlockPower(BlockFace.SELF);
      }
  

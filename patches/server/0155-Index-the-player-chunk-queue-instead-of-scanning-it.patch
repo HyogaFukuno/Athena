@@ -1,0 +1,421 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:04 +0900
+Subject: [PATCH] Index the player chunk queue instead of scanning it
+
+chunkCoordIntPairQueue is probed with contains() on two hot paths:
+PlayerChunkMap.isPlayerWatchingChunk, reached once per tracked entity per player from
+EntityTrackerEntry, and PlayerChunk.sendToAllPlayersWatchingChunk, reached once per block
+change per watcher. As a LinkedList each probe was a pointer-chasing scan; a live server
+was measured holding 431 entries in the queue while a player moved.
+
+ChunkCoordQueueIndex mirrors the queue as a multiset keyed by packed chunk coordinate, so
+a probe becomes one hash lookup answering exactly what List.contains answered. It is a
+multiset because List.contains stays true until the last copy of a coordinate leaves;
+nothing is expected to enqueue a coordinate twice, but assuming so would turn a stale
+duplicate into a silently wrong answer instead of a harmless one.
+
+Every mutation site is listed in EntityPlayer. Collections.sort on the queue only permutes
+it and so leaves the index alone.
+
+diff --git a/src/main/java/net/minecraft/server/ChunkCoordQueueIndex.java b/src/main/java/net/minecraft/server/ChunkCoordQueueIndex.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c4f115d5e2363839316a24172759310852b0b56
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkCoordQueueIndex.java
+@@ -0,0 +1,99 @@
++package net.minecraft.server;
++
++import it.unimi.dsi.fastutil.longs.Long2IntMap;
++import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
++import java.util.Collection;
++
++// Athena - membership index for EntityPlayer.chunkCoordIntPairQueue.
++//
++// The queue is probed with contains() on two hot paths: PlayerChunkMap.isPlayerWatchingChunk,
++// reached once per tracked entity per player from EntityTrackerEntry, and
++// PlayerChunk.sendToAllPlayersWatchingChunk, reached once per block change per watcher. As a
++// LinkedList each probe was a pointer-chasing scan over up to (2 * viewDistance + 1)^2 entries.
++//
++// This holds the queue's contents as a multiset keyed by packed chunk coordinate, so a probe is a
++// single hash lookup that answers exactly what List.contains answered. It is a multiset rather than
++// a set because List.contains stays true until the *last* copy of a coordinate leaves the queue;
++// nothing is expected to enqueue a coordinate twice, but assuming so would turn a stale duplicate
++// into a silently wrong answer instead of a harmless one.
++//
++// This class only tracks; keeping it in step with the queue is the caller's job, and every
++// mutation site is listed in EntityPlayer. AthenaIndexAudit re-derives the whole thing from the
++// queue each tick when debugVerifyAthenaIndexes is on, which is what catches a missed call site.
++public final class ChunkCoordQueueIndex {
++
++    private final Long2IntOpenHashMap counts = new Long2IntOpenHashMap();
++
++    public static long key(ChunkCoordIntPair pair) {
++        return ChunkCoordIntPair.chunkXZ2Int(pair.x, pair.z);
++    }
++
++    public void add(ChunkCoordIntPair pair) {
++        if (pair != null) {
++            this.counts.addTo(key(pair), 1);
++        }
++    }
++
++    public void remove(ChunkCoordIntPair pair) {
++        if (pair != null) {
++            long k = key(pair);
++            int count = this.counts.remove(k); // absent -> 0, nothing to put back
++
++            if (count > 1) {
++                this.counts.put(k, count - 1);
++            }
++        }
++    }
++
++    public void clear() {
++        this.counts.clear();
++    }
++
++    public boolean contains(ChunkCoordIntPair pair) {
++        return this.counts.containsKey(key(pair));
++    }
++
++    /** Distinct chunk coordinates currently indexed. */
++    public int size() {
++        return this.counts.size();
++    }
++
++    /** Rebuilds the index that the given queue implies, for the audit to compare against. */
++    public static ChunkCoordQueueIndex derivedFrom(Collection<ChunkCoordIntPair> queue) {
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        for (ChunkCoordIntPair pair : queue) {
++            index.add(pair); // null entries are skipped by add
++        }
++
++        return index;
++    }
++
++    public boolean matches(ChunkCoordQueueIndex other) {
++        return this.counts.equals(other.counts);
++    }
++
++    /** Human-readable account of how this index differs from the given one, for audit reports. */
++    public String describeDifference(ChunkCoordQueueIndex expected) {
++        StringBuilder sb = new StringBuilder();
++        int shown = 0;
++
++        for (Long2IntMap.Entry entry : expected.counts.long2IntEntrySet()) {
++            int have = this.counts.get(entry.getLongKey());
++
++            if (have != entry.getIntValue() && shown++ < 8) {
++                sb.append("\n    chunk ").append((int) entry.getLongKey()).append(',').append((int) (entry.getLongKey() >> 32))
++                        .append(": queue implies ").append(entry.getIntValue()).append(", index holds ").append(have);
++            }
++        }
++
++        for (Long2IntMap.Entry entry : this.counts.long2IntEntrySet()) {
++            if (!expected.counts.containsKey(entry.getLongKey()) && shown++ < 8) {
++                sb.append("\n    chunk ").append((int) entry.getLongKey()).append(',').append((int) (entry.getLongKey() >> 32))
++                        .append(": stale index entry (count ").append(entry.getIntValue()).append(')');
++            }
++        }
++
++        return sb.toString();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 823f266d205cfe6319a50d197388185e371d101e..e79b2b531252426541a771603493b8eed4707bdd 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -35,6 +35,32 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public double managedPosX;
+     public double managedPosZ;
+     public final List<ChunkCoordIntPair> chunkCoordIntPairQueue = Lists.newLinkedList();
++    // Athena start - hash index over chunkCoordIntPairQueue; see ChunkCoordQueueIndex for why.
++    //
++    // Keep this synced with every chunkCoordIntPairQueue mutation. They all live in
++    // PlayerChunkMap.filterChunkLoadQueue, PlayerChunk.addPlayer, PlayerChunk.removePlayer and the
++    // chunk send loop in playerTick below; Collections.sort on the queue only permutes it and so
++    // leaves the index alone. AthenaIndexAudit re-derives the index from the queue every tick when
++    // debugVerifyAthenaIndexes is set, which is what catches a mutation site added without one.
++    private final ChunkCoordQueueIndex queuedChunks = new ChunkCoordQueueIndex();
++
++    public void queuedChunkAdd(ChunkCoordIntPair pair) {
++        this.queuedChunks.add(pair);
++    }
++
++    public void queuedChunkRemove(ChunkCoordIntPair pair) {
++        this.queuedChunks.remove(pair);
++    }
++
++    public void queuedChunkClear() {
++        this.queuedChunks.clear();
++    }
++
++    public boolean hasQueuedChunk(ChunkCoordIntPair pair) {
++        return this.queuedChunks.contains(pair);
++    }
++
++    // Athena end
+     public final java.util.Deque<Integer> removeQueue = new java.util.ArrayDeque<>(); // PandaSpigot
+     private final ServerStatisticManager statsFile;
+     private float combinedHealth = Float.MIN_VALUE;
+@@ -259,11 +285,12 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+                             arraylist.add(chunk);
+                             arraylist1.addAll(chunk.tileEntities.values()); // CraftBukkit - Get tile entities directly from the chunk instead of the world
+                             iterator1.remove();
++                            this.queuedChunkRemove(chunkcoordintpair); // Athena - keep the queue index in sync
+                             new io.papermc.paper.event.packet.PlayerChunkLoadEvent(chunk.bukkitChunk, this.getBukkitEntity()).callEvent(); // PandaSpigot
+                         }
+                     }
+                 } else {
+-                    iterator1.remove();
++                    iterator1.remove(); // Athena - a null entry was never indexed, so nothing to sync here
+                 }
+             }
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index c6976286d2aeb8a9de6cdc23de1f11ab0f3e6264..a3999d0fa82634a5de7c383ae8a896bc16fd5695 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -208,8 +208,10 @@ public class PlayerChunkMap {
+         ChunkCoordIntPair chunkcoordintpair = this.getPlayerInstance(k, l, true).location;
+ 
+         entityplayer.chunkCoordIntPairQueue.clear();
++        entityplayer.queuedChunkClear(); // Athena - keep the queue index in sync
+         if (arraylist.contains(chunkcoordintpair)) {
+             entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
++            entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+         }
+ 
+         int k1;
+@@ -224,6 +226,7 @@ public class PlayerChunkMap {
+                     chunkcoordintpair = this.getPlayerInstance(k + i1, l + j1, true).location;
+                     if (arraylist.contains(chunkcoordintpair)) {
+                         entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
++                        entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+                     }
+                 }
+             }
+@@ -237,6 +240,7 @@ public class PlayerChunkMap {
+             chunkcoordintpair = this.getPlayerInstance(k + i1, l + j1, true).location;
+             if (arraylist.contains(chunkcoordintpair)) {
+                 entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
++                entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+             }
+         }
+ 
+@@ -321,7 +325,7 @@ public class PlayerChunkMap {
+     public boolean isPlayerWatchingChunk(EntityPlayer entityplayer, int i, int j) {
+         PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk = this.getPlayerInstance(i, j, false);
+ 
+-        return playerchunkmap_playerchunk != null && playerchunkmap_playerchunk.playersWatchingChunk.contains(entityplayer) && !entityplayer.chunkCoordIntPairQueue.contains(playerchunkmap_playerchunk.location);
++        return playerchunkmap_playerchunk != null && playerchunkmap_playerchunk.playersWatchingChunk.contains(entityplayer) && !entityplayer.hasQueuedChunk(playerchunkmap_playerchunk.location) /* Athena - was a LinkedList scan */;
+     }
+ 
+     public void setPlayerViewRadius(int i) {
+@@ -439,10 +443,12 @@ public class PlayerChunkMap {
+                 if (this.loaded) {
+                     playerRunnable = null;
+                     entityplayer.chunkCoordIntPairQueue.add(this.location);
++                    entityplayer.queuedChunkAdd(this.location); // Athena - keep the queue index in sync
+                 } else {
+                     playerRunnable = new Runnable() {
+                         public void run() {
+                             entityplayer.chunkCoordIntPairQueue.add(PlayerChunk.this.location);
++                            entityplayer.queuedChunkAdd(PlayerChunk.this.location); // Athena - keep the queue index in sync
+                         }
+                     };
+                     PlayerChunkMap.this.getWorldServer().chunkProviderServer.getChunkAt(this.location.x, this.location.z, playerRunnable);
+@@ -480,6 +486,7 @@ public class PlayerChunkMap {
+                 this.players.remove(entityplayer); // CraftBukkit
+                 this.playersWatchingChunk.remove(entityplayer);
+                 entityplayer.chunkCoordIntPairQueue.remove(this.location);
++                entityplayer.queuedChunkRemove(this.location); // Athena - keep the queue index in sync
+                 org.bukkit.Chunk bukkitChunk = chunk.bukkitChunk;
+                 if (bukkitChunk != null) {
+                     new io.papermc.paper.event.packet.PlayerChunkUnloadEvent(bukkitChunk, entityplayer.getBukkitEntity()).callEvent(); // PandaSpigot
+@@ -533,7 +540,7 @@ public class PlayerChunkMap {
+             for (int i = 0; i < this.playersWatchingChunk.size(); ++i) {
+                 EntityPlayer entityplayer = (EntityPlayer) this.playersWatchingChunk.get(i);
+ 
+-                if (!entityplayer.chunkCoordIntPairQueue.contains(this.location)) {
++                if (!entityplayer.hasQueuedChunk(this.location)) { // Athena - was a LinkedList scan
+                     entityplayer.playerConnection.sendPacket(packet);
+                 }
+             }
+diff --git a/src/test/java/net/minecraft/server/ChunkCoordQueueIndexTest.java b/src/test/java/net/minecraft/server/ChunkCoordQueueIndexTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4693bcc6a0fe8f11b597297daf8181af1da6ce9
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/ChunkCoordQueueIndexTest.java
+@@ -0,0 +1,169 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.LinkedList;
++import java.util.List;
++import java.util.Random;
++import org.junit.Test;
++
++// Athena - the index must answer exactly what List.contains answered on chunkCoordIntPairQueue.
++public class ChunkCoordQueueIndexTest {
++
++    private static ChunkCoordIntPair pair(int x, int z) {
++        return new ChunkCoordIntPair(x, z);
++    }
++
++    @Test
++    public void emptyIndexContainsNothing() {
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        assertFalse(index.contains(pair(0, 0)));
++        assertEquals(0, index.size());
++    }
++
++    @Test
++    public void addThenRemoveClears() {
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        index.add(pair(3, -7));
++        assertTrue(index.contains(pair(3, -7)));
++        index.remove(pair(3, -7));
++        assertFalse(index.contains(pair(3, -7)));
++        assertEquals(0, index.size());
++    }
++
++    @Test
++    public void removingAnAbsentCoordinateIsHarmless() {
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        index.remove(pair(1, 1));
++        index.add(pair(1, 1));
++        index.remove(pair(1, 1));
++        index.remove(pair(1, 1));
++        assertFalse(index.contains(pair(1, 1)));
++        assertEquals(0, index.size());
++    }
++
++    @Test
++    public void duplicatesNeedAsManyRemovals() {
++        // List.contains stays true until the last copy leaves the queue, so the index has to too.
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        index.add(pair(5, 5));
++        index.add(pair(5, 5));
++        index.remove(pair(5, 5));
++        assertTrue("one copy still queued", index.contains(pair(5, 5)));
++        index.remove(pair(5, 5));
++        assertFalse(index.contains(pair(5, 5)));
++    }
++
++    @Test
++    public void nullEntriesAreIgnored() {
++        // The chunk send loop tolerates nulls in the queue and drops them without touching us.
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        index.add(null);
++        index.remove(null);
++        assertEquals(0, index.size());
++    }
++
++    @Test
++    public void negativeAndExtremeCoordinatesDoNotCollide() {
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++        int[] values = { 0, 1, -1, 255, -255, Integer.MAX_VALUE, Integer.MIN_VALUE, 1 << 16, -(1 << 16) };
++
++        for (int x : values) {
++            for (int z : values) {
++                index.add(pair(x, z));
++            }
++        }
++
++        assertEquals(values.length * values.length, index.size());
++
++        for (int x : values) {
++            for (int z : values) {
++                assertTrue(x + "," + z, index.contains(pair(x, z)));
++            }
++        }
++    }
++
++    @Test
++    public void agreesWithListContainsOverRandomOperations() {
++        // The property that actually matters: for every coordinate, index.contains must equal
++        // queue.contains after any sequence of the mutations PlayerChunkMap performs.
++        Random random = new Random(20260824L);
++        List<ChunkCoordIntPair> queue = new LinkedList<ChunkCoordIntPair>();
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        for (int step = 0; step < 20000; ++step) {
++            int x = random.nextInt(12) - 6;
++            int z = random.nextInt(12) - 6;
++            ChunkCoordIntPair p = pair(x, z);
++
++            switch (random.nextInt(10)) {
++                case 0:
++                case 1:
++                case 2:
++                case 3:
++                case 4: // enqueue, as PlayerChunk.addPlayer and filterChunkLoadQueue do
++                    queue.add(p);
++                    index.add(p);
++                    break;
++                case 5:
++                case 6:
++                case 7: // dequeue one copy, as PlayerChunk.removePlayer and the send loop do
++                    if (queue.remove(p)) {
++                        index.remove(p);
++                    } else {
++                        index.remove(p); // remove() is called unconditionally in removePlayer too
++                    }
++                    break;
++                case 8: // reorder, as movePlayer's Collections.sort does - index must not change
++                    java.util.Collections.shuffle(queue, random);
++                    break;
++                default: // wipe, as filterChunkLoadQueue does
++                    queue.clear();
++                    index.clear();
++                    break;
++            }
++
++            if (step % 97 == 0) {
++                for (int qx = -6; qx < 6; ++qx) {
++                    for (int qz = -6; qz < 6; ++qz) {
++                        ChunkCoordIntPair probe = pair(qx, qz);
++
++                        assertEquals("step " + step + " at " + qx + "," + qz,
++                                queue.contains(probe), index.contains(probe));
++                    }
++                }
++                assertTrue("derived index must match at step " + step,
++                        index.matches(ChunkCoordQueueIndex.derivedFrom(queue)));
++            }
++        }
++    }
++
++    @Test
++    public void derivedFromDetectsDivergence() {
++        // The audit relies on this: a missed add or remove has to show up as a mismatch.
++        List<ChunkCoordIntPair> queue = new LinkedList<ChunkCoordIntPair>();
++        ChunkCoordQueueIndex index = new ChunkCoordQueueIndex();
++
++        queue.add(pair(2, 2));
++        index.add(pair(2, 2));
++        assertTrue(index.matches(ChunkCoordQueueIndex.derivedFrom(queue)));
++
++        queue.add(pair(9, 9)); // enqueued without telling the index
++        assertFalse(index.matches(ChunkCoordQueueIndex.derivedFrom(queue)));
++        assertTrue(index.describeDifference(ChunkCoordQueueIndex.derivedFrom(queue)).contains("9,9"));
++
++        index.add(pair(9, 9));
++        assertTrue(index.matches(ChunkCoordQueueIndex.derivedFrom(queue)));
++
++        queue.remove(pair(2, 2)); // dequeued without telling the index
++        assertFalse(index.matches(ChunkCoordQueueIndex.derivedFrom(queue)));
++        assertTrue(index.describeDifference(ChunkCoordQueueIndex.derivedFrom(queue)).contains("stale"));
++    }
++}

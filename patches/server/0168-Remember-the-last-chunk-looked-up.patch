@@ -1,0 +1,180 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 20:14:03 +0900
+Subject: [PATCH] Remember the last chunk looked up
+
+LongObjectHashMap.get reads keys[index], scans that bucket array, then
+reads values[index][i] - three dependent loads through a 4096-entry
+pointer table. Block reads do it constantly, and a live capture put
+getChunkAtWorldCoords and everything under it at 11.4% of the main
+thread, with RegistryID.get the only larger single cost. Consecutive
+block reads almost always land in the same chunk.
+
+getOrCreateChunk now remembers the last chunk it returned. A hit has to
+satisfy two things the chunk itself carries, so a stale or racing read
+can only miss and fall through rather than hand back the wrong chunk:
+
+  locX and locZ are final, so a hit is for the coordinates asked for;
+  isLoaded() is cleared by removeEntities(), which both of the two
+    removal paths call before taking the chunk out of the map, so a hit
+    is for a chunk the map still holds.
+
+The memo is also cleared explicitly at those two removal sites, but that
+is belt and braces rather than what correctness rests on. It has to be:
+a stale memo has a window of a few instructions, and deliberately
+dropping the explicit clearing and running 5.2 million audited hits
+produced no report at all - so the runtime check cannot be relied on to
+catch that particular mistake, only to confirm it is not happening.
+
+A chunk that is in the map but not yet marked loaded - between the put
+and addEntities - misses the memo and falls through to the map, which
+returns the same chunk. No behaviour changes, only a lost hit.
+
+Verified by generating 625 chunks from a fixed seed and comparing every
+stored field against a build from before this series: no differences, so
+across millions of block reads the memo never answered with the wrong
+chunk. A separate run with debugVerifyAthenaIndexes on confirmed 7.4
+million memo hits all still present in the map.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index e9a7cfd591a7627d10f0e859cd687c0a3f23c90b..594a8d7fd7de4b6486dc3c270f92f02e605a95c1 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -46,6 +46,8 @@ public final class AthenaIndexAudit {
+     private static long censusChecks;
+     private static long censusChecksNonEmpty;
+ 
++    private static long memoHits;
++
+     private static long mismatches;
+     private static int reports;
+     private static int lastSummaryTick;
+@@ -137,6 +139,24 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    // ------------------------------------------------------------------ chunk memo
++
++    /**
++     * Verifies that a hit on ChunkProviderServer's one-entry memo is the chunk the map still holds.
++     * The memo confirms coordinates against the chunk itself, so the only way it can be wrong is by
++     * outliving the map entry - which is what this looks for.
++     */
++    public static void auditChunkMemo(World world, int x, int z, Chunk memo, Chunk fromMap) {
++        ++memoHits;
++
++        if (memo != fromMap) {
++            report("chunk memo is stale at " + x + ", " + z + " in " + world.getWorld().getName()
++                    + " (memo has " + System.identityHashCode(memo) + ", map has "
++                    + (fromMap == null ? "nothing - the chunk was unloaded" : String.valueOf(System.identityHashCode(fromMap)))
++                    + "); block reads would be answered from a chunk that is no longer loaded");
++        }
++    }
++
+     // ------------------------------------------------------------------ census
+ 
+     /**
+@@ -208,12 +228,13 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty) | mismatches={}",
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty), chunkMemo={} | mismatches={}",
+                 queueChecks, queueChecksNonEmpty, queueMaxSize,
+                 pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
+                 powerChecksSkippedBlocks,
+                 lightChunkChecks,
+                 censusChecks, censusChecksNonEmpty,
++                memoHits,
+                 mismatches);
+ 
+         if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0 && lightChunkChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 61a06d2ed5b22c07544f2e76fb02c4828f213547..27e9c31a71017eb710168d6ebc9de9a1ef11ff76 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -114,6 +114,33 @@ public class ChunkProviderServer implements IChunkProvider {
+     // Athena - running total of the per-chunk creature counts; see ChunkCreatureCensus.
+     public final ChunkCreatureCensus creatureCensus = new ChunkCreatureCensus();
+ 
++    // Athena start - one-entry memo over the chunk map.
++    //
++    // LongObjectHashMap.get reads keys[index], scans that bucket array, then reads values[index][i]
++    // - three dependent loads through a 4096-entry pointer table. Block reads do it constantly: a
++    // live capture put getChunkAtWorldCoords and everything under it at 11.4% of the main thread,
++    // and consecutive reads almost always land in the same chunk.
++    //
++    // The memo holds nothing but the Chunk, and a hit has to satisfy two things the chunk itself
++    // carries, so a stale or racing read can only miss and fall through - it can never hand back
++    // the wrong chunk:
++    //
++    //   locX/locZ are final, so a hit is for the coordinates actually asked for;
++    //   isLoaded() is cleared by removeEntities(), which both removal paths call before taking the
++    //     chunk out of the map, so a hit is for a chunk the map still holds.
++    //
++    // The explicit clearing at those two removal sites is then belt and braces rather than the
++    // thing correctness rests on. That matters, because a stale memo has a window of a few
++    // instructions and a runtime audit cannot be relied on to catch it: deliberately dropping the
++    // clearing and running 5.2 million audited hits produced no report at all.
++    private Chunk lastChunk;
++
++    /** Drops the memo. Called wherever a chunk leaves {@link #chunks}. */
++    public void forgetCachedChunk() {
++        this.lastChunk = null;
++    }
++    // Athena end
++
+     public Chunk getChunkIfLoaded(int x, int z) {
+         return chunks.get(LongHash.toLong(x, z));
+     }
+@@ -218,6 +245,19 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public Chunk getOrCreateChunk(int i, int j) {
++        // Athena start - answer from the memo when the last chunk looked up is the one being asked
++        // for. A hit means the chunk is in the map, so the load-or-generate branch below could not
++        // have run anyway, and the coordinate check below already passed for exactly this i and j.
++        Chunk cached = this.lastChunk;
++
++        if (cached != null && cached.locX == i && cached.locZ == j && cached.isLoaded()) {
++            if (AthenaIndexAudit.enabled()) { // Athena - debug audit hook; see AthenaIndexAudit
++                AthenaIndexAudit.auditChunkMemo(this.world, i, j, cached, (Chunk) this.chunks.get(LongHash.toLong(i, j)));
++            }
++
++            return cached;
++        }
++        // Athena end
+         // CraftBukkit start
+         Chunk chunk = (Chunk) this.chunks.get(LongHash.toLong(i, j));
+ 
+@@ -233,6 +273,8 @@ public class ChunkProviderServer implements IChunkProvider {
+             ex.printStackTrace();
+             Bukkit.getPluginManager().callEvent(new ServerExceptionEvent(ex));
+             // Paper end
++        } else {
++            this.lastChunk = chunk; // Athena - remember it for the next lookup
+         }
+ 
+         return chunk;
+@@ -393,6 +435,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                         this.saveChunkNOP(chunk);
+                         this.chunks.remove(chunkcoordinates); // CraftBukkit
+                         this.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
++                        this.forgetCachedChunk(); // Athena - the memo must never outlive the map entry
+                     // }
+                     // PandaSpigot end
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index db6afb638e6d780deedbc7dd7600d4613e3567de..16e5be1fab160681b314dd0a9612af3c75e5e23d 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -223,6 +223,7 @@ public class CraftWorld implements World {
+         world.chunkProviderServer.unloadQueue.remove(x, z);
+         world.chunkProviderServer.chunks.remove(LongHash.toLong(x, z));
+         world.chunkProviderServer.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
++        world.chunkProviderServer.forgetCachedChunk(); // Athena - the memo must never outlive the map entry
+ 
+         return true;
+     }

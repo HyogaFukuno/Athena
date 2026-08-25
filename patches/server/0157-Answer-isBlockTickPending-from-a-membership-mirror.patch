@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:06 +0900
+Subject: [PATCH] Answer isBlockTickPending from a membership mirror
+
+isBlockTickPending asked pendingTickListEntriesThisTick, an ArrayList, for containment.
+Repeaters and comparators do that on every neighbour update, while the list holds up to
+tickNextTickCap entries.
+
+The entries all come out of pendingTickListEntriesTreeSet, which is a Set, so the list
+never holds two entries equal by NextTickListEntry.equals and a plain HashSet answers
+exactly what List.contains answered. The mirror is kept in step at the two adds and the
+removal loop in tickUpdates, the clear at the end of it, and the removal loop in
+a(StructureBoundingBox, boolean).
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index c1b545747c7a91c4139972d59650cc286944b832..06d43b4d2b6b50458aeb832569b1a85b51445ef9 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -50,6 +50,19 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     private int blockEventCacheIndex;
+     private static final List<StructurePieceTreasure> bonusChestContent = Lists.newArrayList(new StructurePieceTreasure[] { new StructurePieceTreasure(Items.STICK, 0, 1, 3, 10), new StructurePieceTreasure(Item.getItemOf(Blocks.PLANKS), 0, 1, 3, 10), new StructurePieceTreasure(Item.getItemOf(Blocks.LOG), 0, 1, 3, 10), new StructurePieceTreasure(Items.STONE_AXE, 0, 1, 1, 3), new StructurePieceTreasure(Items.WOODEN_AXE, 0, 1, 1, 5), new StructurePieceTreasure(Items.STONE_PICKAXE, 0, 1, 1, 3), new StructurePieceTreasure(Items.WOODEN_PICKAXE, 0, 1, 1, 5), new StructurePieceTreasure(Items.APPLE, 0, 2, 3, 5), new StructurePieceTreasure(Items.BREAD, 0, 2, 3, 3), new StructurePieceTreasure(Item.getItemOf(Blocks.LOG2), 0, 1, 3, 10)});
+     private List<NextTickListEntry> pendingTickListEntriesThisTick = Lists.newArrayList();
++    // Athena start - membership mirror for pendingTickListEntriesThisTick.
++    //
++    // isBlockTickPending() below asked this ArrayList for containment, which repeaters and
++    // comparators do on every neighbour update while the list can hold up to tickNextTickCap
++    // entries. The entries all come out of pendingTickListEntriesTreeSet, which is a Set, so the
++    // list never holds two entries equal by NextTickListEntry.equals and a plain HashSet answers
++    // exactly what List.contains answered.
++    //
++    // Keep this synced with every pendingTickListEntriesThisTick mutation: the two adds and the
++    // removal loop in tickUpdates, the clear at the end of it, and the removal loop in
++    // a(StructureBoundingBox, boolean).
++    private final Set<NextTickListEntry> pendingTickListEntriesThisTickSet = Sets.newHashSet();
++    // Athena end
+     public boolean hasEntityMoveEvent = false; // PandaSpigot
+     public boolean hasPhysicsEvent = true; // PandaSpigot
+ 
+@@ -677,7 +690,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     public boolean isBlockTickPending(BlockPosition blockposition, Block block) {
+         NextTickListEntry nextticklistentry = new NextTickListEntry(blockposition, block);
+ 
+-        return this.pendingTickListEntriesThisTick.contains(nextticklistentry);
++        return this.pendingTickListEntriesThisTickSet.contains(nextticklistentry); // Athena - was an ArrayList scan
+     }
+ 
+     public void scheduleUpdate(BlockPosition blockposition, Block block, int i) {
+@@ -794,6 +807,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                     // CraftBukkit - use M, PAIL: Rename nextTickList
+                     this.pendingTickListEntriesTreeSet.remove(nextticklistentry);
+                     this.pendingTickListEntriesThisTick.add(nextticklistentry);
++                    this.pendingTickListEntriesThisTickSet.add(nextticklistentry); // Athena - keep the membership mirror in sync
+                 }
+                 timings.scheduledBlocksCleanup.stopTiming(); // Spigot
+ 
+@@ -809,6 +823,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                         if (next.getBlock().isPowerSource() || next.getBlock() instanceof IContainer) {
+                             iterator.remove();
+                             this.pendingTickListEntriesThisTick.add(next);
++                            this.pendingTickListEntriesThisTickSet.add(next); // Athena - keep the membership mirror in sync
+                         }
+                     }
+                 }
+@@ -822,6 +837,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 while (iterator.hasNext()) {
+                     nextticklistentry = (NextTickListEntry) iterator.next();
+                     iterator.remove();
++                    this.pendingTickListEntriesThisTickSet.remove(nextticklistentry); // Athena - keep the membership mirror in sync
+                     byte b0 = 0;
+ 
+                     // Athena - same zero-radius check as above, but on the hot path: this ran
+@@ -852,6 +868,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                 this.methodProfiler.endSection();
+                 this.pendingTickListEntriesThisTick.clear();
++                this.pendingTickListEntriesThisTickSet.clear(); // Athena - keep the membership mirror in sync
+                 return !this.pendingTickListEntriesTreeSet.isEmpty();
+             }
+         }
+@@ -887,6 +904,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                     if (flag) {
+                         // CraftBukkit - use M
+                         iterator.remove();
++                        if (i != 0) {
++                            this.pendingTickListEntriesThisTickSet.remove(nextticklistentry); // Athena - keep the membership mirror in sync
++                        }
+                     }
+ 
+                     if (arraylist == null) {

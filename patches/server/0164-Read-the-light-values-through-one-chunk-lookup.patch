@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 10:44:07 +0900
+Subject: [PATCH] Read the light values through one chunk lookup
+
+getLightFor asked isLoaded whether the chunk was there and then
+getChunkAtWorldCoords for the chunk itself - two probes of the same map
+under the same key. Once a chunk is loaded getOrCreateChunk returns
+exactly what getChunkIfLoaded already found, so the second probe is
+redundant.
+
+With Chunk.getBrightness and Chunk.canSeeSky now taking coordinates, the
+scratch position goes with it, and the BlockPosition form of getLightFor
+no longer allocates a replacement position for negative y - it just
+delegates.
+
+This is the hottest read in the light flood fill: c() visits up to 32768
+cells, probing six neighbours each, and getRawLight adds another six
+reads per cell on top.
+
+setLightFor gets the same treatment. It keeps its scratch position
+because notifyLightSet passes one to the world accesses.
+
+What this drops is getOrCreateChunk's "chunk stored at the wrong
+coordinates" error log on the light path. It only fires on an already
+corrupt chunk map, and every other caller of getOrCreateChunk in the
+same tick still reports it.
+
+The assumption these two rest on is about ChunkProviderServer's map, not
+about anything a unit test can reach, so debugVerifyAthenaIndexes now
+also checks on every light query that the reused chunk is the one the
+provider would have handed back.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index e33c6052b6d59dbe17d1323b61afb9d3bc594647..c928873f271b533e3b96e054cef3abb2bd2d0356 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -138,6 +138,7 @@ public class PandaSpigotConfig {
+         "  - EntityPlayer.queuedChunks vs chunkCoordIntPairQueue\n" +
+         "  - WorldServer.pendingTickListEntriesThisTickSet vs pendingTickListEntriesThisTick\n" +
+         "  - Block.hasRedstonePowerHandler() vs what getWeakPower/getStrongPower actually return\n" +
++        "  - the chunk the light queries reuse vs the one the chunk provider would hand back\n" +
+         "Any disagreement is logged as a warning with a stack trace. This costs real time and\n" +
+         "allocates on the redstone path, so leave it off outside of testing.")
+     public boolean debugVerifyAthenaIndexes = false;
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 33d03961f136a6cff3e033d9b1767ebc4da10fa3..eca7a7c159098495faa7d2185b145b9351ebfe8a 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -41,6 +41,8 @@ public final class AthenaIndexAudit {
+     private static long powerChecks;
+     private static long powerChecksSkippedBlocks;
+ 
++    private static long lightChunkChecks;
++
+     private static long mismatches;
+     private static int reports;
+     private static int lastSummaryTick;
+@@ -132,6 +134,28 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    // ------------------------------------------------------------------ light
++
++    /**
++     * Verifies the assumption getLightFor and setLightFor now make: that once getChunkIfLoaded has
++     * found a chunk, getOrCreateChunk under the same coordinates hands back the very same object.
++     * That is what lets the light path drop its second lookup, and it is a claim about
++     * ChunkProviderServer's map rather than about anything in this class - so it is checked here
++     * instead of in a unit test, on the same live-server run that exercises the flood fill.
++     */
++    public static void auditLightChunk(World world, int x, int z, Chunk found) {
++        ++lightChunkChecks;
++
++        Chunk viaProvider = world.getChunkAtWorldCoords(x, z);
++
++        if (viaProvider != found) {
++            report("getChunkIfLoaded and getOrCreateChunk disagree at chunk " + (x >> 4) + ", " + (z >> 4)
++                    + " in " + world.getWorld().getName() + " (light path got "
++                    + System.identityHashCode(found) + ", provider got " + System.identityHashCode(viaProvider)
++                    + "); the light queries would be reading the wrong chunk");
++        }
++    }
++
+     // ------------------------------------------------------------------
+ 
+     private static void report(String message) {
+@@ -156,13 +180,14 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={} | mismatches={}",
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={} | mismatches={}",
+                 queueChecks, queueChecksNonEmpty, queueMaxSize,
+                 pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
+                 powerChecksSkippedBlocks,
++                lightChunkChecks,
+                 mismatches);
+ 
+-        if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0) {
++        if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0 && lightChunkChecks == 0) {
+             LOGGER.warn("No audited structure has been non-empty yet - the test is not exercising "
+                     + "the changed paths. Move across chunk borders, run a redstone circuit, and let mobs spawn.");
+         }
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 2e8c7cab51785316376f5e77d06fa3ffc058d7ba..9f8d070f44a485c3d3e1e0eab7268d3f6056a18e 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -679,13 +679,26 @@ public class Chunk {
+         }
+     }
+ 
+-    public int getBrightness(EnumSkyBlock enumskyblock, BlockPosition blockposition) {
+-        int i = blockposition.getX() & 15;
+-        int j = blockposition.getY();
+-        int k = blockposition.getZ() & 15;
+-        ChunkSection chunksection = this.sections[j >> 4];
++    // Athena start - scalar brightness lookup.
++    //
++    // The light flood fill reads this for every cell it visits and for all six neighbours of every
++    // cell, and each read had to build a BlockPosition just to have three ints taken back out of
++    // it again. The bodies below are the BlockPosition versions with the accessors substituted.
++    public int getBrightness(EnumSkyBlock enumskyblock, int x, int y, int z) {
++        int i = x & 15;
++        int k = z & 15;
++        ChunkSection chunksection = this.sections[y >> 4];
++
++        return chunksection == null ? (this.canSeeSky(x, y, z) ? enumskyblock.defaultLightValue : 0) : (enumskyblock == EnumSkyBlock.SKY ? (this.world.worldProvider.getHasNoSky() ? 0 : chunksection.getExtSkylightValue(i, y & 15, k)) : (enumskyblock == EnumSkyBlock.BLOCK ? chunksection.getExtBlocklightValue(i, y & 15, k) : enumskyblock.defaultLightValue));
++    }
+ 
+-        return chunksection == null ? (this.canSeeSky(blockposition) ? enumskyblock.defaultLightValue : 0) : (enumskyblock == EnumSkyBlock.SKY ? (this.world.worldProvider.getHasNoSky() ? 0 : chunksection.getExtSkylightValue(i, j & 15, k)) : (enumskyblock == EnumSkyBlock.BLOCK ? chunksection.getExtBlocklightValue(i, j & 15, k) : enumskyblock.defaultLightValue));
++    public boolean canSeeSky(int x, int y, int z) {
++        return y >= this.heightMap[(z & 15) << 4 | (x & 15)];
++    }
++    // Athena end
++
++    public int getBrightness(EnumSkyBlock enumskyblock, BlockPosition blockposition) {
++        return this.getBrightness(enumskyblock, blockposition.getX(), blockposition.getY(), blockposition.getZ()); // Athena - scalar
+     }
+ 
+     public void setLightFor(EnumSkyBlock enumskyblock, BlockPosition blockposition, int i) {
+@@ -827,11 +840,7 @@ public class Chunk {
+     }
+ 
+     public boolean canSeeSky(BlockPosition blockposition) {
+-        int i = blockposition.getX() & 15;
+-        int j = blockposition.getY();
+-        int k = blockposition.getZ() & 15;
+-
+-        return j >= this.heightMap[k << 4 | i];
++        return this.canSeeSky(blockposition.getX(), blockposition.getY(), blockposition.getZ()); // Athena - scalar
+     }
+ 
+     private TileEntity createNewTileEntity(BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 0b800906f5cb7c82f4761619df31ef43c5cf590c..6fe910636772fa691e0c63ab0dedeebf53db3482 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -827,24 +827,52 @@ public abstract class World implements IBlockAccess {
+             y = 0;
+         }
+ 
+-        BlockPosition.MutableBlockPosition pos = scratchPos(10);
+-
+-        pos.set(x, y, z);
+-        if (!this.isValidLocation(pos)) {
++        // Athena - one chunk lookup and no position at all.
++        //
++        // This used to ask isLoaded whether the chunk was there and then getChunkAtWorldCoords for
++        // the chunk itself: two probes of the same map under the same key. Once a chunk is loaded
++        // getOrCreateChunk hands back exactly what getChunkIfLoaded already found, so the second
++        // probe is dropped, and with getBrightness now taking coordinates the scratch position
++        // goes too. This is the single hottest read in the light flood fill.
++        //
++        // Dropping the second probe also drops getOrCreateChunk's "chunk stored at the wrong
++        // coordinates" error log from this path. That only fires on an already-corrupt chunk map,
++        // and every other caller of getOrCreateChunk in the same tick still reports it.
++        if (!this.isValidLocation(x, y, z)) {
+             return enumskyblock.defaultLightValue;
+-        } else if (!this.isLoaded(x, y, z)) {
++        }
++
++        Chunk chunk = this.getChunkIfLoaded(x >> 4, z >> 4);
++
++        if (chunk == null) {
+             return enumskyblock.defaultLightValue;
+-        } else {
+-            return this.getChunkAtWorldCoords(pos).getBrightness(enumskyblock, pos);
+         }
++
++        if (AthenaIndexAudit.enabled()) { // Athena - debug audit hook; see AthenaIndexAudit
++            AthenaIndexAudit.auditLightChunk(this, x, z, chunk);
++        }
++
++        return chunk.getBrightness(enumskyblock, x, y, z);
+     }
+ 
+     public void setLightFor(EnumSkyBlock enumskyblock, int x, int y, int z, int i) {
+-        BlockPosition.MutableBlockPosition pos = scratchPos(11);
++        // Athena - one chunk lookup, for the same reason as getLightFor above. The position stays
++        // because notifyLightSet hands it to the world accesses.
++        if (!this.isValidLocation(x, y, z)) {
++            return;
++        }
+ 
+-        pos.set(x, y, z);
+-        if (this.isValidLocation(pos) && this.isLoaded(x, y, z)) {
+-            this.getChunkAtWorldCoords(pos).setLightFor(enumskyblock, pos, i);
++        Chunk chunk = this.getChunkIfLoaded(x >> 4, z >> 4);
++
++        if (chunk != null) {
++            if (AthenaIndexAudit.enabled()) { // Athena - debug audit hook; see AthenaIndexAudit
++                AthenaIndexAudit.auditLightChunk(this, x, z, chunk);
++            }
++
++            BlockPosition.MutableBlockPosition pos = scratchPos(11);
++
++            pos.set(x, y, z);
++            chunk.setLightFor(enumskyblock, pos, i);
+             this.notifyLightSet(pos);
+         }
+     }
+@@ -897,19 +925,9 @@ public abstract class World implements IBlockAccess {
+     // Athena end
+ 
+     public int getLightFor(EnumSkyBlock enumskyblock, BlockPosition blockposition) {
+-        if (blockposition.getY() < 0) {
+-            blockposition = new BlockPosition(blockposition.getX(), 0, blockposition.getZ());
+-        }
+-
+-        if (!this.isValidLocation(blockposition)) {
+-            return enumskyblock.defaultLightValue;
+-        } else if (!this.isLoaded(blockposition)) {
+-            return enumskyblock.defaultLightValue;
+-        } else {
+-            Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+-
+-            return chunk.getBrightness(enumskyblock, blockposition);
+-        }
++        // Athena - delegate; the scalar form clamps y the same way, without allocating the
++        // replacement position the negative-y branch used to build.
++        return this.getLightFor(enumskyblock, blockposition.getX(), blockposition.getY(), blockposition.getZ());
+     }
+ 
+     public void setLightFor(EnumSkyBlock enumskyblock, BlockPosition blockposition, int i) {

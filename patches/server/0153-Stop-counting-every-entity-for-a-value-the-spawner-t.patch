@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:03 +0900
+Subject: [PATCH] Stop counting every entity for a value the spawner throws
+ away
+
+PandaSpigot replaced the vanilla mob cap check with getEntityCount(), which sums the
+per-chunk counters. The two lines it superseded were left behind, and neither result is
+read again: countEntities() walked the whole entityList calling Class.isAssignableFrom on
+every entity, and l1 was never touched at all.
+
+Both ran once per EnumCreatureType per spawn cycle - four full entity-list scans per cycle -
+purely to be discarded. World.countEntities keeps its callers elsewhere and is left alone.
+
+diff --git a/src/main/java/net/minecraft/server/SpawnerCreature.java b/src/main/java/net/minecraft/server/SpawnerCreature.java
+index 7407553794d65dd8b95328e503ede7380cce4302..c7c1c6390e8dddd2d54f6cd5388df1dbc2772fce 100644
+--- a/src/main/java/net/minecraft/server/SpawnerCreature.java
++++ b/src/main/java/net/minecraft/server/SpawnerCreature.java
+@@ -16,6 +16,7 @@ import org.github.paperspigot.exception.ServerInternalException;
+ 
+ public final class SpawnerCreature {
+ 
++    @SuppressWarnings("unused") // Athena - kept for reference; its only read was the dead cap computation below
+     private static final int MOB_COUNT_DIV = (int) Math.pow(17.0D, 2.0D);
+     private final LongHashSet eligibleChunksForSpawning = new LongHashSet(); // CraftBukkit
+ 
+@@ -126,8 +127,16 @@ public final class SpawnerCreature {
+                 // CraftBukkit end
+ 
+                 if ((!enumcreaturetype.getPeacefulCreature() || flag1) && (enumcreaturetype.getPeacefulCreature() || flag) && (!enumcreaturetype.getAnimal() || flag2)) {
+-                    k = worldserver.countEntities(enumcreaturetype.getCreatureClass());
+-                    int l1 = limit * i / MOB_COUNT_DIV; // CraftBukkit - use per-world limits
++                    // Athena start - drop the dead vanilla mob cap computation.
++                    //
++                    // PandaSpigot replaced the cap check below with getEntityCount(), so neither of
++                    // these two values is ever read again: countEntities() walked the whole
++                    // entityList calling Class.isAssignableFrom on every entity, and l1 was never
++                    // touched at all. Both ran once per EnumCreatureType per spawn cycle purely to
++                    // be thrown away.
++                    // k = worldserver.countEntities(enumcreaturetype.getCreatureClass());
++                    // int l1 = limit * i / MOB_COUNT_DIV; // CraftBukkit - use per-world limits
++                    // Athena end
+ 
+                     if ((mobcnt = getEntityCount(worldserver, enumcreaturetype.getCreatureClass())) <= limit * i / 289) { // PandaSpigot - use 17x17 like vanilla (a at top of file)
+                         Iterator iterator1 = this.eligibleChunksForSpawning.iterator();

@@ -1,0 +1,61 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 11:39:20 +0900
+Subject: [PATCH] Probe the ore vein cells with one reusable position
+
+WorldGenMinable allocated a BlockPosition for every cell of every ore
+vein's bounding ellipsoid and threw away all the ones the stone
+predicate rejected. A live capture during world generation put it at
+208 MB/min - the single largest allocation source on the server, ahead
+of the chunk packet buffers, and 19% of everything allocated.
+
+getType only reads the coordinates back out, so the probe now reuses one
+mutable position per generate() call - one allocation where there were
+hundreds. setTypeAndData still gets its own, because the placement path
+hands the position on to captured block states and to the world
+accesses, either of which may keep it.
+
+Verified by generating 625 chunks from a fixed seed before and after and
+comparing Blocks, Data, Add, BlockLight, SkyLight, HeightMap and Biomes
+of every chunk: no differences, so every vein landed exactly where it
+did before.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/WorldGenMinable.java b/src/main/java/net/minecraft/server/WorldGenMinable.java
+index c01023057ed98e0b3d35e2ddc920701378e256ba..74511e5b8573dc4a9a247cf10b1d8eff8bea1ad6 100644
+--- a/src/main/java/net/minecraft/server/WorldGenMinable.java
++++ b/src/main/java/net/minecraft/server/WorldGenMinable.java
+@@ -30,6 +30,18 @@ public class WorldGenMinable extends WorldGenerator {
+         double d4 = (double) (blockposition.getY() + random.nextInt(3) - 2);
+         double d5 = (double) (blockposition.getY() + random.nextInt(3) - 2);
+ 
++        // Athena start - probe the candidate cells with one reusable position.
++        //
++        // This loop allocated a BlockPosition for every cell of every ore vein's bounding
++        // ellipsoid, and threw away all the ones the predicate rejected. A live capture during
++        // world generation put it at 208 MB/min - the single largest allocation source on the
++        // server, ahead of the chunk packet buffers.
++        //
++        // getType only reads the coordinates back out, so the probe reuses one position per
++        // generate() call. setTypeAndData keeps its own, because the block placement path hands
++        // the position on to captured block states and to the world accesses.
++        BlockPosition.MutableBlockPosition probe = new BlockPosition.MutableBlockPosition();
++
+         for (int i = 0; i < this.numberOfBlocks; ++i) {
+             float f1 = (float) i / (float) this.numberOfBlocks;
+             double d6 = d0 + (d1 - d0) * (double) f1;
+@@ -57,10 +69,10 @@ public class WorldGenMinable extends WorldGenerator {
+                                 double d14 = ((double) j2 + 0.5D - d8) / (d10 / 2.0D);
+ 
+                                 if (d12 * d12 + d13 * d13 + d14 * d14 < 1.0D) {
+-                                    BlockPosition blockposition1 = new BlockPosition(l1, i2, j2);
++                                    probe.set(l1, i2, j2);
+ 
+-                                    if (this.predicate.apply(world.getType(blockposition1))) {
+-                                        world.setTypeAndData(blockposition1, this.oreBlock, 2);
++                                    if (this.predicate.apply(world.getType(probe))) {
++                                        world.setTypeAndData(new BlockPosition(l1, i2, j2), this.oreBlock, 2);
+                                     }
+                                 }
+                             }

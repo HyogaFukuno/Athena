@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 19:54:41 +0900
+Subject: [PATCH] Walk the census maps without building key arrays
+
+TObjectIntHashMap.keys() allocates an Object[] per call. fold() runs on
+every chunk load and unload, and with debugVerifyAthenaIndexes on the
+audit runs it over every loaded chunk once a tick - a live capture with
+the audit enabled showed 30 MB/min of those arrays and put
+TObjectIntHashMap.keys at 5.5% of the main thread.
+
+Iterating the map directly costs nothing extra and drops both.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkCreatureCensus.java b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+index 32e8915d9bd0d9462859e2d97c888b44f088a0cd..29cb8bd09575379960c709c58a04de4ef2256cb5 100644
+--- a/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
++++ b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+@@ -1,5 +1,6 @@
+ package net.minecraft.server;
+ 
++import gnu.trove.iterator.TObjectIntIterator;
+ import gnu.trove.map.hash.TObjectIntHashMap;
+ import java.util.Collection;
+ 
+@@ -70,8 +71,13 @@ public final class ChunkCreatureCensus {
+     }
+ 
+     private void fold(Chunk chunk, int sign) {
+-        for (Object key : chunk.entityCount.keys()) {
+-            this.adjust((Class) key, sign * chunk.entityCount.get(key));
++        // Iterate rather than calling keys(), which builds an Object[] per call. This runs on every
++        // chunk load and unload, and the audit runs it over every loaded chunk once a tick.
++        TObjectIntIterator<Class> iterator = chunk.entityCount.iterator();
++
++        while (iterator.hasNext()) {
++            iterator.advance();
++            this.adjust(iterator.key(), sign * iterator.value());
+         }
+     }
+ 
+@@ -80,9 +86,7 @@ public final class ChunkCreatureCensus {
+         ChunkCreatureCensus census = new ChunkCreatureCensus();
+ 
+         for (Chunk chunk : chunks) {
+-            for (Object key : chunk.entityCount.keys()) {
+-                census.adjust((Class) key, chunk.entityCount.get(key));
+-            }
++            census.fold(chunk, 1);
+         }
+ 
+         return census;
+@@ -95,18 +99,23 @@ public final class ChunkCreatureCensus {
+     public String describeDifference(ChunkCreatureCensus expected) {
+         StringBuilder builder = new StringBuilder();
+ 
+-        for (Object key : expected.counts.keys()) {
+-            int want = expected.counts.get(key);
+-            int have = this.counts.get(key);
++        TObjectIntIterator<Class> wanted = expected.counts.iterator();
+ 
+-            if (want != have) {
+-                builder.append("\n  ").append(((Class) key).getName()).append(": tracked ").append(have).append(", actual ").append(want);
++        while (wanted.hasNext()) {
++            wanted.advance();
++            int have = this.counts.get(wanted.key());
++
++            if (wanted.value() != have) {
++                builder.append("\n  ").append(wanted.key().getName()).append(": tracked ").append(have).append(", actual ").append(wanted.value());
+             }
+         }
+ 
+-        for (Object key : this.counts.keys()) {
+-            if (!expected.counts.containsKey(key)) {
+-                builder.append("\n  ").append(((Class) key).getName()).append(": tracked ").append(this.counts.get(key)).append(", actual 0");
++        TObjectIntIterator<Class> tracked = this.counts.iterator();
++
++        while (tracked.hasNext()) {
++            tracked.advance();
++            if (!expected.counts.containsKey(tracked.key())) {
++                builder.append("\n  ").append(tracked.key().getName()).append(": tracked ").append(tracked.value()).append(", actual 0");
+             }
+         }
+ 

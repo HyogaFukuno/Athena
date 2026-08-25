@@ -1,0 +1,343 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:07 +0900
+Subject: [PATCH] Use the shared enum arrays on the per-tick paths
+
+Enum.values() clones its backing array on every call. EnumDirection.VALUES already existed
+for this reason but twenty call sites still used values(), among them the neighbour scans
+in redstone wire, redstone torch, repeaters, pistons, fire and liquids - all of which run
+inside block ticks.
+
+EnumCreatureType gets the same treatment: Chunk.a and Chunk.b walked values() on every
+entity that entered or left a chunk. Nothing writes to either array.
+
+The remaining values() calls are in static initialisers sizing lookup tables, where the
+copy happens once and the ordering hazard of touching VALUES during class init is real.
+
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index 2e88bb6ec934c2f1af04c1891b4d4b67b76afb80..d870233214f1647a5c3cf2062c68152a2ba4409d 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -44,7 +44,7 @@ public abstract class BlockButtonAbstract extends Block {
+     }
+ 
+     public boolean canPlace(World world, BlockPosition blockposition) {
+-        EnumDirection[] aenumdirection = EnumDirection.values();
++        EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+         int i = aenumdirection.length;
+ 
+         for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+index baba2cf0b7f547aa0c86334e6219c47b01dff47d..8d70b36a01154bd6137e82624672367300d804a3 100644
+--- a/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockDiodeAbstract.java
+@@ -95,7 +95,7 @@ public abstract class BlockDiodeAbstract extends BlockDirectional {
+                 return;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+@@ -203,7 +203,7 @@ public abstract class BlockDiodeAbstract extends BlockDirectional {
+                 return;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/BlockFire.java b/src/main/java/net/minecraft/server/BlockFire.java
+index af304ee38dc00459611e27744786ed6263fcbe88..53cdbbd436b503f4159409df77fcfd8a7d0d02fc 100644
+--- a/src/main/java/net/minecraft/server/BlockFire.java
++++ b/src/main/java/net/minecraft/server/BlockFire.java
+@@ -286,7 +286,7 @@ public class BlockFire extends Block {
+     }
+ 
+     private boolean canNeighborCatchFire(World world, BlockPosition blockposition) {
+-        EnumDirection[] aenumdirection = EnumDirection.values();
++        EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+         int i = aenumdirection.length;
+ 
+         for (int j = 0; j < i; ++j) {
+@@ -305,7 +305,7 @@ public class BlockFire extends Block {
+             return 0;
+         } else {
+             int i = 0;
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int j = aenumdirection.length;
+ 
+             for (int k = 0; k < j; ++k) {
+diff --git a/src/main/java/net/minecraft/server/BlockLever.java b/src/main/java/net/minecraft/server/BlockLever.java
+index 659e2f1a5a541805c668c06d55458fff6d4be877..2e5763fd40b5bafc0c813b45ad9af5e2a5a9ca62 100644
+--- a/src/main/java/net/minecraft/server/BlockLever.java
++++ b/src/main/java/net/minecraft/server/BlockLever.java
+@@ -33,7 +33,7 @@ public class BlockLever extends Block {
+     }
+ 
+     public boolean canPlace(World world, BlockPosition blockposition) {
+-        EnumDirection[] aenumdirection = EnumDirection.values();
++        EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+         int i = aenumdirection.length;
+ 
+         for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/BlockPiston.java b/src/main/java/net/minecraft/server/BlockPiston.java
+index ee1116d7ae23c4552e9a3c4f0b426fee5fead654..14ef03b6ecadfd8425a7447afa1fdabeb4dd0333 100644
+--- a/src/main/java/net/minecraft/server/BlockPiston.java
++++ b/src/main/java/net/minecraft/server/BlockPiston.java
+@@ -93,7 +93,7 @@ public class BlockPiston extends Block {
+     }
+ 
+     private boolean shouldBeExtended(World world, BlockPosition blockposition, EnumDirection enumdirection) {
+-        EnumDirection[] aenumdirection = EnumDirection.values();
++        EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+         int i = aenumdirection.length;
+ 
+         int j;
+@@ -110,7 +110,7 @@ public class BlockPiston extends Block {
+             return true;
+         } else {
+             BlockPosition blockposition1 = blockposition.up();
+-            EnumDirection[] aenumdirection1 = EnumDirection.values();
++            EnumDirection[] aenumdirection1 = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+ 
+             j = aenumdirection1.length;
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+index 010d1cdbc65125a523aa52cef4db1055a844f2b1..2a7e0559e94a64889d153b92dc47e56e44998f8a 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+@@ -64,7 +64,7 @@ public class BlockRedstoneTorch extends BlockTorch {
+                 return;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+@@ -89,7 +89,7 @@ public class BlockRedstoneTorch extends BlockTorch {
+                 return;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index 55febdd62dd52a910c1c410531267a31cfd8594d..6e8f7b8bc30a51eea4ca7083e34b1dec9c63460d 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -183,7 +183,7 @@ public class BlockRedstoneWire extends Block {
+                 return;
+             }
+             // PaperSpigot end
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+@@ -233,7 +233,7 @@ public class BlockRedstoneWire extends Block {
+     public void remove(World world, BlockPosition blockposition, IBlockData iblockdata) {
+         super.remove(world, blockposition, iblockdata);
+         if (!world.isClientSide) {
+-            EnumDirection[] aenumdirection = EnumDirection.values();
++            EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+             int i = aenumdirection.length;
+ 
+             for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/BlockSponge.java b/src/main/java/net/minecraft/server/BlockSponge.java
+index 8e69e99a931e4483f080f9c2ae92e8d4fb7b1126..ddae9ea28c63a5e3a0356cafdb99d620906bf626 100644
+--- a/src/main/java/net/minecraft/server/BlockSponge.java
++++ b/src/main/java/net/minecraft/server/BlockSponge.java
+@@ -62,7 +62,7 @@ public class BlockSponge extends Block {
+             BlockPosition blockposition1 = (BlockPosition) tuple.getFirst();
+             int j = (Integer) tuple.getSecond();
+ 
+-            for (EnumDirection enumdirection : EnumDirection.values()) {
++            for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+                 BlockPosition blockposition2 = blockposition1.shift(enumdirection);
+ 
+                 if (world.getType(blockposition2).getBlock().getMaterial() == Material.WATER) {
+diff --git a/src/main/java/net/minecraft/server/BlockStateDirection.java b/src/main/java/net/minecraft/server/BlockStateDirection.java
+index af4125bd843dba0c23dab44d0570be9c828a7028..2b93e03a324f1ab1553ccdce634bdf1e943e1568 100644
+--- a/src/main/java/net/minecraft/server/BlockStateDirection.java
++++ b/src/main/java/net/minecraft/server/BlockStateDirection.java
+@@ -18,7 +18,7 @@ public class BlockStateDirection extends BlockStateEnum<EnumDirection> {
+     }
+ 
+     public static BlockStateDirection of(String s, Predicate<EnumDirection> predicate) {
+-        return create(s, Collections2.filter(Lists.newArrayList(EnumDirection.values()), predicate));
++        return create(s, Collections2.filter(Lists.newArrayList(EnumDirection.VALUES), predicate)); // Athena - shared array; values() clones on every call
+     }
+ 
+     public static BlockStateDirection create(String s, Collection<EnumDirection> collection) {
+diff --git a/src/main/java/net/minecraft/server/BlockStationary.java b/src/main/java/net/minecraft/server/BlockStationary.java
+index 57782cacae9bd6fe507443364940fa9dd9851d2c..a6fc6d2f6f751d952a8ababa800448e8241880ac 100644
+--- a/src/main/java/net/minecraft/server/BlockStationary.java
++++ b/src/main/java/net/minecraft/server/BlockStationary.java
+@@ -87,7 +87,7 @@ public class BlockStationary extends BlockFluids {
+     }
+ 
+     protected boolean isSurroundingBlockFlammable(World world, BlockPosition blockposition) {
+-        EnumDirection[] aenumdirection = EnumDirection.values();
++        EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+         int i = aenumdirection.length;
+ 
+         for (int j = 0; j < i; ++j) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 59b07a522268332c261840a76c9a4fa17784b41c..2e8c7cab51785316376f5e77d06fa3ffc058d7ba 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -777,7 +777,7 @@ public class Chunk {
+                 return;
+             }
+         }
+-        for ( EnumCreatureType creatureType : EnumCreatureType.values() )
++        for ( EnumCreatureType creatureType : EnumCreatureType.VALUES ) // Athena - shared array; values() clones on every call
+         {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+@@ -816,7 +816,7 @@ public class Chunk {
+                 return;
+             }
+         }
+-        for ( EnumCreatureType creatureType : EnumCreatureType.values() )
++        for ( EnumCreatureType creatureType : EnumCreatureType.VALUES ) // Athena - shared array; values() clones on every call
+         {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+@@ -1328,7 +1328,7 @@ public class Chunk {
+                 boolean flag = i1 == 0 || i1 == 15 || k == 0 || k == 15 || l == 0 || l == 15;
+ 
+                 if (this.sections[j] == null && flag || this.sections[j] != null && this.sections[j].getBlockByExtId(k, i1, l).getMaterial() == Material.AIR) {
+-                    EnumDirection[] aenumdirection = EnumDirection.values();
++                    EnumDirection[] aenumdirection = EnumDirection.VALUES; // Athena - shared array; values() clones on every call
+                     int j1 = aenumdirection.length;
+ 
+                     for (int k1 = 0; k1 < j1; ++k1) {
+diff --git a/src/main/java/net/minecraft/server/EnumCreatureType.java b/src/main/java/net/minecraft/server/EnumCreatureType.java
+index 077ea42aea7193a19907240d99f51badaa03b9ba..035f321c7a20771c0a6469625356a9c4da5177ce 100644
+--- a/src/main/java/net/minecraft/server/EnumCreatureType.java
++++ b/src/main/java/net/minecraft/server/EnumCreatureType.java
+@@ -5,6 +5,10 @@ public enum EnumCreatureType {
+ 
+     MONSTER(IMonster.class, 70, Material.AIR, false, false), CREATURE(EntityAnimal.class, 10, Material.AIR, true, true), AMBIENT(EntityAmbient.class, 15, Material.AIR, true, false), WATER_CREATURE(EntityWaterAnimal.class, 5, Material.WATER, true, false);
+ 
++    // Athena - shared array; values() clones on every call, and Chunk.a/Chunk.b walk this on every
++    // entity that enters or leaves a chunk. Nothing writes to the returned array.
++    public static final EnumCreatureType[] VALUES = values();
++
+     private final Class<? extends IAnimal> creatureClass;
+     private final int maxNumberOfCreature;
+     private final Material creatureMaterial;
+diff --git a/src/main/java/net/minecraft/server/PathfinderWater.java b/src/main/java/net/minecraft/server/PathfinderWater.java
+index b24829239d2022f3e2acb163cf87e8cdab5cecc5..fb029ab5f5d8a42fdd197e86da8bb114123b0fc7 100644
+--- a/src/main/java/net/minecraft/server/PathfinderWater.java
++++ b/src/main/java/net/minecraft/server/PathfinderWater.java
+@@ -29,7 +29,7 @@ public class PathfinderWater extends PathfinderAbstract {
+     public int findPathOptions(PathPoint[] apathpoint, Entity entity, PathPoint pathpoint, PathPoint pathpoint1, float f) {
+         int i = 0;
+ 
+-        for (EnumDirection enumdirection : EnumDirection.values()) {
++        for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+             PathPoint pathpoint2 = this.getSafePoint(entity, pathpoint.xCoord + enumdirection.getAdjacentX(), pathpoint.yCoord + enumdirection.getAdjacentY(), pathpoint.zCoord + enumdirection.getAdjacentZ());
+ 
+             if (pathpoint2 != null && !pathpoint2.visited && pathpoint2.distanceTo(pathpoint1) < f) {
+diff --git a/src/main/java/net/minecraft/server/PistonExtendsChecker.java b/src/main/java/net/minecraft/server/PistonExtendsChecker.java
+index 5db93649801c55149452ef0a406255366ba3be66..4a4672c5cf2a560465a31809b0050a7be79ec471 100644
+--- a/src/main/java/net/minecraft/server/PistonExtendsChecker.java
++++ b/src/main/java/net/minecraft/server/PistonExtendsChecker.java
+@@ -153,7 +153,7 @@ public class PistonExtendsChecker {
+     }
+ 
+     private boolean b(BlockPosition blockposition) {
+-        for (EnumDirection enumdirection : EnumDirection.values()) {
++        for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+             if (enumdirection.getAxis() != this.moveDirection.getAxis() && !this.a(blockposition.shift(enumdirection))) {
+                 return false;
+             }
+diff --git a/src/main/java/net/minecraft/server/ShapeDetector.java b/src/main/java/net/minecraft/server/ShapeDetector.java
+index dedfe934329fb29b6393f057987d84d593c1980d..8b86a2a84bb1df34f9f8ed46d92474ebe493b9c8 100644
+--- a/src/main/java/net/minecraft/server/ShapeDetector.java
++++ b/src/main/java/net/minecraft/server/ShapeDetector.java
+@@ -58,8 +58,8 @@ public class ShapeDetector {
+         int i = Math.max(Math.max(this.palmLength, this.thumbLength), this.fingerLength);
+ 
+         for (BlockPosition blockposition1 : BlockPosition.getAllInBox(blockposition, blockposition.add(i - 1, i - 1, i - 1))) {
+-            for (EnumDirection enumdirection : EnumDirection.values()) {
+-                for (EnumDirection enumdirection1 : EnumDirection.values()) {
++            for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
++                for (EnumDirection enumdirection1 : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+                     if (enumdirection1 != enumdirection && enumdirection1 != enumdirection.opposite()) {
+                         ShapeDetector.ShapeDetectorCollection shapedetector_shapedetectorcollection = this.checkPatternAt(blockposition1, enumdirection, enumdirection1, loadingcache);
+ 
+diff --git a/src/main/java/net/minecraft/server/SpawnerCreature.java b/src/main/java/net/minecraft/server/SpawnerCreature.java
+index c7c1c6390e8dddd2d54f6cd5388df1dbc2772fce..ab376e08b043f768ac3a5d4a4cc0bad072f1aa60 100644
+--- a/src/main/java/net/minecraft/server/SpawnerCreature.java
++++ b/src/main/java/net/minecraft/server/SpawnerCreature.java
+@@ -96,7 +96,7 @@ public final class SpawnerCreature {
+ 
+             int j1 = 0;
+             BlockPosition blockposition = worldserver.getSpawn();
+-            EnumCreatureType[] aenumcreaturetype = EnumCreatureType.values();
++            EnumCreatureType[] aenumcreaturetype = EnumCreatureType.VALUES; // Athena - shared array; values() clones on every call
+ 
+             j = aenumcreaturetype.length;
+ 
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 896c9879c54f2af622d7657bee9cad7b68655848..a7400f922595f5073698a1f9402e1e9d7fd239a4 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3449,8 +3449,6 @@ public abstract class World implements IBlockAccess {
+     // Athena - scalar overload
+     public int isBlockIndirectlyGettingPowered(int x, int y, int z) {
+         int i = 0;
+-        EnumDirection[] aenumdirection = EnumDirection.values();
+-        int j = aenumdirection.length;
+ 
+         for (int j = 0; j < EnumDirection.VALUES.length; ++j) { // Athena - shared array, values() copies
+             EnumDirection enumdirection = EnumDirection.VALUES[j];
+diff --git a/src/main/java/net/minecraft/server/WorldGenLightStone1.java b/src/main/java/net/minecraft/server/WorldGenLightStone1.java
+index e30465967fa211f76f7b6eb37fe27d3ffa839546..4e2ab6c34a9d241e69a6ada3790e23cb1e182804 100644
+--- a/src/main/java/net/minecraft/server/WorldGenLightStone1.java
++++ b/src/main/java/net/minecraft/server/WorldGenLightStone1.java
+@@ -22,7 +22,7 @@ public class WorldGenLightStone1 extends WorldGenerator {
+                 if (world.getType(blockposition1).getBlock().getMaterial() == Material.AIR) {
+                     int j = 0;
+ 
+-                    for (EnumDirection enumdirection : EnumDirection.values()) {
++                    for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+                         if (world.getType(blockposition1.shift(enumdirection)).getBlock() == Blocks.GLOWSTONE) {
+                             ++j;
+                         }
+diff --git a/src/main/java/net/minecraft/server/WorldGenLightStone2.java b/src/main/java/net/minecraft/server/WorldGenLightStone2.java
+index f8ce80f7a77942c589bf896a081b32ca545a6169..a8944935270eeeb6ff10aad20ea9593e6ccacc7c 100644
+--- a/src/main/java/net/minecraft/server/WorldGenLightStone2.java
++++ b/src/main/java/net/minecraft/server/WorldGenLightStone2.java
+@@ -22,7 +22,7 @@ public class WorldGenLightStone2 extends WorldGenerator {
+                 if (world.getType(blockposition1).getBlock().getMaterial() == Material.AIR) {
+                     int j = 0;
+ 
+-                    for (EnumDirection enumdirection : EnumDirection.values()) {
++                    for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+                         if (world.getType(blockposition1.shift(enumdirection)).getBlock() == Blocks.GLOWSTONE) {
+                             ++j;
+                         }
+diff --git a/src/main/java/net/minecraft/server/WorldGenMonumentPieces.java b/src/main/java/net/minecraft/server/WorldGenMonumentPieces.java
+index ad95aee5b0acdc2e6d70a4d4e1c9ddf2ee64a4a1..cddce9b88461e38bbc7a3ff987379cf5c9ad0b9f 100644
+--- a/src/main/java/net/minecraft/server/WorldGenMonumentPieces.java
++++ b/src/main/java/net/minecraft/server/WorldGenMonumentPieces.java
+@@ -269,7 +269,7 @@ public class WorldGenMonumentPieces {
+                         int i3 = b(j2, l2, k2);
+ 
+                         if (aworldgenmonumentpieces_worldgenmonumentstatetracker[i3] != null) {
+-                            for (EnumDirection enumdirection : EnumDirection.values()) {
++                            for (EnumDirection enumdirection : EnumDirection.VALUES) { // Athena - shared array; values() clones on every call
+                                 int j3 = j2 + enumdirection.getAdjacentX();
+                                 int k3 = l2 + enumdirection.getAdjacentY();
+                                 int l3 = k2 + enumdirection.getAdjacentZ();

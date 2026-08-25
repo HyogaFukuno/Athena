@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 10:06:05 +0900
+Subject: [PATCH] Hoist the constant block states out of the generation loops
+
+setBlocksInChunk re-resolved Blocks.STONE.getBlockData() and the ocean
+block on every one of the 65536 iterations of its innermost loop, and
+read settings.seaLevel there too. generateBiomeTerrain did the same for
+bedrock and stone across a 256-step column scan that runs once per
+column, so also 65536 times per chunk.
+
+Measured over 625 chunks generated from a fixed seed: 6.578s -> 6.365s,
+about 3%.
+
+That is roughly the ceiling for this method without changing what it
+produces. generateBiomeTerrain calls random.nextInt(5) once per y per
+column - 65536 draws per chunk - and the number of draws determines
+every terrain feature downstream, so no iteration of that loop can be
+skipped. The noise generation has the same property through floating
+point operation order.
+
+The 625-chunk comparison confirms every stored field is unchanged.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BiomeBase.java b/src/main/java/net/minecraft/server/BiomeBase.java
+index 44b30344498d9c04a910537ff00ea7630f793ea9..e7e48fda03f758d528893f1eebeff103eb1ae904 100644
+--- a/src/main/java/net/minecraft/server/BiomeBase.java
++++ b/src/main/java/net/minecraft/server/BiomeBase.java
+@@ -277,10 +277,15 @@ public abstract class BiomeBase {
+         int j1 = i & 15;
+         int k1 = j & 15;
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
++        // Athena - constant states, hoisted out of the 256-step column scan. This method runs once
++        // per column, so 65536 times per chunk.
++        IBlockData bedrock = Blocks.BEDROCK.getBlockData();
++        IBlockData stone = Blocks.STONE.getBlockData();
++        boolean flatBedrock = world.paperSpigotConfig.generateFlatBedrock; // PaperSpigot
+ 
+         for (int l1 = 255; l1 >= 0; --l1) {
+-            if (l1 <= (world.paperSpigotConfig.generateFlatBedrock ? 0 : random.nextInt(5))) { // PaperSpigot - Configurable flat bedrock
+-                chunksnapshot.setBlockState(k1, l1, j1, Blocks.BEDROCK.getBlockData());
++            if (l1 <= (flatBedrock ? 0 : random.nextInt(5))) { // PaperSpigot - Configurable flat bedrock // Athena - hoisted
++                chunksnapshot.setBlockState(k1, l1, j1, bedrock); // Athena - hoisted
+             } else {
+                 IBlockData iblockdata2 = chunksnapshot.getBlockState(k1, l1, j1);
+ 
+@@ -290,7 +295,7 @@ public abstract class BiomeBase {
+                     if (l == -1) {
+                         if (i1 <= 0) {
+                             iblockdata = null;
+-                            iblockdata1 = Blocks.STONE.getBlockData();
++                            iblockdata1 = stone; // Athena - hoisted
+                         } else if (l1 >= k - 4 && l1 <= k + 1) {
+                             iblockdata = this.topBlock;
+                             iblockdata1 = this.fillerBlock;
+@@ -309,7 +314,7 @@ public abstract class BiomeBase {
+                             chunksnapshot.setBlockState(k1, l1, j1, iblockdata);
+                         } else if (l1 < k - 7 - i1) {
+                             iblockdata = null;
+-                            iblockdata1 = Blocks.STONE.getBlockData();
++                            iblockdata1 = stone; // Athena - hoisted
+                             chunksnapshot.setBlockState(k1, l1, j1, Blocks.GRAVEL.getBlockData());
+                         } else {
+                             chunksnapshot.setBlockState(k1, l1, j1, iblockdata1);
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index 31e146c445fea29387d6a3e404b73c84493902be..e92c76939492024ac743db471f06d658256cfeb9 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -78,6 +78,11 @@ public class ChunkProviderGenerate implements IChunkProvider {
+     public void setBlocksInChunk(int i, int j, ChunkSnapshot chunksnapshot) {
+         this.biomesForGeneration = this.worldObj.getWorldChunkManager().getBiomes(this.biomesForGeneration, i * 4 - 2, j * 4 - 2, 10, 10);
+         this.a(i * 4, 0, j * 4);
++        // Athena - the two states written below never change; the innermost loop runs 65536 times
++        // per chunk and was re-resolving them on every one.
++        IBlockData stone = Blocks.STONE.getBlockData();
++        IBlockData ocean = this.oceanBlockTmpl.getBlockData();
++        int seaLevel = this.settings.seaLevel;
+ 
+         for (int k = 0; k < 4; ++k) {
+             int l = k * 5;
+@@ -114,9 +119,9 @@ public class ChunkProviderGenerate implements IChunkProvider {
+ 
+                             for (int j3 = 0; j3 < 4; ++j3) {
+                                 if ((d16 += d15) > 0.0D) {
+-                                    chunksnapshot.setBlockState(k * 4 + i3, k2 * 8 + l2, j1 * 4 + j3, Blocks.STONE.getBlockData());
+-                                } else if (k2 * 8 + l2 < this.settings.seaLevel) {
+-                                    chunksnapshot.setBlockState(k * 4 + i3, k2 * 8 + l2, j1 * 4 + j3, this.oceanBlockTmpl.getBlockData());
++                                    chunksnapshot.setBlockState(k * 4 + i3, k2 * 8 + l2, j1 * 4 + j3, stone); // Athena - hoisted
++                                } else if (k2 * 8 + l2 < seaLevel) {
++                                    chunksnapshot.setBlockState(k * 4 + i3, k2 * 8 + l2, j1 * 4 + j3, ocean); // Athena - hoisted
+                                 }
+                             }
+ 

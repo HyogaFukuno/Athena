@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 24 Aug 2026 08:55:08 +0900
+Subject: [PATCH] Use the scalar entity queries on the remaining hot call sites
+
+The six-double overloads of getEntitiesWithinAABB and getEntitiesInAABBexcluding already
+existed, but these callers still built an AxisAlignedBB to pass through them. The hopper
+pair runs on every hopper on its own tick, which is the one that matters; the rest are the
+bed safety check, the explosion entity sweep and the mob call-for-help scan.
+
+PathfinderGoalHurtByTarget built a box only to grow() it into another, so the expansion is
+inlined - min/max mirror what the AxisAlignedBB constructor would have computed.
+
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 79c8653219dd2714137b43f25c1a080d44f8f9ec..52869e3744ac313765cd18c633a7423f8569aa1d 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -1162,7 +1162,7 @@ public abstract class EntityHuman extends EntityLiving {
+ 
+             double d0 = 8.0D;
+             double d1 = 5.0D;
+-            List list = this.world.getEntitiesWithinAABB(EntityMonster.class, new AxisAlignedBB((double) blockposition.getX() - d0, (double) blockposition.getY() - d1, (double) blockposition.getZ() - d0, (double) blockposition.getX() + d0, (double) blockposition.getY() + d1, (double) blockposition.getZ() + d0));
++            List list = this.world.getEntitiesWithinAABB(EntityMonster.class, (double) blockposition.getX() - d0, (double) blockposition.getY() - d1, (double) blockposition.getZ() - d0, (double) blockposition.getX() + d0, (double) blockposition.getY() + d1, (double) blockposition.getZ() + d0); // Athena - scalar overload
+ 
+             if (!list.isEmpty()) {
+                 return EntityHuman.EnumBedResult.NOT_SAFE;
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+index 527a9ad3e6cc9cb089f7c033f40c10849967543c..ef94c21fda8a8f8ed1bd6744355f7758b1ae9550 100644
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -124,7 +124,7 @@ public class Explosion {
+         int j1 = MathHelper.floor(this.posZ - (double) f3 - 1.0D);
+         int k1 = MathHelper.floor(this.posZ + (double) f3 + 1.0D);
+         // PaperSpigot start - Fix lag from explosions processing dead entities
+-        List list = this.world.getEntitiesInAABBexcluding(excludeSourceFromDamage ? this.source : (Entity) null, new AxisAlignedBB((double) i, (double) l, (double) j1, (double) j, (double) i1, (double) k1), new com.google.common.base.Predicate<Entity>() { // PandaSpigot
++        List list = this.world.getEntitiesInAABBexcluding(excludeSourceFromDamage ? this.source : (Entity) null, (double) i, (double) l, (double) j1, (double) j, (double) i1, (double) k1, new com.google.common.base.Predicate<Entity>() { // PandaSpigot // Athena - scalar overload
+             @Override
+             public boolean apply(Entity entity) {
+                 return IEntitySelector.NOT_SPECTATING.apply(entity) && !entity.dead;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalHurtByTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalHurtByTarget.java
+index c907e43ada1f4dfdf9958d0d7dbd37ff12e61c2b..fcbf2b74ae343814c8bc51ec040ad66e964d7fed 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalHurtByTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalHurtByTarget.java
+@@ -28,7 +28,8 @@ public class PathfinderGoalHurtByTarget extends PathfinderGoalTarget {
+         this.revengeTimerOld = this.taskOwner.getRevengeTimer();
+         if (this.entityCallsForHelp) {
+             double d0 = this.getTargetDistance();
+-            List list = this.taskOwner.world.getEntitiesWithinAABB(this.taskOwner.getClass(), (new AxisAlignedBB(this.taskOwner.locX, this.taskOwner.locY, this.taskOwner.locZ, this.taskOwner.locX + 1.0D, this.taskOwner.locY + 1.0D, this.taskOwner.locZ + 1.0D)).grow(d0, 10.0D, d0));
++            // Athena - scalar overload; grow() expanded inline (min/max mirror the AxisAlignedBB constructor)
++            List list = this.taskOwner.world.getEntitiesWithinAABB(this.taskOwner.getClass(), this.taskOwner.locX - d0, this.taskOwner.locY - 10.0D, this.taskOwner.locZ - d0, this.taskOwner.locX + 1.0D + d0, this.taskOwner.locY + 1.0D + 10.0D, this.taskOwner.locZ + 1.0D + d0);
+             Iterator iterator = list.iterator();
+ 
+             while (iterator.hasNext()) {
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index c39e00ccd2000eb0c742b795ea908ea5e3108587..732270c66e36a5f5f7ebdaf4dccc1deb81bb8ce1 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -546,7 +546,7 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+     }
+ 
+     public static List<EntityItem> a(World world, double d0, double d1, double d2) {
+-        return world.getEntitiesWithinAABB(EntityItem.class, new AxisAlignedBB(d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D), IEntitySelector.selectAnything);
++        return world.getEntitiesWithinAABB(EntityItem.class, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectAnything); // Athena - scalar overload; every hopper ran this on its own tick
+     }
+ 
+     public static IInventory getInventoryAtPosition(World world, double d0, double d1, double d2) {
+@@ -570,7 +570,7 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+         }
+ 
+         if (object == null) {
+-            List list = world.getEntitiesInAABBexcluding((Entity) null, new AxisAlignedBB(d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D), IEntitySelector.selectInventories);
++            List list = world.getEntitiesInAABBexcluding((Entity) null, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectInventories); // Athena - scalar overload
+ 
+             if (list.size() > 0) {
+                 object = (IInventory) list.get(world.random.nextInt(list.size()));

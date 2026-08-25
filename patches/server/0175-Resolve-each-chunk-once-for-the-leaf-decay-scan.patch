@@ -1,0 +1,234 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 10:47:02 +0900
+Subject: [PATCH] Resolve each chunk once for the leaf decay scan
+
+BlockLeaves.updateTick reads a 9x9x9 cube - 729 blocks - to decide
+whether one leaf block is still connected to a log, and every one of
+those reads hashed the chunk coordinates again. A live capture put 13 of
+the 18 samples that landed in leaf decay inside those reads.
+
+The cube spans at most four chunks. Walking z before y makes the chunk
+constant for a whole inner run, so the scan resolves it on the order of
+twenty times instead of 729. The scan writes a distinct cell of
+surroundings for every (k1, l1, i2) and never reads one back, so the
+order it visits them in is not observable; BlockLeavesScanOrderTest
+pins that the index formula is injective over the cube and that the cube
+really does stay inside four chunks wherever it is centred.
+
+getTypeIfLoaded gains a form that takes the chunk, which is its old body
+with the lookup lifted out. The BlockPosition form now delegates to it,
+which means the chunk is looked up before the captured block states are
+consulted rather than after - a pure map read either way.
+
+The bounds check ahead of the scan built two BlockPositions per decay
+check; areChunksLoadedBetween forwards straight to isAreaLoaded with the
+same six coordinates, so it calls that instead.
+
+Verified differentially: two 70-second runs of the same jar on a fixed
+seed differ in 1 of 625 chunks, which is the noise floor from tick
+timing. Against a build from before this change the new jar differs in
+1 chunk on one run and 0 on the other - indistinguishable from that
+floor, over 70 seconds of live leaf decay.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockLeaves.java b/src/main/java/net/minecraft/server/BlockLeaves.java
+index 5a2f031fa9fe7951f56312993b72d3b60d2365a6..8f6199b00aacd5f4d6866c2d4636b1fba60075a1 100644
+--- a/src/main/java/net/minecraft/server/BlockLeaves.java
++++ b/src/main/java/net/minecraft/server/BlockLeaves.java
+@@ -60,17 +60,36 @@ public abstract class BlockLeaves extends BlockTransparent {
+                     this.surroundings = new int[b1 * b1 * b1];
+                 }
+ 
+-                if (world.areChunksLoadedBetween(new BlockPosition(j - i, k - i, l - i), new BlockPosition(j + i, k + i, l + i))) {
+-                    BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+-
++                if (world.isAreaLoaded(j - i, k - i, l - i, j + i, k + i, l + i, true)) { // Athena - scalar; this built two positions per decay check
+                     int k1;
+                     int l1;
+                     int i2;
++                    // Athena start - resolve each chunk once instead of once per block.
++                    //
++                    // The scan below reads 729 blocks spanning at most four chunks, and every read
++                    // used to hash the chunk coordinates again. Walking z before y makes the chunk
++                    // constant for a whole inner run, so the cube costs on the order of twenty
++                    // lookups instead of 729. The scan writes a distinct cell of surroundings for
++                    // every (k1, l1, i2), so the order it visits them in is not observable.
++                    Chunk chunk = null;
++                    int chunkX = Integer.MIN_VALUE;
++                    int chunkZ = Integer.MIN_VALUE;
+ 
+                     for (k1 = -b0; k1 <= b0; ++k1) {
+-                        for (l1 = -b0; l1 <= b0; ++l1) {
+-                            for (i2 = -b0; i2 <= b0; ++i2) {
+-                                Block block = world.getTypeIfLoaded(blockposition_mutableblockposition.set(j + k1, k + l1, l + i2)).getBlock(); // PandaSpigot - Use getTypeIfLoaded
++                        int x = j + k1;
++
++                        for (i2 = -b0; i2 <= b0; ++i2) {
++                            int z = l + i2;
++
++                            if (x >> 4 != chunkX || z >> 4 != chunkZ) {
++                                chunkX = x >> 4;
++                                chunkZ = z >> 4;
++                                chunk = world.getChunkIfLoaded(chunkX, chunkZ);
++                            }
++
++                            for (l1 = -b0; l1 <= b0; ++l1) {
++                                Block block = world.getTypeIfLoaded(x, k + l1, z, chunk).getBlock(); // PandaSpigot - Use getTypeIfLoaded // Athena - chunk resolved above
++                    // Athena end
+ 
+                                 if (block != Blocks.LOG && block != Blocks.LOG2) {
+                                     if (block.getMaterial() == Material.LEAVES) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 075213a56d008fa59af7ea84467782fb2631b035..f8bdecc30b95bd9a8aa8a8e660c255c2e60a2626 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -960,19 +960,39 @@ public abstract class World implements IBlockAccess {
+ 
+     // PandaSpigot start - Add getTypeIfLoaded
+     public IBlockData getTypeIfLoaded(BlockPosition blockposition) {
++        int x = blockposition.getX();
++        int y = blockposition.getY();
++        int z = blockposition.getZ();
++
++        // Athena - the chunk is now resolved by the caller. It is looked up before the captured
++        // block states are consulted rather than after, which is a pure map read either way.
++        return this.getTypeIfLoaded(x, y, z, this.getChunkIfLoaded(x >> 4, z >> 4));
++    }
++
++    // Athena start - block lookup for a caller that already holds the chunk.
++    //
++    // BlockLeaves.updateTick reads a 9x9x9 cube - 729 blocks - for a single decay check, and each
++    // read hashed the chunk coordinates again; a live capture put 13 of its 18 samples inside
++    // those reads. The cube spans at most four chunks, so the caller resolves each one once.
++    //
++    // This is getTypeIfLoaded's body with the chunk lookup lifted out, and has to stay in step
++    // with it.
++    public IBlockData getTypeIfLoaded(int x, int y, int z, Chunk chunk) {
+         if (this.captureTreeGeneration) {
+             for (BlockState previous : this.capturedBlockStates) {
+-                if (previous.getX() == blockposition.getX() && previous.getY() == blockposition.getY() && previous.getZ() == blockposition.getZ()) {
++                if (previous.getX() == x && previous.getY() == y && previous.getZ() == z) {
+                     return CraftMagicNumbers.getBlock(previous.getTypeId()).fromLegacyData(previous.getRawData());
+                 }
+             }
+         }
+-        Chunk chunk = this.getChunkIfLoaded(blockposition);
+-        if (chunk != null) {
+-            return this.isValidLocation(blockposition) ? chunk.getBlockData(blockposition) : Blocks.AIR.getBlockData();
++
++        if (chunk == null) {
++            return null;
+         }
+-        return null;
++
++        return this.isValidLocation(x, y, z) ? chunk.getBlockData(x, y, z) : Blocks.AIR.getBlockData();
+     }
++    // Athena end
+     // PandaSpigot end
+     // Spigot start
+     public IBlockData getType(BlockPosition blockposition)
+diff --git a/src/test/java/net/minecraft/server/BlockLeavesScanOrderTest.java b/src/test/java/net/minecraft/server/BlockLeavesScanOrderTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3d252c98ed486bfacd2e697c21204f93510771ce
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/BlockLeavesScanOrderTest.java
+@@ -0,0 +1,97 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashSet;
++import java.util.Set;
++import org.junit.Test;
++
++/**
++ * Athena - BlockLeaves.updateTick now walks its 9x9x9 scan z before y, so that the chunk stays the
++ * same for a whole inner run and can be resolved once instead of once per block.
++ *
++ * <p>That is only safe because the scan writes a distinct cell of {@code surroundings} for every
++ * (k1, l1, i2) and never reads one back, which makes the visit order unobservable. The index
++ * formula is duplicated here and checked to be injective over the whole cube - if it ever stops
++ * being, the reordering silently starts producing a different decay map.
++ */
++public class BlockLeavesScanOrderTest {
++
++    private static final int B0 = 4;    // scan radius
++    private static final int B1 = 32;   // side of the surroundings cube
++    private static final int I1 = B1 * B1;
++    private static final int J1 = B1 / 2;
++
++    private static int index(int k1, int l1, int i2) {
++        return (k1 + J1) * I1 + (l1 + J1) * B1 + i2 + J1;
++    }
++
++    @Test
++    public void everyScannedCellHasItsOwnIndex() {
++        Set<Integer> seen = new HashSet<Integer>();
++        int count = 0;
++
++        for (int k1 = -B0; k1 <= B0; ++k1) {
++            for (int l1 = -B0; l1 <= B0; ++l1) {
++                for (int i2 = -B0; i2 <= B0; ++i2) {
++                    int index = index(k1, l1, i2);
++
++                    assertTrue("index " + index + " written twice, at " + k1 + "," + l1 + "," + i2,
++                            seen.add(index));
++                    assertTrue("index " + index + " is outside the surroundings array",
++                            index >= 0 && index < B1 * B1 * B1);
++                    ++count;
++                }
++            }
++        }
++
++        assertEquals(9 * 9 * 9, count);
++    }
++
++    @Test
++    public void reorderingTheScanVisitsTheSameCells() {
++        // The order the production loop now uses: x, then z, then y.
++        Set<Integer> reordered = new HashSet<Integer>();
++
++        for (int k1 = -B0; k1 <= B0; ++k1) {
++            for (int i2 = -B0; i2 <= B0; ++i2) {
++                for (int l1 = -B0; l1 <= B0; ++l1) {
++                    reordered.add(index(k1, l1, i2));
++                }
++            }
++        }
++
++        Set<Integer> original = new HashSet<Integer>();
++
++        for (int k1 = -B0; k1 <= B0; ++k1) {
++            for (int l1 = -B0; l1 <= B0; ++l1) {
++                for (int i2 = -B0; i2 <= B0; ++i2) {
++                    original.add(index(k1, l1, i2));
++                }
++            }
++        }
++
++        assertEquals(original, reordered);
++    }
++
++    @Test
++    public void theScannedCubeStaysInsideFourChunks() {
++        // What lets the chunk be resolved once per inner run: the cube spans at most two chunk
++        // columns on each axis, whatever block it is centred on.
++        for (int cx = -40; cx <= 40; ++cx) {
++            for (int cz = -40; cz <= 40; ++cz) {
++                Set<Long> chunks = new HashSet<Long>();
++
++                for (int k1 = -B0; k1 <= B0; ++k1) {
++                    for (int i2 = -B0; i2 <= B0; ++i2) {
++                        chunks.add((long) ((cx + k1) >> 4) << 32 | (long) ((cz + i2) >> 4) & 0xffffffffL);
++                    }
++                }
++
++                assertTrue("centre " + cx + "," + cz + " touched " + chunks.size() + " chunks",
++                        chunks.size() <= 4);
++            }
++        }
++    }
++}
