@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 05:59:45 +0900
+Subject: [PATCH] Hold the entity tracker entries in an array
+
+
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index fda10a5336ca8fbf71191db83aca68110788508b..693a25715b1bd8eecdeb5371652d9e57780ca2c9 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -15,7 +15,44 @@ public class EntityTracker {
+ 
+     private static final Logger logger = LogManager.getLogger();
+     private final WorldServer world;
+-    private Set<EntityTrackerEntry> c = Sets.newHashSet();
++    // Athena start - hold the entries in a flat array instead of a HashSet.
++    //
++    // Every one of these entries is visited twice per tick: once by updatePlayers to let the entry
++    // decide whether it moved, and once more for each player that moved, to offer that player every
++    // entry in the world. On a populated world that is two full traversals of this collection per
++    // tick, and a HashSet traversal walks a table of buckets - it touches empty slots, follows a
++    // reference per entry, and gives the prefetcher nothing to work with. An array walk is the
++    // shape the same work wants; see the entity slice walk this repeats.
++    //
++    // Membership is still exact: the array holds each entry once, and each entry remembers its own
++    // slot so removal is a swap with the last element rather than a scan.
++    private EntityTrackerEntry[] entries = new EntityTrackerEntry[256];
++    private int entryCount;
++
++    private void addEntry(EntityTrackerEntry entitytrackerentry) {
++        if (this.entryCount == this.entries.length) {
++            this.entries = java.util.Arrays.copyOf(this.entries, this.entryCount << 1);
++        }
++
++        entitytrackerentry.trackerIndex = this.entryCount;
++        this.entries[this.entryCount++] = entitytrackerentry;
++    }
++
++    private void removeEntry(EntityTrackerEntry entitytrackerentry) {
++        int i = entitytrackerentry.trackerIndex;
++
++        if (i < 0 || i >= this.entryCount || this.entries[i] != entitytrackerentry) {
++            return;
++        }
++
++        EntityTrackerEntry last = this.entries[--this.entryCount];
++
++        this.entries[i] = last;
++        last.trackerIndex = i;
++        this.entries[this.entryCount] = null;
++        entitytrackerentry.trackerIndex = -1;
++    }
++    // Athena end
+     public IntHashMap<EntityTrackerEntry> trackedEntities = new IntHashMap();
+     private int maxTrackingDistanceThreshold;
+ 
+@@ -28,10 +65,9 @@ public class EntityTracker {
+         if (entity instanceof EntityPlayer) {
+             this.addEntity(entity, 512, 2);
+             EntityPlayer entityplayer = (EntityPlayer) entity;
+-            Iterator iterator = this.c.iterator();
+ 
+-            while (iterator.hasNext()) {
+-                EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
++            for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
++                EntityTrackerEntry entitytrackerentry = this.entries[i];
+ 
+                 if (entitytrackerentry.tracker != entityplayer) {
+                     entitytrackerentry.updatePlayer(entityplayer);
+@@ -109,7 +145,7 @@ public class EntityTracker {
+ 
+             EntityTrackerEntry entitytrackerentry = new EntityTrackerEntry(entity, i, j, flag);
+ 
+-            this.c.add(entitytrackerentry);
++            this.addEntry(entitytrackerentry); // Athena
+             this.trackedEntities.addKey(entity.getId(), entitytrackerentry);
+             entitytrackerentry.scanPlayers(this.world.players);
+         } catch (Throwable throwable) {
+@@ -151,43 +187,46 @@ public class EntityTracker {
+         org.spigotmc.AsyncCatcher.catchOp( "entity untrack"); // Spigot
+         if (entity instanceof EntityPlayer) {
+             EntityPlayer entityplayer = (EntityPlayer) entity;
+-            Iterator iterator = this.c.iterator();
+-
+-            while (iterator.hasNext()) {
+-                EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
+ 
+-                entitytrackerentry.removeFromTrackedPlayers(entityplayer);
++            for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
++                this.entries[i].removeFromTrackedPlayers(entityplayer);
+             }
+         }
+ 
+         EntityTrackerEntry entitytrackerentry1 = (EntityTrackerEntry) this.trackedEntities.removeObject(entity.getId());
+ 
+         if (entitytrackerentry1 != null) {
+-            this.c.remove(entitytrackerentry1);
++            this.removeEntry(entitytrackerentry1); // Athena
+             entitytrackerentry1.sendDestroyEntityPacketToTrackedPlayers();
+         }
+ 
+     }
+ 
+     public void updatePlayers() {
+-        ArrayList arraylist = Lists.newArrayList();
+-        Iterator iterator = this.c.iterator();
++        ArrayList arraylist = null; // Athena - most ticks move no player; do not allocate for them
+ 
+-        while (iterator.hasNext()) {
+-            EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
++        for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
++            EntityTrackerEntry entitytrackerentry = this.entries[i];
+ 
+             entitytrackerentry.track(this.world.players);
+             if (entitytrackerentry.playerEntitiesUpdated && entitytrackerentry.tracker instanceof EntityPlayer) {
++                if (arraylist == null) {
++                    arraylist = Lists.newArrayList();
++                }
++
+                 arraylist.add((EntityPlayer) entitytrackerentry.tracker);
+             }
+         }
+ 
++        if (arraylist == null) {
++            return;
++        }
++
+         for (int i = 0; i < arraylist.size(); ++i) {
+             EntityPlayer entityplayer = (EntityPlayer) arraylist.get(i);
+-            Iterator iterator1 = this.c.iterator();
+ 
+-            while (iterator1.hasNext()) {
+-                EntityTrackerEntry entitytrackerentry1 = (EntityTrackerEntry) iterator1.next();
++            for (int j = 0; j < this.entryCount; ++j) { // Athena - indexed walk
++                EntityTrackerEntry entitytrackerentry1 = this.entries[j];
+ 
+                 if (entitytrackerentry1.tracker != entityplayer) {
+                     entitytrackerentry1.updatePlayer(entityplayer);
+@@ -198,10 +237,8 @@ public class EntityTracker {
+     }
+ 
+     public void a(EntityPlayer entityplayer) {
+-        Iterator iterator = this.c.iterator();
+-
+-        while (iterator.hasNext()) {
+-            EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
++        for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
++            EntityTrackerEntry entitytrackerentry = this.entries[i];
+ 
+             if (entitytrackerentry.tracker == entityplayer) {
+                 entitytrackerentry.scanPlayers(this.world.players);
+@@ -231,12 +268,8 @@ public class EntityTracker {
+     }
+ 
+     public void untrackPlayer(EntityPlayer entityplayer) {
+-        Iterator iterator = this.c.iterator();
+-
+-        while (iterator.hasNext()) {
+-            EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
+-
+-            entitytrackerentry.clear(entityplayer);
++        for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
++            this.entries[i].clear(entityplayer);
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 062e8dfc9786b45c524ff4774e8b9fd9a1de20cd..a2508b872e865f6f4c659e25a8ebb0fdb419d2b7 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -43,9 +43,12 @@ public class EntityTrackerEntry {
+     // PaperSpigot start
+     // Replace trackedPlayers Set with a Map. The value is true until the player receives
+     // their first update (which is forced to have absolute coordinates), false afterward.
+-    public java.util.Map<EntityPlayer, Boolean> trackedPlayerMap = new java.util.HashMap<EntityPlayer, Boolean>();
++    // Athena - identity keys, no boxed Boolean, and a table that iterates as an array. The map is
++    // read once per tracked player per broadcast and walked whole on every metadata send.
++    public java.util.Map<EntityPlayer, Boolean> trackedPlayerMap = new it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap<EntityPlayer, Boolean>();
+     public Set<EntityPlayer> trackedPlayers = trackedPlayerMap.keySet();
+     // PaperSpigot end
++    int trackerIndex = -1; // Athena - this entry's slot in EntityTracker's array
+ 
+     public EntityTrackerEntry(Entity entity, int i, int j, boolean flag) {
+         this.tracker = entity;

@@ -1,0 +1,312 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 05:59:45 +0900
+Subject: [PATCH] Keep the scheduled block updates in a heap instead of a hash
+ tree
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaScheduledTickQueue.java b/src/main/java/net/minecraft/server/AthenaScheduledTickQueue.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ad8a8f85237af6e63604ba653040e7d103bd11c
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaScheduledTickQueue.java
+@@ -0,0 +1,196 @@
++package net.minecraft.server;
++
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.NoSuchElementException;
++import java.util.Set;
++
++// Athena start - the queue of scheduled block updates.
++//
++// This replaces CraftBukkit's HashTreeSet, which kept a HashSet and a TreeSet side by side: the
++// HashSet to reject a second entry for a position that is already scheduled (NextTickListEntry
++// compares by time, priority and serial, but is *equal* by position and block, so the tree alone
++// cannot deduplicate), the TreeSet to hand out the earliest entry.
++//
++// The tree was doing more than the job needs. WorldServer only ever asks for the smallest element
++// and then removes it, which a red-black tree answers by walking to its leftmost node and then
++// rebalancing - two O(log n) pointer chases per entry per tick, each on separately allocated nodes.
++// A binary heap in a flat array answers the same two operations with the smallest element already
++// at index 0 and one sift down, with no nodes to allocate and no pointers to follow.
++//
++// The two callers that delete from the middle - the redstone bypass in tickUpdates and the chunk
++// unload path - both already scan everything, so they punch a hole in the array and the heap is
++// rebuilt in one O(n) pass before the next ordered read. Ordering, deduplication and iteration
++// content are all unchanged; only the order that iterator() yields entries in differs, and both of
++// its callers filter rather than depend on it.
++final class AthenaScheduledTickQueue implements Iterable<NextTickListEntry> {
++
++    private NextTickListEntry[] heap = new NextTickListEntry[256];
++    private int used; // slots in use, tombstones included
++    private final Set<NextTickListEntry> membership = new HashSet<NextTickListEntry>();
++    private boolean holed;
++
++    public int size() {
++        return this.membership.size();
++    }
++
++    public boolean isEmpty() {
++        return this.membership.isEmpty();
++    }
++
++    public boolean contains(NextTickListEntry nextticklistentry) {
++        return this.membership.contains(nextticklistentry);
++    }
++
++    public boolean add(NextTickListEntry nextticklistentry) {
++        if (!this.membership.add(nextticklistentry)) {
++            return false;
++        }
++
++        if (this.holed) {
++            this.rebuild();
++        }
++
++        if (this.used == this.heap.length) {
++            this.heap = Arrays.copyOf(this.heap, this.used << 1);
++        }
++
++        this.heap[this.used] = nextticklistentry;
++        this.siftUp(this.used++);
++        return true;
++    }
++
++    public NextTickListEntry first() {
++        if (this.holed) {
++            this.rebuild();
++        }
++
++        return this.used == 0 ? null : this.heap[0];
++    }
++
++    public NextTickListEntry poll() {
++        if (this.holed) {
++            this.rebuild();
++        }
++
++        if (this.used == 0) {
++            return null;
++        }
++
++        NextTickListEntry nextticklistentry = this.heap[0];
++        NextTickListEntry last = this.heap[--this.used];
++
++        this.heap[this.used] = null;
++        if (this.used > 0) {
++            this.heap[0] = last;
++            this.siftDown(0);
++        }
++
++        this.membership.remove(nextticklistentry);
++        return nextticklistentry;
++    }
++
++    public void clear() {
++        Arrays.fill(this.heap, 0, this.used, (NextTickListEntry) null);
++        this.used = 0;
++        this.holed = false;
++        this.membership.clear();
++    }
++
++    public Iterator<NextTickListEntry> iterator() {
++        return new Iterator<NextTickListEntry>() {
++            private int next;
++            private int last = -1;
++
++            public boolean hasNext() {
++                while (this.next < AthenaScheduledTickQueue.this.used && AthenaScheduledTickQueue.this.heap[this.next] == null) {
++                    ++this.next;
++                }
++
++                return this.next < AthenaScheduledTickQueue.this.used;
++            }
++
++            public NextTickListEntry next() {
++                if (!this.hasNext()) {
++                    throw new NoSuchElementException();
++                }
++
++                this.last = this.next++;
++                return AthenaScheduledTickQueue.this.heap[this.last];
++            }
++
++            public void remove() {
++                if (this.last < 0) {
++                    throw new IllegalStateException();
++                }
++
++                AthenaScheduledTickQueue.this.membership.remove(AthenaScheduledTickQueue.this.heap[this.last]);
++                AthenaScheduledTickQueue.this.heap[this.last] = null;
++                AthenaScheduledTickQueue.this.holed = true;
++                this.last = -1;
++            }
++        };
++    }
++
++    private void rebuild() {
++        int write = 0;
++
++        for (int read = 0; read < this.used; ++read) {
++            NextTickListEntry nextticklistentry = this.heap[read];
++
++            if (nextticklistentry != null) {
++                this.heap[write++] = nextticklistentry;
++            }
++        }
++
++        Arrays.fill(this.heap, write, this.used, (NextTickListEntry) null);
++        this.used = write;
++        this.holed = false;
++
++        for (int i = (this.used >> 1) - 1; i >= 0; --i) {
++            this.siftDown(i);
++        }
++    }
++
++    private void siftUp(int i) {
++        NextTickListEntry nextticklistentry = this.heap[i];
++
++        while (i > 0) {
++            int parent = (i - 1) >> 1;
++
++            if (nextticklistentry.compareTo(this.heap[parent]) >= 0) {
++                break;
++            }
++
++            this.heap[i] = this.heap[parent];
++            i = parent;
++        }
++
++        this.heap[i] = nextticklistentry;
++    }
++
++    private void siftDown(int i) {
++        NextTickListEntry nextticklistentry = this.heap[i];
++        int half = this.used >> 1;
++
++        while (i < half) {
++            int child = (i << 1) + 1;
++            int right = child + 1;
++
++            if (right < this.used && this.heap[right].compareTo(this.heap[child]) < 0) {
++                child = right;
++            }
++
++            if (nextticklistentry.compareTo(this.heap[child]) <= 0) {
++                break;
++            }
++
++            this.heap[i] = this.heap[child];
++            i = child;
++        }
++
++        this.heap[i] = nextticklistentry;
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index d2d1ad553fb71389183df46c7dd039f8c02ff3bc..2e8c81e5011b21a61c03cc3ea6f14c6f679ff2e4 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -20,7 +20,6 @@ import java.util.logging.Level;
+ import org.bukkit.WeatherType;
+ import org.bukkit.block.BlockState;
+ import org.bukkit.craftbukkit.util.LongHash;
+-import org.bukkit.craftbukkit.util.HashTreeSet;
+ import org.bukkit.event.block.BlockFormEvent;
+ import org.bukkit.event.weather.LightningStrikeEvent;
+ 
+@@ -37,7 +36,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     public EntityTracker tracker;
+     private final PlayerChunkMap manager;
+     // private final Set<NextTickListEntry> L = Sets.newHashSet(); // PAIL: Rename nextTickListHash
+-    private final HashTreeSet<NextTickListEntry> pendingTickListEntriesTreeSet = new HashTreeSet<NextTickListEntry>(); // CraftBukkit - HashTreeSet // PAIL: Rename nextTickList
++    private final AthenaScheduledTickQueue pendingTickListEntriesTreeSet = new AthenaScheduledTickQueue(); // CraftBukkit - HashTreeSet // PAIL: Rename nextTickList // Athena - a heap, not a tree
+     private final Map<UUID, Entity> entitiesByUUID = Maps.newHashMap();
+     public ChunkProviderServer chunkProviderServer;
+     public boolean savingDisabled;
+@@ -737,9 +736,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             }
+ 
+             // CraftBukkit - use M, PAIL: Rename nextTickList
+-            if (!this.pendingTickListEntriesTreeSet.contains(nextticklistentry)) {
+-                this.pendingTickListEntriesTreeSet.add(nextticklistentry);
+-            }
++            this.pendingTickListEntriesTreeSet.add(nextticklistentry); // Athena - add already rejects a duplicate; the separate contains was a second probe
+         }
+ 
+     }
+@@ -753,9 +750,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         }
+ 
+         // CraftBukkit - use M, PAIL: Rename nextTickList
+-        if (!this.pendingTickListEntriesTreeSet.contains(nextticklistentry)) {
+-            this.pendingTickListEntriesTreeSet.add(nextticklistentry);
+-        }
++        this.pendingTickListEntriesTreeSet.add(nextticklistentry); // Athena - add already rejects a duplicate
+ 
+     }
+ 
+@@ -807,13 +802,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 NextTickListEntry nextticklistentry;
+ 
+                 for (int j = 0; j < i; ++j) {
+-                    nextticklistentry = (NextTickListEntry) this.pendingTickListEntriesTreeSet.first();
++                    nextticklistentry = this.pendingTickListEntriesTreeSet.first(); // Athena - the head is already at index 0
+                     if (!flag && nextticklistentry.scheduledTime > this.worldData.getTime()) {
+                         break;
+                     }
+ 
+                     // CraftBukkit - use M, PAIL: Rename nextTickList
+-                    this.pendingTickListEntriesTreeSet.remove(nextticklistentry);
++                    this.pendingTickListEntriesTreeSet.poll(); // Athena - was first() then remove(), two walks of the same tree
+                     this.pendingTickListEntriesThisTick.add(nextticklistentry);
+                     this.pendingTickListEntriesThisTickSet.add(nextticklistentry); // Athena - keep the membership mirror in sync
+                 }
+@@ -821,19 +816,42 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                 // PaperSpigot start - Allow redstone ticks to bypass the tickNextTickListCap
+                 if (paperSpigotConfig.tickNextTickListCapIgnoresRedstone) {
++                    // Athena start - the queue no longer hands entries out in scheduled order, so
++                    // the early break becomes a skip (it selected the same entries either way: a
++                    // sorted walk stops at the first entry past the deadline, and everything it
++                    // would have gone on to see is later still) and the entries this pass takes are
++                    // sorted before they join the tick list, so the order they are ticked in is the
++                    // one the sorted walk produced.
+                     Iterator<NextTickListEntry> iterator = this.pendingTickListEntriesTreeSet.iterator();
++                    java.util.List<NextTickListEntry> bypassed = null;
++
+                     while (iterator.hasNext()) {
+                         NextTickListEntry next = iterator.next();
+                         if (!flag && next.scheduledTime > this.worldData.getTime()) {
+-                            break;
++                            continue;
+                         }
+ 
+                         if (next.getBlock().isPowerSource() || next.getBlock() instanceof IContainer) {
+                             iterator.remove();
++                            if (bypassed == null) {
++                                bypassed = Lists.newArrayList();
++                            }
++
++                            bypassed.add(next);
++                        }
++                    }
++
++                    if (bypassed != null) {
++                        java.util.Collections.sort(bypassed);
++
++                        for (int j = 0; j < bypassed.size(); ++j) {
++                            NextTickListEntry next = bypassed.get(j);
++
+                             this.pendingTickListEntriesThisTick.add(next);
+                             this.pendingTickListEntriesThisTickSet.add(next); // Athena - keep the membership mirror in sync
+                         }
+                     }
++                    // Athena end
+                 }
+                 // PaperSpigot end
+ 

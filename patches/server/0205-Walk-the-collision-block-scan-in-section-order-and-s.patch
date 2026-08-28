@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 05:59:45 +0900
+Subject: [PATCH] Walk the collision block scan in section order and skip empty
+ sections
+
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 5c382db47de7ed5c23e4284e7284c67a81f13f8e..5c83b5b829463b974e361dd59ce1ad68b8cf3700 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1474,27 +1474,67 @@ public abstract class World implements IBlockAccess {
+                 int xend = ( j < ( cx + 16 ) ) ? j : ( cx + 16 );
+                 int zstart = ( i1 < cz ) ? cz : i1;
+                 int zend = ( j1 < ( cz + 16 ) ) ? j1 : ( cz + 16 );
+-                // Loop through blocks within chunk
+-                for ( int x = xstart; x < xend; x++ )
++
++                // Athena start - walk this chunk's blocks in the order the section stores them, and
++                // skip the sections that hold nothing.
++                //
++                // A ChunkSection indexes its block array as y<<8 | z<<4 | x, so the old x/z/y nest
++                // stepped 512 bytes per iteration on its innermost loop - a cache line per block,
++                // over a volume that is mostly air. y/z/x reads the array front to back. The JIT
++                // does not interchange loops, so this is not something C2 was already doing.
++                //
++                // The section lookup also moves out of the block loop: it was one bounds check and
++                // one array load per block through Chunk.getBlockData, and it is constant across a
++                // 16-block run of y. Once it is in hand, a section that is empty (or absent) can
++                // only answer air, and air has no collision box, so the whole run is dead work.
++                if ( xstart >= xend || zstart >= zend || ystart >= l )
++                {
++                    continue;
++                }
++
++                // The border state update is the same store on every block - it is decided by flag
++                // and flag1, which are loop invariants - so it runs once per chunk that has blocks
++                // to visit, which is exactly when the old loop ran it at least once.
++                if (flag && flag1) {
++                    entity.setOutsideBorder(false);
++                } else if (!flag && !flag1) {
++                    entity.setOutsideBorder(true);
++                }
++
++                // Whether a block is replaced by stone depends only on x and z, and the border is
++                // an axis-aligned box, so testing the two corners of this chunk's range answers it
++                // for every block in it. When they are all inside, the per-block test disappears
++                // and the empty-section skip below is sound.
++                boolean allInsideBorder = !flag1
++                        || ( (double) ( xstart + 1 ) > worldborder.minX() && (double) ( xend - 1 ) < worldborder.maxX()
++                          && (double) ( zstart + 1 ) > worldborder.minZ() && (double) ( zend - 1 ) < worldborder.maxZ() );
++                ChunkSection[] sections = chunk.getSections();
++
++                for ( int y = ystart; y < l; y++ )
+                 {
++                    ChunkSection section = ( y >> 4 ) < sections.length ? sections[y >> 4] : null;
++                    boolean sectionEmpty = section == null || section.isEmpty();
++
++                    if ( sectionEmpty && allInsideBorder )
++                    {
++                        y |= 15; // nothing but air up to the top of this section
++                        continue;
++                    }
++
+                     for ( int z = zstart; z < zend; z++ )
+                     {
+-                        for ( int y = ystart; y < l; y++ )
++                        for ( int x = xstart; x < xend; x++ )
+                         {
+                             BlockPosition blockposition = blockposition_mutableblockposition.set( x, y, z );
+ 
+-                            if (flag && flag1) {
+-                                entity.setOutsideBorder(false);
+-                            } else if (!flag && !flag1) {
+-                                entity.setOutsideBorder(true);
+-                            }
+-
+                             IBlockData block;
+-                            if (!worldborder.contains(blockposition) && flag1) {
++                            if (!allInsideBorder && !worldborder.contains(blockposition)) {
+                                 block = Blocks.STONE.getBlockData();
++                            } else if (sectionEmpty) {
++                                continue;
+                             } else
+                             {
+-                                block = chunk.getBlockData( blockposition );
++                                block = section.getType( x & 15, y & 15, z & 15 );
+                             }
+                             if ( block != null )
+                             {
+@@ -1510,6 +1550,7 @@ public abstract class World implements IBlockAccess {
+                         }
+                     }
+                 }
++                // Athena end
+             }
+         }
+         // Spigot end

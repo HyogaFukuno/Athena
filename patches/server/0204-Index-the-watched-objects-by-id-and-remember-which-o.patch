@@ -1,0 +1,205 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 05:59:45 +0900
+Subject: [PATCH] Index the watched objects by id and remember which ones are
+ dirty
+
+
+diff --git a/src/main/java/net/minecraft/server/DataWatcher.java b/src/main/java/net/minecraft/server/DataWatcher.java
+index 425cb4029b1ca9e4facb67858f3ee9dc190d8b8f..05ac43db5c6e6ea8554e44cb637ff06a61f174b6 100644
+--- a/src/main/java/net/minecraft/server/DataWatcher.java
++++ b/src/main/java/net/minecraft/server/DataWatcher.java
+@@ -23,6 +23,26 @@ public class DataWatcher {
+     private static final Map<Class<?>, Integer> dataTypes = gnu.trove.TDecorators.wrap( classToId );
+     private final Map<Integer, DataWatcher.WatchableObject> watchedObjects = gnu.trove.TDecorators.wrap( dataValues );
+     // Spigot End
++    // Athena start - index the watched objects by id, and remember which ones are dirty.
++    //
++    // Data value ids are 0-31 by protocol - addObject rejects anything larger, and the wire format
++    // packs the id into five bits - so every registered object fits a 32-slot array and every dirty
++    // set fits an int. dataValues stays the authoritative map (it is what the watchedObjects
++    // decorator plugins reflect on is built from) and holds the same WatchableObject instances, so
++    // the two can never disagree about an object's contents; only membership has to be mirrored,
++    // which happens in addObject and add.
++    //
++    // What this buys: getWatchedObject was a trove hash probe on every read, and getChanged walked
++    // the whole map asking each entry whether it had changed. getChanged runs once per tracked
++    // entity per tracker update, so that scan was (entities) x (registered ids) per tick to find
++    // the handful that actually moved. The mask visits exactly the dirty ones.
++    private final DataWatcher.WatchableObject[] byId = new DataWatcher.WatchableObject[32];
++    private int dirtyMask;
++    // An id outside 0-31 cannot be mirrored, and cannot be written to the wire either. Nothing in
++    // the server registers one, but add() never rejected it, so keep the old full scan available
++    // rather than silently dropping such an entry from getChanged.
++    private boolean hasUnmirroredId;
++    // Athena end
+     private boolean objectChanged;
+     // private ReadWriteLock f = new ReentrantReadWriteLock(); // PandaSpigot - Remove DataWatcher Locking
+ 
+@@ -46,6 +66,7 @@ public class DataWatcher {
+ 
+             // this.f.writeLock().lock(); // PandaSpigot
+             this.dataValues.put(i, datawatcher_watchableobject); // Spigot
++            this.mirror(i, datawatcher_watchableobject); // Athena
+             // this.f.writeLock().unlock(); // PandaSpigot
+             this.isBlank = false;
+         }
+@@ -56,10 +77,23 @@ public class DataWatcher {
+ 
+         // this.f.writeLock().lock(); // PandaSpigot
+         this.dataValues.put(i, datawatcher_watchableobject); // Spigot
++        this.mirror(i, datawatcher_watchableobject); // Athena
+         // this.f.writeLock().unlock(); // PandaSpigot
+         this.isBlank = false;
+     }
+ 
++    // Athena start - keep the id index and the dirty mask in step with dataValues. A freshly built
++    // WatchableObject is born watched, so registering one marks its bit.
++    private void mirror(int i, DataWatcher.WatchableObject datawatcher_watchableobject) {
++        if ((i & ~31) == 0) {
++            this.byId[i] = datawatcher_watchableobject;
++            this.dirtyMask |= 1 << i;
++        } else {
++            this.hasUnmirroredId = true;
++        }
++    }
++    // Athena end
++
+     public byte getByte(int i) {
+         return ((Byte) this.getWatchedObject(i).getObject()).byteValue();
+     }
+@@ -104,6 +138,11 @@ public class DataWatcher {
+         this.f.readLock().unlock();
+         return datawatcher_watchableobject;
+         */
++        // Athena - index instead of probing; ids outside the mirrored range fall back to the map
++        if ((i & ~31) == 0) {
++            return this.byId[i];
++        }
++
+         return (WatchableObject) this.dataValues.get(i);
+         // PandaSpigot end
+     }
+@@ -119,6 +158,7 @@ public class DataWatcher {
+             datawatcher_watchableobject.setObject(t0);
+             this.owner.onDataWatcherUpdate(i);
+             datawatcher_watchableobject.setWatched(true);
++            this.dirtyMask |= 1 << (i & 31); // Athena - i is the id setWatched was just applied to
+             this.objectChanged = true;
+         }
+ 
+@@ -126,6 +166,7 @@ public class DataWatcher {
+ 
+     public void update(int i) {
+         this.getWatchedObject(i).watched = true;
++        this.dirtyMask |= 1 << (i & 31); // Athena
+         this.objectChanged = true;
+     }
+ 
+@@ -151,39 +192,83 @@ public class DataWatcher {
+         ArrayList arraylist = null;
+ 
+         if (this.objectChanged) {
+-            // this.f.readLock().lock(); // PandaSpigot
+-            Iterator iterator = this.dataValues.valueCollection().iterator(); // Spigot
++            // Athena start - walk only the dirty ids. The entries come out in ascending id order
++            // instead of trove's bucket order; the client keys each one by its own id, so the order
++            // they arrive in is not something it can observe.
++            if (this.hasUnmirroredId) {
++                return this.getChangedSlow();
++            }
+ 
+-            while (iterator.hasNext()) {
+-                DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
++            int mask = this.dirtyMask;
++
++            this.dirtyMask = 0;
++            while (mask != 0) {
++                int id = Integer.numberOfTrailingZeros(mask);
++
++                mask &= mask - 1;
++
++                DataWatcher.WatchableObject datawatcher_watchableobject = this.byId[id];
++
++                if (datawatcher_watchableobject == null || !datawatcher_watchableobject.isWatched()) {
++                    continue;
++                }
++
++                datawatcher_watchableobject.setWatched(false);
++                if (arraylist == null) {
++                    arraylist = Lists.newArrayList();
++                }
+ 
+-                if (datawatcher_watchableobject.isWatched()) {
+-                    datawatcher_watchableobject.setWatched(false);
+-                    if (arraylist == null) {
+-                        arraylist = Lists.newArrayList();
+-                    }
+-
+-                   // Spigot start - copy ItemStacks to prevent ConcurrentModificationExceptions
+-                    if ( datawatcher_watchableobject.getObject() instanceof ItemStack )
+-                    {
+-                        datawatcher_watchableobject = new WatchableObject(
+-                                datawatcher_watchableobject.getObjectType(),
+-                                datawatcher_watchableobject.getDataValueId(),
+-                                ( (ItemStack) datawatcher_watchableobject.getObject() ).cloneItemStack()
+-                        );
+-                    }
+-                    // Spigot end
+-
+-                    arraylist.add(datawatcher_watchableobject);
++                // Spigot start - copy ItemStacks to prevent ConcurrentModificationExceptions
++                if ( datawatcher_watchableobject.getObject() instanceof ItemStack )
++                {
++                    datawatcher_watchableobject = new WatchableObject(
++                            datawatcher_watchableobject.getObjectType(),
++                            datawatcher_watchableobject.getDataValueId(),
++                            ( (ItemStack) datawatcher_watchableobject.getObject() ).cloneItemStack()
++                    );
+                 }
++                // Spigot end
++
++                arraylist.add(datawatcher_watchableobject);
+             }
++            // Athena end
++        }
++
++        this.objectChanged = false;
++        return arraylist;
++    }
++
++    // Athena start - the pre-index path, kept for the case the mask cannot represent
++    private List<DataWatcher.WatchableObject> getChangedSlow() {
++        ArrayList arraylist = null;
++        Iterator iterator = this.dataValues.valueCollection().iterator();
+ 
+-            // this.f.readLock().unlock(); // PandaSpigot
++        while (iterator.hasNext()) {
++            DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
++
++            if (datawatcher_watchableobject.isWatched()) {
++                datawatcher_watchableobject.setWatched(false);
++                if (arraylist == null) {
++                    arraylist = Lists.newArrayList();
++                }
++
++                if (datawatcher_watchableobject.getObject() instanceof ItemStack) {
++                    datawatcher_watchableobject = new WatchableObject(
++                            datawatcher_watchableobject.getObjectType(),
++                            datawatcher_watchableobject.getDataValueId(),
++                            ((ItemStack) datawatcher_watchableobject.getObject()).cloneItemStack()
++                    );
++                }
++
++                arraylist.add(datawatcher_watchableobject);
++            }
+         }
+ 
++        this.dirtyMask = 0;
+         this.objectChanged = false;
+         return arraylist;
+     }
++    // Athena end
+ 
+     public void writeTo(PacketDataSerializer packetdataserializer) throws IOException {
+         // this.f.readLock().lock(); // PandaSpigot
