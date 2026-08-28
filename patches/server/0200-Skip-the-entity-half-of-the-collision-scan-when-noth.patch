@@ -1,0 +1,250 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 01:24:27 +0900
+Subject: [PATCH] Skip the entity half of the collision scan when nothing can
+ collide
+
+World.getCubes ends by querying every entity near the one being moved and asking
+each for a collision box. getCollisionBoundingBox() is null for everything except
+EntityBoat, and getCollisionBox(Entity) is null for everything except EntityBoat
+and EntityMinecartAbstract - so unless the entity being moved is one of those two,
+or a boat is nearby, that query builds a list of everything in reach and gets null
+from all of it. It was 16% of the server thread.
+
+Entity now says up front whether either method can answer non-null, Chunk counts
+the entities with a collision bounding box per slice the way it already counts
+items and inventories, and getCubes checks those counts - one int per slice over
+the same chunk range the query would have walked - before deciding to run it.
+getChunkIfLoaded never loads, so skipping the query loads nothing it would have.
+
+debugVerifyAthenaIndexes checks the count against the slice and, on every entity,
+that anything answering a collision bounding box admits to it up front - which is
+what a plugin subclass overriding one method and not the other would trip.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 875dfcf8ca86b73dc71173bc12f11ab68d6670f4..629df2e10a4b4b48a9e4c8bbc6cc7767f433a438 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -264,6 +264,7 @@ public final class AthenaIndexAudit {
+                 // Athena - the per-slice counts a target query skips whole slices on
+                 int monsters = 0;
+                 int humans = 0;
++                int boxes = 0;
+ 
+                 for (int idx = 0; idx < flat.size(); ++idx) {
+                     Entity entity = flat.get(idx);
+@@ -275,6 +276,23 @@ public final class AthenaIndexAudit {
+                     if (entity instanceof EntityHuman) {
+                         ++humans;
+                     }
++
++                    if (entity.hasCollisionBoundingBox()) {
++                        ++boxes;
++                    }
++
++                    // The claim World.getCubes now skips its entity query on: an entity that
++                    // answers a collision bounding box has to admit to it up front.
++                    if (entity.getCollisionBoundingBox() != null && !entity.hasCollisionBoundingBox()) {
++                        report(entity.getClass().getName() + " returns a collision bounding box but"
++                                + " hasCollisionBoundingBox() is false");
++                    }
++                }
++
++                if (boxes != chunk.auditCollisionBoxCount(slice)) {
++                    report("slice " + slice + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                            + boxes + " entities with a collision box but its count says "
++                            + chunk.auditCollisionBoxCount(slice));
+                 }
+ 
+                 if (monsters != chunk.auditMonsterCount(slice)) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 4986c539c14de3927ecb36b7eb1ce370b3411e5e..352b76451d9771f2b40b524e47304cde32e9618e 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -72,6 +72,8 @@ public class Chunk {
+     // and rarely find. See AthenaMonsterOnly.
+     private final int[] monsterCounts = new int[16];
+     private final int[] playerCounts = new int[16];
++    // Athena - and one for the entity half of World.getCubes; see Entity.hasCollisionBoundingBox
++    private final int[] collisionBoxCounts = new int[16];
+     private boolean done;
+     private boolean lit;
+     private boolean p; public boolean hasTicked() { return this.p; } // PandaSpigot - OBFHELPER
+@@ -850,12 +852,31 @@ public class Chunk {
+     }
+     // Athena end
+ 
++    /**
++     * Athena - whether any slice this box reaches holds an entity with a collision bounding box.
++     * The slice range is the one getEntitiesWithinAABBForEntity uses, so a "no" here means that
++     * query would have found nothing with a box either.
++     */
++    public boolean hasCollisionBoxEntities(double minY, double maxY) {
++        int i = MathHelper.clamp(MathHelper.floor((minY - 2.0D) / 16.0D), 0, this.entitySlices.length - 1);
++        int j = MathHelper.clamp(MathHelper.floor((maxY + 2.0D) / 16.0D), 0, this.entitySlices.length - 1);
++
++        for (int k = i; k <= j; ++k) {
++            if (this.collisionBoxCounts[k] > 0) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
+     // Athena - accessors for AthenaIndexAudit only
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
+     int auditBucketOf(double x) { return this.bucketOf(x); }
+     int auditBucketPad(int slice) { return this.bucketPad[slice]; }
+     int auditMonsterCount(int slice) { return this.monsterCounts[slice]; }
+     int auditPlayerCount(int slice) { return this.playerCounts[slice]; }
++    int auditCollisionBoxCount(int slice) { return this.collisionBoxCounts[slice]; }
+ 
+     public void addEntity(Entity entity) {
+         this.hasEntities = true;
+@@ -911,6 +932,10 @@ public class Chunk {
+         if (entity instanceof EntityHuman) {
+             playerCounts[k]++;
+         }
++
++        if (entity.hasCollisionBoundingBox()) {
++            collisionBoxCounts[k]++;
++        }
+         // Athena end
+         // Spigot start - increment creature type count
+         // Keep this synced up with World.a(Class)
+@@ -983,6 +1008,10 @@ public class Chunk {
+         if (entity instanceof EntityHuman) {
+             playerCounts[i]--;
+         }
++
++        if (entity.hasCollisionBoundingBox()) {
++            collisionBoxCounts[i]--;
++        }
+         // Athena end
+         // Spigot start - decrement creature type count
+         // Keep this synced up with World.a(Class)
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 20b0ae35c3a2d3f25e8537dd948c4cbbf4d83b1a..0d03516914051ff5076a0a9b25099907fd50e0f2 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -969,6 +969,29 @@ public abstract class Entity implements ICommandListener {
+         return null;
+     }
+ 
++    // Athena start - what the entity half of World.getCubes actually needs.
++    //
++    // getCollisionBoundingBox() is null for everything except EntityBoat, and getCollisionBox(Entity)
++    // is null for everything except EntityBoat and EntityMinecartAbstract. So the loop at the end of
++    // getCubes adds nothing unless the entity being moved is one of those two, or one of the
++    // entities near it is a boat - and that loop's query was 16% of the server thread, spent
++    // building a list whose every element was then asked for a box and answered null.
++    //
++    // These two let the query be skipped without asking anyone for a box. A subclass that overrides
++    // either box method must override the matching one here; debugVerifyAthenaIndexes checks that
++    // every entity whose getCollisionBoundingBox() is non-null says so.
++
++    /** Whether {@link #getCollisionBoundingBox()} can return non-null. */
++    public boolean hasCollisionBoundingBox() {
++        return false;
++    }
++
++    /** Whether {@link #getCollisionBox(Entity)} can return non-null. */
++    public boolean providesCollisionBoxes() {
++        return false;
++    }
++    // Athena end
++
+     protected void burn(float i) { // CraftBukkit - int -> float
+         if (!this.fireProof) {
+             this.damageEntity(DamageSource.FIRE, (float) i);
+diff --git a/src/main/java/net/minecraft/server/EntityBoat.java b/src/main/java/net/minecraft/server/EntityBoat.java
+index 7cc9137d9e79b4e353abe1579c39cd7a51550ebe..85e801ea61a209f17a8c7477b9de1c4d1a23493f 100644
+--- a/src/main/java/net/minecraft/server/EntityBoat.java
++++ b/src/main/java/net/minecraft/server/EntityBoat.java
+@@ -73,6 +73,17 @@ public class EntityBoat extends Entity {
+         return new AxisAlignedBB(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ); // Athena
+     }
+ 
++    // Athena - both of the above are non-null for a boat; see Entity.hasCollisionBoundingBox
++    @Override
++    public boolean hasCollisionBoundingBox() {
++        return true;
++    }
++
++    @Override
++    public boolean providesCollisionBoxes() {
++        return true;
++    }
++
+     public boolean canBePushed() {
+         return true;
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+index ce78126706e1d162365bd8f47242e2beca0d66c3..6b1c6d11dad167365dc4d0d463c6e33f234d50fd 100644
+--- a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
++++ b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+@@ -91,6 +91,13 @@ public abstract class EntityMinecartAbstract extends Entity implements INamableT
+         return null;
+     }
+ 
++    // Athena - a minecart has no bounding box of its own but does push what it meets; see
++    // Entity.hasCollisionBoundingBox
++    @Override
++    public boolean providesCollisionBoxes() {
++        return true;
++    }
++
+     public boolean canBePushed() {
+         return true;
+     }
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 426e7c2366dd90605c00f18e83c1cbfd20adab7e..e48a7715828ebef97c0afda3a30bba03096dce5e 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1528,6 +1528,15 @@ public abstract class World implements IBlockAccess {
+         if (entity instanceof EntityArmorStand) return; // PandaSpigot - Optimize armor stand movement
+ 
+         double d0 = 0.25D;
++        // Athena - the loop below can only add a box if the entity being moved provides them, or if
++        // one of the entities it finds has a collision bounding box of its own. When neither can be
++        // true the whole query is dead work: it built a list of everything nearby and then asked
++        // each one for a box that was always null. See Entity.hasCollisionBoundingBox.
++        if (!entity.providesCollisionBoxes()
++                && !this.anyCollisionBoxEntity(minX - d0, minY - d0, minZ - d0, maxX + d0, maxY + d0, maxZ + d0)) {
++            return;
++        }
++
+         List list = this.getEntities(entity, minX - d0, minY - d0, minZ - d0, maxX + d0, maxY + d0, maxZ + d0);
+ 
+         for (int j2 = 0; j2 < list.size(); ++j2) {
+@@ -1546,6 +1555,27 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
++    // Athena - walks the same chunk range getEntitiesInAABBexcluding would have walked, reading one
++    // int per slice instead of every entity in it. getChunkIfLoaded, like that query, never loads.
++    private boolean anyCollisionBoxEntity(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor((minX - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxX + 2.0D) / 16.0D);
++        int k = MathHelper.floor((minZ - 2.0D) / 16.0D);
++        int l = MathHelper.floor((maxZ + 2.0D) / 16.0D);
++
++        for (int i1 = i; i1 <= j; ++i1) {
++            for (int j1 = k; j1 <= l; ++j1) {
++                Chunk chunk = this.getChunkIfLoaded(i1, j1);
++
++                if (chunk != null && chunk.hasCollisionBoxEntities(minY, maxY)) {
++                    return true;
++                }
++            }
++        }
++
++        return false;
++    }
++
+     /** Convenience wrapper for the cold callers that only ask "is anything in the way?". */
+     public boolean hasCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+         CollisionBoxSink sink = collisionSink();

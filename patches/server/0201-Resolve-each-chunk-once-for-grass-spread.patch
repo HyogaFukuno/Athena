@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 02:13:22 +0900
+Subject: [PATCH] Resolve each chunk once for grass spread
+
+BlockGrass.updateTick is the busiest random tick on an overworld. Every read in
+it hashed the chunk coordinates again, and the spread probes read the same column
+twice in a row: getType for the block above, then getTypeIfLoaded for the block
+itself, two lookups of one chunk. A tick did on the order of fourteen.
+
+The probe offsets are +-1 in x and z, so a tick touches at most four chunks and
+usually one. The source chunk is resolved once up front - the block being ticked
+lives in a loaded chunk by construction - and each probe column once, which covers
+every block read in the method. This is the shape patch 0175 used for the leaf
+decay scan.
+
+The probe position is no longer built before the tests that throw it away. Only
+the isLightLevel call still needs one, and the chain reaches that last, so the
+common path where the probe is not dirt now allocates nothing.
+
+Behaviour is unchanged. The three offsets are drawn in the same order the
+BlockPosition constructor drew them, so the random sequence is identical. The two
+reads swap order, which is not observable - both are pure, and the only caller
+that could have seen a difference is a probe in an unloaded chunk, which used to
+read air for the block above and then return on the null; it still returns, one
+lookup earlier. getType's decorating() branch is not lost: decorating() is true
+only on the decoration worker thread, and a grass tick reaching that thread is
+recorded by forceBlockUpdateTick and replayed on the server thread instead.
+
+Measured with JFR on a fixed route, comparing shares within each run because the
+block tick sweep's share of the thread swings between 16% and 26% run to run and
+totals across runs are not comparable. Inside BlockGrass.updateTick's own samples:
+
+  World.getChunkAtWorldCoords     32.4% -> 8.6%
+  LongObjectHashMap.get           29.1% -> 8.0%
+  World.getChunkIfLoaded          24.6% -> 9.7%
+  World.getType                   29.1% -> gone
+  ChunkProviderServer.getOrCreateChunk  8.4% -> gone
+
+The lookups are demonstrably gone. The end to end effect is about 1% of the
+server thread, which is below what the saturating TPS harness can resolve at its
+0.9% noise floor, so this is not claimed as a TPS win.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockGrass.java b/src/main/java/net/minecraft/server/BlockGrass.java
+index 33445a3784fcaf2232cbe902bf96d4e013d44f1b..53d6dc8f26a8fa175044fbee8339a6ce4ef7d27f 100644
+--- a/src/main/java/net/minecraft/server/BlockGrass.java
++++ b/src/main/java/net/minecraft/server/BlockGrass.java
+@@ -30,8 +30,32 @@ public class BlockGrass extends Block implements IBlockFragilePlantElement {
+ 
+     public void updateTick(World world, BlockPosition blockposition, IBlockData iblockdata, Random random) {
+         if (!world.isClientSide) {
++            // Athena start - resolve each chunk once instead of once per read.
++            //
++            // Grass spread is the busiest random tick on an overworld: a profile of the block tick
++            // sweep put BlockGrass.updateTick at 4.1% of the server thread, and 42% of that was
++            // inside getChunkAtWorldCoords - LongObjectHashMap.get alone was the leaf of a quarter
++            // of its samples. Every read here hashed the chunk coordinates again, and the spread
++            // probes read the same column twice in a row.
++            //
++            // The probe offsets are +-1 in x and z, so a tick touches at most four chunks and
++            // usually one. Resolving the source chunk up front and each probe's chunk once covers
++            // every read below. This is the same shape as the leaf decay scan.
++            int x = blockposition.getX();
++            int y = blockposition.getY();
++            int z = blockposition.getZ();
++            int chunkX = x >> 4;
++            int chunkZ = z >> 4;
++            Chunk chunk = world.getChunkIfLoaded(chunkX, chunkZ);
++
++            if (chunk == null) {
++                // The block being random-ticked lives in a loaded chunk by construction, so this
++                // is unreachable; bail rather than fall through to a null dereference.
++                return;
++            }
++            // Athena end
+             int lightLevel = -1; // PandaSpigot
+-            if (world.getType(blockposition.up()).getBlock().getLightOpacity() > 2 && (lightLevel = world.getLightLevel(blockposition.up())) < 4) { // PandaSpigot - Move light check to end to avoid unneeded light lookups
++            if (world.getTypeIfLoaded(x, y + 1, z, chunk).getBlock().getLightOpacity() > 2 && (lightLevel = world.getLightLevel(blockposition.up())) < 4) { // PandaSpigot - Move light check to end to avoid unneeded light lookups // Athena - the block above shares this chunk
+                 // CraftBukkit start
+                 // world.setTypeUpdate(blockposition, Blocks.DIRT.getBlockData());
+                 org.bukkit.World bworld = world.getWorld();
+@@ -53,20 +77,35 @@ public class BlockGrass extends Block implements IBlockFragilePlantElement {
+                 if (lightLevel >= 9) {
+                 // PandaSpigot end
+                     for (int i = 0; i < Math.min(4, Math.max(20, (int) (4 * 100F / world.growthOdds))); ++i) { // Spigot
+-                        BlockPosition blockposition1 = blockposition.add(random.nextInt(3) - 1, random.nextInt(5) - 3, random.nextInt(3) - 1);
+-                        Block block = world.getType(blockposition1.up()).getBlock();
++                        // Athena - the three offsets are drawn in the same order the BlockPosition
++                        // constructor used to draw them, so the random sequence is unchanged.
++                        int x1 = x + random.nextInt(3) - 1;
++                        int y1 = y + random.nextInt(5) - 3;
++                        int z1 = z + random.nextInt(3) - 1;
++                        // Athena - one lookup for the probe column, reused for both reads below.
++                        // A probe outside a loaded chunk used to read air for the block above and
++                        // then return on the null below; it still returns, one lookup earlier.
++                        Chunk probe = (x1 >> 4) == chunkX && (z1 >> 4) == chunkZ
++                                ? chunk
++                                : world.getChunkIfLoaded(x1 >> 4, z1 >> 4);
+                         // PandaSpigot start
+-                        IBlockData iblockdata1 = world.getTypeIfLoaded(blockposition1);
++                        IBlockData iblockdata1 = world.getTypeIfLoaded(x1, y1, z1, probe);
+                         if (iblockdata1 == null) {
+                             return;
+                         }
+ 
+-                        if (iblockdata1.getBlock() == Blocks.DIRT && iblockdata1.get(BlockDirt.VARIANT) == BlockDirt.EnumDirtVariant.DIRT && block.getLightOpacity() <= 2 && world.isLightLevel(blockposition1.up(), 4)) { // Move last check before isLightLevel to avoid unneeded light checks
++                        Block block = world.getTypeIfLoaded(x1, y1 + 1, z1, probe).getBlock(); // Athena - same chunk as the probe
++
++                        // Athena - the probe position used to be built before any of these tests
++                        // and thrown away by the first one that failed, which is nearly all of
++                        // them. The only survivor is the position isLightLevel needs, and that is
++                        // now built where the chain reaches it.
++                        if (iblockdata1.getBlock() == Blocks.DIRT && iblockdata1.get(BlockDirt.VARIANT) == BlockDirt.EnumDirtVariant.DIRT && block.getLightOpacity() <= 2 && world.isLightLevel(new BlockPosition(x1, y1 + 1, z1), 4)) { // Move last check before isLightLevel to avoid unneeded light checks
+                         // PandaSpigot end
+                             // CraftBukkit start
+                             // world.setTypeUpdate(blockposition1, Blocks.GRASS.getBlockData());
+                             org.bukkit.World bworld = world.getWorld();
+-                            BlockState blockState = bworld.getBlockAt(blockposition1.getX(), blockposition1.getY(), blockposition1.getZ()).getState();
++                            BlockState blockState = bworld.getBlockAt(x1, y1, z1).getState(); // Athena - scalar
+                             blockState.setType(CraftMagicNumbers.getMaterial(Blocks.GRASS));
+ 
+                             BlockSpreadEvent event = new BlockSpreadEvent(blockState.getBlock(), bworld.getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()), blockState);
