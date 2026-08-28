@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 09:22:48 +0900
+Subject: [PATCH] Restore the immediate-update flag even if the forced tick
+ throws
+
+World.forceBlockUpdateTick set scheduledUpdatesAreImmediate, ran the block's
+tick, and cleared it afterwards. Anything thrown in between left it set for the
+rest of the server's life, and while it is set every scheduled update in every
+world runs immediately and recursively instead of being queued - so all liquid
+becomes synchronous cascades.
+
+That is a latent bug in the original code, not one deferral introduced, but
+deferral gave it a way to fire: the replayed forced tick reported earlier as a
+crash on obsidian was thrown from inside exactly this window, and a live server
+afterwards measured water block ticks at 1.42ms each against 0.005ms before.
+
+Also tried and reverted: dropping the forced tick entirely and letting the
+spring's own onPlace schedule the flow the ordinary way. It removes the cascade,
+but no lava reaches water during generation and naturally generated obsidian
+disappears completely - 544 blocks to none over 625 chunks.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 20093c8122985acbe0a326c5e9ec6bd94ee26cef..426e7c2366dd90605c00f18e83c1cbfd20adab7e 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2887,9 +2887,19 @@ public abstract class World implements IBlockAccess {
+             this.decorationBuffer.recordUpdateTick(block, blockposition);
+             return;
+         }
++        // Athena - restore the flag even if the tick throws.
++        //
++        // It was set, the tick run, and the flag cleared afterwards. Anything thrown in between left
++        // it set for the rest of the server's life, and while it is set every scheduled update in
++        // every world runs immediately and recursively instead of being queued. One throw turns all
++        // liquid into synchronous cascades.
+         this.scheduledUpdatesAreImmediate = true;
+-        block.updateTick(this, blockposition, this.getType(blockposition), random);
+-        this.scheduledUpdatesAreImmediate = false;
++
++        try {
++            block.updateTick(this, blockposition, this.getType(blockposition), random);
++        } finally {
++            this.scheduledUpdatesAreImmediate = false;
++        }
+     }
+ 
+     public boolean canBlockFreezeWater(BlockPosition blockposition) {

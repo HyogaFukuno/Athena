@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 00:49:00 +0900
+Subject: [PATCH] Decide and announce the shaping mode at world load
+
+The decision was made on the first brand new chunk, so on a world that is
+already generated it never happened and the log line never appeared - which
+looks exactly like the feature being broken.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 42794c49255775915bb06deba2a99518a18a3c8a..947dcda21dc1277cc5c90d49f3494cc6e2bdd16d 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -177,6 +177,15 @@ public class ChunkProviderServer implements IChunkProvider {
+         return provider instanceof ChunkProviderGenerate ? (ChunkProviderGenerate) provider : null;
+     }
+ 
++    /**
++     * Decides the mode and says so once, at world load. Without this the decision - and its log
++     * line - would not happen until the first brand new chunk, which on an existing world can be
++     * never.
++     */
++    public void reportChunkShaping() {
++        this.asyncShapingEnabled();
++    }
++
+     private boolean asyncShapingEnabled() {
+         if (this.asyncShaping == null) {
+             this.shapingGenerator = this.resolveShapingGenerator();
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index e19ee647dfcc05d24af9684702d449233226a6e7..d4dd7ac2c0a4be1bb403b605936314d78aed698d 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -344,6 +344,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         for (int m = 0; m < worlds.size(); m++) {
+             WorldServer worldserver = this.worlds.get(m);
+             LOGGER.info("Preparing start region for level " + m + " (Seed: " + worldserver.getSeed() + ")");
++            worldserver.chunkProviderServer.reportChunkShaping(); // Athena - decide and announce it here, not on the first chunk generated
+ 
+             if (!worldserver.getWorld().getKeepSpawnInMemory()) {
+                 continue;

@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 03:49:15 +0900
+Subject: [PATCH] Turn chunk decoration deferral off by default - it is a net
+ loss
+
+Measured on a live server, tick time per chunk went from 3.24ms to 6.81ms.
+Decoration does leave the server thread - the populate path itself dropped from
+2.33ms to 1.43ms per chunk - but replaying the blocks costs 4.37ms, and the
+whole of that is new work.
+
+The reason is that a deferred write is not the same write. Vanilla decorates
+while the chunk is still isolated and its neighbours are not loaded, so
+Chunk.relightBlock has nowhere to propagate skylight to. By the time the replay
+runs, the neighbours are loaded and every write pushes skylight into them; the
+profile is almost entirely Chunk.updateSkylightNeighborHeight underneath
+setTypeAndData.
+
+The earlier estimate that a quarter of population is writes and would have to
+stay was measured on the cheap inline writes, and does not carry over to
+deferred ones.
+
+Left in and switchable rather than removed: the sandbox, the buffer and the
+single decoration thread all work, and if the replay is ever made to write
+sections in bulk and relight the chunk once, the rest is already here.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index c0f61b2d1e3fc155c1ec0b224ddee256466eee19..17cbe423182b1578dab1c720a367e6d0cb09b673 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -94,7 +94,12 @@ public class PandaSpigotWorldConfig {
+             "unchanged.\n" +
+             "Decoration runs on a single thread for the whole server, so its ordering is exactly\n" +
+             "as serial as it has always been.\n" +
+-            "Default: true")
+-    public boolean asyncChunkDecoration = true;
++            "OFF BY DEFAULT: measured on a live server this is a net loss. Decoration does leave\n" +
++            "the server thread, but replaying its blocks there costs far more than placing them\n" +
++            "inline did - by the time they are replayed the surrounding chunks are loaded, so\n" +
++            "every write propagates skylight into them. Vanilla places them while the chunk is\n" +
++            "still isolated and that propagation does not happen.\n" +
++            "Default: false")
++    public boolean asyncChunkDecoration = false;
+     // Athena end
+ }

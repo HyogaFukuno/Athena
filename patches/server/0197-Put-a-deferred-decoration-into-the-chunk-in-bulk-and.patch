@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 04:10:33 +0900
+Subject: [PATCH] Put a deferred decoration into the chunk in bulk, and send it
+ once
+
+Replaying decoration one setTypeAndData at a time was what made deferral a net
+loss: a replayed write reaches neighbours an inline one does not, so every block
+propagated skylight into them, and the profile was almost entirely
+Chunk.updateSkylightNeighborHeight.
+
+The blocks now go straight into the chunk sections, each touched chunk is relit
+once with the same initLighting() a freshly generated chunk gets, and the chunk
+is sent to its watchers in one packet instead of a block change per write. What
+Chunk.setBlockState does besides writing - onPlace, and physics for the writes
+that asked for it - is replayed afterwards in the order the decoration made it,
+so sand still settles and liquids still start moving.
+
+On a generation-bound benchmark - 625 chunks of spawn, eight runs each way -
+this turns a 5% loss into a 6.4% gain (median 5.686s against 6.074s, faster in
+50 of 64 pairings). On a walk, generation work on the server thread falls from
+39.8% to 31.3%.
+
+Features are unchanged from the per-block version: over 625 chunks ores within
+2%, logs and leaves +5.6%, nothing missing. 2557 chunks generated in a soak with
+no escape and no replay failure.
+
+Turned back on by default.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index 17cbe423182b1578dab1c720a367e6d0cb09b673..b00523c1a3810700922949f24ccad0006345a6ac 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -94,12 +94,11 @@ public class PandaSpigotWorldConfig {
+             "unchanged.\n" +
+             "Decoration runs on a single thread for the whole server, so its ordering is exactly\n" +
+             "as serial as it has always been.\n" +
+-            "OFF BY DEFAULT: measured on a live server this is a net loss. Decoration does leave\n" +
+-            "the server thread, but replaying its blocks there costs far more than placing them\n" +
+-            "inline did - by the time they are replayed the surrounding chunks are loaded, so\n" +
+-            "every write propagates skylight into them. Vanilla places them while the chunk is\n" +
+-            "still isolated and that propagation does not happen.\n" +
+-            "Default: false")
+-    public boolean asyncChunkDecoration = false;
++            "The blocks are put into the chunk sections in bulk and the chunk is relit and sent\n" +
++            "once, rather than one setTypeAndData per block: a replayed write reaches loaded\n" +
++            "neighbours that an inline one does not, and propagating skylight into them for every\n" +
++            "block was more expensive than the decoration it replaced.\n" +
++            "Default: true")
++    public boolean asyncChunkDecoration = true;
+     // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+index 612485ddb4bd0d36d9292fcb958b3f3d5b7c31e5..55d34a93292943df5b572d5cfe6b060e49dd73a2 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+@@ -4,6 +4,7 @@ import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+ import it.unimi.dsi.fastutil.longs.LongArrayList;
+ import it.unimi.dsi.fastutil.ints.IntArrayList;
+ import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
++import it.unimi.dsi.fastutil.longs.Long2IntMap;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+@@ -228,35 +229,126 @@ public class ChunkDecorationBuffer {
+     }
+ 
+     /**
+-     * Replays every write through the real World, in the order the decoration made them, so that
+-     * lighting, height maps, client updates and physics all happen the way they would have if the
+-     * decoration had never left the server thread.
++     * Puts the decoration into the world, in bulk.
++     *
++     * The obvious way - hand every write to setTypeAndData - was measured and is far more expensive
++     * than the inline writes it replaces. Vanilla decorates while the chunk is still isolated, so
++     * Chunk.relightBlock has no loaded neighbours to push skylight into; by the time a replay runs
++     * they are loaded and every single write propagates. The profile was almost entirely
++     * Chunk.updateSkylightNeighborHeight.
++     *
++     * So the blocks go straight into the chunk sections, each touched chunk is relit once with the
++     * same initLighting() a freshly generated chunk gets, and the whole chunk is sent to its
++     * watchers once instead of block by block. What Chunk.setBlockState would have done besides
++     * that - onPlace, and physics for the writes that asked for it - is replayed afterwards in the
++     * order the decoration made it, so sand still settles and liquids still start moving.
+      */
+     public void apply() {
++        boolean hasSky = !this.world.worldProvider.getHasNoSky();
++        Long2IntOpenHashMap touched = new Long2IntOpenHashMap();
++        int count = this.logPositions.size();
++        List<IBlockData> previous = new ArrayList<IBlockData>(count);
++
++        touched.defaultReturnValue(0);
++
++        // 1 - the blocks themselves, with no lighting and no notification
++        for (int i = 0; i < count; ++i) {
++            IBlockData iblockdata = this.logStates.get(i);
++
++            if (iblockdata == null) {
++                previous.add(null); // an update tick, handled in step 4
++                continue;
++            }
++
++            long packed = this.logPositions.getLong(i);
++            int x = BlockPosition.unpackX(packed);
++            int y = BlockPosition.unpackY(packed);
++            int z = BlockPosition.unpackZ(packed);
++            long key = ChunkCoordIntPair.chunkXZ2Int(x >> 4, z >> 4);
++            Chunk chunk = this.captured.get(key);
++
++            if (chunk == null) {
++                previous.add(null);
++                continue;
++            }
++
++            ChunkSection[] sections = chunk.getSections();
++            ChunkSection section = sections[y >> 4];
++
++            if (section == null) {
++                if (iblockdata.getBlock() == Blocks.AIR) {
++                    previous.add(null);
++                    continue;
++                }
++
++                section = new ChunkSection(y >> 4 << 4, hasSky);
++                sections[y >> 4] = section;
++            }
++
++            previous.add(section.getType(x & 15, y & 15, z & 15));
++            section.setType(x & 15, y & 15, z & 15, iblockdata);
++            touched.put(key, touched.get(key) | 1 << (y >> 4));
++        }
++
++        // 2 - one relight per chunk instead of one propagation per block
++        for (Long2IntMap.Entry entry : touched.long2IntEntrySet()) {
++            Chunk chunk = this.captured.get(entry.getLongKey());
++
++            chunk.initLighting();
++            chunk.setChunkModified();
++        }
++
++        // 3 - what setBlockState would have done besides writing, in the original order
+         BlockPosition.MutableBlockPosition position = new BlockPosition.MutableBlockPosition();
+ 
+-        for (int i = 0; i < this.logPositions.size(); ++i) {
++        for (int i = 0; i < count; ++i) {
++            IBlockData iblockdata = this.logStates.get(i);
++            IBlockData old = previous.get(i);
++
++            if (iblockdata == null || old == null || old.getBlock() == iblockdata.getBlock()) {
++                continue;
++            }
++
+             long packed = this.logPositions.getLong(i);
+ 
+             position.set(BlockPosition.unpackX(packed), BlockPosition.unpackY(packed), BlockPosition.unpackZ(packed));
+ 
+-            IBlockData iblockdata = this.logStates.get(i);
++            BlockPosition target = new BlockPosition(position);
+ 
+-            if (iblockdata != null) {
+-                this.world.setTypeAndData(new BlockPosition(position), iblockdata, this.logFlags.getInt(i));
+-            } else {
+-                // The recorded tick fires later than it would have, so the block it was recorded for
+-                // may be gone by now - lava that has since met water is obsidian, and handing that
+-                // to BlockFlowing.updateTick asks obsidian for a level it does not have. This is the
+-                // same guard WorldServer.updateBlockTick applies before running a tick immediately.
+-                Block block = this.logTickBlocks.get(i);
+-                BlockPosition target = new BlockPosition(position);
+-                IBlockData current = this.world.getType(target);
+-
+-                if (current.getBlock() == block && current.getBlock().getMaterial() != Material.AIR) {
+-                    this.world.forceBlockUpdateTick(block, target, this.world.random);
+-                }
++            iblockdata.getBlock().onPlace(this.world, target, iblockdata);
++            if ((this.logFlags.getInt(i) & 1) != 0) {
++                this.world.update(target, old.getBlock());
++            }
++        }
++
++        // 4 - the recorded update ticks, guarded the way WorldServer guards an immediate one
++        for (int i = 0; i < count; ++i) {
++            if (this.logStates.get(i) != null) {
++                continue;
+             }
++
++            long packed = this.logPositions.getLong(i);
++
++            position.set(BlockPosition.unpackX(packed), BlockPosition.unpackY(packed), BlockPosition.unpackZ(packed));
++
++            Block block = this.logTickBlocks.get(i);
++            BlockPosition target = new BlockPosition(position);
++            IBlockData current = this.world.getType(target);
++
++            // The tick fires later than it would have, so the block it was recorded for may be gone
++            // - lava that has since met water is obsidian, and BlockFlowing.updateTick would ask
++            // obsidian for a level it does not have.
++            if (current.getBlock() == block && current.getBlock().getMaterial() != Material.AIR) {
++                this.world.forceBlockUpdateTick(block, target, this.world.random);
++            }
++        }
++
++        // 5 - one chunk packet per touched chunk, rather than a block change per write
++        for (Long2IntMap.Entry entry : touched.long2IntEntrySet()) {
++            long key = entry.getLongKey();
++            Chunk chunk = this.captured.get(key);
++
++            this.world.getPlayerChunkMap().flagChunkForFullUpdate(chunk.locX, chunk.locZ, entry.getIntValue());
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index a90e60ad9a21133e1cc098c284a592b0ad2cd2db..52077451e7dda7cb4b0aecbeeb8921c436d149c0 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -214,6 +214,20 @@ public class PlayerChunkMap {
+     }
+     // CraftBukkit end
+ 
++    // Athena start - send a whole chunk to its watchers in one packet.
++    //
++    // Used after a deferred decoration is put into a chunk. Flagging each of its ~1500 blocks
++    // individually would walk the dirty list for the first 64 and then send the whole chunk anyway;
++    // this says so directly.
++    public void flagChunkForFullUpdate(int chunkX, int chunkZ, int sectionMask) {
++        PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk = this.getPlayerInstance(chunkX, chunkZ, false);
++
++        if (playerchunkmap_playerchunk != null) {
++            playerchunkmap_playerchunk.flagWholeChunkForUpdate(sectionMask);
++        }
++    }
++    // Athena end
++
+     public void flagDirty(BlockPosition blockposition) {
+         int i = blockposition.getX() >> 4;
+         int j = blockposition.getZ() >> 4;
+@@ -583,6 +597,16 @@ public class PlayerChunkMap {
+             this.previousWorldTime = PlayerChunkMap.this.world.getTime();
+         }
+ 
++        // Athena - dirtyCount 64 is the case onUpdate() sends the whole chunk for
++        public void flagWholeChunkForUpdate(int sectionMask) {
++            if (this.dirtyCount == 0) {
++                PlayerChunkMap.this.playerInstancesToUpdate.add(this);
++            }
++
++            this.flagsYAreasToUpdate |= sectionMask;
++            this.dirtyCount = 64;
++        }
++
+         public void flagChunkForUpdate(int i, int j, int k) {
+             if (this.dirtyCount == 0) {
+                 PlayerChunkMap.this.playerInstancesToUpdate.add(this);

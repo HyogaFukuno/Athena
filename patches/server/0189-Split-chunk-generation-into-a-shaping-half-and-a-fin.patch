@@ -1,0 +1,195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 13:07:56 +0900
+Subject: [PATCH] Split chunk generation into a shaping half and a finishing
+ half
+
+shapeChunk does noise, biome lookup, surface replacement, caves and ravines.
+It writes only into a ChunkSnapshot nobody can see yet and reads nothing from
+the World but its seed and the generate-x flags, so it is a pure function of
+(seed, x, z).
+
+finishChunk does structure starts, builds the Chunk and lights it. Structure
+starts stay here because they mutate a map and a persistent NBT record that
+/locate, ender eyes and mob-spawn checks read from the server thread. They
+still run after caves and ravines and before the Chunk is built, so blocks
+land in the same order.
+
+createShapingCopy rebuilds the generator from the seed for use on a worker,
+because rand, the noise buffers and biomesForGeneration are per-instance
+scratch and cannot be entered twice at once. The copy carries its own
+WorldChunkManager for the same reason and does not touch the world.
+
+getOrCreateChunk calls both halves back to back, so nothing changes yet.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index e92c76939492024ac743db471f06d658256cfeb9..de20c78d4bf88156d3be1f06de48f974176cbe2f 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -30,12 +30,34 @@ public class ChunkProviderGenerate implements IChunkProvider {
+     private WorldGenBase ravineGenerator;
+     private WorldGenMonument oceanMonumentGenerator;
+     private BiomeBase[] biomesForGeneration;
++    // Athena start - everything a shaping copy of this generator needs to rebuild itself
++    private final long seed;
++    private final String generatorSettings;
++    private final String worldGeneratorOptions;
++    private final WorldChunkManager shapingChunkManager; // null on the world's own generator
++    // Athena end
+     double[] mainNoiseArray;
+     double[] lowerLimitNoiseArray;
+     double[] upperLimitNoiseArray;
+     double[] depthNoiseArray;
+ 
+     public ChunkProviderGenerate(World world, long i, boolean flag, String s) {
++        this(world, i, flag, s, world.getWorldData().getGeneratorOptions(), false); // Athena
++    }
++
++    // Athena start - a second constructor so a shaping copy can be built.
++    //
++    // The copy exists because this class cannot be entered twice at once: rand, the noise buffers,
++    // biomesForGeneration and stoneNoise are all per-instance scratch. Rebuilding from the same seed
++    // reproduces it exactly - the noise generators consume rand in a fixed order and their tables
++    // never change afterwards - so a copy answers what the original would have answered.
++    //
++    // It also gets its own WorldChunkManager: GenLayer rewrites a seed field on every call and
++    // BiomeCache is a bare hash map, so the world's manager cannot be shared with a worker. That one
++    // is built from the seed as well, so it agrees with the world's.
++    //
++    // A copy must not touch the world, hence the flag guarding setSeaLevel below.
++    private ChunkProviderGenerate(World world, long i, boolean flag, String s, String generatoroptions, boolean forshaping) {
+         this.oceanBlockTmpl = Blocks.WATER;
+         this.stoneNoise = new double[256];
+         this.caveGenerator = new WorldGenCaves();
+@@ -70,13 +92,32 @@ public class ChunkProviderGenerate implements IChunkProvider {
+         if (s != null) {
+             this.settings = CustomWorldSettingsFinal.CustomWorldSettings.jsonToFactory(s).b();
+             this.oceanBlockTmpl = this.settings.useLavaOceans ? Blocks.LAVA : Blocks.WATER;
+-            world.setSeaLevel(this.settings.seaLevel);
++            if (!forshaping) { // Athena - a shaping copy must not write to the world
++                world.setSeaLevel(this.settings.seaLevel);
++            }
+         }
+ 
++        // Athena start
++        this.seed = i;
++        this.generatorSettings = s;
++        this.worldGeneratorOptions = generatoroptions;
++        this.shapingChunkManager = forshaping ? new WorldChunkManager(i, this.o, generatoroptions) : null;
++        // Athena end
+     }
+ 
++    /** Builds an independent copy of this generator for shaping chunks off the server thread. */
++    public ChunkProviderGenerate createShapingCopy() {
++        return new ChunkProviderGenerate(this.worldObj, this.seed, this.mapFeaturesEnabled, this.generatorSettings, this.worldGeneratorOptions, true);
++    }
++
++    /** The biome source to shape from - this copy's own, or the world's on the original. */
++    private WorldChunkManager chunkManager() {
++        return this.shapingChunkManager != null ? this.shapingChunkManager : this.worldObj.getWorldChunkManager();
++    }
++    // Athena end
++
+     public void setBlocksInChunk(int i, int j, ChunkSnapshot chunksnapshot) {
+-        this.biomesForGeneration = this.worldObj.getWorldChunkManager().getBiomes(this.biomesForGeneration, i * 4 - 2, j * 4 - 2, 10, 10);
++        this.biomesForGeneration = this.chunkManager().getBiomes(this.biomesForGeneration, i * 4 - 2, j * 4 - 2, 10, 10);
+         this.a(i * 4, 0, j * 4);
+         // Athena - the two states written below never change; the innermost loop runs 65536 times
+         // per chunk and was re-resolving them on every one.
+@@ -156,11 +197,27 @@ public class ChunkProviderGenerate implements IChunkProvider {
+     }
+ 
+     public Chunk getOrCreateChunk(int i, int j) {
++        // Athena - the two halves below, back to back; this is what the sync path still does
++        return this.finishChunk(i, j, this.shapeChunk(i, j));
++    }
++
++    // Athena start - the half of generation that never looks at the World.
++    //
++    // Noise, biome lookup, surface replacement, caves and ravines all write into a ChunkSnapshot
++    // that nothing else can see yet, and read nothing from the world beyond its seed and the
++    // generate-x config flags. That makes this a pure function of (seed, x, z) and safe to run on a
++    // worker - on a copy of this generator, since the scratch fields it uses are per-instance.
++    //
++    // Structure starts deliberately stay behind in finishChunk: they mutate a map and a persistent
++    // NBT record that /locate, ender eyes and mob-spawn checks read from the server thread. They
++    // still run before the Chunk is built, and after caves and ravines, so blocks land in the same
++    // order and the terrain is unchanged.
++    public ChunkShape shapeChunk(int i, int j) {
+         this.rand.setSeed((long) i * 341873128712L + (long) j * 132897987541L);
+         ChunkSnapshot chunksnapshot = new ChunkSnapshot();
+ 
+         this.setBlocksInChunk(i, j, chunksnapshot);
+-        this.biomesForGeneration = this.worldObj.getWorldChunkManager().getBiomeBlock(this.biomesForGeneration, i * 16, j * 16, 16, 16);
++        this.biomesForGeneration = this.chunkManager().getBiomeBlock(this.biomesForGeneration, i * 16, j * 16, 16, 16);
+         this.replaceBlocksForBiome(i, j, chunksnapshot, this.biomesForGeneration);
+         if (this.settings.useCaves && this.worldObj.paperSpigotConfig.generateCaves) { // PaperSpigot
+             this.caveGenerator.generate(this, this.worldObj, i, j, chunksnapshot);
+@@ -170,6 +227,20 @@ public class ChunkProviderGenerate implements IChunkProvider {
+             this.ravineGenerator.generate(this, this.worldObj, i, j, chunksnapshot);
+         }
+ 
++        // biomesForGeneration is scratch that the next chunk overwrites, so the ids are copied out here
++        byte[] abyte = new byte[256];
++
++        for (int k = 0; k < abyte.length; ++k) {
++            abyte[k] = (byte) this.biomesForGeneration[k].id;
++        }
++
++        return new ChunkShape(chunksnapshot, abyte);
++    }
++
++    /** The rest of generation, on the server thread: structure starts, the Chunk, its lighting. */
++    public Chunk finishChunk(int i, int j, ChunkShape chunkshape) {
++        ChunkSnapshot chunksnapshot = chunkshape.blocks;
++
+         if (this.settings.useMineShafts && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateMineshaft) { // PaperSpigot
+             this.mineshaftGenerator.generate(this, this.worldObj, i, j, chunksnapshot);
+         }
+@@ -191,15 +262,12 @@ public class ChunkProviderGenerate implements IChunkProvider {
+         }
+ 
+         Chunk chunk = new Chunk(this.worldObj, chunksnapshot, i, j);
+-        byte[] abyte = chunk.getBiomeIndex();
+-
+-        for (int k = 0; k < abyte.length; ++k) {
+-            abyte[k] = (byte) this.biomesForGeneration[k].id;
+-        }
+ 
++        System.arraycopy(chunkshape.biomeIndex, 0, chunk.getBiomeIndex(), 0, chunkshape.biomeIndex.length); // Athena - shaped alongside the blocks
+         chunk.initLighting();
+         return chunk;
+     }
++    // Athena end
+ 
+     private void a(int i, int j, int k) {
+         this.depthNoiseArray = this.noiseGen6.generateNoiseOctaves(this.depthNoiseArray, i, k, 5, 5, (double) this.settings.depthNoiseScaleX, (double) this.settings.depthNoiseScaleZ, (double) this.settings.depthNoiseScaleExponent);
+diff --git a/src/main/java/net/minecraft/server/ChunkShape.java b/src/main/java/net/minecraft/server/ChunkShape.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6a177447b7367cc4076291a14a3fa0c26329d3a3
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkShape.java
+@@ -0,0 +1,21 @@
++package net.minecraft.server;
++
++// Athena start - the result of the off-thread half of chunk generation.
++//
++// Everything in here is produced without reading or writing the World: the block states come out
++// of the noise and the biome table, and the biome ids are a copy, because the generator reuses its
++// own BiomeBase[] for the next chunk. Handing this to the server thread is what lets the rest of
++// generation - structure starts, the Chunk itself, lighting, population - stay exactly where it was.
++public class ChunkShape {
++
++    /** Block states for the chunk, in the layout ChunkSnapshot uses. */
++    public final ChunkSnapshot blocks;
++    /** The chunk's 16x16 biome ids, ready to be copied into Chunk.getBiomeIndex(). */
++    public final byte[] biomeIndex;
++
++    public ChunkShape(ChunkSnapshot chunksnapshot, byte[] abyte) {
++        this.blocks = chunksnapshot;
++        this.biomeIndex = abyte;
++    }
++}
++// Athena end
