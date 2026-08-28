@@ -1,0 +1,929 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 02:36:01 +0900
+Subject: [PATCH] WIP: run chunk decoration off the server thread
+
+Splits populate into three stages - structures/lakes/dungeons, decoration,
+then the animals and the snow - and puts the middle one on a single decoration
+thread for the whole server, with its world calls redirected into a sandbox
+that buffers the blocks it chooses. The server thread replays them through the
+real setTypeAndData, so lighting, client updates and physics still happen where
+they always did.
+
+With the feature off the generated world is bit-identical to master (0 of 625
+chunks differ), so the refactor itself is neutral. With it on it is not, for
+two reasons that the measurement pinned down and that are recorded in the next
+commit message rather than fixed here.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index 26975c7d373b6f8095bfdc2ea06661aa030a89ff..c0f61b2d1e3fc155c1ec0b224ddee256466eee19 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -83,5 +83,18 @@ public class PandaSpigotWorldConfig {
+             "always generates on the server thread.\n" +
+             "Default: true")
+     public boolean asyncChunkShaping = true;
++
++    @Comment("When enabled, the decoration pass of populating a chunk - ores, trees, plants -\n" +
++            "runs on a worker thread instead of the server thread. It is about three quarters\n" +
++            "of what populating a chunk costs and touches no entities or tile entities, so it\n" +
++            "is the part that can be lifted out. Structures, lakes, dungeons, the animals a new\n" +
++            "chunk starts with, ice and snow, plugin block populators and ChunkPopulateEvent all\n" +
++            "still run on the server thread, in the same order as before; the blocks the\n" +
++            "decoration chose are replayed there too, so lighting and client updates are\n" +
++            "unchanged.\n" +
++            "Decoration runs on a single thread for the whole server, so its ordering is exactly\n" +
++            "as serial as it has always been.\n" +
++            "Default: true")
++    public boolean asyncChunkDecoration = true;
+     // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 2748fa79b0d6265ed2767ae483178015363af6d9..4986c539c14de3927ecb36b7eb1ce370b3411e5e 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -194,6 +194,7 @@ public class Chunk {
+ 
+     public org.bukkit.Chunk bukkitChunk;
+     public boolean mustSave;
++    public boolean decorationPending; // Athena - a deferred decoration still has to land in this chunk
+     // CraftBukkit end
+ 
+     public Chunk(World world, ChunkSnapshot chunksnapshot, int i, int j) {
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9eb45f556783beed51190ffef4b3304c5d6fe643
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+@@ -0,0 +1,223 @@
++package net.minecraft.server;
++
++import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
++import it.unimi.dsi.fastutil.longs.LongArrayList;
++import it.unimi.dsi.fastutil.ints.IntArrayList;
++import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
++import java.util.ArrayList;
++import java.util.List;
++
++// Athena start - the sandbox a chunk's decoration runs in while it is off the server thread.
++//
++// Decoration - ores, trees, plants, the things BiomeBase.decorate places - is three quarters of
++// what populating a chunk costs, and unlike the rest of population it touches no entities and no
++// tile entities. That makes it the one part that can be lifted out whole.
++//
++// It still reads and writes the World, so those calls are redirected here for the decorating
++// thread. Reads come from the overlay first and the live chunk underneath it; writes go into the
++// overlay and into an ordered log, which the server thread later replays through the real
++// setTypeAndData so that lighting, client updates and everything else happen exactly where they
++// always did.
++//
++// Two things are deliberately recomputed rather than mirrored. The height map and the
++// precipitation height are maintained incrementally by Chunk as blocks are set; here they are
++// derived on demand from the overlay plus the chunk below it, which lands on the same answer
++// because the vanilla map is always exact - it is only ever updated in the cases that can change
++// it. Doing it this way avoids running Chunk.setBlockState off-thread, which would call back into
++// the World through onPlace, tile entity creation and skylight propagation.
++//
++// Anything this class cannot model exactly sets `escaped`. The job is then thrown away and the
++// server thread decorates inline, so an unmodelled call costs time and never correctness.
++public class ChunkDecorationBuffer {
++
++    /** Chunks this buffer may read. Captured on the server thread; only ever read from here. */
++    private final Long2ObjectOpenHashMap<Chunk> captured = new Long2ObjectOpenHashMap<Chunk>();
++    /** Latest state written at a position, for reads. */
++    private final Long2ObjectOpenHashMap<IBlockData> overlay = new Long2ObjectOpenHashMap<IBlockData>();
++    /** Every write, in order, for the replay. */
++    private final LongArrayList logPositions = new LongArrayList();
++    private final List<IBlockData> logStates = new ArrayList<IBlockData>();
++    private final IntArrayList logFlags = new IntArrayList();
++
++    /** Highest y written in a column, keyed by packed (x, z). Keeps the height lookups off a scan. */
++    private final Long2IntOpenHashMap columnTop = new Long2IntOpenHashMap();
++
++    private final WorldServer world;
++    private boolean escaped;
++
++    public ChunkDecorationBuffer(WorldServer worldserver) {
++        this.world = worldserver;
++        this.columnTop.defaultReturnValue(-1);
++    }
++
++    // ---- set up, on the server thread ----
++
++    public void capture(Chunk chunk) {
++        this.captured.put(ChunkCoordIntPair.chunkXZ2Int(chunk.locX, chunk.locZ), chunk);
++    }
++
++    public void reset() {
++        this.captured.clear();
++        this.overlay.clear();
++        this.logPositions.clear();
++        this.logStates.clear();
++        this.logFlags.clear();
++        this.columnTop.clear();
++        this.escaped = false;
++    }
++
++    public boolean hasEscaped() {
++        return this.escaped;
++    }
++
++    /** Marks the job unusable. Called wherever this buffer would have to guess. */
++    public void escape() {
++        this.escaped = true;
++    }
++
++    // ---- the redirected World calls ----
++
++    /**
++     * The chunk the World would have handed back. Never consults the live chunk map, which the
++     * server thread is busy mutating; a chunk that was not captured reads as empty, which is what
++     * the world does for an unloaded chunk during population anyway.
++     */
++    public Chunk chunkAt(int chunkX, int chunkZ) {
++        Chunk chunk = this.captured.get(ChunkCoordIntPair.chunkXZ2Int(chunkX, chunkZ));
++
++        return chunk != null ? chunk : this.world.chunkProviderServer.emptyChunk;
++    }
++
++    public IBlockData getType(int x, int y, int z) {
++        if (y < 0 || y >= 256) {
++            return Blocks.AIR.getBlockData();
++        }
++
++        IBlockData written = this.overlay.get(BlockPosition.pack(x, y, z));
++
++        if (written != null) {
++            return written;
++        }
++
++        return this.chunkAt(x >> 4, z >> 4).getBlockData(x, y, z);
++    }
++
++    public boolean setType(BlockPosition blockposition, IBlockData iblockdata, int flags) {
++        int y = blockposition.getY();
++
++        if (y < 0 || y >= 256) {
++            return false;
++        }
++
++        // A write outside everything we captured would have landed in the world's empty chunk and
++        // been dropped there; drop it here too rather than logging a write that cannot be replayed.
++        if (this.captured.get(ChunkCoordIntPair.chunkXZ2Int(blockposition.getX() >> 4, blockposition.getZ() >> 4)) == null) {
++            return false;
++        }
++
++        long column = ChunkCoordIntPair.chunkXZ2Int(blockposition.getX(), blockposition.getZ());
++
++        if (y > this.columnTop.get(column)) {
++            this.columnTop.put(column, y);
++        }
++
++        this.overlay.put(blockposition.asLong(), iblockdata);
++        this.logPositions.add(blockposition.asLong());
++        this.logStates.add(iblockdata);
++        this.logFlags.add(flags);
++        return true;
++    }
++
++    /**
++     * The height map value, derived instead of maintained. Starts above anything written or already
++     * standing in the column and walks down while the block below is transparent - the same loop
++     * Chunk.relightBlock runs.
++     */
++    public int highestBlockY(int x, int z) {
++        Chunk chunk = this.chunkAt(x >> 4, z >> 4);
++        int y = chunk.getHeightValue(x & 15, z & 15);
++        int overlayTop = this.overlayColumnTop(x, z);
++
++        if (overlayTop + 1 > y) {
++            y = overlayTop + 1;
++        }
++
++        while (y > 0 && this.getType(x, y - 1, z).getBlock().getLightOpacity() == 0) {
++            --y;
++        }
++
++        return y;
++    }
++
++    /** The highest y this buffer has written in the column, or -1. */
++    private int overlayColumnTop(int x, int z) {
++        return this.columnTop.get(ChunkCoordIntPair.chunkXZ2Int(x, z));
++    }
++
++    /** World.getTopSolidOrLiquidBlock, reading through the overlay. */
++    public BlockPosition topSolidOrLiquidBlock(BlockPosition blockposition) {
++        int x = blockposition.getX();
++        int z = blockposition.getZ();
++        int y = this.chunkAt(x >> 4, z >> 4).getTopFilledSegment() + 16;
++        int overlayTop = this.overlayColumnTop(x, z);
++
++        if (overlayTop + 16 > y) {
++            y = overlayTop + 16;
++        }
++
++        while (y >= 0) {
++            Material material = this.getType(x, y - 1, z).getBlock().getMaterial();
++
++            if (material.isSolid() && material != Material.LEAVES) {
++                break;
++            }
++
++            --y;
++        }
++
++        return new BlockPosition(x, y, z);
++    }
++
++    /** World.getPrecipitationHeight, reading through the overlay. */
++    public BlockPosition precipitationHeight(BlockPosition blockposition) {
++        int x = blockposition.getX();
++        int z = blockposition.getZ();
++        int y = this.highestBlockY(x, z);
++
++        while (y > 0) {
++            Block block = this.getType(x, y - 1, z).getBlock();
++            Material material = block.getMaterial();
++
++            if (material.isSolid() || material.isLiquid()) {
++                break;
++            }
++
++            --y;
++        }
++
++        return new BlockPosition(x, y, z);
++    }
++
++    // ---- the replay, on the server thread ----
++
++    public int writeCount() {
++        return this.logPositions.size();
++    }
++
++    /**
++     * Replays every write through the real World, in the order the decoration made them, so that
++     * lighting, height maps, client updates and physics all happen the way they would have if the
++     * decoration had never left the server thread.
++     */
++    public void apply() {
++        BlockPosition.MutableBlockPosition position = new BlockPosition.MutableBlockPosition();
++
++        for (int i = 0; i < this.logPositions.size(); ++i) {
++            long packed = this.logPositions.getLong(i);
++
++            position.set(BlockPosition.unpackX(packed), BlockPosition.unpackY(packed), BlockPosition.unpackZ(packed));
++            this.world.setTypeAndData(new BlockPosition(position), this.logStates.get(i), this.logFlags.getInt(i));
++        }
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b0196e4f83647fc49e7d6d8dbdff5fbfad75d41e
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -0,0 +1,144 @@
++package net.minecraft.server;
++
++import java.util.ArrayDeque;
++import java.util.Queue;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.BlockingQueue;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena start - the single thread every chunk's decoration runs on.
++//
++// One thread for the whole server, not one per world. Decoration reaches through BiomeBase into the
++// biome's BiomeDecorator, which is a singleton holding the world, the Random and the position it is
++// working on, and into WorldGenerator instances that are configured mid-run. None of that can be
++// entered twice at once. One thread keeps decoration exactly as serial as it has always been, and
++// the ordering it produces is the ordering the server thread used to produce.
++//
++// The win is not parallelism. It is that the server thread stops waiting for the three quarters of
++// population that is search and decision work, and only pays for replaying the writes.
++public final class ChunkDecorationExecutor {
++
++    private static final Logger logger = LogManager.getLogger();
++
++    private static final BlockingQueue<ChunkPopulateJob> pending = new LinkedBlockingQueue<ChunkPopulateJob>();
++    private static final Queue<ChunkPopulateJob> finished = new ConcurrentLinkedQueue<ChunkPopulateJob>();
++    private static volatile Thread worker;
++    /** Jobs handed to the worker but not yet drained. Read on the server thread only. */
++    private static int inFlight;
++
++    private ChunkDecorationExecutor() {}
++
++    private static synchronized void start() {
++        if (ChunkDecorationExecutor.worker == null) {
++            Thread thread = new Thread(new Runnable() {
++                public void run() {
++                    ChunkDecorationExecutor.loop();
++                }
++            }, "Chunk Decoration Thread");
++
++            thread.setDaemon(true);
++            thread.setPriority(Thread.NORM_PRIORITY - 1);
++            thread.start();
++            ChunkDecorationExecutor.worker = thread;
++        }
++    }
++
++    private static void loop() {
++        while (true) {
++            ChunkPopulateJob job;
++
++            try {
++                job = ChunkDecorationExecutor.pending.take();
++            } catch (InterruptedException interruptedexception) {
++                Thread.currentThread().interrupt();
++                return;
++            }
++
++            run(job);
++            ChunkDecorationExecutor.finished.add(job);
++        }
++    }
++
++    /**
++     * Decorates one chunk with the world redirected into the job's buffer.
++     *
++     * Everything is caught. A call this sandbox does not model - anything that reaches the live
++     * chunk map, a tile entity, an entity - either escapes deliberately or throws, and either way
++     * the job is marked and the server thread does the whole decoration itself instead. An
++     * unmodelled call therefore costs time and never correctness.
++     */
++    private static void run(ChunkPopulateJob job) {
++        World world = job.world;
++
++        world.decorationBuffer = job.buffer;
++        world.decorationThread = Thread.currentThread();
++
++        try {
++            job.generator.decorate(job);
++        } catch (Throwable throwable) {
++            job.buffer.escape();
++            ChunkDecorationExecutor.logger.warn("[Athena] Chunk " + job.chunkX + ", " + job.chunkZ + " will be decorated on the server thread instead", throwable);
++        } finally {
++            world.decorationThread = null;
++            world.decorationBuffer = null;
++        }
++    }
++
++    /** Queues a chunk's decoration. Server thread only. */
++    public static void queue(ChunkPopulateJob job) {
++        ChunkDecorationExecutor.start();
++        ++ChunkDecorationExecutor.inFlight;
++        ChunkDecorationExecutor.pending.add(job);
++    }
++
++    /** Hands finished decorations back to the server thread. Called once per tick. */
++    public static void tick() {
++        ChunkPopulateJob job;
++
++        while ((job = ChunkDecorationExecutor.finished.poll()) != null) {
++            --ChunkDecorationExecutor.inFlight;
++            complete(job);
++        }
++    }
++
++    /**
++     * Runs every queued decoration to completion, now. Needed before anything that has to see a
++     * finished world - saving, unloading, shutdown.
++     */
++    public static void flush() {
++        while (ChunkDecorationExecutor.inFlight > 0) {
++            ChunkPopulateJob job = ChunkDecorationExecutor.finished.poll();
++
++            if (job != null) {
++                --ChunkDecorationExecutor.inFlight;
++                complete(job);
++            } else {
++                Thread.yield();
++            }
++        }
++    }
++
++    private static void complete(ChunkPopulateJob job) {
++        if (job.buffer.hasEscaped()) {
++            // The sandbox could not finish it; do the whole decoration here, against the real world.
++            // The abandoned attempt drew from the sequence, so put it back first.
++            job.buffer.reset();
++            job.random.restore(job.randomAtDecoration);
++            job.generator.decorate(job);
++        } else {
++            BlockFalling.instaFall = true; // vanilla held this across the whole of populate
++
++            try {
++                job.buffer.apply();
++            } finally {
++                BlockFalling.instaFall = false;
++            }
++        }
++
++        job.generator.finishPopulate(job);
++        job.completion.run();
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/ChunkPopulateJob.java b/src/main/java/net/minecraft/server/ChunkPopulateJob.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b5928fe1fe7bc18bff6fd24511f426d65ffa14c
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/ChunkPopulateJob.java
+@@ -0,0 +1,62 @@
++package net.minecraft.server;
++
++import java.util.Random;
++
++// Athena start - one chunk's population, carried between the server thread and the decorating one.
++//
++// It exists because populate used to be a single call that kept all its state in locals and in the
++// generator's own Random. Splitting it in three means that state has to live somewhere; the Random
++// in particular has to be per-job, or a second chunk starting on the server thread would move the
++// sequence out from under a decoration still running.
++//
++// That is safe to do because vanilla reseeds the generator's Random from the chunk coordinates at
++// the top of every populate, so nothing was ever carried between chunks.
++public class ChunkPopulateJob {
++
++    public final ChunkProviderGenerate generator;
++    public final WorldServer world;
++    public final int chunkX;
++    public final int chunkZ;
++    public final int originX;
++    public final int originZ;
++    public final SnapshotRandom random;
++    /** Where the sequence stood when decoration began, so an abandoned attempt can be redone. */
++    public final long randomAtDecoration;
++    public final BiomeBase biome;
++    public final ChunkDecorationBuffer buffer;
++
++    /** What the server thread runs once the decoration has been replayed. */
++    public Runnable completion;
++
++    public ChunkPopulateJob(ChunkProviderGenerate generator, World world, int chunkX, int chunkZ, SnapshotRandom random, BiomeBase biome, BlockPosition origin) {
++        this.generator = generator;
++        this.world = (WorldServer) world;
++        this.chunkX = chunkX;
++        this.chunkZ = chunkZ;
++        this.originX = origin.getX();
++        this.originZ = origin.getZ();
++        this.random = random;
++        this.randomAtDecoration = random.snapshot();
++        this.biome = biome;
++        this.buffer = new ChunkDecorationBuffer(this.world);
++    }
++
++    /**
++     * Takes references to every chunk the decoration is allowed to touch. Decoration writes into the
++     * 2x2 of chunks starting at this one, and a feature at the far edge can reach a little past it,
++     * so a ring is taken as well. A chunk that is not loaded is left out, which is what the world
++     * itself does during population - it hands back the empty chunk and the write is dropped.
++     */
++    public void captureChunks(ChunkProviderServer provider) {
++        for (int x = this.chunkX - 1; x <= this.chunkX + 2; ++x) {
++            for (int z = this.chunkZ - 1; z <= this.chunkZ + 2; ++z) {
++                Chunk chunk = provider.getChunkIfLoaded(x, z);
++
++                if (chunk != null) {
++                    this.buffer.capture(chunk);
++                }
++            }
++        }
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index 3a05c24f57777a6c0569530fa7f51e67ecef0646..68cf800dbd4fb8c2efc640452549562302cb04c0 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -384,77 +384,111 @@ public class ChunkProviderGenerate implements IChunkProvider {
+         return true;
+     }
+ 
+-    public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
++    // Athena start - populate, split at the point decoration begins.
++    //
++    // Structures, lakes and dungeons stay on the server thread: they create tile entities and
++    // entities, and they are a rounding error next to decoration. Decoration - ores, trees, plants -
++    // is three quarters of the cost and touches neither, so it is the piece that leaves.
++    //
++    // The vanilla method used this.rand throughout. It is reseeded from the chunk coordinates at the
++    // top of every populate, so nothing carries between chunks and a job-local Random is exactly
++    // equivalent - and it is what lets one chunk's decoration outlive the call that started it.
++    public ChunkPopulateJob beginPopulate(int i, int j) {
+         BlockFalling.instaFall = true;
+         int k = i * 16;
+         int l = j * 16;
+         BlockPosition blockposition = new BlockPosition(k, 0, l);
+         BiomeBase biomebase = this.worldObj.getBiome(blockposition.add(16, 0, 16));
++        SnapshotRandom random = new SnapshotRandom(this.worldObj.getSeed()); // Athena - job-local and rewindable, see above
+ 
+-        this.rand.setSeed(this.worldObj.getSeed());
+-        long i1 = this.rand.nextLong() / 2L * 2L + 1L;
+-        long j1 = this.rand.nextLong() / 2L * 2L + 1L;
++        long i1 = random.nextLong() / 2L * 2L + 1L;
++        long j1 = random.nextLong() / 2L * 2L + 1L;
+ 
+-        this.rand.setSeed((long) i * i1 + (long) j * j1 ^ this.worldObj.getSeed());
++        random.setSeed((long) i * i1 + (long) j * j1 ^ this.worldObj.getSeed());
+         boolean flag = false;
+         ChunkCoordIntPair chunkcoordintpair = new ChunkCoordIntPair(i, j);
+ 
+         if (this.settings.useMineShafts && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateMineshaft) { // PaperSpigot
+-            this.mineshaftGenerator.generateStructure(this.worldObj, this.rand, chunkcoordintpair);
++            this.mineshaftGenerator.generateStructure(this.worldObj, random, chunkcoordintpair);
+         }
+ 
+         if (this.settings.useVillages && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateVillage) { // PaperSpigot
+-            flag = this.villageGenerator.generateStructure(this.worldObj, this.rand, chunkcoordintpair);
++            flag = this.villageGenerator.generateStructure(this.worldObj, random, chunkcoordintpair);
+         }
+ 
+         if (this.settings.useStrongholds && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateStronghold) { // PaperSpigot
+-            this.strongholdGenerator.generateStructure(this.worldObj, this.rand, chunkcoordintpair);
++            this.strongholdGenerator.generateStructure(this.worldObj, random, chunkcoordintpair);
+         }
+ 
+         if (this.settings.useTemples && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateTemple) { // PaperSpigot
+-            this.scatteredFeatureGenerator.generateStructure(this.worldObj, this.rand, chunkcoordintpair);
++            this.scatteredFeatureGenerator.generateStructure(this.worldObj, random, chunkcoordintpair);
+         }
+ 
+         if (this.settings.useMonuments && this.mapFeaturesEnabled && this.worldObj.paperSpigotConfig.generateMonument) { // PaperSpigot
+-            this.oceanMonumentGenerator.generateStructure(this.worldObj, this.rand, chunkcoordintpair);
++            this.oceanMonumentGenerator.generateStructure(this.worldObj, random, chunkcoordintpair);
+         }
+ 
+         int k1;
+         int l1;
+         int i2;
+ 
+-        if (biomebase != BiomeBase.DESERT && biomebase != BiomeBase.DESERT_HILLS && this.settings.useWaterLakes && !flag && this.rand.nextInt(this.settings.waterLakeChance) == 0) {
+-            k1 = this.rand.nextInt(16) + 8;
+-            l1 = this.rand.nextInt(256);
+-            i2 = this.rand.nextInt(16) + 8;
+-            (new WorldGenLakes(Blocks.WATER)).generate(this.worldObj, this.rand, blockposition.add(k1, l1, i2));
++        if (biomebase != BiomeBase.DESERT && biomebase != BiomeBase.DESERT_HILLS && this.settings.useWaterLakes && !flag && random.nextInt(this.settings.waterLakeChance) == 0) {
++            k1 = random.nextInt(16) + 8;
++            l1 = random.nextInt(256);
++            i2 = random.nextInt(16) + 8;
++            (new WorldGenLakes(Blocks.WATER)).generate(this.worldObj, random, blockposition.add(k1, l1, i2));
+         }
+ 
+-        if (!flag && this.rand.nextInt(this.settings.lavaLakeChance / 10) == 0 && this.settings.useLavaLakes) {
+-            k1 = this.rand.nextInt(16) + 8;
+-            l1 = this.rand.nextInt(this.rand.nextInt(248) + 8);
+-            i2 = this.rand.nextInt(16) + 8;
+-            if (l1 < this.worldObj.getSeaLevel() || this.rand.nextInt(this.settings.lavaLakeChance / 8) == 0) {
+-                (new WorldGenLakes(Blocks.LAVA)).generate(this.worldObj, this.rand, blockposition.add(k1, l1, i2));
++        if (!flag && random.nextInt(this.settings.lavaLakeChance / 10) == 0 && this.settings.useLavaLakes) {
++            k1 = random.nextInt(16) + 8;
++            l1 = random.nextInt(random.nextInt(248) + 8);
++            i2 = random.nextInt(16) + 8;
++            if (l1 < this.worldObj.getSeaLevel() || random.nextInt(this.settings.lavaLakeChance / 8) == 0) {
++                (new WorldGenLakes(Blocks.LAVA)).generate(this.worldObj, random, blockposition.add(k1, l1, i2));
+             }
+         }
+ 
+         if (this.settings.useDungeons && this.worldObj.paperSpigotConfig.generateDungeon) { // PaperSpigot
+             for (k1 = 0; k1 < this.settings.dungeonChance; ++k1) {
+-                l1 = this.rand.nextInt(16) + 8;
+-                i2 = this.rand.nextInt(256);
+-                int j2 = this.rand.nextInt(16) + 8;
++                l1 = random.nextInt(16) + 8;
++                i2 = random.nextInt(256);
++                int j2 = random.nextInt(16) + 8;
+ 
+-                (new WorldGenDungeons()).generate(this.worldObj, this.rand, blockposition.add(l1, i2, j2));
++                (new WorldGenDungeons()).generate(this.worldObj, random, blockposition.add(l1, i2, j2));
+             }
+         }
+ 
+-        biomebase.decorate(this.worldObj, this.rand, new BlockPosition(k, 0, l));
+-        SpawnerCreature.performWorldGenSpawning(this.worldObj, biomebase, k + 8, l + 8, 16, 16, this.rand);
+-        blockposition = blockposition.add(8, 0, 8);
++        BlockFalling.instaFall = false;
++        return new ChunkPopulateJob(this, this.worldObj, i, j, random, biomebase, blockposition);
++    }
++
++    /** The half that leaves the server thread. Writes land in the job's buffer, not the world. */
++    public void decorate(ChunkPopulateJob job) {
++        // Vanilla held instaFall across the whole of populate. Off the server thread nothing is
++        // placed, so it does not matter there; inline it does, and the replay sets it as well.
++        BlockFalling.instaFall = true;
++
++        try {
++            job.biome.decorate(this.worldObj, job.random, new BlockPosition(job.originX, 0, job.originZ));
++        } finally {
++            BlockFalling.instaFall = false;
++        }
++    }
+ 
+-        for (k1 = 0; k1 < 16; ++k1) {
+-            for (l1 = 0; l1 < 16; ++l1) {
++    /**
++     * The tail, back on the server thread once the decoration has been replayed: the animals a new
++     * chunk starts with, then the ice and snow that settle on whatever is now standing there.
++     */
++    public void finishPopulate(ChunkPopulateJob job) {
++        BlockFalling.instaFall = true;
++        int k = job.originX;
++        int l = job.originZ;
++
++        SpawnerCreature.performWorldGenSpawning(this.worldObj, job.biome, k + 8, l + 8, 16, 16, job.random);
++        BlockPosition blockposition = new BlockPosition(k, 0, l).add(8, 0, 8);
++
++        for (int k1 = 0; k1 < 16; ++k1) {
++            for (int l1 = 0; l1 < 16; ++l1) {
+                 BlockPosition blockposition1 = this.worldObj.getPrecipitationHeight(blockposition.add(k1, 0, l1));
+                 BlockPosition blockposition2 = blockposition1.down();
+ 
+@@ -471,6 +505,16 @@ public class ChunkProviderGenerate implements IChunkProvider {
+         BlockFalling.instaFall = false;
+     }
+ 
++    public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
++        // The three stages back to back - what the server thread does when decoration is not deferred.
++        ChunkPopulateJob job = this.beginPopulate(i, j);
++
++        this.decorate(job);
++        this.finishPopulate(job);
++    }
++    // Athena end
++
++
+     public boolean populateChunk(IChunkProvider ichunkprovider, Chunk chunk, int i, int j) {
+         boolean flag = false;
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 947dcda21dc1277cc5c90d49f3494cc6e2bdd16d..3d4ab45239bb7155009f69973d52e240029cb002 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -511,42 +511,79 @@ public class ChunkProviderServer implements IChunkProvider {
+         }
+     }
+ 
+-    public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
+-        Chunk chunk = this.getOrCreateChunk(i, j);
++    public void getChunkAt(IChunkProvider ichunkprovider, final int i, final int j) {
++        final Chunk chunk = this.getOrCreateChunk(i, j);
+ 
+         if (!chunk.isDone()) {
+             chunk.n();
+             if (this.chunkProvider != null) {
++                // Athena start - hand the decoration half to the decoration thread. Structures,
++                // lakes and dungeons have already run on this thread inside beginPopulate; the
++                // populators and the event run in finishPopulate once the decoration is replayed.
++                if (this.asyncDecorationEnabled()) {
++                    ChunkPopulateJob job = this.shapingGenerator.beginPopulate(i, j);
++
++                    job.captureChunks(this);
++                    chunk.decorationPending = true; // this chunk must not unload before the replay
++                    job.completion = new Runnable() {
++                        public void run() {
++                            chunk.decorationPending = false;
++                            ChunkProviderServer.this.finishPopulate(chunk);
++                        }
++                    };
++                    ChunkDecorationExecutor.queue(job);
++                    if (System.getProperty("athena.decorFlush") != null) ChunkDecorationExecutor.flush(); // ATHENA-TEMP-VERIFY
++                    return;
++                }
++                // Athena end
++
+                 this.chunkProvider.getChunkAt(ichunkprovider, i, j);
++                this.finishPopulate(chunk); // Athena - was inline here
++            }
++        }
+ 
+-                // CraftBukkit start
+-                BlockSand.instaFall = true;
+-                Random random = new Random();
+-                random.setSeed(world.getSeed());
+-                long xRand = random.nextLong() / 2L * 2L + 1L;
+-                long zRand = random.nextLong() / 2L * 2L + 1L;
+-                random.setSeed((long) i * xRand + (long) j * zRand ^ world.getSeed());
+-
+-                org.bukkit.World world = this.world.getWorld();
+-                if (world != null) {
+-                    this.world.populating = true;
+-                    try {
+-                        for (org.bukkit.generator.BlockPopulator populator : world.getPopulators()) {
+-                            populator.populate(world, random, chunk.bukkitChunk);
+-                        }
+-                    } finally {
+-                        this.world.populating = false;
+-                    }
++    }
++
++    // Athena start - the tail of population: plugin block populators, then the event. Split out so
++    // that the deferred path runs it at the same point in the sequence, just later in wall time.
++    private void finishPopulate(Chunk chunk) {
++        // CraftBukkit start
++        BlockSand.instaFall = true;
++        Random random = new Random();
++        random.setSeed(world.getSeed());
++        long xRand = random.nextLong() / 2L * 2L + 1L;
++        long zRand = random.nextLong() / 2L * 2L + 1L;
++        random.setSeed((long) chunk.locX * xRand + (long) chunk.locZ * zRand ^ world.getSeed());
++
++        org.bukkit.World world = this.world.getWorld();
++        if (world != null) {
++            this.world.populating = true;
++            try {
++                for (org.bukkit.generator.BlockPopulator populator : world.getPopulators()) {
++                    populator.populate(world, random, chunk.bukkitChunk);
+                 }
+-                BlockSand.instaFall = false;
+-                this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.world.ChunkPopulateEvent(chunk.bukkitChunk));
+-                // CraftBukkit end
+-                
+-                chunk.setChunkModified();
++            } finally {
++                this.world.populating = false;
+             }
+         }
++        BlockSand.instaFall = false;
++        this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.world.ChunkPopulateEvent(chunk.bukkitChunk));
++        // CraftBukkit end
++
++        chunk.setChunkModified();
++    }
++
++    private Boolean asyncDecoration; // decided once, on the server thread
++
++    private boolean asyncDecorationEnabled() {
++        if (this.asyncDecoration == null) {
++            this.asyncDecoration = this.world.pandaSpigotConfig.asyncChunkDecoration
++                    && this.asyncShapingEnabled(); // same generator and same world requirements
++        }
+ 
++        return this.asyncDecoration;
+     }
++    // Athena end
+ 
+     public boolean populateChunk(IChunkProvider ichunkprovider, Chunk chunk, int i, int j) {
+         if (this.chunkProvider != null && this.chunkProvider.populateChunk(ichunkprovider, chunk, i, j)) {
+@@ -560,6 +597,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public boolean saveChunks(boolean flag, IProgressUpdate iprogressupdate) {
++        ChunkDecorationExecutor.flush(); // Athena - a chunk must never reach disk with its decoration still queued
+         int i = 0;
+ 
+         // CraftBukkit start
+@@ -600,6 +638,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                 long chunkcoordinates = this.unloadQueue.popFirst();
+                 Chunk chunk = this.chunks.get(chunkcoordinates);
+                 if (chunk == null) continue;
++                if (chunk.decorationPending) continue; // Athena - a decoration is still on its way to this chunk
+ 
+                 ChunkUnloadEvent event = new ChunkUnloadEvent(chunk.bukkitChunk);
+                 server.getPluginManager().callEvent(event);
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index d4dd7ac2c0a4be1bb403b605936314d78aed698d..23e430f898d0185f72e8ebf87da052e79e6b9bf0 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -849,6 +849,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         SpigotTimings.chunkIOTickTimer.startTiming(); // Spigot
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick();
+         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(); // Athena - hand finished chunk shapes back to the server thread
++        ChunkDecorationExecutor.tick(); // Athena - and finished chunk decorations
+         SpigotTimings.chunkIOTickTimer.stopTiming(); // Spigot
+ 
+         SpigotTimings.timeUpdateTimer.startTiming(); // Spigot
+diff --git a/src/main/java/net/minecraft/server/SnapshotRandom.java b/src/main/java/net/minecraft/server/SnapshotRandom.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd8269f8d37f12b334a3b482839bf9bd34fd72d8
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/SnapshotRandom.java
+@@ -0,0 +1,56 @@
++package net.minecraft.server;
++
++import java.util.Random;
++
++// Athena start - a java.util.Random whose position in the sequence can be taken and put back.
++//
++// Decoration runs off the server thread against a sandbox, and if the sandbox hits something it
++// cannot model the job is thrown away and the server thread decorates instead. That only produces
++// the same world if the second attempt starts from the same place in the random sequence as the
++// first - and by then the abandoned attempt has already drawn from it.
++//
++// java.util.Random keeps its position in a private field, so it is reimplemented here. This is the
++// exact algorithm from java.util.Random: the same 48-bit linear congruential generator, the same
++// scramble in setSeed, the same shift in next(bits). Every other method - nextInt, nextDouble,
++// nextLong - is inherited and defined in terms of next(bits), so they all follow.
++//
++// nextGaussian is the one exception: it caches a second value in a superclass field this class
++// cannot see, so a snapshot taken between the two draws of a pair would be incomplete. No
++// decoration draws one.
++public class SnapshotRandom extends Random {
++
++    private static final long MULTIPLIER = 0x5DEECE66DL;
++    private static final long ADDEND = 0xBL;
++    private static final long MASK = (1L << 48) - 1;
++
++    private long state;
++
++    public SnapshotRandom(long seed) {
++        super(0L); // the superclass seed is never used; next(int) below is the only source
++        this.setSeed(seed);
++    }
++
++    @Override
++    public void setSeed(long seed) {
++        // Called from the superclass constructor before this class is initialised, which is safe
++        // here because the only field it touches is a long that is already zeroed.
++        this.state = (seed ^ SnapshotRandom.MULTIPLIER) & SnapshotRandom.MASK;
++    }
++
++    @Override
++    protected int next(int bits) {
++        this.state = (this.state * SnapshotRandom.MULTIPLIER + SnapshotRandom.ADDEND) & SnapshotRandom.MASK;
++        return (int) (this.state >>> (48 - bits));
++    }
++
++    /** The current position in the sequence. */
++    public long snapshot() {
++        return this.state;
++    }
++
++    /** Puts the sequence back where {@link #snapshot()} was taken. */
++    public void restore(long snapshot) {
++        this.state = snapshot;
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index f8bdecc30b95bd9a8aa8a8e660c255c2e60a2626..a8cfffc7b4a478bf519673fc23111e55df6ef137 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -169,6 +169,16 @@ public abstract class World implements IBlockAccess {
+     public final org.github.paperspigot.PaperSpigotWorldConfig paperSpigotConfig; // PaperSpigot
+ 
+     public com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig pandaSpigotConfig; // PandaSpigot
++    // Athena start - while a chunk decorates off the server thread, that thread's world calls are
++    // answered from a sandbox instead of the live world. The check is a field load and a compare
++    // against the current thread, which is false for the server thread on every call.
++    public Thread decorationThread;
++    public ChunkDecorationBuffer decorationBuffer;
++
++    private boolean decorating() {
++        return this.decorationThread == Thread.currentThread();
++    }
++    // Athena end
+ 
+     public final co.aikar.timings.WorldTimingsHandler timings; // Spigot
+ 
+@@ -395,10 +405,12 @@ public abstract class World implements IBlockAccess {
+     // PandaSpigot end
+ 
+     public Chunk getChunkAt(int i, int j) {
++        if (this.decorating()) return this.decorationBuffer.chunkAt(i, j); // Athena
+         return this.chunkProvider.getOrCreateChunk(i, j);
+     }
+ 
+     public boolean setTypeAndData(BlockPosition blockposition, IBlockData iblockdata, int i) {
++        if (this.decorating()) return this.decorationBuffer.setType(blockposition, iblockdata, i); // Athena
+         // CraftBukkit start - tree generation
+         if (this.captureTreeGeneration) {
+             BlockState blockstate = null;
+@@ -797,6 +809,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public BlockPosition getHighestBlockYAt(BlockPosition blockposition) {
++        if (this.decorating()) return new BlockPosition(blockposition.getX(), this.decorationBuffer.highestBlockY(blockposition.getX(), blockposition.getZ()), blockposition.getZ()); // Athena
+         int i;
+ 
+         if (blockposition.getX() >= -30000000 && blockposition.getZ() >= -30000000 && blockposition.getX() < 30000000 && blockposition.getZ() < 30000000) {
+@@ -1009,6 +1022,7 @@ public abstract class World implements IBlockAccess {
+         return this.getType(blockposition.getX(), blockposition.getY(), blockposition.getZ(), useCaptured);
+     }
+     public IBlockData getType(int x, int y, int z, boolean useCaptured) {
++        if (this.decorating()) return this.decorationBuffer.getType(x, y, z); // Athena
+         // CraftBukkit start - tree generation
+         if (captureTreeGeneration && useCaptured) {
+     // Spigot end
+@@ -1819,6 +1833,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public BlockPosition getPrecipitationHeight(BlockPosition blockposition) {
++        if (this.decorating()) return this.decorationBuffer.precipitationHeight(blockposition); // Athena
+         return this.getChunkAtWorldCoords(blockposition).getPrecipitationHeight(blockposition);
+     }
+ 
+@@ -1828,6 +1843,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public BlockPosition getTopSolidOrLiquidBlock(BlockPosition blockposition) {
++        if (this.decorating()) return this.decorationBuffer.topSolidOrLiquidBlock(blockposition); // Athena
+         Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+ 
+         BlockPosition blockposition1;

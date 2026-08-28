@@ -1,0 +1,398 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 13:05:31 +0900
+Subject: [PATCH] Give the biome generation scratch state a thread each
+
+IntCache handed the same int[] to two threads: resetIntCache() moves every
+in-use array onto the free lists, so one thread's working array becomes the
+next caller's. Each thread gets its own cache now, which cannot change what
+GenLayer produces because it treats the arrays as scratch it always fully
+overwrites.
+
+BiomeBigHills, BiomeSavanna and BiomeTaiga chose their surface blocks by
+writing topBlock/fillerBlock on the shared biome singleton and reading them
+back. That choice is per-thread now. It has to keep working the same way and
+not simply become a local, because WorldGenCaves and WorldGenCanyon read the
+current value when they floor a carved opening - the last column shaped in a
+chunk decides the cave floor, and every column of a chunk plus its carving run
+on one thread in the original order.
+
+BiomeMesa built its noise tables lazily into fields of the shared singleton
+with no lock, which would let one thread read half-published arrays.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BiomeBase.java b/src/main/java/net/minecraft/server/BiomeBase.java
+index e7e48fda03f758d528893f1eebeff103eb1ae904..edfef87cd9e0629899bfd8e7592600a20455a2c9 100644
+--- a/src/main/java/net/minecraft/server/BiomeBase.java
++++ b/src/main/java/net/minecraft/server/BiomeBase.java
+@@ -264,14 +264,67 @@ public abstract class BiomeBase {
+         return this.enableSnow;
+     }
+ 
++    // Athena start - per-thread terrain-shaping block choice.
++    //
++    // BiomeBigHills, BiomeSavanna and BiomeTaiga pick their surface and filler blocks from the
++    // stone noise of the column being shaped, and used to do it by writing topBlock/fillerBlock on
++    // the biome singleton and reading them back a few lines later. Those singletons are shared by
++    // every world and every thread, so with shaping running on a worker two chunks in the same
++    // biome would interleave a write and a read and lay down the wrong surface.
++    //
++    // The choice is now per-thread. That is not just thread safety, it is what keeps the terrain
++    // identical: WorldGenCaves and WorldGenCanyon read the *current* value when they floor a
++    // carved opening, so the quirk that the last column shaped in a chunk decides the cave floor
++    // has to survive. All 256 columns of a chunk and the carving that follows them run on one
++    // thread in the original order, so each thread sees exactly the sequence the server thread
++    // used to see on its own.
++    //
++    // topBlock/fillerBlock themselves are now written only by constructors, and stay the fallback
++    // for any thread that has not shaped a column of this biome.
++    private static final class ShapingBlocks {
++
++        IBlockData top;
++        IBlockData filler;
++    }
++
++    private final ThreadLocal<BiomeBase.ShapingBlocks> shapingBlocks = new ThreadLocal<BiomeBase.ShapingBlocks>();
++
++    protected final void setShapingBlocks(IBlockData iblockdata, IBlockData iblockdata1) {
++        BiomeBase.ShapingBlocks shapingblocks = this.shapingBlocks.get();
++
++        if (shapingblocks == null) {
++            shapingblocks = new BiomeBase.ShapingBlocks();
++            this.shapingBlocks.set(shapingblocks);
++        }
++
++        shapingblocks.top = iblockdata;
++        shapingblocks.filler = iblockdata1;
++    }
++
++    public final IBlockData getShapingTopBlock() {
++        BiomeBase.ShapingBlocks shapingblocks = this.shapingBlocks.get();
++
++        return shapingblocks == null ? this.topBlock : shapingblocks.top;
++    }
++
++    public final IBlockData getShapingFillerBlock() {
++        BiomeBase.ShapingBlocks shapingblocks = this.shapingBlocks.get();
++
++        return shapingblocks == null ? this.fillerBlock : shapingblocks.filler;
++    }
++    // Athena end
++
+     public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+         this.generateBiomeTerrain(world, random, chunksnapshot, i, j, d0);
+     }
+ 
+     public final void generateBiomeTerrain(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+         int k = world.getSeaLevel();
+-        IBlockData iblockdata = this.topBlock;
+-        IBlockData iblockdata1 = this.fillerBlock;
++        // Athena - resolve the per-thread shaping choice once; it is read again inside the column scan
++        IBlockData shapingTop = this.getShapingTopBlock();
++        IBlockData shapingFiller = this.getShapingFillerBlock();
++        IBlockData iblockdata = shapingTop;
++        IBlockData iblockdata1 = shapingFiller;
+         int l = -1;
+         int i1 = (int) (d0 / 3.0D + 3.0D + random.nextDouble() * 0.25D);
+         int j1 = i & 15;
+@@ -297,8 +350,8 @@ public abstract class BiomeBase {
+                             iblockdata = null;
+                             iblockdata1 = stone; // Athena - hoisted
+                         } else if (l1 >= k - 4 && l1 <= k + 1) {
+-                            iblockdata = this.topBlock;
+-                            iblockdata1 = this.fillerBlock;
++                            iblockdata = shapingTop; // Athena - per-thread shaping choice
++                            iblockdata1 = shapingFiller; // Athena - per-thread shaping choice
+                         }
+ 
+                         if (l1 < k && (iblockdata == null || iblockdata.getBlock().getMaterial() == Material.AIR)) {
+diff --git a/src/main/java/net/minecraft/server/BiomeBigHills.java b/src/main/java/net/minecraft/server/BiomeBigHills.java
+index 31517c92ab47d8e7370a953c5423af8230a2b779..05637da8af2703c1b1b5254b2ac182fb38f5bebf 100644
+--- a/src/main/java/net/minecraft/server/BiomeBigHills.java
++++ b/src/main/java/net/minecraft/server/BiomeBigHills.java
+@@ -60,16 +60,20 @@ public class BiomeBigHills extends BiomeBase {
+ 
+     @Override
+     public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+-        this.topBlock = Blocks.GRASS.getBlockData();
+-        this.fillerBlock = Blocks.DIRT.getBlockData();
++        // Athena - was writing the shared biome singleton; the choice is per-thread now
++        IBlockData top = Blocks.GRASS.getBlockData();
++        IBlockData filler = Blocks.DIRT.getBlockData();
++
+         if ((d0 < -1.0D || d0 > 2.0D) && this.aI == this.aH) {
+-            this.topBlock = Blocks.GRAVEL.getBlockData();
+-            this.fillerBlock = Blocks.GRAVEL.getBlockData();
++            top = Blocks.GRAVEL.getBlockData();
++            filler = Blocks.GRAVEL.getBlockData();
+         } else if (d0 > 1.0D && this.aI != this.aG) {
+-            this.topBlock = Blocks.STONE.getBlockData();
+-            this.fillerBlock = Blocks.STONE.getBlockData();
++            top = Blocks.STONE.getBlockData();
++            filler = Blocks.STONE.getBlockData();
+         }
+ 
++        this.setShapingBlocks(top, filler);
++
+         this.generateBiomeTerrain(world, random, chunksnapshot, i, j, d0);
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BiomeMesa.java b/src/main/java/net/minecraft/server/BiomeMesa.java
+index 5d46c80cb906c3d8f38faa44d746e37d66650268..cc2fd3fde89150a1bf45020a54454c1ec63265d1 100644
+--- a/src/main/java/net/minecraft/server/BiomeMesa.java
++++ b/src/main/java/net/minecraft/server/BiomeMesa.java
+@@ -43,19 +43,32 @@ public class BiomeMesa extends BiomeBase {
+         super.decorate(world, random, blockposition);
+     }
+ 
+-    public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+-        if (this.aD == null || this.aE != world.getSeed()) {
+-            this.a(world.getSeed());
+-        }
++    // Athena start - the noise tables below are built lazily into fields of this shared biome
++    // singleton. With shaping running on several threads, two of them could enter the build at once
++    // and one would read half-published arrays. The build is once per seed, so a lock costs nothing;
++    // taking it on every call is also what makes the arrays visible to the reading thread.
++    private final Object noiseLock = new Object();
++
++    private void ensureNoiseTables(long seed) {
++        synchronized (this.noiseLock) {
++            if (this.aD == null || this.aE != seed) {
++                this.a(seed);
++            }
+ 
+-        if (this.aF == null || this.aG == null || this.aE != world.getSeed()) {
+-            Random random1 = new Random(this.aE);
++            if (this.aF == null || this.aG == null || this.aE != seed) {
++                Random random1 = new Random(this.aE);
+ 
+-            this.aF = new NoiseGenerator3(random1, 4);
+-            this.aG = new NoiseGenerator3(random1, 1);
++                this.aF = new NoiseGenerator3(random1, 4);
++                this.aG = new NoiseGenerator3(random1, 1);
++            }
++
++            this.aE = seed;
+         }
++    }
++    // Athena end
+ 
+-        this.aE = world.getSeed();
++    public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
++        this.ensureNoiseTables(world.getSeed()); // Athena - see above
+         double d1 = 0.0D;
+         int k;
+         int l;
+diff --git a/src/main/java/net/minecraft/server/BiomeSavanna.java b/src/main/java/net/minecraft/server/BiomeSavanna.java
+index 584ab4d674ace4223d0c4e042b9b41e2de65f9bc..70240e093a6b1161ee5b1e1d7546070990f6b274 100644
+--- a/src/main/java/net/minecraft/server/BiomeSavanna.java
++++ b/src/main/java/net/minecraft/server/BiomeSavanna.java
+@@ -56,15 +56,19 @@ public class BiomeSavanna extends BiomeBase {
+ 
+         @Override
+         public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+-            this.topBlock = Blocks.GRASS.getBlockData();
+-            this.fillerBlock = Blocks.DIRT.getBlockData();
++            // Athena - was writing the shared biome singleton; the choice is per-thread now
++            IBlockData top = Blocks.GRASS.getBlockData();
++            IBlockData filler = Blocks.DIRT.getBlockData();
++
+             if (d0 > 1.75D) {
+-                this.topBlock = Blocks.STONE.getBlockData();
+-                this.fillerBlock = Blocks.STONE.getBlockData();
++                top = Blocks.STONE.getBlockData();
++                filler = Blocks.STONE.getBlockData();
+             } else if (d0 > -0.5D) {
+-                this.topBlock = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.COARSE_DIRT);
++                top = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.COARSE_DIRT);
+             }
+ 
++            this.setShapingBlocks(top, filler);
++
+             this.generateBiomeTerrain(world, random, chunksnapshot, i, j, d0);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/BiomeTaiga.java b/src/main/java/net/minecraft/server/BiomeTaiga.java
+index 3727287f9cad18442b91ca5f3448a85c59fec022..994c1ddcc6ca803b895d2fee9b3a3598cd568839 100644
+--- a/src/main/java/net/minecraft/server/BiomeTaiga.java
++++ b/src/main/java/net/minecraft/server/BiomeTaiga.java
+@@ -68,13 +68,17 @@ public class BiomeTaiga extends BiomeBase {
+     @Override
+     public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+         if (this.aI == 1 || this.aI == 2) {
+-            this.topBlock = Blocks.GRASS.getBlockData();
+-            this.fillerBlock = Blocks.DIRT.getBlockData();
++            // Athena - was writing the shared biome singleton; the choice is per-thread now
++            IBlockData top = Blocks.GRASS.getBlockData();
++            IBlockData filler = Blocks.DIRT.getBlockData();
++
+             if (d0 > 1.75D) {
+-                this.topBlock = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.COARSE_DIRT);
++                top = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.COARSE_DIRT);
+             } else if (d0 > -0.95D) {
+-                this.topBlock = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.PODZOL);
++                top = Blocks.DIRT.getBlockData().set(BlockDirt.VARIANT, BlockDirt.EnumDirtVariant.PODZOL);
+             }
++
++            this.setShapingBlocks(top, filler);
+         }
+ 
+         this.generateBiomeTerrain(world, random, chunksnapshot, i, j, d0);
+diff --git a/src/main/java/net/minecraft/server/IntCache.java b/src/main/java/net/minecraft/server/IntCache.java
+index 10ee88878c95a6de38d613c0260ec4f2c27e4e43..fc439e432782f68b7270e8c6882ea9e4a0f10645 100644
+--- a/src/main/java/net/minecraft/server/IntCache.java
++++ b/src/main/java/net/minecraft/server/IntCache.java
+@@ -6,59 +6,94 @@ import java.util.List;
+ 
+ public class IntCache {
+ 
+-    private static int intCacheSize = 256;
+-    private static List<int[]> freeSmallArrays = Lists.newArrayList();
+-    private static List<int[]> inUseSmallArrays = Lists.newArrayList();
+-    private static List<int[]> freeLargeArrays = Lists.newArrayList();
+-    private static List<int[]> inUseLargeArrays = Lists.newArrayList();
++    // Athena start - give every thread its own scratch arrays.
++    //
++    // The lists below used to be static and shared. The `synchronized` kept them from being
++    // structurally corrupted, but it never made the *arrays* safe: resetIntCache() moves every
++    // in-use array back onto the free lists, so one thread calling it hands another thread's
++    // working array straight to the next caller. The biome data being generated in that array is
++    // then silently overwritten mid-flight.
++    //
++    // That is harmless while only the server thread runs GenLayer, and fatal the moment chunk
++    // shaping runs on a worker. A cache per thread removes the sharing entirely, and it cannot
++    // change what any generator produces: GenLayer treats these arrays as pure scratch and always
++    // writes every element it later reads, so the recycled contents were never observable.
++    //
++    // The methods stay static so that no call site has to change.
++    private static final class Cache {
+ 
+-    public static synchronized int[] getIntCache(int i) {
++        private int intCacheSize = 256;
++        private final List<int[]> freeSmallArrays = Lists.newArrayList();
++        private final List<int[]> inUseSmallArrays = Lists.newArrayList();
++        private final List<int[]> freeLargeArrays = Lists.newArrayList();
++        private final List<int[]> inUseLargeArrays = Lists.newArrayList();
++    }
++
++    private static final ThreadLocal<Cache> caches = new ThreadLocal<Cache>() {
++        @Override
++        protected Cache initialValue() {
++            return new Cache();
++        }
++    };
++
++    public static int[] getIntCache(int i) {
++        Cache cache = IntCache.caches.get();
+         int[] aint;
+ 
+         if (i <= 256) {
+-            if (IntCache.freeSmallArrays.isEmpty()) {
++            if (cache.freeSmallArrays.isEmpty()) {
+                 aint = new int[256];
+-                if (inUseSmallArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) IntCache.inUseSmallArrays.add(aint);
++                if (cache.inUseSmallArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) cache.inUseSmallArrays.add(aint);
+                 return aint;
+             } else {
+-                aint = (int[]) IntCache.freeSmallArrays.remove(IntCache.freeSmallArrays.size() - 1);
+-                if (inUseSmallArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) IntCache.inUseSmallArrays.add(aint);
++                aint = (int[]) cache.freeSmallArrays.remove(cache.freeSmallArrays.size() - 1);
++                if (cache.inUseSmallArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) cache.inUseSmallArrays.add(aint);
+                 return aint;
+             }
+-        } else if (i > IntCache.intCacheSize) {
+-            IntCache.intCacheSize = i;
+-            IntCache.freeLargeArrays.clear();
+-            IntCache.inUseLargeArrays.clear();
+-            aint = new int[IntCache.intCacheSize];
+-            if (inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) IntCache.inUseLargeArrays.add(aint);
++        } else if (i > cache.intCacheSize) {
++            cache.intCacheSize = i;
++            cache.freeLargeArrays.clear();
++            cache.inUseLargeArrays.clear();
++            aint = new int[cache.intCacheSize];
++            if (cache.inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) cache.inUseLargeArrays.add(aint);
+             return aint;
+-        } else if (IntCache.freeLargeArrays.isEmpty()) {
+-            aint = new int[IntCache.intCacheSize];
+-            if (inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) IntCache.inUseLargeArrays.add(aint);
++        } else if (cache.freeLargeArrays.isEmpty()) {
++            aint = new int[cache.intCacheSize];
++            if (cache.inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) cache.inUseLargeArrays.add(aint);
+             return aint;
+         } else {
+-            aint = (int[]) IntCache.freeLargeArrays.remove(IntCache.freeLargeArrays.size() - 1);
+-            if (inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) IntCache.inUseLargeArrays.add(aint);
++            aint = (int[]) cache.freeLargeArrays.remove(cache.freeLargeArrays.size() - 1);
++            if (cache.inUseLargeArrays.size() < org.spigotmc.SpigotConfig.intCacheLimit) cache.inUseLargeArrays.add(aint);
+             return aint;
+         }
+     }
+ 
+-    public static synchronized void resetIntCache() {
+-        if (!IntCache.freeLargeArrays.isEmpty()) {
+-            IntCache.freeLargeArrays.remove(IntCache.freeLargeArrays.size() - 1);
++    public static void resetIntCache() {
++        Cache cache = IntCache.caches.get();
++
++        if (!cache.freeLargeArrays.isEmpty()) {
++            cache.freeLargeArrays.remove(cache.freeLargeArrays.size() - 1);
+         }
+ 
+-        if (!IntCache.freeSmallArrays.isEmpty()) {
+-            IntCache.freeSmallArrays.remove(IntCache.freeSmallArrays.size() - 1);
++        if (!cache.freeSmallArrays.isEmpty()) {
++            cache.freeSmallArrays.remove(cache.freeSmallArrays.size() - 1);
+         }
+ 
+-        IntCache.freeLargeArrays.addAll(IntCache.inUseLargeArrays);
+-        IntCache.freeSmallArrays.addAll(IntCache.inUseSmallArrays);
+-        IntCache.inUseLargeArrays.clear();
+-        IntCache.inUseSmallArrays.clear();
++        cache.freeLargeArrays.addAll(cache.inUseLargeArrays);
++        cache.freeSmallArrays.addAll(cache.inUseSmallArrays);
++        cache.inUseLargeArrays.clear();
++        cache.inUseSmallArrays.clear();
++    }
++
++    /** Drops the calling thread's scratch arrays. Called when a shaping worker goes idle. */
++    public static void releaseIntCache() {
++        IntCache.caches.remove();
+     }
+ 
+-    public static synchronized String getCacheSizes() {
+-        return "cache: " + IntCache.freeLargeArrays.size() + ", tcache: " + IntCache.freeSmallArrays.size() + ", allocated: " + IntCache.inUseLargeArrays.size() + ", tallocated: " + IntCache.inUseSmallArrays.size();
++    public static String getCacheSizes() {
++        Cache cache = IntCache.caches.get();
++
++        return "cache: " + cache.freeLargeArrays.size() + ", tcache: " + cache.freeSmallArrays.size() + ", allocated: " + cache.inUseLargeArrays.size() + ", tallocated: " + cache.inUseSmallArrays.size();
+     }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/WorldGenCanyon.java b/src/main/java/net/minecraft/server/WorldGenCanyon.java
+index 7077d6e90193cbdeb1d9c874ed077ec399ddcec1..a17385f249a4d82ece0afee1b26e50a959bb2873 100644
+--- a/src/main/java/net/minecraft/server/WorldGenCanyon.java
++++ b/src/main/java/net/minecraft/server/WorldGenCanyon.java
+@@ -148,7 +148,7 @@ public class WorldGenCanyon extends WorldGenBase {
+                                                     chunksnapshot.setBlockState(i4, k4, j4, Blocks.AIR.getBlockData());
+                                                     if (flag2 && chunksnapshot.getBlockState(i4, k4 - 1, j4).getBlock() == Blocks.DIRT) {
+                                                         blockposition_mutableblockposition.set(i4 + j * 16, 0, j4 + k * 16);
+-                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).topBlock);
++                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).getShapingTopBlock()); // Athena - per-thread shaping choice
+                                                     }
+                                                 }
+                                             }
+diff --git a/src/main/java/net/minecraft/server/WorldGenCaves.java b/src/main/java/net/minecraft/server/WorldGenCaves.java
+index 2270ee44e4169e6348b8aa6e59bc548f67f2aaae..3f02c617126d207adfce60206a1b4f06986662d8 100644
+--- a/src/main/java/net/minecraft/server/WorldGenCaves.java
++++ b/src/main/java/net/minecraft/server/WorldGenCaves.java
+@@ -156,7 +156,7 @@ public class WorldGenCaves extends WorldGenBase {
+ 
+                                                     if (flag3 && chunksnapshot.getBlockState(i4, k4 - 1, j4).getBlock() == Blocks.DIRT) {
+                                                         blockposition_mutableblockposition.set(i4 + j * 16, 0, j4 + k * 16);
+-                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).topBlock.getBlock().getBlockData());
++                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).getShapingTopBlock().getBlock().getBlockData()); // Athena - per-thread shaping choice
+                                                     }
+                                                 }
+                                             }

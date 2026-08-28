@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 13:58:36 +0900
+Subject: [PATCH] Look through the generator wrapper when deciding to shape
+ off-thread
+
+ChunkProviderServer never holds the vanilla generator directly: CraftBukkit
+wraps it in NormalChunkGenerator, which forwards every call. The instanceof
+check therefore always failed and every world kept shaping on the server
+thread. Unwrapping it is what actually turns the feature on.
+
+Also logs once per world which way it went, and why, because "is it even
+running?" was not answerable from the outside.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index b6965f1a1b1b09e68c8fc72c2cf4a6a0a5c6b254..42794c49255775915bb06deba2a99518a18a3c8a 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -159,22 +159,46 @@ public class ChunkProviderServer implements IChunkProvider {
+     private final ThreadLocal<ChunkProviderGenerate> shapingCopies = new ThreadLocal<ChunkProviderGenerate>();
+     private final ConcurrentLinkedQueue<ChunkProviderGenerate> spareShapingCopies = new ConcurrentLinkedQueue<ChunkProviderGenerate>();
+     private Boolean asyncShaping; // decided once, on the server thread
++    private ChunkProviderGenerate shapingGenerator; // the real generator, unwrapped
++
++    /**
++     * The vanilla generator behind chunkProvider. CraftBukkit always hands ChunkProviderServer a
++     * NormalChunkGenerator, a wrapper that forwards to the real one, so the instanceof has to look
++     * through it. Anything else - a flat world, the nether, a plugin generator - has no shaping half
++     * to move and answers null.
++     */
++    private ChunkProviderGenerate resolveShapingGenerator() {
++        IChunkProvider provider = this.chunkProvider;
++
++        if (provider instanceof org.bukkit.craftbukkit.generator.NormalChunkGenerator) {
++            provider = ((org.bukkit.craftbukkit.generator.NormalChunkGenerator) provider).getDelegate();
++        }
++
++        return provider instanceof ChunkProviderGenerate ? (ChunkProviderGenerate) provider : null;
++    }
+ 
+     private boolean asyncShapingEnabled() {
+         if (this.asyncShaping == null) {
++            this.shapingGenerator = this.resolveShapingGenerator();
++
+             boolean enabled = this.world.pandaSpigotConfig.asyncChunkShaping
+-                    && this.chunkProvider instanceof ChunkProviderGenerate
++                    && this.shapingGenerator != null
+                     && this.world.generator == null // a plugin generator keeps generating on the server thread
+                     && this.world.getWorldChunkManager().getClass() == WorldChunkManager.class;
+ 
+             if (enabled) {
+                 // Built here, on the server thread, so that a worker never has to touch the world.
+                 for (int i = 0; i < 3; ++i) {
+-                    this.spareShapingCopies.add(((ChunkProviderGenerate) this.chunkProvider).createShapingCopy());
++                    this.spareShapingCopies.add(this.shapingGenerator.createShapingCopy());
+                 }
+             }
+ 
+             this.asyncShaping = enabled;
++            ChunkProviderServer.logger.info("[Athena] " + this.world.getWorld().getName() + ": chunk shaping is " + (enabled ? "off the server thread" : "on the server thread")
++                    + " (config=" + this.world.pandaSpigotConfig.asyncChunkShaping
++                    + ", generator=" + (this.shapingGenerator == null ? this.chunkProvider.getClass().getSimpleName() : this.shapingGenerator.getClass().getSimpleName())
++                    + ", pluginGenerator=" + (this.world.generator != null)
++                    + ", biomeSource=" + this.world.getWorldChunkManager().getClass().getSimpleName() + ")");
+         }
+ 
+         return this.asyncShaping;
+@@ -187,7 +211,7 @@ public class ChunkProviderServer implements IChunkProvider {
+         if (generator == null) {
+             generator = this.spareShapingCopies.poll();
+             if (generator == null) {
+-                generator = ((ChunkProviderGenerate) this.chunkProvider).createShapingCopy();
++                generator = this.shapingGenerator.createShapingCopy();
+             }
+ 
+             this.shapingCopies.set(generator);
+@@ -217,7 +241,7 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+         if (chunk == null) {
+             try {
+-                chunk = ((ChunkProviderGenerate) this.chunkProvider).finishChunk(i, j, chunkshape);
++                chunk = this.shapingGenerator.finishChunk(i, j, chunkshape);
+             } catch (Throwable throwable) {
+                 CrashReport crashreport = CrashReport.makeCrashReport(throwable, "Exception generating new chunk");
+                 CrashReportSystemDetails crashreportsystemdetails = crashreport.makeCategory("Chunk to be generated");
+diff --git a/src/main/java/org/bukkit/craftbukkit/generator/NormalChunkGenerator.java b/src/main/java/org/bukkit/craftbukkit/generator/NormalChunkGenerator.java
+index 627f25528b406a218e96663393955795fa23627b..6d94116cf4363d78969c8d5d07f4db1d7d8f4dc5 100644
+--- a/src/main/java/org/bukkit/craftbukkit/generator/NormalChunkGenerator.java
++++ b/src/main/java/org/bukkit/craftbukkit/generator/NormalChunkGenerator.java
+@@ -17,6 +17,11 @@ public class NormalChunkGenerator extends InternalChunkGenerator {
+         provider = world.worldProvider.getChunkProvider();
+     }
+ 
++    /** The generator this wrapper delegates to. Athena unwraps it to shape chunks off-thread. */
++    public IChunkProvider getDelegate() { // Athena
++        return this.provider;
++    }
++
+     @Override
+     public byte[] generate(org.bukkit.World world, Random random, int x, int z) {
+         throw new UnsupportedOperationException("Not supported.");

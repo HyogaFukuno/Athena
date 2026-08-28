@@ -1,0 +1,497 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 25 Aug 2026 13:13:26 +0900
+Subject: [PATCH] Shape brand new chunks on a worker thread
+
+New chunks now go through ChunkGenExecutor, built on the same AsynchronousExecutor
+that has been deferring chunk loads for years: stage 1 shapes the chunk on a
+worker, stage 2 finishes it on the server thread. The route in is the callback
+form of ChunkProviderServer.getChunkAt, which callers have always allowed to
+answer later, so none of them notice.
+
+A caller that needs the chunk immediately still goes through the queue, which
+joins a worker that has already started that chunk instead of shaping it twice.
+Population of a neighbour asks for exactly those chunks, so this is the common
+case, not a corner.
+
+Each shaping thread gets its own copy of the generator; three are built up front
+on the server thread so a worker never has to touch the world to make one. The
+carvers get the copy's own WorldChunkManager, because World.getBiome would
+otherwise read the chunk map and the shared BiomeCache from a worker - it
+answers the same thing, since the chunk being carved is never loaded yet.
+
+Worlds with a plugin chunk generator, and anything but a plain WorldChunkManager,
+keep generating on the server thread. pandaspigot.yml async-chunk-shaping turns
+it off.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index 4acb6f191e0ce83cc035d27ab446928a692e9a19..26975c7d373b6f8095bfdc2ea06661aa030a89ff 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -71,4 +71,17 @@ public class PandaSpigotWorldConfig {
+         "behaviour while still providing performance optimizations.\n" +
+         "Default: false")
+     public boolean useSpigotChunkTickingSelection = false;
++
++    // Athena start
++    @Comment("When enabled, the first half of generating a brand new chunk - noise, biomes,\n" +
++            "surface blocks, caves and ravines - runs on a worker thread instead of the\n" +
++            "server thread. It is a pure function of the seed and the chunk coordinates, so\n" +
++            "the terrain it produces is identical either way; structures, lighting, the\n" +
++            "chunk map, events and population all still happen on the server thread in the\n" +
++            "same order as before.\n" +
++            "Only ordinary generated worlds use it. A world with a plugin chunk generator\n" +
++            "always generates on the server thread.\n" +
++            "Default: true")
++    public boolean asyncChunkShaping = true;
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index de20c78d4bf88156d3be1f06de48f974176cbe2f..3a05c24f57777a6c0569530fa7f51e67ecef0646 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -102,6 +102,12 @@ public class ChunkProviderGenerate implements IChunkProvider {
+         this.generatorSettings = s;
+         this.worldGeneratorOptions = generatoroptions;
+         this.shapingChunkManager = forshaping ? new WorldChunkManager(i, this.o, generatoroptions) : null;
++        if (forshaping) {
++            // The carvers ask for the biome of the column they are flooring; point them at this
++            // copy's manager so they never reach into the world's chunk map or biome cache.
++            this.caveGenerator.setShapingChunkManager(this.shapingChunkManager);
++            this.ravineGenerator.setShapingChunkManager(this.shapingChunkManager);
++        }
+         // Athena end
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 82bd492e1abbfa3d07b6110c5aa8fe2f28033e99..b6965f1a1b1b09e68c8fc72c2cf4a6a0a5c6b254 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -15,6 +15,8 @@ import java.util.logging.Level;
+ import org.bukkit.Bukkit;
+ import org.bukkit.Server;
+ import org.bukkit.craftbukkit.chunkio.ChunkIOExecutor;
++import org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor; // Athena
++import java.util.concurrent.ConcurrentLinkedQueue; // Athena
+ import org.bukkit.craftbukkit.util.LongHash;
+ import org.bukkit.craftbukkit.util.LongHashSet;
+ import org.bukkit.craftbukkit.util.LongObjectHashMap;
+@@ -141,6 +143,127 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+     // Athena end
+ 
++    // Athena start - shaping brand new chunks off the server thread.
++    //
++    // Only the first half of generation moves: ChunkProviderGenerate.shapeChunk, which reads nothing
++    // from the World and writes only into a snapshot nobody can see yet. Everything with a side
++    // effect - structure starts, the chunk map, ChunkLoadEvent, population - still happens here, in
++    // the order it always did.
++    //
++    // The route in is the callback form of getChunkAt, which has been allowed to answer later ever
++    // since chunk loading went async; callers that need a chunk immediately still get one, shaped
++    // inline or by waiting on a worker that has already started it.
++    //
++    // Each thread that shapes gets its own copy of the generator, because its scratch fields cannot
++    // be entered twice at once.
++    private final ThreadLocal<ChunkProviderGenerate> shapingCopies = new ThreadLocal<ChunkProviderGenerate>();
++    private final ConcurrentLinkedQueue<ChunkProviderGenerate> spareShapingCopies = new ConcurrentLinkedQueue<ChunkProviderGenerate>();
++    private Boolean asyncShaping; // decided once, on the server thread
++
++    private boolean asyncShapingEnabled() {
++        if (this.asyncShaping == null) {
++            boolean enabled = this.world.pandaSpigotConfig.asyncChunkShaping
++                    && this.chunkProvider instanceof ChunkProviderGenerate
++                    && this.world.generator == null // a plugin generator keeps generating on the server thread
++                    && this.world.getWorldChunkManager().getClass() == WorldChunkManager.class;
++
++            if (enabled) {
++                // Built here, on the server thread, so that a worker never has to touch the world.
++                for (int i = 0; i < 3; ++i) {
++                    this.spareShapingCopies.add(((ChunkProviderGenerate) this.chunkProvider).createShapingCopy());
++                }
++            }
++
++            this.asyncShaping = enabled;
++        }
++
++        return this.asyncShaping;
++    }
++
++    /** Runs the pure half of generation on whichever thread calls this, using that thread's copy. */
++    public ChunkShape shapeChunkForWorker(int i, int j) {
++        ChunkProviderGenerate generator = this.shapingCopies.get();
++
++        if (generator == null) {
++            generator = this.spareShapingCopies.poll();
++            if (generator == null) {
++                generator = ((ChunkProviderGenerate) this.chunkProvider).createShapingCopy();
++            }
++
++            this.shapingCopies.set(generator);
++        }
++
++        return generator.shapeChunk(i, j);
++    }
++
++    /**
++     * The server-thread half, for a chunk whose shape a worker has finished. Everything below the
++     * first two guards is what originalGetChunkAt does once it has a Chunk.
++     */
++    public Chunk finishGeneratedChunk(int i, int j, ChunkShape chunkshape) {
++        long key = LongHash.toLong(i, j);
++
++        this.unloadQueue.remove(i, j);
++
++        Chunk chunk = this.chunks.get(key);
++
++        if (chunk != null) {
++            return chunk; // something needed it before the worker came back and generated it inline
++        }
++
++        this.world.timings.syncChunkLoadTimer.startTiming(); // Spigot
++        chunk = this.loadChunk(i, j); // the loader still wins if the chunk reached disk meanwhile
++        boolean newChunk = false;
++
++        if (chunk == null) {
++            try {
++                chunk = ((ChunkProviderGenerate) this.chunkProvider).finishChunk(i, j, chunkshape);
++            } catch (Throwable throwable) {
++                CrashReport crashreport = CrashReport.makeCrashReport(throwable, "Exception generating new chunk");
++                CrashReportSystemDetails crashreportsystemdetails = crashreport.makeCategory("Chunk to be generated");
++
++                crashreportsystemdetails.addCrashSection("Location", (Object) String.format("%d,%d", new Object[] { Integer.valueOf(i), Integer.valueOf(j)}));
++                crashreportsystemdetails.addCrashSection("Position hash", (Object) Long.valueOf(key));
++                crashreportsystemdetails.addCrashSection("Generator", (Object) this.chunkProvider.getName());
++                throw new ReportedException(crashreport);
++            }
++
++            newChunk = true;
++        }
++
++        this.chunks.put(key, chunk);
++        this.creatureCensus.chunkAdded(chunk);
++
++        chunk.addEntities();
++
++        Server server = this.world.getServer();
++
++        if (server != null) {
++            server.getPluginManager().callEvent(new org.bukkit.event.world.ChunkLoadEvent(chunk.bukkitChunk, newChunk));
++        }
++
++        // Update neighbor counts
++        for (int x = -2; x < 3; x++) {
++            for (int z = -2; z < 3; z++) {
++                if (x == 0 && z == 0) {
++                    continue;
++                }
++
++                Chunk neighbor = this.getChunkIfLoaded(chunk.locX + x, chunk.locZ + z);
++                if (neighbor != null) {
++                    neighbor.setNeighborLoaded(-x, -z);
++                    chunk.setNeighborLoaded(x, z);
++                }
++            }
++        }
++
++        chunk.loadNearby(this, this, i, j);
++        this.world.timings.syncChunkLoadTimer.stopTiming(); // Spigot
++
++        return chunk;
++    }
++    // Athena end
++
+     public Chunk getChunkIfLoaded(int x, int z) {
+         return chunks.get(LongHash.toLong(x, z));
+     }
+@@ -167,6 +290,26 @@ public class ChunkProviderServer implements IChunkProvider {
+                 chunk = ChunkIOExecutor.syncChunkLoad(world, loader, this, i, j);
+             }
+         } else if (chunk == null) {
++            // Athena start - route brand new chunks through the shaping queue
++            if (this.asyncShapingEnabled()) {
++                if (runnable != null) {
++                    // This caller gave us a callback, so it has already agreed to be answered later.
++                    ChunkGenExecutor.queueChunkGen(this.world, this, i, j, runnable);
++                    return null;
++                }
++
++                // This one needs the chunk now - population of a neighbour, an entity moving, a
++                // block read. Going through the queue anyway means joining a worker that has
++                // already started this chunk rather than shaping it a second time; with no task
++                // queued it simply does both halves here, exactly as the line below would.
++                ChunkGenExecutor.syncChunkGen(this.world, this, i, j);
++                chunk = this.chunks.get(LongHash.toLong(i, j));
++
++                if (chunk != null) {
++                    return chunk;
++                }
++            }
++            // Athena end
+             chunk = originalGetChunkAt(i, j);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 7da25a028e3897b637de17c1898a9c58712f5bca..e19ee647dfcc05d24af9684702d449233226a6e7 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -847,6 +847,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+ 
+         SpigotTimings.chunkIOTickTimer.startTiming(); // Spigot
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick();
++        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(); // Athena - hand finished chunk shapes back to the server thread
+         SpigotTimings.chunkIOTickTimer.stopTiming(); // Spigot
+ 
+         SpigotTimings.timeUpdateTimer.startTiming(); // Spigot
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index c275d56b9b74bbefd0c98678887fb1c7894d059d..a90e60ad9a21133e1cc098c284a592b0ad2cd2db 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -529,11 +529,13 @@ public class PlayerChunkMap {
+                 // CraftBukkit start - If we haven't loaded yet don't load the chunk just so we can clean it up
+                 if (!this.loaded) {
+                     ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.players.get(entityplayer));
++                    org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.dropQueuedChunkGen(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.players.get(entityplayer)); // Athena - the chunk may be waiting to be shaped instead of loaded
+                     this.playersWatchingChunk.remove(entityplayer);
+                     this.players.remove(entityplayer);
+ 
+                     if (this.playersWatchingChunk.isEmpty()) {
+                         ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.loadedRunnable);
++                        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.dropQueuedChunkGen(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.loadedRunnable); // Athena - same
+                         long i = (long) this.location.x + 2147483647L | (long) this.location.z + 2147483647L << 32;
+                         PlayerChunkMap.this.playerInstances.remove(i);
+                         PlayerChunkMap.this.removePlayerInstance(this); // Athena - O(1); see the field
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 741ebb3d57f990e4bfa631fb862b8b80b88b69db..50c188400470c5bd28e891b165c83669e6c76710 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -325,6 +325,7 @@ public abstract class PlayerList {
+         // PandaSpigot end
+ 
+         ChunkIOExecutor.adjustPoolSize(getPlayerCount());
++        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.adjustPoolSize(getPlayerCount()); // Athena
+         // CraftBukkit end
+ 
+         // CraftBukkit start - sendAll above replaced with this loop
+@@ -411,6 +412,7 @@ public abstract class PlayerList {
+         // CraftBukkit end
+ 
+         ChunkIOExecutor.adjustPoolSize(this.getPlayerCount()); // CraftBukkit
++        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.adjustPoolSize(this.getPlayerCount()); // Athena
+ 
+         return playerQuitEvent.quitMessage(); // CraftBukkit // PandaSpigot - Adventure
+     }
+diff --git a/src/main/java/net/minecraft/server/WorldGenBase.java b/src/main/java/net/minecraft/server/WorldGenBase.java
+index a7bd6f283aa624a6fb2e23bc152d895748db22ba..05c81dd1e457d727be7742bd2ea53c8fa7da4974 100644
+--- a/src/main/java/net/minecraft/server/WorldGenBase.java
++++ b/src/main/java/net/minecraft/server/WorldGenBase.java
+@@ -32,4 +32,25 @@ public class WorldGenBase {
+     }
+ 
+     protected void recursiveGenerate(World world, int i, int j, int k, int l, ChunkSnapshot chunksnapshot) {}
++
++    // Athena start - a biome source a worker is allowed to use.
++    //
++    // World.getBiome asks the chunk map whether the position is loaded and then reads the world's
++    // shared BiomeCache. Neither survives being touched from a shaping worker: the chunk map is a
++    // plain hash map the server thread is mutating, and BiomeCache is a bare LongHashMap.
++    //
++    // A shaping copy of the generator hands its own manager down to here. The answer is the same
++    // one the world would give, because every position asked about lies inside the chunk being
++    // carved, which is not in the chunk map yet - so the world's own lookup falls through to its
++    // WorldChunkManager too, and that manager was built from the same seed.
++    protected WorldChunkManager shapingChunkManager;
++
++    public void setShapingChunkManager(WorldChunkManager worldchunkmanager) {
++        this.shapingChunkManager = worldchunkmanager;
++    }
++
++    protected BiomeBase shapingBiome(BlockPosition blockposition) {
++        return this.shapingChunkManager != null ? this.shapingChunkManager.getBiome(blockposition, BiomeBase.PLAINS) : this.worldObj.getBiome(blockposition);
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/WorldGenCanyon.java b/src/main/java/net/minecraft/server/WorldGenCanyon.java
+index a17385f249a4d82ece0afee1b26e50a959bb2873..7da57f3cf0d2aeea7d0bf3dd393dc2793b21e678 100644
+--- a/src/main/java/net/minecraft/server/WorldGenCanyon.java
++++ b/src/main/java/net/minecraft/server/WorldGenCanyon.java
+@@ -148,7 +148,7 @@ public class WorldGenCanyon extends WorldGenBase {
+                                                     chunksnapshot.setBlockState(i4, k4, j4, Blocks.AIR.getBlockData());
+                                                     if (flag2 && chunksnapshot.getBlockState(i4, k4 - 1, j4).getBlock() == Blocks.DIRT) {
+                                                         blockposition_mutableblockposition.set(i4 + j * 16, 0, j4 + k * 16);
+-                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).getShapingTopBlock()); // Athena - per-thread shaping choice
++                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.shapingBiome(blockposition_mutableblockposition).getShapingTopBlock()); // Athena - per-thread shaping choice
+                                                     }
+                                                 }
+                                             }
+diff --git a/src/main/java/net/minecraft/server/WorldGenCaves.java b/src/main/java/net/minecraft/server/WorldGenCaves.java
+index 3f02c617126d207adfce60206a1b4f06986662d8..1ec9bfabefb65b0995606ffe221f240e25477e16 100644
+--- a/src/main/java/net/minecraft/server/WorldGenCaves.java
++++ b/src/main/java/net/minecraft/server/WorldGenCaves.java
+@@ -156,7 +156,7 @@ public class WorldGenCaves extends WorldGenBase {
+ 
+                                                     if (flag3 && chunksnapshot.getBlockState(i4, k4 - 1, j4).getBlock() == Blocks.DIRT) {
+                                                         blockposition_mutableblockposition.set(i4 + j * 16, 0, j4 + k * 16);
+-                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.worldObj.getBiome(blockposition_mutableblockposition).getShapingTopBlock().getBlock().getBlockData()); // Athena - per-thread shaping choice
++                                                        chunksnapshot.setBlockState(i4, k4 - 1, j4, this.shapingBiome(blockposition_mutableblockposition).getShapingTopBlock().getBlock().getBlockData()); // Athena - per-thread shaping choice
+                                                     }
+                                                 }
+                                             }
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenExecutor.java b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenExecutor.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..72ae1660bcb7c38edf41c4864b71a56ca05471fa
+--- /dev/null
++++ b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenExecutor.java
+@@ -0,0 +1,45 @@
++package org.bukkit.craftbukkit.chunkgen;
++
++import net.minecraft.server.ChunkProviderServer;
++import net.minecraft.server.ChunkShape;
++import net.minecraft.server.World;
++import org.bukkit.craftbukkit.util.AsynchronousExecutor;
++
++// Athena start - the queue that shapes new chunks off the server thread.
++//
++// Deliberately the same shape as ChunkIOExecutor, which has been deferring chunk *loads* this way
++// for years: callers that passed a Runnable already accept being answered later, so generation can
++// use the same contract without any of them noticing.
++public class ChunkGenExecutor {
++
++    private static final int BASE_THREADS = 2;
++
++    private static final AsynchronousExecutor<QueuedGen, ChunkShape, Runnable, RuntimeException> instance =
++            new AsynchronousExecutor<QueuedGen, ChunkShape, Runnable, RuntimeException>(new ChunkGenProvider(), BASE_THREADS);
++
++    public static void queueChunkGen(World world, ChunkProviderServer provider, int x, int z, Runnable runnable) {
++        instance.add(new QueuedGen(x, z, world, provider), runnable);
++    }
++
++    /**
++     * Shapes and finishes the chunk now, waiting on the worker if it has already started.
++     * For callers that cannot be answered later.
++     */
++    public static void syncChunkGen(World world, ChunkProviderServer provider, int x, int z) {
++        instance.getSkipQueue(new QueuedGen(x, z, world, provider));
++    }
++
++    /** Mirrors ChunkIOExecutor.dropQueuedChunkLoad; only world and coordinates are compared. */
++    public static void dropQueuedChunkGen(World world, int x, int z, Runnable runnable) {
++        instance.drop(new QueuedGen(x, z, world, null), runnable);
++    }
++
++    public static void tick() {
++        instance.finishActive();
++    }
++
++    public static void adjustPoolSize(int players) {
++        instance.setActiveThreads(Math.max(BASE_THREADS, Math.min(4, players / 25)));
++    }
++}
++// Athena end
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a5965ecc7ea939719814ece906aa54d796278d7a
+--- /dev/null
++++ b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java
+@@ -0,0 +1,43 @@
++package org.bukkit.craftbukkit.chunkgen;
++
++import java.util.concurrent.atomic.AtomicInteger;
++import net.minecraft.server.ChunkShape;
++import org.bukkit.craftbukkit.util.AsynchronousExecutor;
++
++// Athena start - the two halves of generating a brand new chunk, split across threads.
++//
++// Stage 1 is ChunkProviderGenerate.shapeChunk on a copy of the world's generator: noise, biomes,
++// surface, caves, ravines, all into a snapshot nothing else can see. Stage 2 is everything that has
++// to stay on the server thread - structure starts, building the Chunk, lighting, the chunk map,
++// ChunkLoadEvent, and population through loadNearby.
++//
++// Stage 1 also runs on the server thread when AsynchronousExecutor.getSkipQueue is used, which is
++// what happens when someone needs the chunk before the worker has finished. The shaping copies are
++// handed out per thread, so that path is safe too.
++class ChunkGenProvider implements AsynchronousExecutor.CallBackProvider<QueuedGen, ChunkShape, Runnable, RuntimeException> {
++
++    private final AtomicInteger threadNumber = new AtomicInteger(1);
++
++    // async
++    public ChunkShape callStage1(QueuedGen queuedGen) throws RuntimeException {
++        return queuedGen.provider.shapeChunkForWorker(queuedGen.x, queuedGen.z);
++    }
++
++    // sync
++    public void callStage2(QueuedGen queuedGen, ChunkShape chunkShape) throws RuntimeException {
++        queuedGen.provider.finishGeneratedChunk(queuedGen.x, queuedGen.z, chunkShape);
++    }
++
++    public void callStage3(QueuedGen queuedGen, ChunkShape chunkShape, Runnable runnable) throws RuntimeException {
++        runnable.run();
++    }
++
++    public Thread newThread(Runnable runnable) {
++        Thread thread = new Thread(runnable, "Chunk Shaping Thread-" + this.threadNumber.getAndIncrement());
++
++        thread.setDaemon(true);
++        thread.setPriority(Thread.NORM_PRIORITY - 1); // the server thread must never wait behind these
++        return thread;
++    }
++}
++// Athena end
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkgen/QueuedGen.java b/src/main/java/org/bukkit/craftbukkit/chunkgen/QueuedGen.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..064ee37434cfa68c679d19a3d868ffe47fb667c5
+--- /dev/null
++++ b/src/main/java/org/bukkit/craftbukkit/chunkgen/QueuedGen.java
+@@ -0,0 +1,50 @@
++package org.bukkit.craftbukkit.chunkgen;
++
++import net.minecraft.server.ChunkProviderServer;
++import net.minecraft.server.World;
++
++// Athena start - the parameter identifying one chunk waiting to be shaped.
++//
++// hashCode and equals cover only the world and the coordinates, because AsynchronousExecutor keys
++// its task map on this object: a second request for the same chunk has to find the task already
++// queued rather than start a second one.
++class QueuedGen {
++
++    final int x;
++    final int z;
++    final World world;
++    final ChunkProviderServer provider;
++
++    QueuedGen(int x, int z, World world, ChunkProviderServer provider) {
++        this.x = x;
++        this.z = z;
++        this.world = world;
++        this.provider = provider;
++    }
++
++    @Override
++    public int hashCode() {
++        return (this.world.hashCode() * 31 + this.x) * 31 + this.z;
++    }
++
++    @Override
++    public boolean equals(Object object) {
++        if (this == object) {
++            return true;
++        }
++
++        if (!(object instanceof QueuedGen)) {
++            return false;
++        }
++
++        QueuedGen other = (QueuedGen) object;
++
++        return this.x == other.x && this.z == other.z && this.world == other.world;
++    }
++
++    @Override
++    public String toString() {
++        return "QueuedGen{" + this.x + ", " + this.z + " in " + this.world.getWorld().getName() + "}";
++    }
++}
++// Athena end

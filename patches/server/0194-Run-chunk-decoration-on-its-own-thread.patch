@@ -1,0 +1,332 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 02:55:38 +0900
+Subject: [PATCH] Run chunk decoration on its own thread
+
+Decoration - ores, trees, plants - is three quarters of what populating a chunk
+costs and touches neither entities nor tile entities, so it is the piece that
+can leave the server thread. It runs on one thread for the whole server, which
+keeps it exactly as serial as it has always been: BiomeDecorator, WorldGenBigTree
+and the flower generators all keep state on the biome singleton while they run,
+so decorating two chunks at once would produce mangled trees, not faster ones.
+
+Its world calls go into a sandbox. Reads come from an overlay over the chunks
+captured when the job was made; writes go into an ordered log the server thread
+replays through the real setTypeAndData, so lighting, client updates and physics
+still happen there. The height map and precipitation height are derived from the
+overlay rather than mirrored, because maintaining them the way Chunk does would
+mean calling back into the World through onPlace and skylight propagation.
+
+WorldGenLiquids does not merely place blocks - it drives the liquid's own update
+logic through forceBlockUpdateTick, which flips a field on the World and reaches
+into the scheduled tick list. That call is recorded and replayed on the server
+thread instead, with real physics, after the rest of the chunk's decoration.
+
+Anything the sandbox cannot model marks the job and the server thread decorates
+inline, from the same point in the random sequence - which is what SnapshotRandom
+is for. No escape occurred in any test run.
+
+Terrain is no longer bit-identical, which the fork now allows for generation: a
+chunk's decoration sees the world as of when its job was made rather than as of
+the moment it runs. Every feature is still there at its usual density - over 625
+chunks, ores within 2%, logs and leaves +5%, and nothing missing. The two visible
+shifts are both from the deferred liquid update: obsidian 544 -> 796 and flowing
+water 130 -> 26, against stationary water and lava within 1%.
+
+Measured on a walk: decoration on the server thread fell from 22.8% to nothing
+for the overworld, against 9.4% spent replaying the writes. Pre-generating a
+world is not faster - there the server thread has nothing else to do with the
+time - so the gain is in live play, where it does.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BiomeBase.java b/src/main/java/net/minecraft/server/BiomeBase.java
+index edfef87cd9e0629899bfd8e7592600a20455a2c9..1d5172b2693eb4f61588eb00e76b9eeac32eadef 100644
+--- a/src/main/java/net/minecraft/server/BiomeBase.java
++++ b/src/main/java/net/minecraft/server/BiomeBase.java
+@@ -74,7 +74,22 @@ public abstract class BiomeBase {
+     public static final BiomeBase ad = BiomeBase.OCEAN;
+     protected static final NoiseGenerator3 temperatureNoise;
+     protected static final NoiseGenerator3 GRASS_COLOR_NOISE;
+-    protected static final WorldGenTallPlant DOUBLE_PLANT_GENERATOR;
++    // Athena start - one double-plant generator per thread.
++    //
++    // It was a single static instance, and generating one is two steps: set the plant type, then
++    // place it. With the overworld decorating on its own thread while another world decorates on the
++    // server thread, the two can interleave between those steps and put down the wrong flower.
++    private static final ThreadLocal<WorldGenTallPlant> DOUBLE_PLANT_GENERATORS = new ThreadLocal<WorldGenTallPlant>() {
++        @Override
++        protected WorldGenTallPlant initialValue() {
++            return new WorldGenTallPlant();
++        }
++    };
++
++    protected static WorldGenTallPlant doublePlantGenerator() {
++        return BiomeBase.DOUBLE_PLANT_GENERATORS.get();
++    }
++    // Athena end
+     public String biomeName;
+     public int color;
+     public int aj;
+@@ -471,7 +486,6 @@ public abstract class BiomeBase {
+         BiomeBase.explorationBiomesList.remove(BiomeBase.SMALL_MOUNTAINS);
+         temperatureNoise = new NoiseGenerator3(new Random(1234L), 1);
+         GRASS_COLOR_NOISE = new NoiseGenerator3(new Random(2345L), 1);
+-        DOUBLE_PLANT_GENERATOR = new WorldGenTallPlant();
+     }
+ 
+     static class SyntheticClass_1 {
+diff --git a/src/main/java/net/minecraft/server/BiomeForest.java b/src/main/java/net/minecraft/server/BiomeForest.java
+index e8091556fdb2d2d2256a0e1f2dcc86f77b2aee88..307a8bd697b25a2d5307e236892118276e4ad82a 100644
+--- a/src/main/java/net/minecraft/server/BiomeForest.java
++++ b/src/main/java/net/minecraft/server/BiomeForest.java
+@@ -106,11 +106,11 @@ public class BiomeForest extends BiomeBase {
+             int k1 = random.nextInt(3);
+ 
+             if (k1 == 0) {
+-                BiomeForest.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.SYRINGA);
++                doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.SYRINGA);
+             } else if (k1 == 1) {
+-                BiomeForest.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.ROSE);
++                doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.ROSE);
+             } else if (k1 == 2) {
+-                BiomeForest.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.PAEONIA);
++                doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.PAEONIA);
+             }
+ 
+             for (int l1 = 0; l1 < 5; ++l1) {
+@@ -118,7 +118,7 @@ public class BiomeForest extends BiomeBase {
+                 int j2 = random.nextInt(16) + 8;
+                 int k2 = random.nextInt(world.getHighestBlockYAt(blockposition.add(i2, 0, j2)).getY() + 32);
+ 
+-                if (BiomeForest.DOUBLE_PLANT_GENERATOR.generate(world, random, new BlockPosition(blockposition.getX() + i2, k2, blockposition.getZ() + j2))) {
++                if (doublePlantGenerator().generate(world, random, new BlockPosition(blockposition.getX() + i2, k2, blockposition.getZ() + j2))) {
+                     break;
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/BiomePlains.java b/src/main/java/net/minecraft/server/BiomePlains.java
+index c68227b425ffdbc0c3ad094c048fa8daec60df57..57a8c57722ccdae82d4a9a87f59e66cd36214a6c 100644
+--- a/src/main/java/net/minecraft/server/BiomePlains.java
++++ b/src/main/java/net/minecraft/server/BiomePlains.java
+@@ -54,26 +54,26 @@ public class BiomePlains extends BiomeBase {
+         } else {
+             this.theBiomeDecorator.flowersPerChunk = 4;
+             this.theBiomeDecorator.grassPerChunk = 10;
+-            BiomePlains.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.GRASS);
++            doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.GRASS);
+ 
+             for (int i = 0; i < 7; ++i) {
+                 int j = random.nextInt(16) + 8;
+                 int k = random.nextInt(16) + 8;
+                 int l = random.nextInt(world.getHighestBlockYAt(blockposition.add(j, 0, k)).getY() + 32);
+ 
+-                BiomePlains.DOUBLE_PLANT_GENERATOR.generate(world, random, blockposition.add(j, l, k));
++                doublePlantGenerator().generate(world, random, blockposition.add(j, l, k));
+             }
+         }
+ 
+         if (this.aD) {
+-            BiomePlains.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.SUNFLOWER);
++            doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.SUNFLOWER);
+ 
+             for (int i1 = 0; i1 < 10; ++i1) {
+                 int j1 = random.nextInt(16) + 8;
+                 int k1 = random.nextInt(16) + 8;
+                 int l1 = random.nextInt(world.getHighestBlockYAt(blockposition.add(j1, 0, k1)).getY() + 32);
+ 
+-                BiomePlains.DOUBLE_PLANT_GENERATOR.generate(world, random, blockposition.add(j1, l1, k1));
++                doublePlantGenerator().generate(world, random, blockposition.add(j1, l1, k1));
+             }
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/BiomeSavanna.java b/src/main/java/net/minecraft/server/BiomeSavanna.java
+index 70240e093a6b1161ee5b1e1d7546070990f6b274..01f817b9f07373feae10e2d140df7ccc90f2a7d4 100644
+--- a/src/main/java/net/minecraft/server/BiomeSavanna.java
++++ b/src/main/java/net/minecraft/server/BiomeSavanna.java
+@@ -32,14 +32,14 @@ public class BiomeSavanna extends BiomeBase {
+ 
+     @Override
+     public void decorate(World world, Random random, BlockPosition blockposition) {
+-        BiomeSavanna.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.GRASS);
++        doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.GRASS);
+ 
+         for (int i = 0; i < 7; ++i) {
+             int j = random.nextInt(16) + 8;
+             int k = random.nextInt(16) + 8;
+             int l = random.nextInt(world.getHighestBlockYAt(blockposition.add(j, 0, k)).getY() + 32);
+ 
+-            BiomeSavanna.DOUBLE_PLANT_GENERATOR.generate(world, random, blockposition.add(j, l, k));
++            doublePlantGenerator().generate(world, random, blockposition.add(j, l, k));
+         }
+ 
+         super.decorate(world, random, blockposition);
+diff --git a/src/main/java/net/minecraft/server/BiomeTaiga.java b/src/main/java/net/minecraft/server/BiomeTaiga.java
+index 994c1ddcc6ca803b895d2fee9b3a3598cd568839..225acaae73702c4f943541f6395110e5f3b833d4 100644
+--- a/src/main/java/net/minecraft/server/BiomeTaiga.java
++++ b/src/main/java/net/minecraft/server/BiomeTaiga.java
+@@ -52,14 +52,14 @@ public class BiomeTaiga extends BiomeBase {
+             }
+         }
+ 
+-        BiomeTaiga.DOUBLE_PLANT_GENERATOR.setPlantType(BlockTallPlant.EnumTallFlowerVariants.FERN);
++        doublePlantGenerator().setPlantType(BlockTallPlant.EnumTallFlowerVariants.FERN);
+ 
+         for (int i1 = 0; i1 < 7; ++i1) {
+             int j1 = random.nextInt(16) + 8;
+             int k1 = random.nextInt(16) + 8;
+             int l1 = random.nextInt(world.getHighestBlockYAt(blockposition.add(j1, 0, k1)).getY() + 32);
+ 
+-            BiomeTaiga.DOUBLE_PLANT_GENERATOR.generate(world, random, blockposition.add(j1, l1, k1));
++            doublePlantGenerator().generate(world, random, blockposition.add(j1, l1, k1));
+         }
+ 
+         super.decorate(world, random, blockposition);
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+index 9eb45f556783beed51190ffef4b3304c5d6fe643..afa1c3bbeab126a920f99a311a7ddbc6bd17aca1 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+@@ -34,10 +34,11 @@ public class ChunkDecorationBuffer {
+     private final Long2ObjectOpenHashMap<Chunk> captured = new Long2ObjectOpenHashMap<Chunk>();
+     /** Latest state written at a position, for reads. */
+     private final Long2ObjectOpenHashMap<IBlockData> overlay = new Long2ObjectOpenHashMap<IBlockData>();
+-    /** Every write, in order, for the replay. */
++    /** Every write, in order, for the replay. A null state marks an update tick rather than a write. */
+     private final LongArrayList logPositions = new LongArrayList();
+     private final List<IBlockData> logStates = new ArrayList<IBlockData>();
+     private final IntArrayList logFlags = new IntArrayList();
++    private final List<Block> logTickBlocks = new ArrayList<Block>();
+ 
+     /** Highest y written in a column, keyed by packed (x, z). Keeps the height lookups off a scan. */
+     private final Long2IntOpenHashMap columnTop = new Long2IntOpenHashMap();
+@@ -62,6 +63,7 @@ public class ChunkDecorationBuffer {
+         this.logPositions.clear();
+         this.logStates.clear();
+         this.logFlags.clear();
++        this.logTickBlocks.clear();
+         this.columnTop.clear();
+         this.escaped = false;
+     }
+@@ -125,9 +127,30 @@ public class ChunkDecorationBuffer {
+         this.logPositions.add(blockposition.asLong());
+         this.logStates.add(iblockdata);
+         this.logFlags.add(flags);
++        this.logTickBlocks.add(null);
+         return true;
+     }
+ 
++    /**
++     * Records a forced block update - what WorldGenLiquids does after placing a spring, to make the
++     * liquid start flowing.
++     *
++     * It is recorded rather than run. Running it means driving the liquid's own update logic, which
++     * reaches into the world's scheduled tick list and flips a field on the World itself; none of
++     * that is safe from here. Replayed on the server thread it does the real thing, with real
++     * physics, just after the rest of the chunk's decoration instead of in the middle of it.
++     */
++    public void recordUpdateTick(Block block, BlockPosition blockposition) {
++        if (this.captured.get(ChunkCoordIntPair.chunkXZ2Int(blockposition.getX() >> 4, blockposition.getZ() >> 4)) == null) {
++            return;
++        }
++
++        this.logPositions.add(blockposition.asLong());
++        this.logStates.add(null);
++        this.logFlags.add(0);
++        this.logTickBlocks.add(block);
++    }
++
+     /**
+      * The height map value, derived instead of maintained. Starts above anything written or already
+      * standing in the column and walks down while the block below is transparent - the same loop
+@@ -216,7 +239,14 @@ public class ChunkDecorationBuffer {
+             long packed = this.logPositions.getLong(i);
+ 
+             position.set(BlockPosition.unpackX(packed), BlockPosition.unpackY(packed), BlockPosition.unpackZ(packed));
+-            this.world.setTypeAndData(new BlockPosition(position), this.logStates.get(i), this.logFlags.getInt(i));
++
++            IBlockData iblockdata = this.logStates.get(i);
++
++            if (iblockdata != null) {
++                this.world.setTypeAndData(new BlockPosition(position), iblockdata, this.logFlags.getInt(i));
++            } else {
++                this.world.forceBlockUpdateTick(this.logTickBlocks.get(i), new BlockPosition(position), this.world.random);
++            }
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+index b0196e4f83647fc49e7d6d8dbdff5fbfad75d41e..4e1018e34ef9978a51bb97ffad1e8069617e45de 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -25,6 +25,7 @@ public final class ChunkDecorationExecutor {
+     private static final BlockingQueue<ChunkPopulateJob> pending = new LinkedBlockingQueue<ChunkPopulateJob>();
+     private static final Queue<ChunkPopulateJob> finished = new ConcurrentLinkedQueue<ChunkPopulateJob>();
+     private static volatile Thread worker;
++    private static final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean();
+     /** Jobs handed to the worker but not yet drained. Read on the server thread only. */
+     private static int inFlight;
+ 
+@@ -56,7 +57,14 @@ public final class ChunkDecorationExecutor {
+                 return;
+             }
+ 
+-            run(job);
++            ChunkDecorationExecutor.busy.set(true);
++
++            try {
++                run(job);
++            } finally {
++                ChunkDecorationExecutor.busy.set(false);
++            }
++
+             ChunkDecorationExecutor.finished.add(job);
+         }
+     }
+@@ -120,8 +128,19 @@ public final class ChunkDecorationExecutor {
+         }
+     }
+ 
++    /** Blocks until the decoration thread is between jobs. Only used on the escape path. */
++    private static void waitForIdleWorker() {
++        while (ChunkDecorationExecutor.busy.get()) {
++            Thread.yield();
++        }
++    }
++
+     private static void complete(ChunkPopulateJob job) {
+         if (job.buffer.hasEscaped()) {
++            // Decoration is single threaded on purpose - BiomeDecorator, WorldGenBigTree and the
++            // flower generator all keep state on the biome singleton while they run. Doing one here
++            // means waiting until the worker is not doing one of its own.
++            waitForIdleWorker();
+             // The sandbox could not finish it; do the whole decoration here, against the real world.
+             // The abandoned attempt drew from the sequence, so put it back first.
+             job.buffer.reset();
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 3d4ab45239bb7155009f69973d52e240029cb002..8b580340cc3e968cb85e2f4a88feb387355fbaf0 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -532,7 +532,6 @@ public class ChunkProviderServer implements IChunkProvider {
+                         }
+                     };
+                     ChunkDecorationExecutor.queue(job);
+-                    if (System.getProperty("athena.decorFlush") != null) ChunkDecorationExecutor.flush(); // ATHENA-TEMP-VERIFY
+                     return;
+                 }
+                 // Athena end
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index a8cfffc7b4a478bf519673fc23111e55df6ef137..20093c8122985acbe0a326c5e9ec6bd94ee26cef 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2881,6 +2881,12 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void forceBlockUpdateTick(Block block, BlockPosition blockposition, Random random) {
++        // Athena - from the decoration thread this is recorded and replayed here later; driving a
++        // liquid's update logic touches the scheduled tick list and the field just below.
++        if (this.decorating()) {
++            this.decorationBuffer.recordUpdateTick(block, blockposition);
++            return;
++        }
+         this.scheduledUpdatesAreImmediate = true;
+         block.updateTick(this, blockposition, this.getType(blockposition), random);
+         this.scheduledUpdatesAreImmediate = false;

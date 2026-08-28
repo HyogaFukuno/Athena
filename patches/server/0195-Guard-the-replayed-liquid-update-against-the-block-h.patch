@@ -1,0 +1,64 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 26 Aug 2026 03:40:31 +0900
+Subject: [PATCH] Guard the replayed liquid update against the block having
+ changed
+
+WorldGenLiquids places a spring and immediately drives its update tick, so in
+vanilla the block is always still there when the tick runs. Replayed on the
+server thread the tick fires later, and by then lava that has met water is
+obsidian - which BlockFlowing.updateTick then asks for a level it does not
+have, taking the server down with it.
+
+This is the check WorldServer.updateBlockTick already makes before running a
+tick immediately: run it only if the block at the position is still the one the
+tick was recorded for.
+
+The replay also no longer lets a single bad entry reach the tick loop. It runs
+inside MinecraftServer's tick, so a chunk left part decorated and reported is
+better than the server stopping.
+
+Reported from live play as a crash on obsidian; 2557 chunks generated since
+without an exception, with obsidian among them.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+index afa1c3bbeab126a920f99a311a7ddbc6bd17aca1..612485ddb4bd0d36d9292fcb958b3f3d5b7c31e5 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+@@ -245,7 +245,17 @@ public class ChunkDecorationBuffer {
+             if (iblockdata != null) {
+                 this.world.setTypeAndData(new BlockPosition(position), iblockdata, this.logFlags.getInt(i));
+             } else {
+-                this.world.forceBlockUpdateTick(this.logTickBlocks.get(i), new BlockPosition(position), this.world.random);
++                // The recorded tick fires later than it would have, so the block it was recorded for
++                // may be gone by now - lava that has since met water is obsidian, and handing that
++                // to BlockFlowing.updateTick asks obsidian for a level it does not have. This is the
++                // same guard WorldServer.updateBlockTick applies before running a tick immediately.
++                Block block = this.logTickBlocks.get(i);
++                BlockPosition target = new BlockPosition(position);
++                IBlockData current = this.world.getType(target);
++
++                if (current.getBlock() == block && current.getBlock().getMaterial() != Material.AIR) {
++                    this.world.forceBlockUpdateTick(block, target, this.world.random);
++                }
+             }
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+index 4e1018e34ef9978a51bb97ffad1e8069617e45de..665fe3646b53cbc93a39979662f79e2fa6a034bf 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -151,6 +151,11 @@ public final class ChunkDecorationExecutor {
+ 
+             try {
+                 job.buffer.apply();
++            } catch (Throwable throwable) {
++                // The replay runs inside the tick loop, so a single bad entry must not take the
++                // server down with it. The chunk is left part decorated, which is visible and
++                // reported, rather than the world being lost.
++                ChunkDecorationExecutor.logger.error("[Athena] Replaying the decoration of chunk " + job.chunkX + ", " + job.chunkZ + " failed; that chunk is partly decorated", throwable);
+             } finally {
+                 BlockFalling.instaFall = false;
+             }
