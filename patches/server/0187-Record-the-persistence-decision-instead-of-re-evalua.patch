@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 00:44:50 +0900
+Subject: [PATCH] Record the persistence decision instead of re-evaluating it
+
+Chunk.addEntity and Chunk.removeEntityAtIndex both guard the entityCount
+bookkeeping with isTypeNotPersistent() && isPersistent(). Both inputs are mutable,
+so the guard can answer differently at the two ends of an entity's stay in a chunk:
+EntityChicken.isTypeNotPersistent() is isChickenJockey() && passenger == null and
+onLivingUpdate then rewrites persistent for a jockey, EntityWolf and EntityOcelot
+answer !isTamed(), and EntityInsentient sets persistent when a mob picks up loot.
+
+The pair then stops being symmetric. Trove's adjustValue silently does nothing when
+the key is absent, so entityCount hides the case where a decrement runs for an
+entity that was never incremented - but ChunkCreatureCensus applies its adjustment
+unconditionally, so the world total walks away from the sum it mirrors. On a live
+server the audit caught it as EntityAnimal: tracked 193, actual 194, drifting.
+That total is what EnumCreatureType spawn limits are read from, so a census below
+the truth is a server that quietly stops spawning animals.
+
+Record the decision on the entity in addEntity and let removeEntityAtIndex follow
+it rather than asking again. This also cures the other direction, which upstream
+has always had: a mob that picks up loot after being counted is never taken back
+out of entityCount.
+
+debugVerifyAthenaIndexes now also checks, at the moment entityCount is mutated,
+that inCreatureCensus agrees with the provider's map and that a decrement is not
+being applied to a class entityCount has no entry for. The second one is what found
+this. Verified over a ten minute flight on a freshly generated world: 36,000 census
+checks, 12,387 of them non-empty, ~17,000 entities, zero divergences - against 3,207
+on the same route before the fix.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 2f24738411531038bc991f6ae416690496a5f152..875dfcf8ca86b73dc71173bc12f11ab68d6670f4 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -172,9 +172,77 @@ public final class AthenaIndexAudit {
+         }
+ 
+         if (!tracked.matches(expected)) {
++            // Athena - a divergence is either a chunk whose tally was never folded in or a
++            // mismatched pair of adjustments, and the two want different fixes. Name the chunks
++            // sitting in the map with the flag clear, so the report says which of the two it is.
++            int unfolded = 0;
++            StringBuilder where = new StringBuilder();
++
++            for (Object o : world.chunkProviderServer.chunks.values()) {
++                Chunk chunk = (Chunk) o;
++
++                if (!chunk.inCreatureCensus) {
++                    ++unfolded;
++                    if (unfolded <= 8) {
++                        where.append("\n  in map but never folded in: ").append(chunk.locX).append(',').append(chunk.locZ)
++                                .append(" tally=").append(chunk.entityCount.toString())
++                                .append(" loaded=").append(chunk.isLoaded());
++                    }
++                }
++            }
++
+             report("creature census diverged in " + world.getWorld().getName()
+-                    + tracked.describeDifference(expected));
++                    + tracked.describeDifference(expected)
++                    + "\n  chunks in map with inCreatureCensus=false: " + unfolded
++                    + where);
++        }
++    }
++
++    /**
++     * Checks the two invariants the census rests on, at the moment a chunk's entityCount is
++     * mutated: that inCreatureCensus agrees with whether the chunk is really in the provider's
++     * map, and that a decrement is not being applied to a class entityCount has no entry for.
++     * The second one is what caught the persistence-flag asymmetry described in Chunk.addEntity -
++     * trove's adjustValue swallows that case, so entityCount looks fine while the census, which
++     * applies its adjustment unconditionally, walks away from the sum it mirrors.
++     */
++    public static void auditCensusSite(Chunk chunk, String site, Class creatureClass, boolean decrement) {
++        if (!(chunk.world instanceof WorldServer)) {
++            return;
++        }
++
++        ChunkProviderServer provider = ((WorldServer) chunk.world).chunkProviderServer;
++
++        if (provider == null) {
++            return;
++        }
++
++        Chunk inMap = provider.getChunkIfLoaded(chunk.locX, chunk.locZ);
++        boolean mapped = inMap == chunk;
++
++        if (mapped != chunk.inCreatureCensus) {
++            report("census flag out of step at " + site + " for chunk " + chunk.locX + "," + chunk.locZ
++                    + ": inCreatureCensus=" + chunk.inCreatureCensus + ", in provider map=" + mapped
++                    + (inMap == null ? " (no chunk at that key)" : (mapped ? "" : " (a different chunk object holds that key)"))
++                    + "\n" + trace());
++        }
++
++        if (decrement && !chunk.entityCount.containsKey(creatureClass)) {
++            report("census decrement with no entityCount entry at " + site + " for chunk "
++                    + chunk.locX + "," + chunk.locZ + " class " + creatureClass.getName()
++                    + "\n" + trace());
++        }
++    }
++
++    private static String trace() {
++        StringBuilder builder = new StringBuilder();
++        StackTraceElement[] frames = new Throwable().getStackTrace();
++
++        for (int i = 2; i < frames.length && i < 14; ++i) {
++            builder.append("      at ").append(frames[i]).append('\n');
+         }
++
++        return builder.toString();
+     }
+ 
+     // --------------------------------------------------------------- buckets
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index c3f13f4e3dd0b805c11559dcfb6d9dd8fd6d0c07..2748fa79b0d6265ed2767ae483178015363af6d9 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -913,16 +913,29 @@ public class Chunk {
+         // Athena end
+         // Spigot start - increment creature type count
+         // Keep this synced up with World.a(Class)
++        // Athena start - the test below reads state the entity can change while it sits in this
++        // chunk: a chicken jockey loses its rider, a wolf or ocelot is tamed, a mob picks up loot.
++        // Asking it a second time in removeEntityAtIndex can therefore answer differently from the
++        // way it answers here, and the pair stops being symmetric - a decrement runs for an entity
++        // that was never incremented, or an increment is never taken back out. Trove's adjustValue
++        // silently does nothing when the key is absent, so entityCount hides half of that, but the
++        // census applies its adjustment unconditionally and drifts away from the sum it mirrors.
++        // Record the decision once, here, and let removal follow it instead of re-deciding.
+         if (entity instanceof EntityInsentient) {
+             EntityInsentient entityinsentient = (EntityInsentient) entity;
+             if (entityinsentient.isTypeNotPersistent() && entityinsentient.isPersistent()) {
++                entity.athenaCountedInChunk = false;
+                 return;
+             }
+         }
++
++        entity.athenaCountedInChunk = true;
++        // Athena end
+         for ( EnumCreatureType creatureType : EnumCreatureType.VALUES ) // Athena - shared array; values() clones on every call
+         {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
++                if ( AthenaIndexAudit.enabled() ) AthenaIndexAudit.auditCensusSite( this, "Chunk.addEntity", creatureType.getCreatureClass(), false ); // Athena - audit hook
+                 this.entityCount.adjustOrPutValue( creatureType.getCreatureClass(), 1, 1 );
+                 if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), 1 ); // Athena - keep the world total in step
+             }
+@@ -972,16 +985,20 @@ public class Chunk {
+         // Athena end
+         // Spigot start - decrement creature type count
+         // Keep this synced up with World.a(Class)
+-        if (entity instanceof EntityInsentient) {
+-            EntityInsentient entityinsentient = (EntityInsentient) entity;
+-            if (entityinsentient.isTypeNotPersistent() && entityinsentient.isPersistent()) {
+-                return;
+-            }
++        // Athena - follow the decision addEntity recorded rather than re-running a test whose
++        // inputs the entity may have changed since. See the note there. The slice removal above
++        // has already established that this chunk is the one the entity was registered in, so the
++        // flag it left behind belongs to this chunk's tally.
++        if (!entity.athenaCountedInChunk) {
++            return;
+         }
++
++        entity.athenaCountedInChunk = false;
+         for ( EnumCreatureType creatureType : EnumCreatureType.VALUES ) // Athena - shared array; values() clones on every call
+         {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
++                if ( AthenaIndexAudit.enabled() ) AthenaIndexAudit.auditCensusSite( this, "Chunk.removeEntityAtIndex", creatureType.getCreatureClass(), true ); // Athena - audit hook
+                 this.entityCount.adjustValue( creatureType.getCreatureClass(), -1 );
+                 if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), -1 ); // Athena - keep the world total in step
+             }
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 7d485a38e76c40b8d247583010166b5ec87d295a..20b0ae35c3a2d3f25e8537dd948c4cbbf4d83b1a 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -131,6 +131,10 @@ public abstract class Entity implements ICommandListener {
+     // by Chunk (addEntity, removeEntityAtIndex, addEntities, removeEntities, updateEntityBucket).
+     Chunk athenaChunk;
+     int athenaBucket = -1;
++    // Athena - whether the chunk this entity is registered in counted it into entityCount. The
++    // persistence test that decides it reads mutable state, so the answer has to be remembered
++    // rather than asked for a second time at removal. See Chunk.addEntity.
++    boolean athenaCountedInChunk;
+     // PaperSpigot start - EAR: Fix bug with teleporting entities
+     public boolean isAddedToChunk() {
+         int chunkX = MathHelper.floor(locX / 16.0D);

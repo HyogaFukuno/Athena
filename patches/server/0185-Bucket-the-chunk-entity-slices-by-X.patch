@@ -1,0 +1,528 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 28 Aug 2026 20:44:46 +0900
+Subject: [PATCH] Bucket the chunk entity slices by X
+
+An entity slice holds every entity in a 16x16x16 section, and the queries that
+dominate the server thread ask it for the few entities inside a box barely larger
+than one entity. Counted on a crowded world: 87 candidates scanned per call and
+1.3 of them matching, so 98.5% of the scan was thrown away.
+
+Each slice now also carries 16 buckets, one per block column in X, and a query
+walks only the buckets its box can reach. An entity is bucketed by its minimum X
+corner, so the range starts one pad below the box - the pad being at least the
+width of the widest entity the slice has held - which is what makes the bucketed
+answer identical to the flat one rather than merely close.
+
+The index is exact, not refreshed once a tick: setEntityBoundingBox is the single
+point where a bounding box changes and it updates the bucket from there, so there
+is no window in which an entity sits in a bucket that no longer matches where it
+is. A once-a-tick index would have been fine at chunk granularity and wrong at one
+block: a knockback or a teleport would leave an entity unfindable for a tick, and
+that is an arrow that does not hit.
+
+entitySlices stays authoritative. The buckets are derived: every path that is not
+a positional query still reads the slice, a slice below the threshold has no
+bucket array and is walked flat, and debugVerifyAthenaIndexes now checks the
+buckets against the slice they came from on every tick.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 2e53163296bbe20a49c26c0676f09371b86df92b..76b60f16bbbe4e8ed93f0eecf2f66dacf18d861b 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -143,6 +143,7 @@ public class PandaSpigotConfig {
+         "  - Block.hasRedstonePowerHandler() vs what getWeakPower/getStrongPower actually return\n" +
+         "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk\n" +
+         "  - the chunk the light queries reuse vs the one the chunk provider would hand back\n" +
++        "  - Chunk's X bucket index vs the entity slice it is derived from\n" +
+         "Any disagreement is logged as a warning with a stack trace. This costs real time and\n" +
+         "allocates on the redstone path, so leave it off outside of testing.")
+     public boolean debugVerifyAthenaIndexes = false;
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 618634f12f444a7145720afbbf33cc9a816bf51c..ef77e8ca0cec8bcbb90b82038deaa6f8802a8aa3 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -46,6 +46,10 @@ public final class AthenaIndexAudit {
+     private static long censusChecks;
+     private static long censusChecksNonEmpty;
+ 
++    private static long bucketChecks;
++    private static long bucketChecksIndexed;
++    private static long bucketEntities;
++
+ 
+     private static long mismatches;
+     private static int reports;
+@@ -173,6 +177,72 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    // --------------------------------------------------------------- buckets
++
++    /**
++     * Verifies Chunk's X bucket index against the entity slice it is derived from. The index is
++     * maintained from five places - addEntity, removeEntityAtIndex, addEntities, removeEntities and
++     * the setEntityBoundingBox callback - and a query that reads it must return exactly what a flat
++     * walk of the slice would have returned, so every entity has to be in the one bucket its
++     * minimum X corner puts it in, and the pad has to cover the widest entity present.
++     */
++    public static void auditEntityBuckets(WorldServer world) {
++        for (Object o : world.chunkProviderServer.chunks.values()) {
++            Chunk chunk = (Chunk) o;
++
++            for (int slice = 0; slice < chunk.entitySlices.length; ++slice) {
++                ++bucketChecks;
++                java.util.List<Entity> flat = chunk.entitySlices[slice];
++                java.util.List<Entity>[] buckets = chunk.auditBuckets(slice);
++
++                if (buckets == null) {
++                    continue;
++                }
++
++                ++bucketChecksIndexed;
++                bucketEntities += flat.size();
++                int found = 0;
++
++                for (int b = 0; b < buckets.length; ++b) {
++                    if (buckets[b] == null) {
++                        continue;
++                    }
++
++                    for (Entity entity : buckets[b]) {
++                        ++found;
++
++                        if (entity.athenaBucket != b) {
++                            report("entity " + entity.getId() + " is in bucket " + b + " but records " + entity.athenaBucket);
++                        }
++
++                        if (chunk.auditBucketOf(entity.boundingBoxMinX) != b) {
++                            report("entity " + entity.getId() + " is in bucket " + b + " but its minX "
++                                    + entity.boundingBoxMinX + " belongs in " + chunk.auditBucketOf(entity.boundingBoxMinX));
++                        }
++
++                        if (entity.athenaChunk != chunk) {
++                            report("entity " + entity.getId() + " is bucketed in " + chunk.locX + "," + chunk.locZ
++                                    + " but points at " + (entity.athenaChunk == null ? "null" : entity.athenaChunk.locX + "," + entity.athenaChunk.locZ));
++                        }
++
++                        if (!flat.contains(entity)) {
++                            report("entity " + entity.getId() + " is bucketed but not in slice " + slice);
++                        }
++
++                        if (entity.boundingBoxMaxX - entity.boundingBoxMinX > chunk.auditBucketPad(slice)) {
++                            report("entity " + entity.getId() + " is wider than the pad of slice " + slice);
++                        }
++                    }
++                }
++
++                if (found != flat.size()) {
++                    report("slice " + slice + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                            + flat.size() + " entities but its buckets hold " + found);
++                }
++            }
++        }
++    }
++
+     // ------------------------------------------------------------------ light
+ 
+     /**
+@@ -219,12 +289,13 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty) | mismatches={}",
++        LOGGER.info("checks: chunkQueue={} ({} non-empty, max {} entries), pendingTicks={} ({} non-empty, max {} entries), skippedPower={}, lightChunk={}, census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities) | mismatches={}",
+                 queueChecks, queueChecksNonEmpty, queueMaxSize,
+                 pendingChecks, pendingChecksNonEmpty, pendingMaxSize,
+                 powerChecksSkippedBlocks,
+                 lightChunkChecks,
+                 censusChecks, censusChecksNonEmpty,
++                bucketChecks, bucketChecksIndexed, bucketEntities,
+                 mismatches);
+ 
+         if (queueChecksNonEmpty == 0 && pendingChecksNonEmpty == 0 && powerChecksSkippedBlocks == 0 && lightChunkChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index eeb11d7e703aa916dc10c281ac61f53227764f39..042d9cdb2cf5318fc7f0557fcf992b2cde515b26 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -42,6 +42,27 @@ public class Chunk {
+     // up no longer needs a BlockPosition to hash and the map holds no position objects at all.
+     public final Long2ObjectMap<TileEntity> tileEntities;
+     public final List<Entity>[] entitySlices; // Spigot
++    // Athena start - a one-block-wide X bucket index over each entity slice.
++    //
++    // A slice holds every entity in a 16x16x16 section, and the queries that dominate the server
++    // thread ask it for the few entities inside a box barely larger than one entity. Counted on a
++    // crowded world: 87 candidates scanned per call and 1.3 of them matching, so 98.5% of the scan
++    // is thrown away. Bucketing the slice by the block column of each entity's minimum X corner
++    // lets a query touch only the buckets its box can reach.
++    //
++    // entitySlices stays authoritative. The buckets are a derived index: everything that is not a
++    // positional query still reads the slice, and a slice with no bucket array is walked flat, so
++    // a missing index costs correctness nothing. Small slices never get one - below the threshold
++    // building and maintaining it costs more than the scan it saves.
++    //
++    // The index is kept exact rather than refreshed once a tick. Entity.setEntityBoundingBox is
++    // the one place a bounding box changes, and it calls updateEntityBucket from there, so a
++    // bucketed query returns exactly the entities the flat walk would have returned - there is no
++    // window in which an entity sits in a bucket that no longer matches where it is.
++    private static final int BUCKET_THRESHOLD = 24;
++    private final List<Entity>[][] entityBuckets = (List<Entity>[][]) new List[16][];
++    private final int[] bucketPad = new int[16];
++    // Athena end
+     // PaperSpigot start - track the number of minecarts and items
+     // Keep this synced with entitySlices.add() and entitySlices.remove()
+     private final int[] itemCounts = new int[16];
+@@ -749,6 +770,86 @@ public class Chunk {
+         }
+     }
+ 
++    // Athena start - bucket index maintenance
++    /** The bucket a world X coordinate falls in, clamped to this chunk. */
++    private int bucketOf(double x) {
++        int b = MathHelper.floor(x) - (this.locX << 4);
++        return b < 0 ? 0 : (b > 15 ? 15 : b);
++    }
++
++    private void bucketAdd(List<Entity>[] buckets, int slice, Entity entity) {
++        int b = this.bucketOf(entity.boundingBoxMinX);
++        List<Entity> bucket = buckets[b];
++
++        if (bucket == null) {
++            bucket = new org.bukkit.craftbukkit.util.UnsafeList<Entity>(4);
++            buckets[b] = bucket;
++        }
++
++        bucket.add(entity);
++        entity.athenaBucket = b;
++        // The query widens its bucket range by this much on the low side, so it has to cover the
++        // widest entity the slice has held: an entity is bucketed by its minimum corner, but it
++        // matches a box that only its maximum corner reaches.
++        int width = MathHelper.floor(entity.boundingBoxMaxX - entity.boundingBoxMinX) + 1;
++
++        if (width > this.bucketPad[slice]) {
++            this.bucketPad[slice] = width;
++        }
++    }
++
++    /** Builds (or rebuilds) the bucket index of one slice from the slice itself. */
++    private void buildBuckets(int slice) {
++        List<Entity>[] buckets = (List<Entity>[]) new List[16];
++
++        this.entityBuckets[slice] = buckets;
++        this.bucketPad[slice] = 1;
++        List<Entity> flat = this.entitySlices[slice];
++
++        for (int i = 0; i < flat.size(); ++i) {
++            this.bucketAdd(buckets, slice, flat.get(i));
++        }
++    }
++
++    /** Called from {@link Entity#setEntityBoundingBox} when a registered entity's box moves. */
++    void updateEntityBucket(Entity entity) {
++        int slice = entity.chunkCoordY;
++
++        if (slice < 0 || slice >= this.entityBuckets.length) {
++            return;
++        }
++
++        List<Entity>[] buckets = this.entityBuckets[slice];
++
++        if (buckets == null) {
++            return;
++        }
++
++        int b = this.bucketOf(entity.boundingBoxMinX);
++
++        if (b == entity.athenaBucket) {
++            int width = MathHelper.floor(entity.boundingBoxMaxX - entity.boundingBoxMinX) + 1;
++
++            if (width > this.bucketPad[slice]) {
++                this.bucketPad[slice] = width;
++            }
++
++            return;
++        }
++
++        if (entity.athenaBucket >= 0 && buckets[entity.athenaBucket] != null) {
++            buckets[entity.athenaBucket].remove(entity);
++        }
++
++        this.bucketAdd(buckets, slice, entity);
++    }
++    // Athena end
++
++    // Athena - accessors for AthenaIndexAudit only
++    List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
++    int auditBucketOf(double x) { return this.bucketOf(x); }
++    int auditBucketPad(int slice) { return this.bucketPad[slice]; }
++
+     public void addEntity(Entity entity) {
+         this.hasEntities = true;
+         int i = MathHelper.floor(entity.locX / 16.0D);
+@@ -778,6 +879,16 @@ public class Chunk {
+         entity.chunkCoordY = k;
+         entity.chunkCoordZ = this.locZ;
+         this.entitySlices[k].add(entity);
++        // Athena start - register with the bucket index, building it if the slice has grown enough
++        entity.athenaChunk = this;
++        entity.athenaBucket = -1;
++
++        if (this.entityBuckets[k] != null) {
++            this.bucketAdd(this.entityBuckets[k], k, entity);
++        } else if (this.entitySlices[k].size() >= BUCKET_THRESHOLD) {
++            this.buildBuckets(k);
++        }
++        // Athena end
+         // PaperSpigot start - update counts
+         if (entity instanceof EntityItem) {
+             itemCounts[k]++;
+@@ -818,6 +929,16 @@ public class Chunk {
+         }
+ 
+         if (!this.entitySlices[i].remove(entity)) return; // PandaSpigot
++        // Athena start - drop it from the bucket index too
++        List<Entity>[] buckets = this.entityBuckets[i];
++
++        if (buckets != null && entity.athenaBucket >= 0 && buckets[entity.athenaBucket] != null) {
++            buckets[entity.athenaBucket].remove(entity);
++        }
++
++        entity.athenaChunk = null;
++        entity.athenaBucket = -1;
++        // Athena end
+         // PaperSpigot start - update counts
+         if (entity instanceof EntityItem) {
+             itemCounts[i]--;
+@@ -932,6 +1053,24 @@ public class Chunk {
+     public void addEntities() {
+         this.isChunkLoaded = true;
+         this.world.addTileEntities(this.tileEntities.values());
++        // Athena start - re-establish the bucket index. removeEntities() drops it and clears every
++        // entity's back reference, and a chunk can be loaded again with its slices still populated,
++        // so rebuild from the slice rather than assuming the entities came through addEntity().
++        for (int i = 0; i < this.entitySlices.length; ++i) {
++            List<Entity> flat = this.entitySlices[i];
++
++            for (int idx = 0; idx < flat.size(); ++idx) {
++                flat.get(idx).athenaChunk = this;
++            }
++
++            if (flat.size() >= BUCKET_THRESHOLD) {
++                this.buildBuckets(i);
++            } else {
++                this.entityBuckets[i] = null;
++                this.bucketPad[i] = 0;
++            }
++        }
++        // Athena end
+ 
+         for (int i = 0; i < this.entitySlices.length; ++i) {
+             Iterator iterator = this.entitySlices[i].iterator();
+@@ -949,6 +1088,24 @@ public class Chunk {
+ 
+     public void removeEntities() {
+         this.isChunkLoaded = false;
++        // Athena start - the chunk is going away: drop the bucket index and every back reference
++        // into it, so no entity keeps pointing at a chunk that is no longer in the map.
++        for (int i = 0; i < this.entitySlices.length; ++i) {
++            List<Entity> flat = this.entitySlices[i];
++
++            for (int idx = 0; idx < flat.size(); ++idx) {
++                Entity entity = flat.get(idx);
++
++                if (entity.athenaChunk == this) {
++                    entity.athenaChunk = null;
++                    entity.athenaBucket = -1;
++                }
++            }
++
++            this.entityBuckets[i] = null;
++            this.bucketPad[i] = 0;
++        }
++        // Athena end
+         Iterator iterator = this.tileEntities.values().iterator();
+ 
+         while (iterator.hasNext()) {
+@@ -1030,43 +1187,69 @@ public class Chunk {
+                  */
+                 if (predicate == IEntitySelector.selectInventories && inventoryEntityCounts[k] <= 0) continue;
+                 // PaperSpigot end
+-                // Athena start - walk the slice by index instead of through UnsafeList's iterator.
++                // Athena start - go through the X bucket index when the slice has one.
+                 //
+-                // UnsafeList.iterator() scans a pool of Itr objects looking for one not in use, and
+-                // the Itr it hands back stores a field on every hasNext() and re-checks modCount on
+-                // every next(). Those stores and checks are why UnsafeList$Itr.next and .hasNext
+-                // came out as the single largest self-time frame on the server thread - larger than
+-                // the intersection test this loop exists to perform.
+-                //
+-                // Nothing in this loop touches the slice, only the caller's output list, so the one
+-                // behaviour lost is the ConcurrentModificationException an iterator would raise if
+-                // a predicate ever removed an entity. The predicates reaching here are the
+-                // IEntitySelector constants, which are pure.
+-                for (int idx = 0; idx < slice.size(); ++idx) {
+-                    Entity entity1 = slice.get(idx);
+-                // Athena end
++                // An entity sits in the bucket of its minimum X corner, so it can only match a box
++                // reaching from minX to maxX if that corner is at or above minX - bucketPad, where
++                // bucketPad is at least the width of the widest entity the slice has held. Both
++                // ends are clamped into the chunk the same way the entities were, and clamping is
++                // monotone, so the range still covers every bucket an entity could be in.
++                List<Entity>[] buckets = this.entityBuckets[k];
++
++                if (buckets == null) {
++                    this.scanSliceForEntity(slice, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                } else {
++                    int hi = this.bucketOf(maxX);
+ 
+-                    if (AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && entity1 != entity) { // Athena
+-                        if (predicate == null || predicate.apply(entity1)) {
+-                            list.add(entity1);
++                    for (int b = this.bucketOf(minX - this.bucketPad[k]); b <= hi; ++b) {
++                        List<Entity> bucket = buckets[b];
++
++                        if (bucket != null && !bucket.isEmpty()) {
++                            this.scanSliceForEntity(bucket, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+                         }
++                    }
++                }
++                // Athena end
++            }
++        }
+ 
+-                        Entity[] aentity = entity1.getParts();
++    }
+ 
+-                        if (aentity != null) {
+-                            for (int l = 0; l < aentity.length; ++l) {
+-                                entity1 = aentity[l];
+-                                if (entity1 != entity && AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply(entity1))) { // Athena
+-                                    list.add(entity1);
+-                                }
+-                            }
++    // Athena start - the body of the loop above, so the flat slice and one bucket can share it.
++    //
++    // The walk is by index rather than through UnsafeList's iterator: UnsafeList.iterator() scans
++    // a pool of Itr objects looking for one not in use, and the Itr it hands back stores a field on
++    // every hasNext() and re-checks modCount on every next(). Those stores and checks were the
++    // single largest self-time frame on the server thread - larger than the intersection test this
++    // loop exists to perform.
++    //
++    // Nothing here touches the list being walked, only the caller's output list, so the one
++    // behaviour lost is the ConcurrentModificationException an iterator would raise if a predicate
++    // ever removed an entity. The predicates reaching here are the IEntitySelector constants,
++    // which are pure.
++    private void scanSliceForEntity(List<Entity> from, Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {
++        for (int idx = 0; idx < from.size(); ++idx) {
++            Entity entity1 = from.get(idx);
++
++            if (AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && entity1 != entity) {
++                if (predicate == null || predicate.apply(entity1)) {
++                    list.add(entity1);
++                }
++
++                Entity[] aentity = entity1.getParts();
++
++                if (aentity != null) {
++                    for (int l = 0; l < aentity.length; ++l) {
++                        entity1 = aentity[l];
++                        if (entity1 != entity && AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply(entity1))) {
++                            list.add(entity1);
+                         }
+                     }
+                 }
+             }
+         }
+-
+     }
++    // Athena end
+ 
+     public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, List<T> list, Predicate<? super T> predicate) { // Athena - delegate to the scalar overload
+         this.getEntitiesOfTypeWithinAAAB(oclass, axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, list, predicate);
+@@ -1093,18 +1276,39 @@ public class Chunk {
+         for (int k = i; k <= j; ++k) {
+             if (counts != null && counts[k] <= 0) continue; // PaperSpigot - Don't check a chunk if it doesn't have the type we are looking for
+             List<Entity> slice = this.entitySlices[k]; // Spigot
++            // Athena start - go through the X bucket index when the slice has one; see
++            // getEntitiesWithinAABBForEntity for why this bucket range covers every match.
++            List<Entity>[] buckets = this.entityBuckets[k];
+ 
+-            for (int idx = 0; idx < slice.size(); ++idx) { // Athena - indexed walk; see getEntitiesWithinAABBForEntity
+-                Entity entity = slice.get(idx);
++            if (buckets == null) {
++                this.scanSliceForType(slice, oclass, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++            } else {
++                int hi = this.bucketOf(maxX);
+ 
+-                if (oclass.isInstance(entity) && AxisAlignedBBHelper.intersects(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply((T) entity))) { // Athena // CraftBukkit - fix decompile error // Spigot
+-                    list.add((T) entity); // Fix decompile error
++                for (int b = this.bucketOf(minX - this.bucketPad[k]); b <= hi; ++b) {
++                    List<Entity> bucket = buckets[b];
++
++                    if (bucket != null && !bucket.isEmpty()) {
++                        this.scanSliceForType(bucket, oclass, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                    }
+                 }
+             }
++            // Athena end
+         }
+ 
+     }
+ 
++    // Athena - the body of the loop above, so the flat slice and one bucket can share it
++    private <T extends Entity> void scanSliceForType(List<Entity> from, Class<? extends T> oclass, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<T> list, Predicate<? super T> predicate) {
++        for (int idx = 0; idx < from.size(); ++idx) {
++            Entity entity = from.get(idx);
++
++            if (oclass.isInstance(entity) && AxisAlignedBBHelper.intersects(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply((T) entity))) { // CraftBukkit - fix decompile error // Spigot
++                list.add((T) entity); // Fix decompile error
++            }
++        }
++    }
++
+     public boolean needsSaving(boolean flag) {
+         if (flag) {
+             if (this.hasEntities && this.world.getTime() != this.lastSaved || this.isModified) {
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 8549be24204f31ea43d7fd4c914a8f8b5ba2772f..7d485a38e76c40b8d247583010166b5ec87d295a 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -126,6 +126,11 @@ public abstract class Entity implements ICommandListener {
+     private double entityRiderPitchDelta;
+     private double entityRiderYawDelta;
+     public boolean addedToChunk;
++    // Athena - the chunk this entity is registered in and the X bucket it sits in there, so a
++    // bounding box change can update the index without looking the chunk up. Maintained entirely
++    // by Chunk (addEntity, removeEntityAtIndex, addEntities, removeEntities, updateEntityBucket).
++    Chunk athenaChunk;
++    int athenaBucket = -1;
+     // PaperSpigot start - EAR: Fix bug with teleporting entities
+     public boolean isAddedToChunk() {
+         int chunkX = MathHelper.floor(locX / 16.0D);
+@@ -2309,6 +2314,11 @@ public abstract class Entity implements ICommandListener {
+         this.boundingBoxMaxY = e;
+         this.boundingBoxMaxZ = f;
+         // CraftBukkit end
++        // Athena - this is the one place a bounding box changes, so it is where the chunk's X
++        // bucket index is kept in step. Null until the entity is registered with a chunk.
++        if (this.athenaChunk != null) {
++            this.athenaChunk.updateEntityBucket(this);
++        }
+     }
+ 
+     public float getHeadHeight() {
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index b448a7e98eff8e3f2b7a3ec4f4cbb479cdbf6153..7da25a028e3897b637de17c1898a9c58712f5bca 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -950,6 +950,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     }
+ 
+                     AthenaIndexAudit.auditCreatureCensus(worldserver);
++                    AthenaIndexAudit.auditEntityBuckets(worldserver);
+                 }
+                 // Athena end
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions

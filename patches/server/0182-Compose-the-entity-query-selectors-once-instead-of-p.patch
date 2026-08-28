@@ -1,0 +1,136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 28 Aug 2026 13:07:21 +0900
+Subject: [PATCH] Compose the entity-query selectors once instead of per call
+
+collideWithNearbyEntities runs for every living entity on every tick and built
+an anonymous Predicate and a Guava AndPredicate on each call; AndPredicate walks
+its argument list once per candidate the query returns, and its apply was 11.9%
+of the server thread under an entity-heavy load - second only to the entity query
+itself. The two pathfinder target goals composed their selectors the same way,
+once per shouldExecute.
+
+Each composite is replaced by a single predicate that runs the same tests in the
+same order. The nearest-attackable-target goal caches its composite against the
+selector instance it was built from, because subclasses reassign that field.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index fa24815b4a651836648e965a6d26dc979f1b20c6..614500318be0192100ca411e4185925a219223f1 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -1697,16 +1697,23 @@ public abstract class EntityLiving extends Entity {
+ 
+     protected void doTick() {}
+ 
+-    protected void collideWithNearbyEntities() {
+-        List list = this.world.getEntitiesInAABBexcluding((Entity) this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Predicates.and(IEntitySelector.NOT_SPECTATING, new Predicate() {
+-            public boolean a(Entity entity) {
+-                return entity.canBePushed();
+-            }
++    // Athena start - one shared predicate instead of a fresh Guava AndPredicate every tick.
++    // collideWithNearbyEntities runs for every living entity on every tick, and each call built
++    // an anonymous Predicate and wrapped it with IEntitySelector.NOT_SPECTATING in a
++    // Predicates.and - which stores its arguments in a list and walks that list for every
++    // candidate the query returns. Predicates$AndPredicate.apply was 11.9% of the server thread
++    // under an entity-heavy load, more than any frame except the entity query itself.
++    // The two tests are in the order Predicates.and evaluated them, and both are pure, so the
++    // answer for any entity is the same one the composite gave.
++    private static final Predicate<Entity> NOT_SPECTATING_AND_PUSHABLE = new Predicate<Entity>() {
++        public boolean apply(Entity entity) {
++            return (!(entity instanceof EntityHuman) || !((EntityHuman) entity).isSpectator()) && entity.canBePushed();
++        }
++    };
++    // Athena end
+ 
+-            public boolean apply(Object object) {
+-                return this.a((Entity) object);
+-            }
+-        }));
++    protected void collideWithNearbyEntities() {
++        List list = this.world.getEntitiesInAABBexcluding((Entity) this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), NOT_SPECTATING_AND_PUSHABLE); // Athena - see above
+ 
+         if (this.canBeCollidedWith() && !list.isEmpty()) { // Spigot: Add this.ad() condition
+             numCollisions -= world.spigotConfig.maxCollisionsPerEntity; // Spigot
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
+index fa24d5a9b38639ee208745be1ff4332f6b691367..4e8a69bb16758f48250335699658b816a12fd402 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalAvoidTarget.java
+@@ -17,6 +17,7 @@ public class PathfinderGoalAvoidTarget<T extends Entity> extends PathfinderGoal
+     private NavigationAbstract entityPathNavigate;
+     private Class<T> classToAvoid;
+     private Predicate<? super T> avoidTargetSelector;
++    private final Predicate<Entity> composedSelector; // Athena - see the constructor
+ 
+     public PathfinderGoalAvoidTarget(EntityCreature entitycreature, Class<T> oclass, float f, double d0, double d1) {
+         this(entitycreature, oclass, Predicates.alwaysTrue(), f, d0, d1);
+@@ -40,11 +41,24 @@ public class PathfinderGoalAvoidTarget<T extends Entity> extends PathfinderGoal
+         this.nearSpeed = d1;
+         this.entityPathNavigate = entitycreature.getNavigation();
+         this.setMutexBits(1);
++        // Athena start - compose the three selectors once instead of per shouldExecute() call.
++        // Predicates.and stores its arguments in a list and walks that list for every candidate
++        // the entity query returns; none of the three components is ever reassigned.
++        final Predicate<Entity> canBeSeen = this.canBeSeenSelector;
++        final Predicate avoidTarget = predicate;
++        this.composedSelector = new Predicate<Entity>() {
++            public boolean apply(Entity entity) {
++                // same order and same tests as Predicates.and(NOT_SPECTATING, canBeSeen, avoidTarget)
++                return (!(entity instanceof EntityHuman) || !((EntityHuman) entity).isSpectator())
++                    && canBeSeen.apply(entity) && avoidTarget.apply(entity);
++            }
++        };
++        // Athena end
+     }
+ 
+     @Override
+     public boolean shouldExecute() {
+-        List list = this.theEntity.world.getEntitiesWithinAABB(this.classToAvoid, Math.min(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.min(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.min(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.max(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), Predicates.and(new Predicate[]{IEntitySelector.NOT_SPECTATING, this.canBeSeenSelector, this.avoidTargetSelector}));
++        List list = this.theEntity.world.getEntitiesWithinAABB(this.classToAvoid, Math.min(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.min(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.min(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinX - (double) this.avoidDistance, this.theEntity.boundingBoxMaxX + (double) this.avoidDistance), Math.max(this.theEntity.boundingBoxMinY - 3.0D, this.theEntity.boundingBoxMaxY + 3.0D), Math.max(this.theEntity.boundingBoxMinZ - (double) this.avoidDistance, this.theEntity.boundingBoxMaxZ + (double) this.avoidDistance), this.composedSelector); // Athena - see the constructor
+ 
+         if (list.isEmpty()) {
+             return false;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+index 2b603070976c8eb1a78c170b05aafa2a92a9d321..607a91b332a9092ded3afa062ea322a4f3ef3207 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+@@ -14,6 +14,29 @@ public class PathfinderGoalNearestAttackableTarget<T extends EntityLiving> exten
+     protected final PathfinderGoalNearestAttackableTarget.DistanceComparator theNearestAttackableTargetSorter;
+     protected Predicate targetEntitySelector;
+     protected EntityLiving targetEntity;
++    // Athena start - keep the composed selector instead of building a Guava AndPredicate per call.
++    // shouldExecute built Predicates.and(targetEntitySelector, NOT_SPECTATING) on every run, and
++    // the composite walks its argument list once per candidate the query returns. Subclasses
++    // reassign targetEntitySelector (EntityIronGolem does), so the cache is keyed on the instance
++    // it was composed from rather than built once in the constructor.
++    private Predicate composedSelector;
++    private Predicate composedFrom;
++
++    private Predicate composedSelector() {
++        if (this.composedFrom != this.targetEntitySelector) {
++            final Predicate inner = this.targetEntitySelector;
++            this.composedFrom = inner;
++            this.composedSelector = new Predicate() {
++                public boolean apply(Object object) {
++                    // same order and same tests Predicates.and(inner, NOT_SPECTATING) applied
++                    return inner.apply(object)
++                        && (!(object instanceof EntityHuman) || !((EntityHuman) object).isSpectator());
++                }
++            };
++        }
++        return this.composedSelector;
++    }
++    // Athena end
+ 
+     public PathfinderGoalNearestAttackableTarget(EntityCreature entitycreature, Class<T> oclass, boolean flag) {
+         this(entitycreature, oclass, flag, false);
+@@ -71,7 +94,7 @@ public class PathfinderGoalNearestAttackableTarget<T extends EntityLiving> exten
+             return false;
+         } else {
+             double d0 = this.getTargetDistance();
+-            List list = this.taskOwner.world.getEntitiesWithinAABB(this.targetClass, Math.min(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.min(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.min(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Math.max(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.max(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.max(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Predicates.and(this.targetEntitySelector, IEntitySelector.NOT_SPECTATING));
++            List list = this.taskOwner.world.getEntitiesWithinAABB(this.targetClass, Math.min(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.min(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.min(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), Math.max(this.taskOwner.boundingBoxMinX - d0, this.taskOwner.boundingBoxMaxX + d0), Math.max(this.taskOwner.boundingBoxMinY - 4.0D, this.taskOwner.boundingBoxMaxY + 4.0D), Math.max(this.taskOwner.boundingBoxMinZ - d0, this.taskOwner.boundingBoxMaxZ + d0), this.composedSelector()); // Athena - see composedSelector()
+ 
+             Collections.sort(list, this.theNearestAttackableTargetSorter);
+             if (list.isEmpty()) {

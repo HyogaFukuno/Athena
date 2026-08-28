@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 27 Aug 2026 20:58:23 +0900
+Subject: [PATCH] Walk the chunk entity slices by index
+
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index b6a4ba1c2ea460f2fac2226f6fc3d3ab3daa7d42..eeb11d7e703aa916dc10c281ac61f53227764f39 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -1018,8 +1018,9 @@ public class Chunk {
+         j = MathHelper.clamp(j, 0, this.entitySlices.length - 1);
+ 
+         for (int k = i; k <= j; ++k) {
+-            if (!this.entitySlices[k].isEmpty()) {
+-                Iterator iterator = this.entitySlices[k].iterator();
++            List<Entity> slice = this.entitySlices[k]; // Athena - see the indexed walk below
++
++            if (!slice.isEmpty()) {
+                 // PaperSpigot start - Don't search for inventories if we have none, and that is all we want
+                 /*
+                  * We check if they want inventories by seeing if it is the static `IEntitySelector.c`
+@@ -1029,8 +1030,21 @@ public class Chunk {
+                  */
+                 if (predicate == IEntitySelector.selectInventories && inventoryEntityCounts[k] <= 0) continue;
+                 // PaperSpigot end
+-                while (iterator.hasNext()) {
+-                    Entity entity1 = (Entity) iterator.next();
++                // Athena start - walk the slice by index instead of through UnsafeList's iterator.
++                //
++                // UnsafeList.iterator() scans a pool of Itr objects looking for one not in use, and
++                // the Itr it hands back stores a field on every hasNext() and re-checks modCount on
++                // every next(). Those stores and checks are why UnsafeList$Itr.next and .hasNext
++                // came out as the single largest self-time frame on the server thread - larger than
++                // the intersection test this loop exists to perform.
++                //
++                // Nothing in this loop touches the slice, only the caller's output list, so the one
++                // behaviour lost is the ConcurrentModificationException an iterator would raise if
++                // a predicate ever removed an entity. The predicates reaching here are the
++                // IEntitySelector constants, which are pure.
++                for (int idx = 0; idx < slice.size(); ++idx) {
++                    Entity entity1 = slice.get(idx);
++                // Athena end
+ 
+                     if (AxisAlignedBBHelper.intersects(entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ, entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && entity1 != entity) { // Athena
+                         if (predicate == null || predicate.apply(entity1)) {
+@@ -1078,10 +1092,10 @@ public class Chunk {
+         // PaperSpigot end
+         for (int k = i; k <= j; ++k) {
+             if (counts != null && counts[k] <= 0) continue; // PaperSpigot - Don't check a chunk if it doesn't have the type we are looking for
+-            Iterator iterator = this.entitySlices[k].iterator(); // Spigot
++            List<Entity> slice = this.entitySlices[k]; // Spigot
+ 
+-            while (iterator.hasNext()) {
+-                Entity entity = (Entity) iterator.next();
++            for (int idx = 0; idx < slice.size(); ++idx) { // Athena - indexed walk; see getEntitiesWithinAABBForEntity
++                Entity entity = slice.get(idx);
+ 
+                 if (oclass.isInstance(entity) && AxisAlignedBBHelper.intersects(entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply((T) entity))) { // Athena // CraftBukkit - fix decompile error // Spigot
+                     list.add((T) entity); // Fix decompile error

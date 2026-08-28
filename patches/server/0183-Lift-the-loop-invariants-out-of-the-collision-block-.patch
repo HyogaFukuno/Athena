@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 28 Aug 2026 13:45:47 +0900
+Subject: [PATCH] Lift the loop invariants out of the collision block scan
+
+World.getCubes walks every block in the entity's swept box. Three things in that
+loop did not depend on the block: the world border state update (its two inputs
+are read once before the loop, so it did the same thing every iteration), the
+falling-block special case, and the border containment test - which only reads x
+and z, and reached four WorldBorder getters that recompute the border from its
+centre and size on every call. Those getters alone were 3.4% of the server thread.
+
+The border test now runs once per column, the border state once per chunk - it is
+idempotent, so the entity ends in the same state - and the scratch BlockPosition
+is only written for blocks that are actually asked for their collision boxes,
+using the scalar Chunk.getBlockData overload for the lookup.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index f8bdecc30b95bd9a8aa8a8e660c255c2e60a2626..23662c42b1154fc0dbe8bfba5f5c4f5313aa1dbe 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1442,6 +1442,23 @@ public abstract class World implements IBlockAccess {
+         boolean flag = entity.isOutsideBorder();
+         boolean flag1 = this.isInsideBorder(worldborder, entity);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(0); // Athena - reuse a per-thread scratch position
++        // Athena start - lift what the block loops repeat out of them.
++        // Three things below were re-evaluated for every block in the box: the border state
++        // update (flag and flag1 are read once, above, so it did the same thing every time), the
++        // falling-block special case, and the border containment test. The border test reads four
++        // WorldBorder getters that each recompute the border from its centre and size - together
++        // they were 3.4% of the server thread - and it does not depend on y at all, so it belongs
++        // in the column loop rather than the block loop. The border cannot move inside one call.
++        final boolean athenaSetBorderFalse = flag && flag1;
++        final boolean athenaSetBorderTrue = !flag && !flag1;
++        final boolean athenaFallingBlockSigns = entity.world.paperSpigotConfig.fallingBlocksCollideWithSigns
++                && (entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock);
++        final IBlockData athenaBorderBlock = Blocks.STONE.getBlockData();
++        final double athenaBorderMinX = worldborder.minX();
++        final double athenaBorderMaxX = worldborder.maxX();
++        final double athenaBorderMinZ = worldborder.minZ();
++        final double athenaBorderMaxZ = worldborder.maxZ();
++        // Athena end
+ 
+         // Spigot start
+         int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
+@@ -1468,36 +1485,39 @@ public abstract class World implements IBlockAccess {
+                 int xend = ( j < ( cx + 16 ) ) ? j : ( cx + 16 );
+                 int zstart = ( i1 < cz ) ? cz : i1;
+                 int zend = ( j1 < ( cz + 16 ) ) ? j1 : ( cz + 16 );
++                // Athena - the border update is idempotent and its arguments are loop-invariant,
++                // so running it once for this chunk leaves the entity in the state the per-block
++                // version left it in. The guard keeps it from running when the block loops would
++                // not have executed at all.
++                if (xstart < xend && zstart < zend && ystart < l) {
++                    if (athenaSetBorderFalse) {
++                        entity.setOutsideBorder(false);
++                    } else if (athenaSetBorderTrue) {
++                        entity.setOutsideBorder(true);
++                    }
++                }
+                 // Loop through blocks within chunk
+                 for ( int x = xstart; x < xend; x++ )
+                 {
+                     for ( int z = zstart; z < zend; z++ )
+                     {
++                        // Athena - one border test per column instead of one per block
++                        boolean athenaOutsideBorder = flag1
++                                && !((double) (x + 1) > athenaBorderMinX && (double) x < athenaBorderMaxX
++                                     && (double) (z + 1) > athenaBorderMinZ && (double) z < athenaBorderMaxZ);
+                         for ( int y = ystart; y < l; y++ )
+                         {
+-                            BlockPosition blockposition = blockposition_mutableblockposition.set( x, y, z );
+-
+-                            if (flag && flag1) {
+-                                entity.setOutsideBorder(false);
+-                            } else if (!flag && !flag1) {
+-                                entity.setOutsideBorder(true);
+-                            }
+-
+-                            IBlockData block;
+-                            if (!worldborder.contains(blockposition) && flag1) {
+-                                block = Blocks.STONE.getBlockData();
+-                            } else
+-                            {
+-                                block = chunk.getBlockData( blockposition );
+-                            }
++                            // Athena - the scratch position is only written when a block is reached
++                            // that actually has to be asked for its collision boxes
++                            IBlockData block = athenaOutsideBorder ? athenaBorderBlock : chunk.getBlockData( x, y, z );
+                             if ( block != null )
+                             {
+                                 // PaperSpigot start - FallingBlocks and TNT collide with specific non-collidable blocks
+                                 Block b = block.getBlock();
+-                                if (entity.world.paperSpigotConfig.fallingBlocksCollideWithSigns && (entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock) && (b instanceof BlockSign || b instanceof BlockFenceGate || b instanceof BlockTorch || b instanceof BlockButtonAbstract || b instanceof BlockLever || b instanceof BlockTripwireHook || b instanceof BlockTripwire || b instanceof BlockChest || b instanceof BlockSlowSand || b instanceof BlockBed || b instanceof BlockEnderChest || b instanceof BlockEnchantmentTable || b instanceof BlockBrewingStand)) {
++                                if (athenaFallingBlockSigns && (b instanceof BlockSign || b instanceof BlockFenceGate || b instanceof BlockTorch || b instanceof BlockButtonAbstract || b instanceof BlockLever || b instanceof BlockTripwireHook || b instanceof BlockTripwire || b instanceof BlockChest || b instanceof BlockSlowSand || b instanceof BlockBed || b instanceof BlockEnderChest || b instanceof BlockEnchantmentTable || b instanceof BlockBrewingStand)) { // Athena - hoisted
+                                     sink.addIfIntersects(x, y, z, x + 1.0D, y + 1.0D, z + 1.0D, minX, minY, minZ, maxX, maxY, maxZ);
+                                 } else {
+-                                    b.addCollisionBoxes(this, blockposition, block, minX, minY, minZ, maxX, maxY, maxZ, sink, entity);
++                                    b.addCollisionBoxes(this, blockposition_mutableblockposition.set( x, y, z ), block, minX, minY, minZ, maxX, maxY, maxZ, sink, entity); // Athena - set here
+                                 }
+                                 // PaperSpigot end
+                             }
