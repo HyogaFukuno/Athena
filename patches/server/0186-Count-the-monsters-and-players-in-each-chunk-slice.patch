@@ -1,0 +1,223 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 00:44:21 +0900
+Subject: [PATCH] Count the monsters and players in each chunk slice
+
+A mob hunting for a target asks for a 33x33 box every few ticks and almost always
+finds nothing. Counted on a crowded world: 146 million candidate tests against
+595 matches, and the class test rejected 1% of them - the slice scan is spent
+proving an absence.
+
+PaperSpigot already keeps a per-slice count of items and of inventories so a
+query can skip a slice that holds none. This adds the same for IMonster and for
+EntityHuman, which is what mobs actually spend their time looking for.
+
+The player count needs nothing new: getEntitiesOfTypeWithinAAAB already picks its
+count array off the requested class, and every mob hunting a player asks for
+EntityHuman or a subclass. The monster count does, because the golem asks for
+EntityInsentient and it is the predicate that requires IMonster - so the
+predicate carries a marker, AthenaMonsterOnly, which
+PathfinderGoalNearestAttackableTarget puts on the selector it composes when the
+goal was built on IMonster.VISIBLE_MOB_SELECTOR or mobSelector. Both begin with
+'entity instanceof IMonster' and every layer above them only narrows, so a slice
+with no IMonster holds nothing the predicate would have accepted.
+
+debugVerifyAthenaIndexes checks both counts against the slice every tick.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index ef77e8ca0cec8bcbb90b82038deaa6f8802a8aa3..2f24738411531038bc991f6ae416690496a5f152 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -193,6 +193,32 @@ public final class AthenaIndexAudit {
+             for (int slice = 0; slice < chunk.entitySlices.length; ++slice) {
+                 ++bucketChecks;
+                 java.util.List<Entity> flat = chunk.entitySlices[slice];
++                // Athena - the per-slice counts a target query skips whole slices on
++                int monsters = 0;
++                int humans = 0;
++
++                for (int idx = 0; idx < flat.size(); ++idx) {
++                    Entity entity = flat.get(idx);
++
++                    if (entity instanceof IMonster) {
++                        ++monsters;
++                    }
++
++                    if (entity instanceof EntityHuman) {
++                        ++humans;
++                    }
++                }
++
++                if (monsters != chunk.auditMonsterCount(slice)) {
++                    report("slice " + slice + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                            + monsters + " monsters but its count says " + chunk.auditMonsterCount(slice));
++                }
++
++                if (humans != chunk.auditPlayerCount(slice)) {
++                    report("slice " + slice + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                            + humans + " humans but its count says " + chunk.auditPlayerCount(slice));
++                }
++
+                 java.util.List<Entity>[] buckets = chunk.auditBuckets(slice);
+ 
+                 if (buckets == null) {
+diff --git a/src/main/java/net/minecraft/server/AthenaMonsterOnly.java b/src/main/java/net/minecraft/server/AthenaMonsterOnly.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f483b56ecb75b04496a99ce7d6708d3b11974b24
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaMonsterOnly.java
+@@ -0,0 +1,17 @@
++package net.minecraft.server;
++
++// Athena - marker for a predicate that can only ever accept an IMonster.
++//
++// A mob hunting for a target asks for a 33x33 box every few ticks and almost always finds nothing:
++// measured on a crowded world, 146 million candidate tests against 595 matches. Testing each
++// candidate faster does not help that; the only thing that does is not looking at slices that
++// cannot hold a match. Chunk keeps a per-slice count of IMonster entities for exactly that, in the
++// same way PaperSpigot already counts items and inventories, and this marker is how a query says
++// the count applies to it.
++//
++// PathfinderGoalNearestAttackableTarget puts it on the selector it composes when the goal was built
++// on IMonster.VISIBLE_MOB_SELECTOR or IMonster.mobSelector. Both begin with
++// "entity instanceof IMonster", and every layer the goals wrap around them - the golem's own
++// selector, the NOT_SPECTATING conjunction - only narrows further, so a slice holding no IMonster
++// holds nothing the composed predicate would have accepted either.
++public interface AthenaMonsterOnly {}
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 042d9cdb2cf5318fc7f0557fcf992b2cde515b26..c3f13f4e3dd0b805c11559dcfb6d9dd8fd6d0c07 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -68,6 +68,10 @@ public class Chunk {
+     private final int[] itemCounts = new int[16];
+     private final int[] inventoryEntityCounts = new int[16];
+     // PaperSpigot end
++    // Athena - two more of the same counts, for the two things mobs spend their time looking for
++    // and rarely find. See AthenaMonsterOnly.
++    private final int[] monsterCounts = new int[16];
++    private final int[] playerCounts = new int[16];
+     private boolean done;
+     private boolean lit;
+     private boolean p; public boolean hasTicked() { return this.p; } // PandaSpigot - OBFHELPER
+@@ -849,6 +853,8 @@ public class Chunk {
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
+     int auditBucketOf(double x) { return this.bucketOf(x); }
+     int auditBucketPad(int slice) { return this.bucketPad[slice]; }
++    int auditMonsterCount(int slice) { return this.monsterCounts[slice]; }
++    int auditPlayerCount(int slice) { return this.playerCounts[slice]; }
+ 
+     public void addEntity(Entity entity) {
+         this.hasEntities = true;
+@@ -896,6 +902,15 @@ public class Chunk {
+             inventoryEntityCounts[k]++;
+         }
+         // PaperSpigot end
++        // Athena start - these two are not exclusive with the pair above, so they get their own tests
++        if (entity instanceof IMonster) {
++            monsterCounts[k]++;
++        }
++
++        if (entity instanceof EntityHuman) {
++            playerCounts[k]++;
++        }
++        // Athena end
+         // Spigot start - increment creature type count
+         // Keep this synced up with World.a(Class)
+         if (entity instanceof EntityInsentient) {
+@@ -946,6 +961,15 @@ public class Chunk {
+             inventoryEntityCounts[i]--;
+         }
+         // PaperSpigot end
++        // Athena start
++        if (entity instanceof IMonster) {
++            monsterCounts[i]--;
++        }
++
++        if (entity instanceof EntityHuman) {
++            playerCounts[i]--;
++        }
++        // Athena end
+         // Spigot start - decrement creature type count
+         // Keep this synced up with World.a(Class)
+         if (entity instanceof EntityInsentient) {
+@@ -1269,6 +1293,14 @@ public class Chunk {
+             counts = itemCounts;
+         } else if (IInventory.class.isAssignableFrom(oclass)) {
+             counts = inventoryEntityCounts;
++        // Athena start - the two cases mobs actually spend their time on. The player count covers
++        // every EntityHuman, so asking for a subclass of it can only over-count, never skip a slice
++        // that held a match. See AthenaMonsterOnly for why the predicate marker is sound.
++        } else if (EntityHuman.class.isAssignableFrom(oclass)) {
++            counts = playerCounts;
++        } else if (predicate instanceof AthenaMonsterOnly) {
++            counts = monsterCounts;
++        // Athena end
+         } else {
+             counts = null;
+         }
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+index 607a91b332a9092ded3afa062ea322a4f3ef3207..9fdc9ae71da756b02179fc2e7e4c672ada79371f 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalNearestAttackableTarget.java
+@@ -21,21 +21,40 @@ public class PathfinderGoalNearestAttackableTarget<T extends EntityLiving> exten
+     // it was composed from rather than built once in the constructor.
+     private Predicate composedSelector;
+     private Predicate composedFrom;
++    // Whether this goal was built on a selector that can only accept an IMonster, which lets the
++    // query skip any chunk slice holding none. See AthenaMonsterOnly.
++    private boolean monsterOnly;
+ 
+     private Predicate composedSelector() {
+         if (this.composedFrom != this.targetEntitySelector) {
+-            final Predicate inner = this.targetEntitySelector;
++            Predicate inner = this.targetEntitySelector;
+             this.composedFrom = inner;
+-            this.composedSelector = new Predicate() {
+-                public boolean apply(Object object) {
+-                    // same order and same tests Predicates.and(inner, NOT_SPECTATING) applied
+-                    return inner.apply(object)
+-                        && (!(object instanceof EntityHuman) || !((EntityHuman) object).isSpectator());
+-                }
+-            };
++            this.composedSelector = this.monsterOnly ? new MonsterOnlyComposed(inner) : new Composed(inner);
+         }
+         return this.composedSelector;
+     }
++
++    /** inner, then NOT_SPECTATING - the order and the tests Predicates.and applied. */
++    private static class Composed implements Predicate {
++
++        final Predicate inner;
++
++        Composed(Predicate inner) {
++            this.inner = inner;
++        }
++
++        public boolean apply(Object object) {
++            return this.inner.apply(object)
++                && (!(object instanceof EntityHuman) || !((EntityHuman) object).isSpectator());
++        }
++    }
++
++    private static final class MonsterOnlyComposed extends Composed implements AthenaMonsterOnly {
++
++        MonsterOnlyComposed(Predicate inner) {
++            super(inner);
++        }
++    }
+     // Athena end
+ 
+     public PathfinderGoalNearestAttackableTarget(EntityCreature entitycreature, Class<T> oclass, boolean flag) {
+@@ -52,6 +71,10 @@ public class PathfinderGoalNearestAttackableTarget<T extends EntityLiving> exten
+         this.targetChance = i;
+         this.theNearestAttackableTargetSorter = new PathfinderGoalNearestAttackableTarget.DistanceComparator(entitycreature);
+         this.setMutexBits(1);
++        // Athena - both of these start with "entity instanceof IMonster", and everything the goals
++        // layer on top only narrows, so the composed selector can carry the marker. See
++        // AthenaMonsterOnly.
++        this.monsterOnly = predicate == IMonster.VISIBLE_MOB_SELECTOR || predicate == IMonster.mobSelector;
+         this.targetEntitySelector = new Predicate() {
+             public boolean a(T t0) {
+                 if (predicate != null && !predicate.apply(t0)) {

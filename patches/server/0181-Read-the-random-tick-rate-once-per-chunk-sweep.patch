@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 27 Aug 2026 21:10:19 +0900
+Subject: [PATCH] Read the random tick rate once per chunk sweep
+
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 68e29003b3a03360a67534d0d76e438d9dd61be4..ffbe51bcfee6bb67cd259ee51fa1393f443a2fb1 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -519,6 +519,8 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 this.getChunkAt(World.keyToX(chunkCoord), World.keyToZ(chunkCoord)).b(false);
+             }
+         } else {
++            int randomTickSpeed = this.getGameRules().getInt("randomTickSpeed"); // Athena - hoisted; see tickPandaChunkTickSelection
++
+             for (gnu.trove.iterator.TLongShortIterator iterator = this.chunkTickList.iterator(); iterator.hasNext(); ) {
+                 iterator.advance();
+                 long chunkCoord = iterator.key();
+@@ -545,7 +547,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 this.methodProfiler.endStartSection("iceandsnow");
+                 tickIceAndSnow(k, l);
+                 this.methodProfiler.endStartSection("tickBlocks");
+-                tickBlocks(chunk, k, l);
++                tickBlocks(chunk, k, l, randomTickSpeed); // Athena - hoisted out of the sweep
+                 this.methodProfiler.endSection();
+             }
+         }
+@@ -562,6 +564,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 chunkIterator.next().b(false);
+             }
+         } else {
++            // Athena - the random tick rate is a game rule, not a per-chunk property. Reading it
++            // inside tickBlocks meant a string hash and a map lookup for every chunk ticked, every
++            // tick; profiling put GameRules.getInt at ~1% of the server thread on its own. The value
++            // cannot change part way through the sweep - only a command sets it, and commands run
++            // between ticks - so one read per sweep is the same number.
++            int randomTickSpeed = this.getGameRules().getInt("randomTickSpeed");
++
+             for (Iterator<Chunk> iterator = this.manager.getTickableChunks(); iterator.hasNext(); ) {
+                 this.methodProfiler.startSection("getChunk");
+                 Chunk chunk = iterator.next();
+@@ -579,7 +588,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 this.methodProfiler.endStartSection("iceandsnow");
+                 tickIceAndSnow(k, l);
+                 this.methodProfiler.endStartSection("tickBlocks");
+-                tickBlocks(chunk, k, l);
++                tickBlocks(chunk, k, l, randomTickSpeed); // Athena - hoisted out of the sweep
+                 this.methodProfiler.endSection();
+             }
+         }
+@@ -644,9 +653,8 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         }
+     }
+ 
+-    private void tickBlocks(Chunk chunk, int k, int l) {
++    private void tickBlocks(Chunk chunk, int k, int l, int i1) { // Athena - rate passed in
+         timings.chunkTicksBlocks.startTiming(); // Spigot
+-        int i1 = this.getGameRules().getInt("randomTickSpeed");
+         if (i1 > 0) {
+             for (ChunkSection chunksection : chunk.getSections()) {
+                 if (chunksection != null && chunksection.shouldTick()) {

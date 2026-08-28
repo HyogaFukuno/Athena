@@ -1,0 +1,147 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 27 Aug 2026 10:29:29 +0900
+Subject: [PATCH] Keep the player chunk instances in an array with tombstones
+
+
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index a3999d0fa82634a5de7c383ae8a896bc16fd5695..c275d56b9b74bbefd0c98678887fb1c7894d059d 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -28,7 +28,59 @@ public class PlayerChunkMap {
+     private final List<EntityPlayer> managedPlayers = Lists.newArrayList();
+     private final LongHashMap<PlayerChunkMap.PlayerChunk> playerInstances = new LongHashMap();
+     private final Queue<PlayerChunkMap.PlayerChunk> playerInstancesToUpdate = new java.util.concurrent.ConcurrentLinkedQueue<PlayerChunkMap.PlayerChunk>(); // CraftBukkit ArrayList -> ConcurrentLinkedQueue
+-    private final Queue<PlayerChunkMap.PlayerChunk> playerInstanceList = new java.util.concurrent.ConcurrentLinkedQueue<PlayerChunkMap.PlayerChunk>(); // CraftBukkit ArrayList -> ConcurrentLinkedQueue
++    // Athena start - back the instance list with an array and tombstones.
++    //
++    // CraftBukkit made this a ConcurrentLinkedQueue because the two things done to it collide: it
++    // is walked every tick (getTickableChunks, and flush() every 8000 ticks), and entries are
++    // dropped from it while that walk is in progress - a random block tick can fire a plugin event
++    // that teleports a player, and a player leaving a chunk drops its PlayerChunk. A linked queue
++    // survives that, but it pays for it twice: remove(Object) is an O(n) traversal, and n here is
++    // every chunk watched by anyone in the world, so a player crossing a chunk border drops ~40
++    // instances at thousands of nodes each. The per-tick walk then chases those same pointers.
++    //
++    // An ArrayList gives O(1) indexed iteration over contiguous memory, and removal becomes O(1) by
++    // marking the instance dead instead of unlinking it. Removal no longer modifies the list at
++    // all, so a walk in progress cannot be disturbed by one; an add still only appends, which an
++    // indexed walk tolerates the same way the queue's weakly consistent iterator did. The dead
++    // entries are swept out in flush(), which runs after updateBlocks() and is never reached from
++    // inside a walk, and only once they are at least half the list, so the sweep costs O(1) per
++    // removal amortised and the walk never sees more than twice the live entries.
++    private final List<PlayerChunkMap.PlayerChunk> playerInstanceList = new ArrayList<PlayerChunkMap.PlayerChunk>();
++    private int deadPlayerInstances;
++
++    /** Drops the instance from the list. Cheap; the list itself is compacted later. */
++    private void removePlayerInstance(PlayerChunkMap.PlayerChunk playerchunk) {
++        if (playerchunk.removedFromInstanceList) {
++            return;
++        }
++
++        playerchunk.removedFromInstanceList = true;
++        ++this.deadPlayerInstances;
++    }
++
++    /** Sweeps out the tombstones. Only safe where no walk of the list is in progress. */
++    private void compactPlayerInstances() {
++        if (this.deadPlayerInstances == 0 || this.deadPlayerInstances * 2 < this.playerInstanceList.size()) {
++            return;
++        }
++
++        int write = 0;
++
++        for (int read = 0; read < this.playerInstanceList.size(); ++read) {
++            PlayerChunkMap.PlayerChunk playerchunk = this.playerInstanceList.get(read);
++
++            if (!playerchunk.removedFromInstanceList) {
++                this.playerInstanceList.set(write++, playerchunk);
++            }
++        }
++
++        for (int i = this.playerInstanceList.size() - 1; i >= write; --i) {
++            this.playerInstanceList.remove(i);
++        }
++
++        this.deadPlayerInstances = 0;
++    }
++    // Athena end
+     private int playerViewRadius;
+     private long previousTotalWorldTime;
+     private final int[][] xzDirectionsConst = new int[][] { { 1, 0}, { 0, 1}, { -1, 0}, { 0, -1}};
+@@ -45,13 +97,20 @@ public class PlayerChunkMap {
+ 
+     // PandaSpigot start - Alternative Chunk Ticking Selection
+     public Iterator<Chunk> getTickableChunks() {
+-        final Iterator<PlayerChunk> iterator = this.playerInstanceList.iterator();
+-
++        // Athena - indexed walk over the array; see the field. Entries appended while this runs are
++        // picked up if they land ahead of the cursor, exactly as the linked queue's iterator did.
+         return new AbstractIterator<Chunk>() {
++            private int cursor;
++
+             @Override
+             protected Chunk computeNext() {
+-                while (iterator.hasNext()) {
+-                    PlayerChunk playerChunk = iterator.next();
++                while (this.cursor < PlayerChunkMap.this.playerInstanceList.size()) {
++                    PlayerChunk playerChunk = PlayerChunkMap.this.playerInstanceList.get(this.cursor++);
++
++                    if (playerChunk.removedFromInstanceList) { // Athena - a tombstone
++                        continue;
++                    }
++
+                     Chunk chunk = playerChunk.getChunk();
+ 
+                     if (chunk == null) {
+@@ -80,6 +139,8 @@ public class PlayerChunkMap {
+     // PandaSpigot end
+ 
+     public void flush() {
++        this.compactPlayerInstances(); // Athena - the one point in the tick with no walk in progress
++
+         long i = this.world.getTime();
+         int j;
+         PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk;
+@@ -88,9 +149,12 @@ public class PlayerChunkMap {
+             this.previousTotalWorldTime = i;
+ 
+             // CraftBukkit start - Use iterator
+-            java.util.Iterator iterator = this.playerInstanceList.iterator();
+-            while (iterator.hasNext()) {
+-                playerchunkmap_playerchunk = (PlayerChunk) iterator.next();
++            // Athena - indexed walk; onUpdate() can load a chunk, which can append to the list
++            for (int k = 0; k < this.playerInstanceList.size(); ++k) {
++                playerchunkmap_playerchunk = this.playerInstanceList.get(k);
++                if (playerchunkmap_playerchunk.removedFromInstanceList) {
++                    continue;
++                }
+                 playerchunkmap_playerchunk.onUpdate();
+                 playerchunkmap_playerchunk.processChunk();
+             }
+@@ -412,6 +476,7 @@ public class PlayerChunkMap {
+         private int flagsYAreasToUpdate;
+         private long previousWorldTime;
+         public Chunk chunk; // PandaSpigot - Alternative Chunk Ticking Selection
++        boolean removedFromInstanceList; // Athena - tombstone; see PlayerChunkMap.playerInstanceList
+ 
+         // CraftBukkit start - add fields
+         private final HashMap<EntityPlayer, Runnable> players = new HashMap<EntityPlayer, Runnable>();
+@@ -471,7 +536,7 @@ public class PlayerChunkMap {
+                         ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.loadedRunnable);
+                         long i = (long) this.location.x + 2147483647L | (long) this.location.z + 2147483647L << 32;
+                         PlayerChunkMap.this.playerInstances.remove(i);
+-                        PlayerChunkMap.this.playerInstanceList.remove(this);
++                        PlayerChunkMap.this.removePlayerInstance(this); // Athena - O(1); see the field
+                     }
+ 
+                     return;
+@@ -496,7 +561,7 @@ public class PlayerChunkMap {
+ 
+                     this.increaseInhabitedTime(chunk);
+                     PlayerChunkMap.this.playerInstances.remove(i);
+-                    PlayerChunkMap.this.playerInstanceList.remove(this);
++                    PlayerChunkMap.this.removePlayerInstance(this); // Athena - O(1); see the field
+                     if (this.dirtyCount > 0) {
+                         PlayerChunkMap.this.playerInstancesToUpdate.remove(this);
+                     }

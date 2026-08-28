@@ -1,0 +1,108 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 27 Aug 2026 10:30:40 +0900
+Subject: [PATCH] Compress and decompress packets out of the buffer they arrive
+ in
+
+
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index b357554f4cc7748fc71451190c626043da16230e..7950b27f8bad34e8440e00e352852e93de83165e 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -25,20 +25,43 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+             packetdataserializer.writeVarIntToBuffer(0);
+             packetdataserializer.writeBytes(bytebuf);
+         } else {
+-            byte[] abyte = new byte[i];
++            packetdataserializer.writeVarIntToBuffer(i);
++            // Athena start - feed the deflater from the buffer it already has.
++            //
++            // This copied every packet over the compression threshold into a fresh byte[] purely to
++            // hand it to setInput(byte[]). A bulk chunk packet is a couple of hundred kilobytes, and
++            // one is produced for every chunk sent to every player, so the copy was both the memcpy
++            // and a short-lived allocation the size of the world data being sent.
++            //
++            // Deflater has taken a ByteBuffer since Java 11 and reads it in place, direct memory
++            // included, which is what Netty hands us here. A composite buffer with more than one
++            // backing region cannot be viewed as a single ByteBuffer, so that case still copies.
++            //
++            // reset() is in a finally because the deflater keeps a reference to the input buffer
++            // until it is reset, and Netty releases that buffer the moment we return - leaving the
++            // reference behind would point the next packet's compression at freed memory.
++            try {
++                if (bytebuf.nioBufferCount() == 1) {
++                    this.deflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), i));
++                    bytebuf.skipBytes(i);
++                } else {
++                    byte[] abyte = new byte[i];
+ 
+-            bytebuf.readBytes(abyte);
+-            packetdataserializer.writeVarIntToBuffer(abyte.length);
+-            this.deflater.setInput(abyte, 0, i);
+-            this.deflater.finish();
++                    bytebuf.readBytes(abyte);
++                    this.deflater.setInput(abyte, 0, i);
++                }
+ 
+-            while (!this.deflater.finished()) {
+-                int j = this.deflater.deflate(this.buffer);
++                this.deflater.finish();
+ 
+-                packetdataserializer.writeBytes(this.buffer, 0, j);
+-            }
++                while (!this.deflater.finished()) {
++                    int j = this.deflater.deflate(this.buffer);
+ 
+-            this.deflater.reset();
++                    packetdataserializer.writeBytes(this.buffer, 0, j);
++                }
++            } finally {
++                this.deflater.reset();
++            }
++            // Athena end
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 34bb0fc196d9a34f25f4c4816922621c68bb927d..06ac0a1d69a71d305b7f51e9bbe618bcb61734c7 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -35,15 +35,32 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                     throw new DecoderException("Badly compressed packet - size of " + i + " is larger than protocol maximum of " + 2097152);
+                 }
+ 
+-                byte[] abyte = new byte[packetdataserializer.readableBytes()];
+-
+-                packetdataserializer.readBytes(abyte);
+-                this.inflater.setInput(abyte);
++                // Athena start - feed the inflater from the buffer it already has; see
++                // PacketCompressor for why, including why reset() belongs in a finally. Only the
++                // input copy goes: the inflated array is handed downstream as the packet buffer, so
++                // it has to be allocated either way.
+                 byte[] abyte1 = new byte[i];
+ 
+-                this.inflater.inflate(abyte1);
++                try {
++                    int j = packetdataserializer.readableBytes();
++
++                    if (bytebuf.nioBufferCount() == 1) {
++                        this.inflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), j));
++                        bytebuf.skipBytes(j);
++                    } else {
++                        byte[] abyte = new byte[j];
++
++                        packetdataserializer.readBytes(abyte);
++                        this.inflater.setInput(abyte);
++                    }
++
++                    this.inflater.inflate(abyte1);
++                } finally {
++                    this.inflater.reset();
++                }
++
+                 list.add(Unpooled.wrappedBuffer(abyte1));
+-                this.inflater.reset();
++                // Athena end
+             }
+ 
+         }
