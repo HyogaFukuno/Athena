@@ -1,0 +1,273 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 30 Aug 2026 12:57:27 +0900
+Subject: [PATCH] Bucket the entity slice index on Z as well as X
+
+With X alone a query still widened its range by the widest entity the slice had held,
+so on a crowded slice it read about a quarter of it and threw most of that away on the
+Y and Z tests. collideWithNearbyEntities reaches this for every living entity every
+tick, and a profile of the saturating bench put the scan itself at 12.4% of the server
+thread - the largest single leaf frame in the server.
+
+The Z rows are four blocks deep while the X columns stay one block wide. That is not
+arbitrary: a one-block Z row was tried first and measured -0.13%, 3/6 wins, a flat null.
+The narrowing was real, but an entity that moves diagonally then crosses a bucket almost
+every tick, and Entity.move updates the index several times per tick through
+setEntityBoundingBox. Four-block rows keep most of the narrowing while crossing a
+quarter as often, and that is the whole difference between the two shapes.
+
+The index stays exact: a bucket is (x << 2) | z, both clamped into the chunk the way the
+X column already was, and clamping is monotone so the widened range still covers every
+entity whose minimum corner could reach the box. Verified with debugVerifyAthenaIndexes
+against the flat slice walk - 6,909,814 bucketed entity checks, no mismatch.
+
+Measured +1.83% TPS, 6/6 pairwise wins, at 30,000 golems with four bots.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 12d59e55dffd5c81cd41614dbe5436e4f1c5ae8d..9fee4e0ff090140ddfe48aa64b92c9ef78541b4c 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -140,7 +140,7 @@ public class PandaSpigotConfig {
+         "still agree with the collections they mirror:\n" +
+         "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk, and the\n" +
+         "    two sites that adjust it, which is where a real divergence was found\n" +
+-        "  - Chunk's X bucket index vs the entity slice it is derived from, and the per-slice\n" +
++        "  - Chunk's X/Z bucket index vs the entity slice it is derived from, and the per-slice\n" +
+         "    IMonster and EntityHuman counts a target query skips slices on\n" +
+         "Any disagreement is logged as a warning with a stack trace. This costs real time, so\n" +
+         "leave it off outside of testing.")
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index a5c553df147c474d26493a87c5fc2e1c1ca918be..d687b771fdc56d4e891057e9382c1670d805d23e 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -236,9 +236,10 @@ public final class AthenaIndexAudit {
+                             report("entity " + entity.getId() + " is in bucket " + b + " but records " + entity.athenaBucket);
+                         }
+ 
+-                        if (chunk.auditBucketOf(entity.boundingBoxMinX) != b) {
+-                            report("entity " + entity.getId() + " is in bucket " + b + " but its minX "
+-                                    + entity.boundingBoxMinX + " belongs in " + chunk.auditBucketOf(entity.boundingBoxMinX));
++                        if (chunk.auditBucketIndexOf(entity.boundingBoxMinX, entity.boundingBoxMinZ) != b) {
++                            report("entity " + entity.getId() + " is in bucket " + b + " but its minimum corner "
++                                    + entity.boundingBoxMinX + "," + entity.boundingBoxMinZ + " belongs in "
++                                    + chunk.auditBucketIndexOf(entity.boundingBoxMinX, entity.boundingBoxMinZ));
+                         }
+ 
+                         if (entity.athenaChunk != chunk) {
+@@ -250,8 +251,12 @@ public final class AthenaIndexAudit {
+                             report("entity " + entity.getId() + " is bucketed but not in slice " + slice);
+                         }
+ 
+-                        if (entity.boundingBoxMaxX - entity.boundingBoxMinX > chunk.auditBucketPad(slice)) {
+-                            report("entity " + entity.getId() + " is wider than the pad of slice " + slice);
++                        if (entity.boundingBoxMaxX - entity.boundingBoxMinX > chunk.auditBucketPadX(slice)) {
++                            report("entity " + entity.getId() + " is wider than the X pad of slice " + slice);
++                        }
++
++                        if (entity.boundingBoxMaxZ - entity.boundingBoxMinZ > chunk.auditBucketPadZ(slice)) {
++                            report("entity " + entity.getId() + " is deeper than the Z pad of slice " + slice);
+                         }
+                     }
+                 }
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 352b76451d9771f2b40b524e47304cde32e9618e..3864d805db2b8e1725c2fd002953c88fb79baa41 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -59,9 +59,17 @@ public class Chunk {
+     // the one place a bounding box changes, and it calls updateEntityBucket from there, so a
+     // bucketed query returns exactly the entities the flat walk would have returned - there is no
+     // window in which an entity sits in a bucket that no longer matches where it is.
++    //
++    // The index buckets on Z as well as X. With X alone a query still had to widen its range by
++    // the widest entity the slice had held, so on a crowded slice it read roughly a quarter of it
++    // and threw away most of that on the Y and Z tests. The second axis narrows the same query by
++    // about the same factor again, at the cost of a 256-entry reference array per indexed slice.
++    // A bucket is (x << 2) | z, both clamped into the chunk exactly as before; the Z rows are
++    // four blocks deep, so an entity crosses one a quarter as often as it crosses an X column.
+     private static final int BUCKET_THRESHOLD = 24;
+     private final List<Entity>[][] entityBuckets = (List<Entity>[][]) new List[16][];
+-    private final int[] bucketPad = new int[16];
++    private final int[] bucketPadX = new int[16];
++    private final int[] bucketPadZ = new int[16];
+     // Athena end
+     // PaperSpigot start - track the number of minecarts and items
+     // Keep this synced with entitySlices.add() and entitySlices.remove()
+@@ -778,14 +786,25 @@ public class Chunk {
+     }
+ 
+     // Athena start - bucket index maintenance
+-    /** The bucket a world X coordinate falls in, clamped to this chunk. */
++    /** The bucket column a world X coordinate falls in, clamped to this chunk. */
+     private int bucketOf(double x) {
+         int b = MathHelper.floor(x) - (this.locX << 4);
+         return b < 0 ? 0 : (b > 15 ? 15 : b);
+     }
+ 
++    /** The bucket row a world Z coordinate falls in, clamped to this chunk. Four blocks deep. */
++    private int bucketOfZ(double z) {
++        int b = (MathHelper.floor(z) - (this.locZ << 4)) >> 2;
++        return b < 0 ? 0 : (b > 3 ? 3 : b);
++    }
++
++    /** The bucket an entity's minimum corner belongs in. */
++    private int bucketIndexOf(double x, double z) {
++        return (this.bucketOf(x) << 2) | this.bucketOfZ(z);
++    }
++
+     private void bucketAdd(List<Entity>[] buckets, int slice, Entity entity) {
+-        int b = this.bucketOf(entity.boundingBoxMinX);
++        int b = this.bucketIndexOf(entity.boundingBoxMinX, entity.boundingBoxMinZ);
+         List<Entity> bucket = buckets[b];
+ 
+         if (bucket == null) {
+@@ -800,17 +819,24 @@ public class Chunk {
+         // matches a box that only its maximum corner reaches.
+         int width = MathHelper.floor(entity.boundingBoxMaxX - entity.boundingBoxMinX) + 1;
+ 
+-        if (width > this.bucketPad[slice]) {
+-            this.bucketPad[slice] = width;
++        if (width > this.bucketPadX[slice]) {
++            this.bucketPadX[slice] = width;
++        }
++
++        int depth = MathHelper.floor(entity.boundingBoxMaxZ - entity.boundingBoxMinZ) + 1; // Athena
++
++        if (depth > this.bucketPadZ[slice]) {
++            this.bucketPadZ[slice] = depth;
+         }
+     }
+ 
+     /** Builds (or rebuilds) the bucket index of one slice from the slice itself. */
+     private void buildBuckets(int slice) {
+-        List<Entity>[] buckets = (List<Entity>[]) new List[16];
++        List<Entity>[] buckets = (List<Entity>[]) new List[64]; // Athena - 16 x 4
+ 
+         this.entityBuckets[slice] = buckets;
+-        this.bucketPad[slice] = 1;
++        this.bucketPadX[slice] = 1;
++        this.bucketPadZ[slice] = 1;
+         List<Entity> flat = this.entitySlices[slice];
+ 
+         for (int i = 0; i < flat.size(); ++i) {
+@@ -832,13 +858,19 @@ public class Chunk {
+             return;
+         }
+ 
+-        int b = this.bucketOf(entity.boundingBoxMinX);
++        int b = this.bucketIndexOf(entity.boundingBoxMinX, entity.boundingBoxMinZ);
+ 
+         if (b == entity.athenaBucket) {
+             int width = MathHelper.floor(entity.boundingBoxMaxX - entity.boundingBoxMinX) + 1;
+ 
+-            if (width > this.bucketPad[slice]) {
+-                this.bucketPad[slice] = width;
++            if (width > this.bucketPadX[slice]) {
++                this.bucketPadX[slice] = width;
++            }
++
++            int depth = MathHelper.floor(entity.boundingBoxMaxZ - entity.boundingBoxMinZ) + 1; // Athena
++
++            if (depth > this.bucketPadZ[slice]) {
++                this.bucketPadZ[slice] = depth;
+             }
+ 
+             return;
+@@ -872,8 +904,9 @@ public class Chunk {
+ 
+     // Athena - accessors for AthenaIndexAudit only
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
+-    int auditBucketOf(double x) { return this.bucketOf(x); }
+-    int auditBucketPad(int slice) { return this.bucketPad[slice]; }
++    int auditBucketIndexOf(double x, double z) { return this.bucketIndexOf(x, z); }
++    int auditBucketPadX(int slice) { return this.bucketPadX[slice]; }
++    int auditBucketPadZ(int slice) { return this.bucketPadZ[slice]; }
+     int auditMonsterCount(int slice) { return this.monsterCounts[slice]; }
+     int auditPlayerCount(int slice) { return this.playerCounts[slice]; }
+     int auditCollisionBoxCount(int slice) { return this.collisionBoxCounts[slice]; }
+@@ -1138,7 +1171,8 @@ public class Chunk {
+                 this.buildBuckets(i);
+             } else {
+                 this.entityBuckets[i] = null;
+-                this.bucketPad[i] = 0;
++                this.bucketPadX[i] = 0;
++                this.bucketPadZ[i] = 0;
+             }
+         }
+         // Athena end
+@@ -1174,7 +1208,8 @@ public class Chunk {
+             }
+ 
+             this.entityBuckets[i] = null;
+-            this.bucketPad[i] = 0;
++            this.bucketPadX[i] = 0;
++            this.bucketPadZ[i] = 0;
+         }
+         // Athena end
+         Iterator iterator = this.tileEntities.values().iterator();
+@@ -1258,7 +1293,7 @@ public class Chunk {
+                  */
+                 if (predicate == IEntitySelector.selectInventories && inventoryEntityCounts[k] <= 0) continue;
+                 // PaperSpigot end
+-                // Athena start - go through the X bucket index when the slice has one.
++                // Athena start - go through the X/Z bucket index when the slice has one.
+                 //
+                 // An entity sits in the bucket of its minimum X corner, so it can only match a box
+                 // reaching from minX to maxX if that corner is at or above minX - bucketPad, where
+@@ -1270,13 +1305,19 @@ public class Chunk {
+                 if (buckets == null) {
+                     this.scanSliceForEntity(slice, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+                 } else {
+-                    int hi = this.bucketOf(maxX);
++                    int hiX = this.bucketOf(maxX);
++                    int hiZ = this.bucketOfZ(maxZ); // Athena
++                    int loZ = this.bucketOfZ(minZ - this.bucketPadZ[k]); // Athena
+ 
+-                    for (int b = this.bucketOf(minX - this.bucketPad[k]); b <= hi; ++b) {
+-                        List<Entity> bucket = buckets[b];
++                    for (int bx = this.bucketOf(minX - this.bucketPadX[k]); bx <= hiX; ++bx) {
++                        int row = bx << 2; // Athena
+ 
+-                        if (bucket != null && !bucket.isEmpty()) {
+-                            this.scanSliceForEntity(bucket, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                        for (int bz = loZ; bz <= hiZ; ++bz) { // Athena
++                            List<Entity> bucket = buckets[row | bz];
++
++                            if (bucket != null && !bucket.isEmpty()) {
++                                this.scanSliceForEntity(bucket, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                            }
+                         }
+                     }
+                 }
+@@ -1355,20 +1396,26 @@ public class Chunk {
+         for (int k = i; k <= j; ++k) {
+             if (counts != null && counts[k] <= 0) continue; // PaperSpigot - Don't check a chunk if it doesn't have the type we are looking for
+             List<Entity> slice = this.entitySlices[k]; // Spigot
+-            // Athena start - go through the X bucket index when the slice has one; see
++            // Athena start - go through the X/Z bucket index when the slice has one; see
+             // getEntitiesWithinAABBForEntity for why this bucket range covers every match.
+             List<Entity>[] buckets = this.entityBuckets[k];
+ 
+             if (buckets == null) {
+                 this.scanSliceForType(slice, oclass, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+             } else {
+-                int hi = this.bucketOf(maxX);
++                int hiX = this.bucketOf(maxX);
++                int hiZ = this.bucketOfZ(maxZ); // Athena
++                int loZ = this.bucketOfZ(minZ - this.bucketPadZ[k]); // Athena
++
++                for (int bx = this.bucketOf(minX - this.bucketPadX[k]); bx <= hiX; ++bx) {
++                    int row = bx << 2; // Athena
+ 
+-                for (int b = this.bucketOf(minX - this.bucketPad[k]); b <= hi; ++b) {
+-                    List<Entity> bucket = buckets[b];
++                    for (int bz = loZ; bz <= hiZ; ++bz) { // Athena
++                        List<Entity> bucket = buckets[row | bz];
+ 
+-                    if (bucket != null && !bucket.isEmpty()) {
+-                        this.scanSliceForType(bucket, oclass, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                        if (bucket != null && !bucket.isEmpty()) {
++                            this.scanSliceForType(bucket, oclass, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                        }
+                     }
+                 }
+             }
