@@ -1,0 +1,482 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 02:05:19 +0900
+Subject: [PATCH] Let a dry section answer the liquid box scans without reading
+ a block
+
+Every entity runs handleWaterMovement once a tick, and it walks its own bounding box a
+block at a time asking each one whether it is water. In a profile at 0218 that scan was
+13.31% of the server thread, 7.79% of it in the loop itself, with isMaterialInBB - the
+same walk for lava, from isInLava - another 3.39%. Almost no entity is ever in either
+liquid, so the scan that finds nothing is the common case rather than the rare one.
+
+ChunkSection already counts the blocks it holds that are not air and the ones that tick.
+Counting the water and the lava too costs one comparison per block written, and it lets
+handleMaterialAcceleration, isMaterialInBB and isAABBInMaterial ask whether any section
+their box touches holds that liquid at all - a handful of int loads - before walking
+anything. This is the shape patch 0218 used for the collision query: skip the query, not
+just the work inside it.
+
+Anything the counters cannot answer is answered true and scanned exactly as before: a
+chunk that is not loaded (the scan itself may load it, and that must not change), world
+decoration in flight, or any material other than water and lava. Water and lava are
+counted separately so that a section on the sea floor does not send every isInLava call
+back to the full walk.
+
+A count that drifts below the truth would silently stop an entity from noticing it is
+standing in water, so it is verified from both ends. ChunkSectionLiquidCountTest walks a
+section through 20,000 random writes - liquid over liquid, liquid over air, air over
+liquid, solid over liquid - and recounts all 4096 blocks after each of the first thousand
+and periodically after that, and covers recalcBlockCounts and the bulk load constructor
+as well. AthenaIndexAudit gained a section recount, one chunk per tick round robin, which
+covers the load path the unit test cannot: 52,074 section checks over a run, 26,687 of
+them holding liquid, no mismatches.
+
+Measured +4.79% TPS, 6/6 pairwise wins, at 30,000 golems with four bots. Two of the six
+pairs were disturbed by unrelated disk load on the machine; their ratios were 1.0115 and
+1.0576, and the four clean pairs span 1.0408 to 1.0614.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 97f4870280302398ffceb8dce5191ce7958fc8de..dec143df5b73fed0deb7e7f102efe60222725c3e 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -14,6 +14,7 @@ import org.apache.logging.log4j.Logger;
+ //   ChunkProviderServer.creatureCensus   mirrors the sum of Chunk.entityCount over loaded chunks
+ //   Chunk.entityBuckets                  mirrors the entity slice it is derived from, plus the
+ //                                        per-slice IMonster and EntityHuman counts
++//   ChunkSection water/lava counts       mirror the blocks the section holds
+ //
+ // The census audit earns its keep: the site check in auditCensusSite found a real divergence in
+ // live play, where a decrement was applied to a class entityCount had no entry for.
+@@ -35,6 +36,10 @@ public final class AthenaIndexAudit {
+     private static long censusChecks;
+     private static long censusChecksNonEmpty;
+ 
++    private static int liquidCursor;
++    private static long liquidChecks;
++    private static long liquidChecksNonEmpty;
++
+     private static long bucketChecks;
+     private static long bucketChecksIndexed;
+     private static long bucketEntities;
+@@ -280,6 +285,69 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    // ------------------------------------------------------------ section liquids
++
++    /**
++     * Verifies the per-section water and lava counts against a full recount of the section's
++     * blocks. The counts are maintained from ChunkSection.setType alone, which every write path
++     * funnels through, and World.mayHoldLiquid turns a zero into "the box holds no water" for the
++     * three material scans - so a count that drifts below the truth would silently stop an entity
++     * from noticing it is standing in water.
++     *
++     * Recounting every loaded section every tick would be 4096 block reads per section, so this
++     * takes one chunk per tick, round robin. Over a bench run that is thousands of chunks.
++     */
++    public static void auditSectionLiquids(WorldServer world) {
++        Object[] chunks = world.chunkProviderServer.chunks.values().toArray();
++
++        if (chunks.length == 0) {
++            return;
++        }
++
++        Chunk chunk = (Chunk) chunks[Math.floorMod(liquidCursor++, chunks.length)];
++        ChunkSection[] sections = chunk.getSections();
++
++        for (int i = 0; i < sections.length; ++i) {
++            ChunkSection section = sections[i];
++
++            if (section == null) {
++                continue;
++            }
++
++            ++liquidChecks;
++            int water = 0;
++            int lava = 0;
++
++            for (int x = 0; x < 16; ++x) {
++                for (int y = 0; y < 16; ++y) {
++                    for (int z = 0; z < 16; ++z) {
++                        Material material = section.getBlockByExtId(x, y, z).getMaterial();
++
++                        if (material == Material.WATER) {
++                            ++water;
++                        } else if (material == Material.LAVA) {
++                            ++lava;
++                        }
++                    }
++                }
++            }
++
++            if (water != 0 || lava != 0) {
++                ++liquidChecksNonEmpty;
++            }
++
++            if (water != section.auditLiquidCount(true)) {
++                report("section " + i + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                        + water + " water blocks but its count says " + section.auditLiquidCount(true));
++            }
++
++            if (lava != section.auditLiquidCount(false)) {
++                report("section " + i + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                        + lava + " lava blocks but its count says " + section.auditLiquidCount(false));
++            }
++        }
++    }
++
+     // ------------------------------------------------------------------
+ 
+     private static void report(String message) {
+@@ -304,9 +372,10 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities) | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty) | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
++                liquidChecks, liquidChecksNonEmpty,
+                 mismatches);
+ 
+         if (censusChecksNonEmpty == 0 && bucketChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 03cd825bcadb0c1f8bffc62354ca7a36d058a9d3..74ffa9fae3c482d066f7e99c6affc2b567e67824 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -6,6 +6,12 @@ public class ChunkSection {
+     private int yPos;
+     private int nonEmptyBlockCount;
+     private int tickingBlockCount;
++    // Athena start - how many blocks of each liquid this section holds. Every box scan that asks
++    // the world "is there water/lava in here" walks the box a block at a time; on dry land the
++    // answer is decided by these two counters without a single block read. See World.mayHoldLiquid.
++    private int waterCount;
++    private int lavaCount;
++    // Athena end
+     private char[] blockIds;
+     private NibbleArray emittedLight;
+     private NibbleArray skyLight;
+@@ -49,6 +55,16 @@ public class ChunkSection {
+             if (block.isTicking()) {
+                 --this.tickingBlockCount;
+             }
++
++            // Athena start
++            Material material = block.getMaterial();
++
++            if (material == Material.WATER) {
++                --this.waterCount;
++            } else if (material == Material.LAVA) {
++                --this.lavaCount;
++            }
++            // Athena end
+         }
+ 
+         if (block1 != Blocks.AIR) {
+@@ -56,6 +72,16 @@ public class ChunkSection {
+             if (block1.isTicking()) {
+                 ++this.tickingBlockCount;
+             }
++
++            // Athena start
++            Material material1 = block1.getMaterial();
++
++            if (material1 == Material.WATER) {
++                ++this.waterCount;
++            } else if (material1 == Material.LAVA) {
++                ++this.lavaCount;
++            }
++            // Athena end
+         }
+ 
+         this.blockIds[j << 8 | k << 4 | i] = (char) Block.getStateId(iblockdata); // Athena - read the id off the state
+@@ -80,6 +106,21 @@ public class ChunkSection {
+         return this.tickingBlockCount > 0;
+     }
+ 
++    // Athena start
++    public boolean hasWater() {
++        return this.waterCount > 0;
++    }
++
++    public boolean hasLava() {
++        return this.lavaCount > 0;
++    }
++
++    // for the index audit only
++    public int auditLiquidCount(boolean water) {
++        return water ? this.waterCount : this.lavaCount;
++    }
++    // Athena end
++
+     public int getYPosition() {
+         return this.yPos;
+     }
+@@ -105,6 +146,8 @@ public class ChunkSection {
+     public void recalcBlockCounts() {
+         this.nonEmptyBlockCount = 0;
+         this.tickingBlockCount = 0;
++        this.waterCount = 0; // Athena
++        this.lavaCount = 0; // Athena
+ 
+         for (int i = 0; i < 16; ++i) {
+             for (int j = 0; j < 16; ++j) {
+@@ -116,6 +159,16 @@ public class ChunkSection {
+                         if (block.isTicking()) {
+                             ++this.tickingBlockCount;
+                         }
++
++                        // Athena start
++                        Material material = block.getMaterial();
++
++                        if (material == Material.WATER) {
++                            ++this.waterCount;
++                        } else if (material == Material.LAVA) {
++                            ++this.lavaCount;
++                        }
++                        // Athena end
+                     }
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 0f60dd9f6f908a407bebc629ee2f4e847edd13ec..a6a3a4fc77e0297f3e85a98022f91924ae0a6da7 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -948,6 +948,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 if (AthenaIndexAudit.enabled()) {
+                     AthenaIndexAudit.auditCreatureCensus(worldserver);
+                     AthenaIndexAudit.auditEntityBuckets(worldserver);
++                    AthenaIndexAudit.auditSectionLiquids(worldserver);
+                 }
+                 // Athena end
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index d5c42c72a1f377886c856d821a03c13d54459c2f..8a187414bf225849e942646ef9477dd86246e863 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2478,6 +2478,60 @@ public abstract class World implements IBlockAccess {
+         return false;
+     }
+ 
++    // Athena start - a conservative answer to "could this box hold that liquid at all".
++    //
++    // Water and lava are the only materials the three box scans below are ever asked about, and a
++    // ChunkSection now counts how many blocks of each it holds, so a box that spans nothing but dry
++    // sections is decided by a handful of int loads instead of a block read per cubic metre. Every
++    // entity runs handleWaterMovement each tick and almost none of them are ever in water, so the
++    // scan that finds nothing is the common case, not the rare one.
++    //
++    // Anything this cannot answer from the counters - a chunk that is not loaded, decoration in
++    // flight, some other material - answers true, and the caller scans exactly as it did before.
++    // The bounds are inclusive block coordinates.
++    private boolean mayHoldLiquid(int minBlockX, int minBlockY, int minBlockZ, int maxBlockX, int maxBlockY, int maxBlockZ, Material material) {
++        boolean water = material == Material.WATER;
++
++        if (!water && material != Material.LAVA) {
++            return true;
++        }
++
++        if (this.decorating() || this.captureTreeGeneration) {
++            return true;
++        }
++
++        if (maxBlockY < 0) {
++            return false; // nothing but the void down there
++        }
++
++        int sectionMin = minBlockY < 0 ? 0 : minBlockY >> 4;
++        int sectionMax = maxBlockY >> 4;
++
++        for (int cx = minBlockX >> 4; cx <= (maxBlockX >> 4); ++cx) {
++            for (int cz = minBlockZ >> 4; cz <= (maxBlockZ >> 4); ++cz) {
++                Chunk chunk = this.getChunkIfLoaded(cx, cz);
++
++                if (chunk == null) {
++                    return true; // the scan itself may load it; do not change what it sees
++                }
++
++                ChunkSection[] sections = chunk.getSections();
++                int top = sectionMax < sections.length - 1 ? sectionMax : sections.length - 1;
++
++                for (int s = sectionMin; s <= top; ++s) {
++                    ChunkSection section = sections[s];
++
++                    if (section != null && (water ? section.hasWater() : section.hasLava())) {
++                        return true;
++                    }
++                }
++            }
++        }
++
++        return false;
++    }
++    // Athena end
++
+     public boolean handleMaterialAcceleration(AxisAlignedBB axisalignedbb, Material material, Entity entity) { // Athena - delegate to the scalar overload
+         return this.handleMaterialAcceleration(axisalignedbb.minX, axisalignedbb.minY, axisalignedbb.minZ, axisalignedbb.maxX, axisalignedbb.maxY, axisalignedbb.maxZ, material, entity);
+     }
+@@ -2493,6 +2547,8 @@ public abstract class World implements IBlockAccess {
+ 
+         if (!this.isAreaLoaded(i, k, i1, j, l, j1, true)) {
+             return false;
++        } else if (!this.mayHoldLiquid(i, k, i1, j - 1, l - 1, j1 - 1, material)) {
++            return false; // Athena - no section in the box holds this liquid, so the scan finds nothing and applies nothing
+         } else {
+             boolean flag = false;
+             Vec3D vec3d = new Vec3D(0.0D, 0.0D, 0.0D);
+@@ -2565,6 +2621,11 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY + 1.0D);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ + 1.0D);
++
++        if (!this.mayHoldLiquid(i, k, i1, j - 1, l - 1, j1 - 1, material)) {
++            return false; // Athena - no section in the box holds this liquid
++        }
++
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(7); // Athena - reuse a per-thread scratch position
+         // Athena start - remember the chunk the last block came from
+         boolean memo = !this.decorating() && !this.captureTreeGeneration;
+@@ -2617,6 +2678,11 @@ public abstract class World implements IBlockAccess {
+         int l = MathHelper.floor(maxY + 1.0D);
+         int i1 = MathHelper.floor(minZ);
+         int j1 = MathHelper.floor(maxZ + 1.0D);
++
++        if (!this.mayHoldLiquid(i, k, i1, j - 1, l - 1, j1 - 1, material)) {
++            return false; // Athena - no section in the box holds this liquid
++        }
++
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(8); // Athena - reuse a per-thread scratch position
+ 
+         for (int k1 = i; k1 < j; ++k1) {
+diff --git a/src/test/java/net/minecraft/server/ChunkSectionLiquidCountTest.java b/src/test/java/net/minecraft/server/ChunkSectionLiquidCountTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..78f2b8459fa76d75bff702e7e372bf32b5d95000
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/ChunkSectionLiquidCountTest.java
+@@ -0,0 +1,122 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.Random;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - ChunkSection counts the water and lava blocks it holds, and World.mayHoldLiquid turns a
++ * zero into "this box holds no water", which lets the three material box scans return without
++ * reading a block.
++ *
++ * <p>That makes the counters load-bearing in one direction: a count that drifts <em>below</em> the
++ * truth silently stops an entity from noticing it is standing in water. The counters are maintained
++ * from {@link ChunkSection#setType} alone, which every write path funnels through, so this walks a
++ * section through a long random sequence of writes - liquid over liquid, liquid over air, air over
++ * liquid, solid over liquid - and compares against a full recount after every one.
++ *
++ * <p>The live audit in AthenaIndexAudit covers the bulk load path across thousands of chunks; what
++ * it cannot do is land on the chunk a mutation just happened in, which is exactly what this does.
++ */
++public class ChunkSectionLiquidCountTest extends AbstractTestingBase {
++
++    private static final IBlockData[] PALETTE = new IBlockData[] {
++        Blocks.AIR.getBlockData(),
++        Blocks.STONE.getBlockData(),
++        Blocks.WATER.getBlockData(),
++        Blocks.FLOWING_WATER.getBlockData(),
++        Blocks.LAVA.getBlockData(),
++        Blocks.FLOWING_LAVA.getBlockData(),
++    };
++
++    private static int recount(ChunkSection section, Material material) {
++        int found = 0;
++
++        for (int x = 0; x < 16; ++x) {
++            for (int y = 0; y < 16; ++y) {
++                for (int z = 0; z < 16; ++z) {
++                    if (section.getBlockByExtId(x, y, z).getMaterial() == material) {
++                        ++found;
++                    }
++                }
++            }
++        }
++
++        return found;
++    }
++
++    private static void assertAgrees(ChunkSection section, String what) {
++        int water = recount(section, Material.WATER);
++        int lava = recount(section, Material.LAVA);
++
++        assertEquals(what + ": water count", water, section.auditLiquidCount(true));
++        assertEquals(what + ": lava count", lava, section.auditLiquidCount(false));
++        assertEquals(what + ": hasWater", water > 0, section.hasWater());
++        assertEquals(what + ": hasLava", lava > 0, section.hasLava());
++    }
++
++    @Test
++    public void countsSurviveEveryWriteTransition() {
++        ChunkSection section = new ChunkSection(0, true);
++        Random random = new Random(20260901L);
++
++        assertAgrees(section, "empty section");
++
++        for (int write = 0; write < 20000; ++write) {
++            int x = random.nextInt(16);
++            int y = random.nextInt(16);
++            int z = random.nextInt(16);
++
++            section.setType(x, y, z, PALETTE[random.nextInt(PALETTE.length)]);
++
++            // Recounting 4096 blocks after every write would be 82 million reads, so check every
++            // write for the first thousand - which is where the transitions are densest, the
++            // section still being mostly air - and then periodically.
++            if (write < 1000 || write % 97 == 0) {
++                assertAgrees(section, "after write " + write);
++            }
++        }
++
++        assertAgrees(section, "after the last write");
++    }
++
++    @Test
++    public void recalcAgreesWithTheRunningCount() {
++        ChunkSection section = new ChunkSection(0, true);
++        Random random = new Random(4242L);
++
++        for (int write = 0; write < 4000; ++write) {
++            section.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16),
++                    PALETTE[random.nextInt(PALETTE.length)]);
++        }
++
++        int water = section.auditLiquidCount(true);
++        int lava = section.auditLiquidCount(false);
++
++        section.recalcBlockCounts();
++
++        assertEquals("recalc disagrees about water", water, section.auditLiquidCount(true));
++        assertEquals("recalc disagrees about lava", lava, section.auditLiquidCount(false));
++        assertAgrees(section, "after recalc");
++    }
++
++    @Test
++    public void theBulkLoadConstructorCounts() {
++        ChunkSection built = new ChunkSection(0, true);
++        Random random = new Random(77L);
++
++        for (int write = 0; write < 4000; ++write) {
++            built.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16),
++                    PALETTE[random.nextInt(PALETTE.length)]);
++        }
++
++        // what ChunkRegionLoader and CustomChunkGenerator do: hand over a raw id array
++        ChunkSection loaded = new ChunkSection(0, true, built.getIdArray().clone());
++
++        assertEquals("water", built.auditLiquidCount(true), loaded.auditLiquidCount(true));
++        assertEquals("lava", built.auditLiquidCount(false), loaded.auditLiquidCount(false));
++        assertAgrees(loaded, "bulk loaded section");
++    }
++}
