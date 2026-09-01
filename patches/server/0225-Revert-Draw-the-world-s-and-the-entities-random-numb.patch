@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 07:49:12 +0900
+Subject: [PATCH] Revert "Draw the world's and the entities' random numbers
+ without a compare-and-set"
+
+This reverts commit 656b7e91efc6edc53f3e43cc6f370fb77fdfdec9.
+
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 9c7fc7ab6e227934440ef474fa390a14c8f60b68..0d03516914051ff5076a0a9b25099907fd50e0f2 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -47,10 +47,7 @@ public abstract class Entity implements ICommandListener {
+     }
+     // CraftBukikt end
+     // PandaSpigot start - Use shared random for entities
+-    // Athena - every mob on the server draws from this one generator, so java.util.Random's
+-    // compare-and-set was one of the most repeated read-modify-writes in the tick. FastRandom walks
+-    // the same sequence over a plain long. See FastRandom.
+-    public static final Random SHARED_RANDOM = new FastRandom() {
++    public static final Random SHARED_RANDOM = new Random() {
+         private boolean locked = false;
+         @Override
+         public synchronized void setSeed(long seed) {
+diff --git a/src/main/java/net/minecraft/server/FastRandom.java b/src/main/java/net/minecraft/server/FastRandom.java
+deleted file mode 100644
+index a1144580addee1b6325b46e4007e07281599ee1d..0000000000000000000000000000000000000000
+--- a/src/main/java/net/minecraft/server/FastRandom.java
++++ /dev/null
+@@ -1,85 +0,0 @@
+-package net.minecraft.server;
+-
+-import java.util.Random;
+-
+-// Athena start - java.util.Random without the atomic.
+-//
+-// java.util.Random keeps its 48 bits of state in an AtomicLong and advances them with a
+-// compare-and-set, so that two threads drawing at once cannot be handed the same number. The tick
+-// loop does not need that. The world's generator and the entities' shared generator are drawn from
+-// the server thread and from nowhere else, and every draw pays a read-modify-write with ordering on
+-// a cache line that is private to that thread anyway. With one shared generator behind every mob -
+-// PandaSpigot points all of them at Entity.SHARED_RANDOM - that line is one of the busiest in the
+-// tick.
+-//
+-// The numbers do not change. This is the same 48-bit linear congruential generator, the same
+-// scramble in setSeed and the same shift in next(bits) as java.util.Random, so a FastRandom and a
+-// java.util.Random started from one seed walk the same sequence. Every other method - nextInt,
+-// nextDouble, nextLong, nextBoolean, nextBytes - is inherited and is defined in terms of
+-// next(bits), so they all follow.
+-//
+-// nextGaussian is the exception. It is synchronized in the superclass and caches the second value
+-// of each pair in a field this class cannot see, so it keeps the monitor and its own state. Nothing
+-// on a hot path draws one.
+-//
+-// What is given up is thread safety: a plugin drawing from World.random off the server thread used
+-// to get a well-defined number and can now be handed a repeat. The state is a single long, so there
+-// is nothing to corrupt - a racing draw returns a stale number, not a broken generator - and
+-// nothing inside the server draws from either of these off the server thread.
+-public class FastRandom extends Random {
+-
+-    protected static final long MULTIPLIER = 0x5DEECE66DL;
+-    protected static final long ADDEND = 0xBL;
+-    protected static final long MASK = (1L << 48) - 1;
+-
+-    private static final java.util.concurrent.atomic.AtomicLong SEED_UNIQUIFIER =
+-            new java.util.concurrent.atomic.AtomicLong(8682522807148012L);
+-
+-    /**
+-     * The generator's position in its sequence.
+-     *
+-     * <p>Deliberately declared without an initialiser. java.util.Random's {@code Random(long)}
+-     * calls {@link #setSeed(long)} when it is constructing a subclass, which happens before this
+-     * class's own initialisers would run; an initialiser here would overwrite the seed that call
+-     * just installed.
+-     */
+-    protected long state;
+-
+-    public FastRandom() {
+-        this(uniqueSeed());
+-    }
+-
+-    public FastRandom(long seed) {
+-        // Random(long) sees that this is a subclass and calls setSeed itself, exactly once. Seeding
+-        // again in this constructor body would only move the sequence on for no reason.
+-        super(seed);
+-    }
+-
+-    private static long uniqueSeed() {
+-        long current;
+-        long next;
+-
+-        do {
+-            current = FastRandom.SEED_UNIQUIFIER.get();
+-            next = current * 1181783497276652981L;
+-        } while (!FastRandom.SEED_UNIQUIFIER.compareAndSet(current, next));
+-
+-        return next ^ System.nanoTime();
+-    }
+-
+-    @Override
+-    public void setSeed(long seed) {
+-        // Reached from the superclass constructor before this class is initialised, which is safe
+-        // because the only field it touches is a long that the JVM has already zeroed.
+-        this.state = (seed ^ FastRandom.MULTIPLIER) & FastRandom.MASK;
+-    }
+-
+-    @Override
+-    protected int next(int bits) {
+-        long state = this.state * FastRandom.MULTIPLIER + FastRandom.ADDEND & FastRandom.MASK;
+-
+-        this.state = state;
+-        return (int) (state >>> (48 - bits));
+-    }
+-}
+-// Athena end
+diff --git a/src/main/java/net/minecraft/server/SnapshotRandom.java b/src/main/java/net/minecraft/server/SnapshotRandom.java
+index 10ee449dd42fecb96d48e31856bac5ba94ba3719..dd8269f8d37f12b334a3b482839bf9bd34fd72d8 100644
+--- a/src/main/java/net/minecraft/server/SnapshotRandom.java
++++ b/src/main/java/net/minecraft/server/SnapshotRandom.java
+@@ -1,23 +1,46 @@
+ package net.minecraft.server;
+ 
+-// Athena start - a generator whose position in the sequence can be taken and put back.
++import java.util.Random;
++
++// Athena start - a java.util.Random whose position in the sequence can be taken and put back.
+ //
+ // Decoration runs off the server thread against a sandbox, and if the sandbox hits something it
+ // cannot model the job is thrown away and the server thread decorates instead. That only produces
+ // the same world if the second attempt starts from the same place in the random sequence as the
+ // first - and by then the abandoned attempt has already drawn from it.
+ //
+-// java.util.Random keeps its position in a private field, so the generator itself lives in
+-// FastRandom, which reimplements java.util.Random's exact algorithm over a plain long. All this
+-// class adds is read and write access to that long.
++// java.util.Random keeps its position in a private field, so it is reimplemented here. This is the
++// exact algorithm from java.util.Random: the same 48-bit linear congruential generator, the same
++// scramble in setSeed, the same shift in next(bits). Every other method - nextInt, nextDouble,
++// nextLong - is inherited and defined in terms of next(bits), so they all follow.
+ //
+-// nextGaussian is the one exception: it caches a second value in a superclass field neither class
+-// can see, so a snapshot taken between the two draws of a pair would be incomplete. No decoration
+-// draws one.
+-public class SnapshotRandom extends FastRandom {
++// nextGaussian is the one exception: it caches a second value in a superclass field this class
++// cannot see, so a snapshot taken between the two draws of a pair would be incomplete. No
++// decoration draws one.
++public class SnapshotRandom extends Random {
++
++    private static final long MULTIPLIER = 0x5DEECE66DL;
++    private static final long ADDEND = 0xBL;
++    private static final long MASK = (1L << 48) - 1;
++
++    private long state;
+ 
+     public SnapshotRandom(long seed) {
+-        super(seed);
++        super(0L); // the superclass seed is never used; next(int) below is the only source
++        this.setSeed(seed);
++    }
++
++    @Override
++    public void setSeed(long seed) {
++        // Called from the superclass constructor before this class is initialised, which is safe
++        // here because the only field it touches is a long that is already zeroed.
++        this.state = (seed ^ SnapshotRandom.MULTIPLIER) & SnapshotRandom.MASK;
++    }
++
++    @Override
++    protected int next(int bits) {
++        this.state = (this.state * SnapshotRandom.MULTIPLIER + SnapshotRandom.ADDEND) & SnapshotRandom.MASK;
++        return (int) (this.state >>> (48 - bits));
+     }
+ 
+     /** The current position in the sequence. */
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 96277966f05b8144b2d0fab3f5071715b61ec493..3676eaa4ee5fe84e8ef35c754a8eec43026efaaa 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -79,7 +79,7 @@ public abstract class World implements IBlockAccess {
+     protected float prevThunderingStrength;
+     protected float thunderingStrength;
+     private int lastLightningBolt;
+-    public final Random random = new FastRandom(); // Athena - same sequence, no compare-and-set
++    public final Random random = new Random();
+     public WorldProvider worldProvider; // CraftBukkit - remove final
+     protected List<IWorldAccess> worldAccesses = Lists.newArrayList();
+     protected IChunkProvider chunkProvider;
