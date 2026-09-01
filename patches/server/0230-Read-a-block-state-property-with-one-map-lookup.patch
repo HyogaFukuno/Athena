@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 12:21:28 +0900
+Subject: [PATCH] Read a block state property with one map lookup
+
+BlockStateList.BlockData.get went through its ImmutableMap twice - containsKey
+to decide whether to throw, then get to fetch the value - and then through
+IBlockState.getValueClass().cast, a virtual call repeating a check the caller's
+own cast already makes.
+
+Every read of a block's level, age, facing or half pays this. A profile of the
+saturating bench put it at 2.16% of the server thread, most of it under the
+fluid flow scan, which asks for a water block's level several times per
+neighbour.
+
+An ImmutableMap cannot hold a null value, so a null from get answers exactly
+what containsKey was asked. The unchecked cast is what the erased signature
+hands every caller regardless: the checkcast the compiler inserts at the call
+site is the same protection Class.cast was giving.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockStateList.java b/src/main/java/net/minecraft/server/BlockStateList.java
+index 10c8645bbb0dcf4d89689e2ea6add0a6cf72f899..0e8b5d1550aa8b2f94215a0534fd4fc15caac62e 100644
+--- a/src/main/java/net/minecraft/server/BlockStateList.java
++++ b/src/main/java/net/minecraft/server/BlockStateList.java
+@@ -113,13 +113,27 @@ public class BlockStateList {
+             return Collections.unmodifiableCollection(this.properties.keySet());
+         }
+ 
++        // Athena - one map lookup instead of two, and no reflective cast.
++        //
++        // Reading a property off a block state went through the map twice - containsKey to decide
++        // whether to throw, then get to fetch - and then through Class.cast, a virtual call that
++        // repeats a check the caller's own cast already makes. Every read of a block's level, age,
++        // facing or half pays this; a profile of the saturating bench put it at 2.16% of the server
++        // thread, most of it under the fluid flow scan.
++        //
++        // An ImmutableMap cannot hold a null value, so a null from get means the property is absent
++        // - exactly what containsKey was asked. The unchecked cast is what the erased signature
++        // gives every caller anyway: the checkcast the compiler inserts at the call site is the
++        // same protection Class.cast was providing.
+         @Override
+         public <T extends Comparable<T>> T get(IBlockState<T> iblockstate) {
+-            if (!this.properties.containsKey(iblockstate)) {
++            Comparable comparable = this.properties.get(iblockstate);
++
++            if (comparable == null) {
+                 throw new IllegalArgumentException("Cannot get property " + iblockstate + " as it does not exist in " + this.block.getBlockState());
+-            } else {
+-                return (T) (iblockstate.getValueClass().cast(this.properties.get(iblockstate)));
+             }
++
++            return (T) comparable;
+         }
+ 
+         @Override
