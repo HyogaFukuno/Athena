@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 2 Sep 2026 13:25:05 +0900
+Subject: [PATCH] Revert "Walk the activation range's entity slices by index"
+
+This reverts commit afe725bdf2873017091171e280f4d74d2266eba4.
+
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index 176d466f779c5d89e59a7f576f35d84812117044..e4e403b222dd03de6af98828f199c6ae5734220e 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -174,16 +174,8 @@ public class ActivationRange
+     {
+         for ( List<Entity> slice : chunk.entitySlices )
+         {
+-            // Athena - by index. UnsafeList.iterator() searches a pool for an iterator not in use
+-            // and resets it, and the Itr it returns stores a field on every hasNext(); this walk
+-            // covers every entity of every chunk in range on every tick, and a profile put
+-            // hasNext() and iterator() together at 2.09% of the server thread, all of it here.
+-            // Nothing in the loop touches the slice, so an index sees exactly what the iterator
+-            // saw. Same trade as the goal selector and the entity slice scan.
+-            for ( int idx = 0; idx < slice.size(); ++idx )
++            for ( Entity entity : slice )
+             {
+-                Entity entity = slice.get( idx );
+-
+                 if ( MinecraftServer.currentTick > entity.activatedTick )
+                 {
+                     if ( entity.defaultActivationState )

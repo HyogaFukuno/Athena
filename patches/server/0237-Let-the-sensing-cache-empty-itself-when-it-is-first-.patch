@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 2 Sep 2026 12:22:16 +0900
+Subject: [PATCH] Let the sensing cache empty itself when it is first asked
+
+EntityInsentient.doTick emptied both of EntitySenses' lists for every mob on
+every tick. A profile of the saturating bench put that at 2.40% of the server
+thread, all of it in ArrayList.clear - while canSee, the only thing that ever
+fills those lists, came in at 0.02%. The lists were almost always already
+empty. What the clearing cost was touching two cold ArrayLists per mob per
+tick, sixty thousand objects a tick, to null nothing.
+
+The cache now carries the tick its answers belong to and empties itself on the
+first question of a new one, so a mob that never asks a sensing question never
+touches the lists at all. The answers are the same: they held one tick's worth
+of results before and still do.
+
+clearSensingCache stays, as an invalidator that resets the stamp. Nothing in
+the server calls it any more.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityInsentient.java b/src/main/java/net/minecraft/server/EntityInsentient.java
+index 92ceb5b2772ce38557f9f75b9b6e99ac7a0d75b4..42f5567b27b1d7842ff8614ef3b2c96e54af4d5c 100644
+--- a/src/main/java/net/minecraft/server/EntityInsentient.java
++++ b/src/main/java/net/minecraft/server/EntityInsentient.java
+@@ -478,9 +478,9 @@ public abstract class EntityInsentient extends EntityLiving {
+             return;
+         }
+         // Spigot End
+-        this.world.methodProfiler.startSection("sensing");
+-        this.senses.clearSensingCache();
+-        this.world.methodProfiler.endSection();
++        // Athena - the sensing cache empties itself on the first question of a tick now; see
++        // EntitySenses. Clearing it here touched two cold ArrayLists for every mob every tick, and
++        // almost every mob never asks a sensing question at all.
+         this.world.methodProfiler.startSection("targetSelector");
+         this.targetSelector.onUpdateTasks();
+         this.world.methodProfiler.endSection();
+diff --git a/src/main/java/net/minecraft/server/EntitySenses.java b/src/main/java/net/minecraft/server/EntitySenses.java
+index a1bd0da4536c995a227200e44f5eaacd6d551805..5c01b0038cc75eeb388981a228679bbbe0111940 100644
+--- a/src/main/java/net/minecraft/server/EntitySenses.java
++++ b/src/main/java/net/minecraft/server/EntitySenses.java
+@@ -9,17 +9,43 @@ public class EntitySenses {
+     EntityInsentient entityObj;
+     List<Entity> seenEntities = Lists.newArrayList();
+     List<Entity> unseenEntities = Lists.newArrayList();
++    // Athena start - the tick the two lists above hold answers for.
++    //
++    // EntityInsentient.doTick used to empty both of them for every mob on every tick. A profile of
++    // the saturating bench put that at 2.40% of the server thread, all of it in ArrayList.clear -
++    // and canSee, the only thing that ever fills them, at 0.02%. The lists were almost always
++    // already empty; what the clearing cost was touching two cold ArrayLists per mob per tick,
++    // sixty thousand objects a tick, for nothing.
++    //
++    // So the cache invalidates itself on the way in instead: canSee empties the lists the first
++    // time it is asked in a tick, and a mob that never asks never touches them. Same answers - the
++    // lists held one tick's worth of results before and still do.
++    private int cachedForTick = Integer.MIN_VALUE;
++    // Athena end
+ 
+     public EntitySenses(EntityInsentient entityinsentient) {
+         this.entityObj = entityinsentient;
+     }
+ 
++    /**
++     * Athena - forces the next {@link #canSee} to start from an empty cache.
++     *
++     * <p>Nothing in the server calls this any more; the tick stamp above does the same job without
++     * touching the lists. Kept because it is public and cheap.
++     */
+     public void clearSensingCache() {
+-        this.seenEntities.clear();
+-        this.unseenEntities.clear();
++        this.cachedForTick = Integer.MIN_VALUE;
+     }
+ 
+     public boolean canSee(Entity entity) {
++        // Athena start - empty the cache on the first question of a tick rather than for every mob
++        if (this.cachedForTick != MinecraftServer.currentTick) {
++            this.cachedForTick = MinecraftServer.currentTick;
++            this.seenEntities.clear();
++            this.unseenEntities.clear();
++        }
++        // Athena end
++
+         if (this.seenEntities.contains(entity)) {
+             return true;
+         } else if (this.unseenEntities.contains(entity)) {
