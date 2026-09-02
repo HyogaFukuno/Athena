@@ -1,0 +1,326 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 2 Sep 2026 11:37:17 +0900
+Subject: [PATCH] Revert "Reject an entity on X out of the bucket's own extents
+ array"
+
+This reverts commit 1884f6d9ea20379e66667f375fec4a5eb93bd23b.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 3e2317d287c1b4b74dc7dd7c9e63f33b282ef3cf..b877fd9302227c586f04db88fd4a02973944dbb9 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -248,35 +248,9 @@ public final class AthenaIndexAudit {
+                         continue;
+                     }
+ 
+-                    // Athena - the X extents array beside this bucket. A stale entry makes the
+-                    // scan reject a candidate it should have returned, which loses a collision
+-                    // silently, so it is checked value by value against the entity it mirrors.
+-                    double[] xs = chunk.auditBucketExtents(slice, b);
+-                    int slot = 0;
+-
+                     for (Entity entity : buckets[b]) {
+                         ++found;
+ 
+-                        // Athena start
+-                        if (entity.athenaBucketSlot != slot) {
+-                            report("entity " + entity.getId() + " sits at index " + slot + " of bucket " + b
+-                                    + " but records slot " + entity.athenaBucketSlot);
+-                        }
+-
+-                        if (xs != null && (slot << 1) + 1 < xs.length) {
+-                            if (xs[slot << 1] != entity.boundingBoxMinX || xs[(slot << 1) | 1] != entity.boundingBoxMaxX) {
+-                                report("entity " + entity.getId() + " at index " + slot + " of bucket " + b
+-                                        + " spans X " + entity.boundingBoxMinX + ".." + entity.boundingBoxMaxX
+-                                        + " but the extents say " + xs[slot << 1] + ".." + xs[(slot << 1) | 1]);
+-                            }
+-                        } else if (xs != null) {
+-                            report("bucket " + b + " of slice " + slice + " holds " + buckets[b].size()
+-                                    + " entities but its extents array only has room for " + (xs.length >> 1));
+-                        }
+-
+-                        ++slot;
+-                        // Athena end
+-
+                         if (entity.athenaBucket != b) {
+                             report("entity " + entity.getId() + " is in bucket " + b + " but records " + entity.athenaBucket);
+                         }
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index b348f1bed466842637d05e14b13936010e756035..029979452082e6a64a378af660b8a35cf3f10e67 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -68,14 +68,6 @@ public class Chunk {
+     // four blocks deep, so an entity crosses one a quarter as often as it crosses an X column.
+     private static final int BUCKET_THRESHOLD = 24;
+     private final List<Entity>[][] entityBuckets = (List<Entity>[][]) new List[16][];
+-    // Athena start - each bucket's X extents, interleaved minX,maxX, parallel to the bucket list.
+-    //
+-    // The scan below rejects a candidate on X before it touches the Entity at all. Reading
+-    // entity.boundingBoxMinX means dereferencing an object with 86 fields, scattered across the
+-    // heap - a cache miss per candidate, which is what scanSliceForEntity's 7% of self time
+-    // actually is. The extents of a whole bucket are a handful of doubles on one line.
+-    private final double[][][] bucketExtents = new double[16][][];
+-    // Athena end
+     private final int[] bucketPadX = new int[16];
+     private final int[] bucketPadZ = new int[16];
+     // Athena end
+@@ -825,24 +817,6 @@ public class Chunk {
+             buckets[b] = bucket;
+         }
+ 
+-        // Athena start - append to the extents array at the same index
+-        double[][] extents = this.bucketExtents[slice];
+-        int slot = bucket.size();
+-
+-        if (extents != null) {
+-            double[] xs = extents[b];
+-
+-            if (xs == null || xs.length < (slot + 1) << 1) {
+-                xs = xs == null ? new double[8] : java.util.Arrays.copyOf(xs, xs.length << 1);
+-                extents[b] = xs;
+-            }
+-
+-            xs[slot << 1] = entity.boundingBoxMinX;
+-            xs[(slot << 1) | 1] = entity.boundingBoxMaxX;
+-        }
+-
+-        entity.athenaBucketSlot = slot;
+-        // Athena end
+         bucket.add(entity);
+         entity.athenaBucket = b;
+         // The query widens its bucket range by this much on the low side, so it has to cover the
+@@ -866,7 +840,6 @@ public class Chunk {
+         List<Entity>[] buckets = (List<Entity>[]) new List[16]; // Athena - 4 x 4
+ 
+         this.entityBuckets[slice] = buckets;
+-        this.bucketExtents[slice] = new double[16][]; // Athena
+         this.bucketPadX[slice] = 1;
+         this.bucketPadZ[slice] = 1;
+         List<Entity> flat = this.entitySlices[slice];
+@@ -893,20 +866,6 @@ public class Chunk {
+         int b = this.bucketIndexOf(entity.boundingBoxMinX, entity.boundingBoxMinZ);
+ 
+         if (b == entity.athenaBucket) {
+-            // Athena - the entity stayed put; its X extents still moved, and this is the only
+-            // place a bounding box change is announced, so they are refreshed here.
+-            double[][] extents = this.bucketExtents[slice];
+-            int slot = entity.athenaBucketSlot;
+-
+-            if (extents != null && slot >= 0) {
+-                double[] xs = extents[b];
+-
+-                if (xs != null && (slot << 1) + 1 < xs.length) {
+-                    xs[slot << 1] = entity.boundingBoxMinX;
+-                    xs[(slot << 1) | 1] = entity.boundingBoxMaxX;
+-                }
+-            }
+-
+             int width = MathHelper.floor(entity.boundingBoxMaxX - entity.boundingBoxMinX) + 1;
+ 
+             if (width > this.bucketPadX[slice]) {
+@@ -922,51 +881,11 @@ public class Chunk {
+             return;
+         }
+ 
+-        this.bucketRemove(buckets, slice, entity); // Athena - keeps the extents in step
+-        this.bucketAdd(buckets, slice, entity);
+-    }
+-
+-    /**
+-     * Athena - takes an entity out of its bucket and out of the extents array beside it.
+-     *
+-     * <p>The entries after it shift down by one, so their slots are re-stamped. Buckets hold a
+-     * handful of entities, and shifting rather than swapping the last entry into the hole keeps
+-     * the order queries see - which is the order collisions are resolved in.
+-     */
+-    private void bucketRemove(List<Entity>[] buckets, int slice, Entity entity) {
+-        int b = entity.athenaBucket;
+-
+-        if (b < 0 || buckets[b] == null) {
+-            return;
+-        }
+-
+-        List<Entity> bucket = buckets[b];
+-        int slot = entity.athenaBucketSlot;
+-
+-        if (slot < 0 || slot >= bucket.size() || bucket.get(slot) != entity) {
+-            slot = bucket.indexOf(entity); // the slot was stale; fall back to a scan
+-            if (slot < 0) {
+-                return;
+-            }
++        if (entity.athenaBucket >= 0 && buckets[entity.athenaBucket] != null) {
++            buckets[entity.athenaBucket].remove(entity);
+         }
+ 
+-        bucket.remove(slot);
+-
+-        double[][] extents = this.bucketExtents[slice];
+-        double[] xs = extents == null ? null : extents[b];
+-        int size = bucket.size();
+-
+-        for (int i = slot; i < size; ++i) {
+-            Entity moved = bucket.get(i);
+-
+-            moved.athenaBucketSlot = i;
+-            if (xs != null) {
+-                xs[i << 1] = moved.boundingBoxMinX;
+-                xs[(i << 1) | 1] = moved.boundingBoxMaxX;
+-            }
+-        }
+-
+-        entity.athenaBucketSlot = -1;
++        this.bucketAdd(buckets, slice, entity);
+     }
+     // Athena end
+ 
+@@ -1008,10 +927,6 @@ public class Chunk {
+ 
+     // Athena - accessors for AthenaIndexAudit only
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
+-    double[] auditBucketExtents(int slice, int bucket) { // Athena
+-        double[][] extents = this.bucketExtents[slice];
+-        return extents == null ? null : extents[bucket];
+-    }
+     int auditBucketIndexOf(double x, double z) { return this.bucketIndexOf(x, z); }
+     int auditBucketPadX(int slice) { return this.bucketPadX[slice]; }
+     int auditBucketPadZ(int slice) { return this.bucketPadZ[slice]; }
+@@ -1052,7 +967,6 @@ public class Chunk {
+         // Athena start - register with the bucket index, building it if the slice has grown enough
+         entity.athenaChunk = this;
+         entity.athenaBucket = -1;
+-        entity.athenaBucketSlot = -1; // Athena - bucketAdd stamps it when there is a bucket
+ 
+         if (this.entityBuckets[k] != null) {
+             this.bucketAdd(this.entityBuckets[k], k, entity);
+@@ -1133,13 +1047,12 @@ public class Chunk {
+         // Athena start - drop it from the bucket index too
+         List<Entity>[] buckets = this.entityBuckets[i];
+ 
+-        if (buckets != null) {
+-            this.bucketRemove(buckets, i, entity); // Athena - keeps the extents in step
++        if (buckets != null && entity.athenaBucket >= 0 && buckets[entity.athenaBucket] != null) {
++            buckets[entity.athenaBucket].remove(entity);
+         }
+ 
+         entity.athenaChunk = null;
+         entity.athenaBucket = -1;
+-        entity.athenaBucketSlot = -1; // Athena
+         // Athena end
+         // PaperSpigot start - update counts
+         if (entity instanceof EntityItem) {
+@@ -1290,7 +1203,6 @@ public class Chunk {
+                 this.buildBuckets(i);
+             } else {
+                 this.entityBuckets[i] = null;
+-                this.bucketExtents[i] = null; // Athena
+                 this.bucketPadX[i] = 0;
+                 this.bucketPadZ[i] = 0;
+             }
+@@ -1324,12 +1236,10 @@ public class Chunk {
+                 if (entity.athenaChunk == this) {
+                     entity.athenaChunk = null;
+                     entity.athenaBucket = -1;
+-                    entity.athenaBucketSlot = -1; // Athena
+                 }
+             }
+ 
+             this.entityBuckets[i] = null;
+-            this.bucketExtents[i] = null; // Athena
+             this.bucketPadX[i] = 0;
+             this.bucketPadZ[i] = 0;
+         }
+@@ -1438,11 +1348,7 @@ public class Chunk {
+                             List<Entity> bucket = buckets[row | bz];
+ 
+                             if (bucket != null && !bucket.isEmpty()) {
+-                                // Athena - reject on X out of the bucket's own extents array first
+-                                double[][] extents = this.bucketExtents[k];
+-
+-                                this.scanSliceForEntity(bucket, extents == null ? null : extents[row | bz],
+-                                        entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
++                                this.scanSliceForEntity(bucket, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+                             }
+                         }
+                     }
+@@ -1466,39 +1372,6 @@ public class Chunk {
+     // ever removed an entity. The predicates reaching here are the IEntitySelector constants,
+     // which are pure.
+     private void scanSliceForEntity(List<Entity> from, Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {
+-        this.scanSliceForEntity(from, null, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+-    }
+-
+-    // Athena - `xs` holds the candidates' X extents interleaved minX,maxX, parallel to `from`, or
+-    // null for a flat slice that has no bucket index.
+-    //
+-    // The X overlap test is the first two comparisons of the full intersection, and X is the axis
+-    // the buckets spread over, so it is the selective one. Deciding it out of a contiguous double
+-    // array means the Entity - 86 fields, somewhere else entirely in the heap - is only touched for
+-    // a candidate that survives, rather than once per candidate. The rejected ones cost a load from
+-    // a line that already holds several of them.
+-    private void scanSliceForEntity(List<Entity> from, double[] xs, Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {
+-        int size = from.size();
+-
+-        if (xs != null && (size << 1) <= xs.length) {
+-            for (int idx = 0; idx < size; ++idx) {
+-                if (!(xs[(idx << 1) | 1] > minX && xs[idx << 1] < maxX)) {
+-                    continue;
+-                }
+-
+-                Entity entity1 = from.get(idx);
+-
+-                if (entity1 != entity && AxisAlignedBBHelper.intersects(
+-                        entity1.boundingBoxMinX, entity1.boundingBoxMinY, entity1.boundingBoxMinZ,
+-                        entity1.boundingBoxMaxX, entity1.boundingBoxMaxY, entity1.boundingBoxMaxZ,
+-                        minX, minY, minZ, maxX, maxY, maxZ)) {
+-                    this.acceptEntity(entity1, entity, minX, minY, minZ, maxX, maxY, maxZ, list, predicate);
+-                }
+-            }
+-
+-            return;
+-        }
+-
+         for (int idx = 0; idx < from.size(); ++idx) {
+             Entity entity1 = from.get(idx);
+ 
+@@ -1520,26 +1393,6 @@ public class Chunk {
+             }
+         }
+     }
+-
+-    // Athena - what the loop above does once a candidate's box has been found to overlap, shared
+-    // with the pre-filtered path so the two cannot drift apart.
+-    private void acceptEntity(Entity entity1, Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, List<Entity> list, Predicate<? super Entity> predicate) {
+-        if (predicate == null || predicate.apply(entity1)) {
+-            list.add(entity1);
+-        }
+-
+-        Entity[] aentity = entity1.getParts();
+-
+-        if (aentity != null) {
+-            for (int l = 0; l < aentity.length; ++l) {
+-                Entity part = aentity[l];
+-
+-                if (part != entity && AxisAlignedBBHelper.intersects(part.boundingBoxMinX, part.boundingBoxMinY, part.boundingBoxMinZ, part.boundingBoxMaxX, part.boundingBoxMaxY, part.boundingBoxMaxZ, minX, minY, minZ, maxX, maxY, maxZ) && (predicate == null || predicate.apply(part))) {
+-                    list.add(part);
+-                }
+-            }
+-        }
+-    }
+     // Athena end
+ 
+     public <T extends Entity> void getEntitiesOfTypeWithinAAAB(Class<? extends T> oclass, AxisAlignedBB axisalignedbb, List<T> list, Predicate<? super T> predicate) { // Athena - delegate to the scalar overload
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 25a0bc8c8245f95c46ad16511734dc6dec553bda..7ce7068f927a9fbb4ea6d952d211724c533634e6 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -131,9 +131,6 @@ public abstract class Entity implements ICommandListener {
+     // by Chunk (addEntity, removeEntityAtIndex, addEntities, removeEntities, updateEntityBucket).
+     Chunk athenaChunk;
+     int athenaBucket = -1;
+-    // Athena - this entity's index inside that bucket, so its X extents can be refreshed in the
+-    // bucket's parallel array without searching for it. Maintained by Chunk alongside athenaBucket.
+-    int athenaBucketSlot = -1;
+     // Athena - whether the chunk this entity is registered in counted it into entityCount. The
+     // persistence test that decides it reads mutable state, so the answer has to be remembered
+     // rather than asked for a second time at removal. See Chunk.addEntity.
