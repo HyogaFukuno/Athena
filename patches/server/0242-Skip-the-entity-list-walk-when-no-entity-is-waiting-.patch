@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 04:23:45 +0900
+Subject: [PATCH] Skip the entity list walk when no entity is waiting to be
+ unloaded
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index f91e1ce09d5a2132a660fcda584fc5ecc1e57d37..9499220f2a4a9472667ff1c3ec371604aaf2fd60 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2069,7 +2069,17 @@ public abstract class World implements IBlockAccess {
+ 
+         this.methodProfiler.endStartSection("remove");
+         timings.entityRemoval.startTiming(); // Spigot
+-        this.entityList.removeAll(this.unloadedEntityList);
++        // Athena start - only walk the entity list when there is something to take out of it.
++        //
++        // ArrayList.removeAll is a full pass over the list, asking the argument contains() for
++        // every element, whatever the argument holds - an empty set still costs one hash probe per
++        // entity. Entities only land in this set when their chunk unloads, which is rare, so on
++        // almost every tick this was a walk of the whole world's entity list that removed nothing.
++        // The production profile put it at 2.2% of the server thread.
++        if (!this.unloadedEntityList.isEmpty()) {
++            this.entityList.removeAll(this.unloadedEntityList);
++        }
++        // Athena end
+ 
+         int j;
+         int k;
