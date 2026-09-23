@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 10:03:56 +0900
+Subject: [PATCH] Read each player chunk instance's loaded chunk off a parallel
+ array in the tick walk
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 90f11bafee90a8b819a14c3c14ccbbb9309512a8..c020d918ba9b278cbb9b09bf0338c998735213b4 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -18,6 +18,7 @@ import org.apache.logging.log4j.Logger;
+ //                                        standing in them - all mirror the blocks the section holds
+ //   ChunkSection.tickingBits            mirrors which positions hold a randomly ticking block, and
+ //   Chunk.tickingSectionMask            promises, where a bit is clear, that the section is idle
++//   PlayerChunkMap.instanceChunks       mirrors each player chunk instance's tombstone and chunk
+ //
+ // The census audit earns its keep: the site check in auditCensusSite found a real divergence in
+ // live play, where a decrement was applied to a class entityCount had no entry for.
+@@ -41,6 +42,7 @@ public final class AthenaIndexAudit {
+ 
+     private static int liquidCursor;
+     private static long tickingBitChecks; // Athena
++    private static long instanceChunkChecks; // Athena
+     private static long liquidChecks;
+     private static long liquidChecksNonEmpty;
+ 
+@@ -373,6 +375,16 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    /** Athena - PlayerChunkMap.instanceChunks mirrors each instance's tombstone flag and loaded chunk. */
++    public static void auditPlayerInstanceChunks(PlayerChunkMap map) {
++        ++instanceChunkChecks;
++        int wrong = map.auditInstanceChunks();
++
++        if (wrong != 0) {
++            report(wrong + " slots of PlayerChunkMap.instanceChunks disagree with the instance they mirror");
++        }
++    }
++
+     /**
+      * Checks a hit in PathfinderNormal's vertical offset memo against a fresh scan of the same
+      * position. Unlike the structures above this one is not rebuilt from anything - it caches a
+@@ -418,11 +430,12 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, verticalOffset={} | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, verticalOffset={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
+                 tickingBitChecks,
++                instanceChunkChecks,
+                 offsetChecks,
+                 mismatches);
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index a6a3a4fc77e0297f3e85a98022f91924ae0a6da7..c7eeee74198f001e73bcc58f48957ed8a71f1de7 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -949,6 +949,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     AthenaIndexAudit.auditCreatureCensus(worldserver);
+                     AthenaIndexAudit.auditEntityBuckets(worldserver);
+                     AthenaIndexAudit.auditSectionLiquids(worldserver);
++                    AthenaIndexAudit.auditPlayerInstanceChunks(worldserver.getPlayerChunkMap()); // Athena
+                 }
+                 // Athena end
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 52077451e7dda7cb4b0aecbeeb8921c436d149c0..90187fc0f21d38c96accf0ed6f069f56a36c2ae4 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -47,6 +47,29 @@ public class PlayerChunkMap {
+     // removal amortised and the walk never sees more than twice the live entries.
+     private final List<PlayerChunkMap.PlayerChunk> playerInstanceList = new ArrayList<PlayerChunkMap.PlayerChunk>();
+     private int deadPlayerInstances;
++    // Athena start - each instance's loaded chunk, at the instance's own index in the list above.
++    //
++    // The tick walk asks every entry first whether it is a tombstone and then whether its chunk has
++    // loaded, and both answers used to come off the PlayerChunk object itself - one dependent load
++    // per entry, into objects nothing else in the tick touches. Tombstones can be up to half the
++    // list before a compaction, and a player on the move leaves a trail of them. Here a null means
++    // "tombstone or not loaded yet" and costs a sequential read of this array; the PlayerChunk is
++    // only loaded for an entry that has a chunk to tick. Kept at the three points that decide it:
++    // adding an instance, the load callback that sets its chunk, and removing it.
++    private Chunk[] instanceChunks = new Chunk[64];
++
++    private void addPlayerInstance(PlayerChunkMap.PlayerChunk playerchunk) {
++        int index = this.playerInstanceList.size();
++
++        if (index == this.instanceChunks.length) {
++            this.instanceChunks = java.util.Arrays.copyOf(this.instanceChunks, index * 2);
++        }
++
++        this.playerInstanceList.add(playerchunk);
++        playerchunk.instanceIndex = index;
++        this.instanceChunks[index] = playerchunk.chunk; // the load callback may already have run, in the constructor
++    }
++    // Athena end
+ 
+     /** Drops the instance from the list. Cheap; the list itself is compacted later. */
+     private void removePlayerInstance(PlayerChunkMap.PlayerChunk playerchunk) {
+@@ -55,6 +78,7 @@ public class PlayerChunkMap {
+         }
+ 
+         playerchunk.removedFromInstanceList = true;
++        this.instanceChunks[playerchunk.instanceIndex] = null; // Athena
+         ++this.deadPlayerInstances;
+     }
+ 
+@@ -70,16 +94,41 @@ public class PlayerChunkMap {
+             PlayerChunkMap.PlayerChunk playerchunk = this.playerInstanceList.get(read);
+ 
+             if (!playerchunk.removedFromInstanceList) {
++                this.instanceChunks[write] = this.instanceChunks[read]; // Athena
++                playerchunk.instanceIndex = write; // Athena
+                 this.playerInstanceList.set(write++, playerchunk);
+             }
+         }
+ 
+         for (int i = this.playerInstanceList.size() - 1; i >= write; --i) {
+             this.playerInstanceList.remove(i);
++            this.instanceChunks[i] = null; // Athena
+         }
+ 
+         this.deadPlayerInstances = 0;
+     }
++
++    /** For the index audit only: how many slots of instanceChunks disagree with the instance they mirror. */
++    int auditInstanceChunks() {
++        int wrong = 0;
++
++        for (int i = 0; i < this.playerInstanceList.size(); ++i) {
++            PlayerChunkMap.PlayerChunk playerchunk = this.playerInstanceList.get(i);
++            Chunk expected = playerchunk.removedFromInstanceList ? null : playerchunk.chunk;
++
++            if (this.instanceChunks[i] != expected || (!playerchunk.removedFromInstanceList && playerchunk.instanceIndex != i)) {
++                ++wrong;
++            }
++        }
++
++        for (int i = this.playerInstanceList.size(); i < this.instanceChunks.length; ++i) {
++            if (this.instanceChunks[i] != null) {
++                ++wrong;
++            }
++        }
++
++        return wrong;
++    }
+     // Athena end
+     private int playerViewRadius;
+     private long previousTotalWorldTime;
+@@ -105,13 +154,9 @@ public class PlayerChunkMap {
+             @Override
+             protected Chunk computeNext() {
+                 while (this.cursor < PlayerChunkMap.this.playerInstanceList.size()) {
+-                    PlayerChunk playerChunk = PlayerChunkMap.this.playerInstanceList.get(this.cursor++);
+-
+-                    if (playerChunk.removedFromInstanceList) { // Athena - a tombstone
+-                        continue;
+-                    }
+-
+-                    Chunk chunk = playerChunk.getChunk();
++                    int index = this.cursor++;
++                    // Athena - null for a tombstone and for a chunk still loading; see instanceChunks
++                    Chunk chunk = PlayerChunkMap.this.instanceChunks[index];
+ 
+                     if (chunk == null) {
+                         continue;
+@@ -125,6 +170,8 @@ public class PlayerChunkMap {
+                         return chunk;
+                     }
+ 
++                    PlayerChunk playerChunk = PlayerChunkMap.this.playerInstanceList.get(index); // Athena - only now
++
+                     if (!playerChunk.hasPlayerMatching(PlayerChunkMap.this.playerViewRadius * 16.0D, NON_SPECTATOR_PREDICATE)) {
+                         continue;
+                     }
+@@ -198,7 +245,7 @@ public class PlayerChunkMap {
+         if (playerchunkmap_playerchunk == null && flag) {
+             playerchunkmap_playerchunk = new PlayerChunkMap.PlayerChunk(i, j);
+             this.playerInstances.put(k, playerchunkmap_playerchunk);
+-            this.playerInstanceList.add(playerchunkmap_playerchunk);
++            this.addPlayerInstance(playerchunkmap_playerchunk); // Athena - keeps instanceChunks in step
+         }
+ 
+         return playerchunkmap_playerchunk;
+@@ -491,6 +538,7 @@ public class PlayerChunkMap {
+         private long previousWorldTime;
+         public Chunk chunk; // PandaSpigot - Alternative Chunk Ticking Selection
+         boolean removedFromInstanceList; // Athena - tombstone; see PlayerChunkMap.playerInstanceList
++        int instanceIndex = -1; // Athena - this instance's slot in playerInstanceList and instanceChunks
+ 
+         // CraftBukkit start - add fields
+         private final HashMap<EntityPlayer, Runnable> players = new HashMap<EntityPlayer, Runnable>();
+@@ -499,6 +547,10 @@ public class PlayerChunkMap {
+             public void run() {
+                 PlayerChunk.this.loaded = true;
+                 PlayerChunk.this.chunk = PlayerChunkMap.this.getWorldServer().chunkProviderServer.getChunkIfLoaded(PlayerChunk.this.location.x, PlayerChunk.this.location.z); // PandaSpigot - Alternative Chunk Ticking Selection
++                // Athena - mirror it for the tick walk, unless this instance is not in the list (yet, or any more)
++                if (PlayerChunk.this.instanceIndex >= 0 && !PlayerChunk.this.removedFromInstanceList) {
++                    PlayerChunkMap.this.instanceChunks[PlayerChunk.this.instanceIndex] = PlayerChunk.this.chunk;
++                }
+             }
+         };
+         // CraftBukkit end
