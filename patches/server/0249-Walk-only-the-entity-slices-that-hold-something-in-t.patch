@@ -1,0 +1,125 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 24 Sep 2026 00:28:45 +0900
+Subject: [PATCH] Walk only the entity slices that hold something in the
+ activation range
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index c020d918ba9b278cbb9b09bf0338c998735213b4..d63ee35a277120be2c095d07dc5d334e79a56998 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -19,6 +19,7 @@ import org.apache.logging.log4j.Logger;
+ //   ChunkSection.tickingBits            mirrors which positions hold a randomly ticking block, and
+ //   Chunk.tickingSectionMask            promises, where a bit is clear, that the section is idle
+ //   PlayerChunkMap.instanceChunks       mirrors each player chunk instance's tombstone and chunk
++//   Chunk.nonEmptySliceMask             mirrors which entity slices hold anything
+ //
+ // The census audit earns its keep: the site check in auditCensusSite found a real divergence in
+ // live play, where a decrement was applied to a class entityCount had no entry for.
+@@ -43,6 +44,7 @@ public final class AthenaIndexAudit {
+     private static int liquidCursor;
+     private static long tickingBitChecks; // Athena
+     private static long instanceChunkChecks; // Athena
++    private static long sliceMaskChecks; // Athena
+     private static long liquidChecks;
+     private static long liquidChecksNonEmpty;
+ 
+@@ -318,6 +320,14 @@ public final class AthenaIndexAudit {
+         for (int i = 0; i < sections.length; ++i) {
+             ChunkSection section = sections[i];
+ 
++            // Athena - the activation range skips a slice whose bit is clear
++            ++sliceMaskChecks;
++            if (((chunk.nonEmptySliceMask & 1 << i) != 0) == chunk.entitySlices[i].isEmpty()) {
++                report("entity slice " + i + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                        + chunk.entitySlices[i].size() + " entities but nonEmptySliceMask says "
++                        + ((chunk.nonEmptySliceMask & 1 << i) != 0 ? "non-empty" : "empty"));
++            }
++
+             // Athena - a clear bit in the chunk's section mask promises the random tick has nothing here
+             if ((chunk.tickingSectionMask & 1 << i) == 0 && section != null && section.shouldTick()) {
+                 report("section " + i + " of chunk " + chunk.locX + "," + chunk.locZ
+@@ -430,12 +440,13 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, verticalOffset={} | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, sliceMask={}, verticalOffset={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
+                 tickingBitChecks,
+                 instanceChunkChecks,
++                sliceMaskChecks,
+                 offsetChecks,
+                 mismatches);
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 585ca7e700e6ab441e6e933868a7b461bc89939d..d4ba235e0e3553ee9fc7dc7a7b8252a1b011fd1e 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -65,6 +65,12 @@ public class Chunk {
+     // up no longer needs a BlockPosition to hash and the map holds no position objects at all.
+     public final Long2ObjectMap<TileEntity> tileEntities;
+     public final List<Entity>[] entitySlices; // Spigot
++    // Athena - bit k set while entitySlices[k] holds at least one entity. Kept at the two places a
++    // slice changes, addEntity and removeEntityAtIndex. The activation range walks every chunk
++    // near every player, slice by slice, and on a small map with twenty players nearly every slice
++    // it visits is empty - but asking an UnsafeList for an iterator searches its iterator pool
++    // either way, and a minigame profile had that search at 11% of the server thread.
++    public int nonEmptySliceMask;
+     // Athena start - a one-block-wide X bucket index over each entity slice.
+     //
+     // A slice holds every entity in a 16x16x16 section, and the queries that dominate the server
+@@ -995,6 +1001,7 @@ public class Chunk {
+         entity.chunkCoordY = k;
+         entity.chunkCoordZ = this.locZ;
+         this.entitySlices[k].add(entity);
++        this.nonEmptySliceMask |= 1 << k; // Athena
+         // Athena start - register with the bucket index, building it if the slice has grown enough
+         entity.athenaChunk = this;
+         entity.athenaBucket = -1;
+@@ -1075,6 +1082,9 @@ public class Chunk {
+         }
+ 
+         if (!this.entitySlices[i].remove(entity)) return; // PandaSpigot
++        if (this.entitySlices[i].isEmpty()) {
++            this.nonEmptySliceMask &= ~(1 << i); // Athena
++        }
+         // Athena start - drop it from the bucket index too
+         List<Entity>[] buckets = this.entityBuckets[i];
+ 
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index e4e403b222dd03de6af98828f199c6ae5734220e..95cdc629a3d74566445d9110bff35b8cd3f28c19 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -172,10 +172,25 @@ public class ActivationRange
+      */
+     private static void activateChunkEntities(Chunk chunk)
+     {
+-        for ( List<Entity> slice : chunk.entitySlices )
++        // Athena start - only the slices that hold something, walked by index.
++        //
++        // Every chunk within range of every player comes through here each tick, and each of its
++        // sixteen slices used to be asked for an iterator - a search of the UnsafeList's iterator
++        // pool and a reset, whether or not the slice held anything. With players sharing a small
++        // map the same chunks are walked once per player, nearly all of them empty. The mask
++        // skips the empty slices without loading them; the rest are walked by index, which visits
++        // the same entities in the same order - nothing in the loop adds to or removes from a slice.
++        int mask = chunk.nonEmptySliceMask;
++
++        while ( mask != 0 )
+         {
+-            for ( Entity entity : slice )
++            List<Entity> slice = chunk.entitySlices[ Integer.numberOfTrailingZeros( mask ) ];
++
++            mask &= mask - 1;
++            for ( int index = 0, size = slice.size(); index < size; ++index )
+             {
++                Entity entity = slice.get( index );
++                // Athena end
+                 if ( MinecraftServer.currentTick > entity.activatedTick )
+                 {
+                     if ( entity.defaultActivationState )
