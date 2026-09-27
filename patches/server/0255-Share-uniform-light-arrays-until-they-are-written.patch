@@ -1,0 +1,220 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 27 Sep 2026 21:50:30 +0900
+Subject: [PATCH] Share uniform light arrays until they are written
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 31ecab233c3817c2a230a12fd8733610bf4f3a7e..1ed69c842ff20fb782deffce808e073ad517b84a 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -348,9 +348,9 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             }
+ 
+             chunksection.setData(achar);
+-            chunksection.setBlocklightArray(new NibbleArray(nbttagcompound1.getByteArray("BlockLight")));
++            chunksection.setBlocklightArray(NibbleArray.light(nbttagcompound1.getByteArray("BlockLight"))); // Athena - shared if uniform
+             if (flag) {
+-                chunksection.setSkylightArray(new NibbleArray(nbttagcompound1.getByteArray("SkyLight")));
++                chunksection.setSkylightArray(NibbleArray.light(nbttagcompound1.getByteArray("SkyLight"))); // Athena - shared if uniform
+             }
+ 
+             chunksection.recalcBlockCounts();
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 7bbe03f91173c484b1bcf28c53cc49b429ea30f8..18075d0bd1365ac3e0cd07cc08f22d29a12c8511 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -53,9 +53,9 @@ public class ChunkSection {
+     public ChunkSection(int i, boolean flag) {
+         this.yPos = i;
+         this.blockIds = new char[4096];
+-        this.emittedLight = new NibbleArray();
++        this.emittedLight = NibbleArray.light(); // Athena - shared until lit
+         if (flag) {
+-            this.skyLight = new NibbleArray();
++            this.skyLight = NibbleArray.light(); // Athena - shared until lit
+         }
+ 
+     }
+@@ -64,9 +64,9 @@ public class ChunkSection {
+     public ChunkSection(int y, boolean flag, char[] blockIds) {
+         this.yPos = y;
+         this.blockIds = blockIds;
+-        this.emittedLight = new NibbleArray();
++        this.emittedLight = NibbleArray.light(); // Athena - shared until lit
+         if (flag) {
+-            this.skyLight = new NibbleArray();
++            this.skyLight = NibbleArray.light(); // Athena - shared until lit
+         }
+         recalcBlockCounts();
+     }
+diff --git a/src/main/java/net/minecraft/server/NibbleArray.java b/src/main/java/net/minecraft/server/NibbleArray.java
+index b50b9aba3b0dc3f0c16900bd2df73850fd2677cc..b939d7fa5ec3bb965748235bb6bd9e8a12e70122 100644
+--- a/src/main/java/net/minecraft/server/NibbleArray.java
++++ b/src/main/java/net/minecraft/server/NibbleArray.java
+@@ -3,7 +3,57 @@ package net.minecraft.server;
+ 
+ public class NibbleArray {
+ 
+-    private final byte[] data;
++    // Athena start - uniform light arrays share one copy until written.
++    //
++    // A loaded section carries two of these for light, 2 KB each, and most of them hold a single
++    // value: block light is 0 almost everywhere, sky light is 15 above the ground and 0 below it.
++    // Light arrays made through light() point at a shared constant while they are all 0 or all
++    // 15, and get their own copy on the first write that changes a nibble. Readers see the same
++    // values; the getData() callers for light only read (packets, saving, CraftChunk snapshots).
++    //
++    // Only light arrays: packSectionIds writes straight into getData() of the arrays it makes
++    // with the constructors, so those always own their bytes.
++    private static final byte[] SHARED_ZERO = new byte[2048];
++    private static final byte[] SHARED_FULL = filled((byte) 0xFF);
++
++    private static byte[] filled(byte value) {
++        byte[] data = new byte[2048];
++
++        java.util.Arrays.fill(data, value);
++        return data;
++    }
++
++    private byte[] data;
++    private boolean shared;
++
++    /** An all-zero light array. */
++    public static NibbleArray light() {
++        return new NibbleArray(SHARED_ZERO, true);
++    }
++
++    /** A light array holding the given bytes, shared if they are uniformly 0 or 15. */
++    public static NibbleArray light(byte[] abyte) {
++        if (abyte.length == 2048) {
++            byte first = abyte[0];
++
++            if (first == 0 || first == (byte) 0xFF) {
++                int i = 1;
++
++                while (i < 2048 && abyte[i] == first) {
++                    ++i;
++                }
++                if (i == 2048) {
++                    return new NibbleArray(first == 0 ? SHARED_ZERO : SHARED_FULL, true);
++                }
++            }
++        }
++        return new NibbleArray(abyte);
++    }
++
++    private NibbleArray(byte[] abyte, boolean shared) {
++        this.data = abyte;
++        this.shared = shared;
++    }
+ 
+     public NibbleArray() {
+         this.data = new byte[2048];
+@@ -15,6 +65,7 @@ public class NibbleArray {
+             throw new IllegalArgumentException("ChunkNibbleArrays should be 2048 bytes not: " + abyte.length);
+         }
+     }
++    // Athena end
+ 
+     public int get(int i, int j, int k) {
+         return this.getFromIndex(this.getCoordinateIndex(i, j, k));
+@@ -39,6 +90,15 @@ public class NibbleArray {
+ 
+         // PandaSpigot start
+         int shift = (i & 1) << 2;
++        // Athena start - copy a shared array on the first write that changes it
++        if (this.shared) {
++            if ((this.data[k] >> shift & 15) == (j & 15)) {
++                return;
++            }
++            this.data = this.data.clone();
++            this.shared = false;
++        }
++        // Athena end
+         this.data[k] = (byte) (this.data[k] & ~(15 << shift) | (j & 15) << shift);
+         // PandaSpigot end
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSharedLightTest.java b/src/test/java/net/minecraft/server/AthenaSharedLightTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..361b7b249432544aa6ba5273335fd108a2d58700
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSharedLightTest.java
+@@ -0,0 +1,77 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertSame;
++
++import java.util.Arrays;
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - uniform light arrays share a constant until a write changes them. A write through
++ * one array must never show through another, and every read must match a plain array.
++ */
++public class AthenaSharedLightTest {
++
++    private static byte[] uniform(int value) {
++        byte[] data = new byte[2048];
++
++        Arrays.fill(data, (byte) (value | value << 4));
++        return data;
++    }
++
++    @Test
++    public void uniformArraysShareUntilChanged() {
++        NibbleArray a = NibbleArray.light(uniform(15));
++        NibbleArray b = NibbleArray.light(uniform(15));
++
++        assertSame("two all-15 arrays share", a.getData(), b.getData());
++
++        a.setIndex(100, 15); // no change: stays shared
++        assertSame(a.getData(), b.getData());
++
++        a.setIndex(100, 3);
++        assertNotSame(a.getData(), b.getData());
++        assertEquals(3, a.getFromIndex(100));
++        assertEquals("the other array is untouched", 15, b.getFromIndex(100));
++        assertArrayEquals("the constant is untouched", uniform(15), NibbleArray.light(uniform(15)).getData());
++
++        NibbleArray zero = NibbleArray.light();
++
++        zero.set(1, 2, 3, 7);
++        assertEquals(7, zero.get(1, 2, 3));
++        assertArrayEquals(new byte[2048], NibbleArray.light().getData());
++    }
++
++    @Test
++    public void mixedArraysAreKeptAsGiven() {
++        byte[] data = uniform(0);
++
++        data[2047] = 1;
++        assertSame(data, NibbleArray.light(data).getData());
++    }
++
++    @Test
++    public void randomWritesMatchAPlainArray() {
++        Random random = new Random(7);
++
++        for (int start : new int[] {0, 15}) {
++            NibbleArray shared = NibbleArray.light(uniform(start));
++            NibbleArray plain = new NibbleArray(uniform(start));
++
++            for (int n = 0; n < 20000; ++n) {
++                int index = random.nextInt(4096);
++                int value = random.nextInt(4) == 0 ? random.nextInt(16) : start;
++
++                shared.setIndex(index, value);
++                plain.setIndex(index, value);
++                assertEquals(plain.getFromIndex(index), shared.getFromIndex(index));
++            }
++            assertArrayEquals(plain.getData(), shared.getData());
++        }
++        assertArrayEquals(uniform(0), NibbleArray.light().getData());
++        assertArrayEquals(uniform(15), NibbleArray.light(uniform(15)).getData());
++    }
++}

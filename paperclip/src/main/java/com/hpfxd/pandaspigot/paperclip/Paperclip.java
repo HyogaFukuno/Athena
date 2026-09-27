@@ -333,8 +333,25 @@ public final class Paperclip {
 
     private static boolean isJarInvalid(final MessageDigest digest, final Path jar, final byte[] hash) {
         if (Files.exists(jar)) {
-            final byte[] jarBytes = readBytes(jar);
-            return !Arrays.equals(hash, digest.digest(jarBytes));
+            // Athena - hash the jar as a stream. Reading it whole grew a buffer to twice its size
+            // and then copied it: ~100 MB of heap for a ~40 MB jar on every start, which was the
+            // largest allocation of the whole launch and made a 160 MB heap fail before the
+            // server ever ran.
+            digest.reset();
+            try (InputStream in = Files.newInputStream(jar)) {
+                final byte[] buffer = new byte[64 * 1024];
+                int read;
+
+                while ((read = in.read(buffer)) != -1) {
+                    digest.update(buffer, 0, read);
+                }
+            } catch (final IOException e) {
+                System.err.println("Failed to read all of the data from " + jar.toAbsolutePath());
+                e.printStackTrace();
+                System.exit(1);
+                throw new InternalError();
+            }
+            return !Arrays.equals(hash, digest.digest());
         }
         return true;
     }
