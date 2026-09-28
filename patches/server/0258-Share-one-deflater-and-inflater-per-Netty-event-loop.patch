@@ -1,0 +1,137 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 29 Sep 2026 08:39:28 +0900
+Subject: [PATCH] Share one deflater and inflater per Netty event loop instead
+ of one per connection
+
+
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 19bc8971a32ecdf93a84eea70218630edae6d276..7f968302f54354715b6528fdd3e66989f0009540 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -8,8 +8,25 @@ import java.util.zip.Deflater;
+ 
+ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+ 
+-    private final byte[] buffer = new byte[8192];
+-    private final Deflater deflater;
++    // Athena start - one deflater and output buffer per event loop thread, not per connection.
++    //
++    // A zlib deflate state is ~256 KB of native memory, and every connection allocated one that
++    // was never end()ed, so it stayed until a GC happened to collect the handler. Each packet is
++    // compressed from start to finish inside one call on the channel's event loop and the
++    // deflater is reset before the call returns, so connections that share a thread can share it.
++    private static final io.netty.util.concurrent.FastThreadLocal<Deflater> DEFLATER = new io.netty.util.concurrent.FastThreadLocal<Deflater>() {
++        @Override
++        protected Deflater initialValue() {
++            return new Deflater();
++        }
++    };
++    private static final io.netty.util.concurrent.FastThreadLocal<byte[]> BUFFER = new io.netty.util.concurrent.FastThreadLocal<byte[]>() {
++        @Override
++        protected byte[] initialValue() {
++            return new byte[8192];
++        }
++    };
++    // Athena end
+     private int treshold;
+     // Athena - the next message is a frame PacketEncoder took from AthenaChunkPacketCache, already
+     // in the form this handler produces; copy it through. Set and cleared on the channel's event
+@@ -22,7 +39,6 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+ 
+     public PacketCompressor(int i) {
+         this.treshold = i;
+-        this.deflater = new Deflater();
+     }
+ 
+     protected void a(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, ByteBuf bytebuf1) throws Exception {
+@@ -54,26 +70,29 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+             // reset() is in a finally because the deflater keeps a reference to the input buffer
+             // until it is reset, and Netty releases that buffer the moment we return - leaving the
+             // reference behind would point the next packet's compression at freed memory.
++            Deflater deflater = DEFLATER.get(); // Athena
++            byte[] buffer = BUFFER.get(); // Athena
++
+             try {
+                 if (bytebuf.nioBufferCount() == 1) {
+-                    this.deflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), i));
++                    deflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), i));
+                     bytebuf.skipBytes(i);
+                 } else {
+                     byte[] abyte = new byte[i];
+ 
+                     bytebuf.readBytes(abyte);
+-                    this.deflater.setInput(abyte, 0, i);
++                    deflater.setInput(abyte, 0, i);
+                 }
+ 
+-                this.deflater.finish();
++                deflater.finish();
+ 
+-                while (!this.deflater.finished()) {
+-                    int j = this.deflater.deflate(this.buffer);
++                while (!deflater.finished()) {
++                    int j = deflater.deflate(buffer);
+ 
+-                    packetdataserializer.writeBytes(this.buffer, 0, j);
++                    packetdataserializer.writeBytes(buffer, 0, j);
+                 }
+             } finally {
+-                this.deflater.reset();
++                deflater.reset();
+             }
+             // Athena end
+         }
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 06ac0a1d69a71d305b7f51e9bbe618bcb61734c7..c13e0cda44092b64f1d9d9159718c8a4b2de5ecb 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -11,12 +11,17 @@ import java.util.zip.Inflater;
+ 
+ public class PacketDecompressor extends ByteToMessageDecoder {
+ 
+-    private final Inflater inflater;
++    // Athena - one inflater per event loop thread; see PacketCompressor.DEFLATER
++    private static final io.netty.util.concurrent.FastThreadLocal<Inflater> INFLATER = new io.netty.util.concurrent.FastThreadLocal<Inflater>() {
++        @Override
++        protected Inflater initialValue() {
++            return new Inflater();
++        }
++    };
+     private int treshold;
+ 
+     public PacketDecompressor(int i) {
+         this.treshold = i;
+-        this.inflater = new Inflater();
+     }
+ 
+     protected void decode(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, List<Object> list) throws Exception {
+@@ -40,23 +45,24 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                 // input copy goes: the inflated array is handed downstream as the packet buffer, so
+                 // it has to be allocated either way.
+                 byte[] abyte1 = new byte[i];
++                Inflater inflater = INFLATER.get(); // Athena
+ 
+                 try {
+                     int j = packetdataserializer.readableBytes();
+ 
+                     if (bytebuf.nioBufferCount() == 1) {
+-                        this.inflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), j));
++                        inflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), j));
+                         bytebuf.skipBytes(j);
+                     } else {
+                         byte[] abyte = new byte[j];
+ 
+                         packetdataserializer.readBytes(abyte);
+-                        this.inflater.setInput(abyte);
++                        inflater.setInput(abyte);
+                     }
+ 
+-                    this.inflater.inflate(abyte1);
++                    inflater.inflate(abyte1);
+                 } finally {
+-                    this.inflater.reset();
++                    inflater.reset();
+                 }
+ 
+                 list.add(Unpooled.wrappedBuffer(abyte1));
