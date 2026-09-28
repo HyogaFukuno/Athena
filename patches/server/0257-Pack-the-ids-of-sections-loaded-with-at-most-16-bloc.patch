@@ -1,0 +1,329 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 29 Sep 2026 06:14:15 +0900
+Subject: [PATCH] Pack the ids of sections loaded with at most 16 block states
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 67c18d3b71cbcbd4cbd30b70e6182ab0eac7c67a..b7c80111c00cf127ba17886674f9318511f56c33 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -73,7 +73,7 @@ public class ChunkSection {
+     // CraftBukkit end
+ 
+     public IBlockData getType(int i, int j, int k) {
+-        IBlockData iblockdata = (IBlockData) Block.BLOCK_STATE_IDS.getByValue(this.blockIds[j << 8 | k << 4 | i]);
++        IBlockData iblockdata = (IBlockData) Block.BLOCK_STATE_IDS.getByValue(this.stateIdAt(j << 8 | k << 4 | i)); // Athena
+ 
+         return iblockdata != null ? iblockdata : Blocks.AIR.getBlockData();
+     }
+@@ -133,12 +133,16 @@ public class ChunkSection {
+         char newId = (char) Block.getStateId(iblockdata);
+         int idIndex = j << 8 | k << 4 | i;
+ 
+-        if (this.idsShared && this.blockIds[idIndex] != newId) {
+-            this.blockIds = this.blockIds.clone();
+-            this.idsShared = false;
+-        }
+-        if (!this.idsShared) {
+-            this.blockIds[idIndex] = newId;
++        if (this.blockIds == null) {
++            this.setPacked(idIndex, newId);
++        } else {
++            if (this.idsShared && this.blockIds[idIndex] != newId) {
++                this.blockIds = this.blockIds.clone();
++                this.idsShared = false;
++            }
++            if (!this.idsShared) {
++                this.blockIds[idIndex] = newId;
++            }
+         }
+         // Athena end
+         ++this.modCount; // Athena
+@@ -306,17 +310,97 @@ public class ChunkSection {
+     }
+     // Athena end
+ 
+-    /** Athena - read only: the array may be shared with other sections; see setDataSharingUniform. */
++    /**
++     * Athena - read only. The array may be shared with other sections (see setDataSharingUniform),
++     * and a packed section hands out a fresh copy that writes do not reach (see packed ids).
++     * The one caller that writes, CustomChunkGenerator, does so into sections it has just
++     * constructed, which always hold a plain array of their own.
++     */
+     public char[] getIdArray() {
+-        return this.blockIds;
++        char[] ids = this.blockIds;
++
++        return ids != null ? ids : this.unpackedIds();
+     }
+ 
+     public void setData(char[] achar) {
+         this.blockIds = achar;
+         this.idsShared = false; // Athena
++        this.packedIds = null; // Athena
++        this.palette = null; // Athena
+         ++this.modCount; // Athena
+     }
+ 
++    // Athena start - packed ids for sections loaded with few block states.
++    //
++    // Natural terrain is mostly sections of a handful of states - stone, dirt, ores, air - yet
++    // each held a char[4096], 8 KB. A production survival-games map had 57% of the sections
++    // around its arena at 16 states or fewer. Those are loaded as a palette of up to 16 ids and
++    // a 4-bit index per block, 2 KB, the same idea as the palette storage of later versions.
++    // It is an in-memory form only: packets and saves still read the ids through getIdArray(),
++    // so what the client receives and what goes to disk are unchanged.
++    //
++    // A write whose id is in the palette, or fits in it, stays packed. The seventeenth distinct
++    // id unpacks the section into a plain array for good. blockIds is null exactly while the
++    // section is packed; the packed arrays are left in place on unpacking, so a reader that saw
++    // blockIds null still finds them.
++    private byte[] packedIds;
++    private char[] palette;
++    private int paletteSize;
++
++    private char stateIdAt(int index) {
++        char[] ids = this.blockIds;
++
++        if (ids != null) {
++            return ids[index];
++        }
++        return this.palette[this.packedIds[index >> 1] >> ((index & 1) << 2) & 15];
++    }
++
++    private void setPacked(int index, char id) {
++        char[] palette = this.palette;
++        int p = 0;
++
++        while (p < this.paletteSize && palette[p] != id) {
++            ++p;
++        }
++        if (p == this.paletteSize) {
++            if (p == 16) {
++                char[] ids = this.unpackedIds();
++
++                ids[index] = id;
++                this.blockIds = ids;
++                return;
++            }
++            palette[p] = id; // before any index points at it
++            this.paletteSize = p + 1;
++        }
++
++        int shift = (index & 1) << 2;
++        byte[] packed = this.packedIds;
++
++        packed[index >> 1] = (byte) (packed[index >> 1] & ~(15 << shift) | p << shift);
++    }
++
++    private char[] unpackedIds() {
++        char[] palette = this.palette;
++        byte[] packed = this.packedIds;
++        char[] ids = new char[4096];
++
++        for (int k = 0; k < 4096; k += 2) {
++            int b = packed[k >> 1];
++
++            ids[k] = palette[b & 15];
++            ids[k + 1] = palette[b >> 4 & 15];
++        }
++        return ids;
++    }
++
++    /** Whether this section currently holds its ids packed; for tests and the audit. */
++    boolean isPacked() {
++        return this.blockIds == null;
++    }
++    // Athena end
++
+     // Athena start - sections made of a single block state share one array until written.
+     //
+     // A loaded section holds its blocks in a char[4096], 8 KB, whatever is in it. Maps saved by
+@@ -329,16 +413,47 @@ public class ChunkSection {
+     private static final java.util.concurrent.ConcurrentHashMap<Character, char[]> UNIFORM_IDS = new java.util.concurrent.ConcurrentHashMap<>();
+     private boolean idsShared;
+ 
+-    /** As setData, but shares the array if every id in it is the same. For freshly loaded data. */
++    /**
++     * As setData, for freshly loaded data: shares the array if every id in it is the same, and
++     * packs it if it holds at most 16 distinct ids (see packed ids).
++     */
+     void setDataSharingUniform(char[] achar) {
+-        char first = achar.length == 4096 ? achar[0] : 1;
+-        int n = 1;
++        if (achar.length != 4096) {
++            this.setData(achar);
++            return;
++        }
++
++        char[] palette = new char[16];
++        byte[] packed = new byte[2048];
++        int size = 1;
++        char last = achar[0];
++        int lastIndex = 0;
++
++        palette[0] = last;
++        for (int k = 0; k < 4096; ++k) {
++            char c = achar[k];
++
++            if (c != last) {
++                int p = 0;
+ 
+-        while (n < achar.length && achar[n] == first) {
+-            ++n;
++                while (p < size && palette[p] != c) {
++                    ++p;
++                }
++                if (p == size) {
++                    if (size == 16) {
++                        this.setData(achar); // too many states to pack
++                        return;
++                    }
++                    palette[size++] = c;
++                }
++                last = c;
++                lastIndex = p;
++            }
++            packed[k >> 1] |= (byte) (lastIndex << ((k & 1) << 2));
+         }
+-        if (achar.length == 4096 && n == 4096) {
+-            this.setData(UNIFORM_IDS.computeIfAbsent(first, id -> {
++
++        if (size == 1) {
++            this.setData(UNIFORM_IDS.computeIfAbsent(achar[0], id -> {
+                 char[] ids = new char[4096];
+ 
+                 java.util.Arrays.fill(ids, id);
+@@ -347,6 +462,10 @@ public class ChunkSection {
+             this.idsShared = true;
+         } else {
+             this.setData(achar);
++            this.palette = palette;
++            this.paletteSize = size;
++            this.packedIds = packed;
++            this.blockIds = null; // packed from here on
+         }
+     }
+     // Athena end
+diff --git a/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java b/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java
+index 1b3b3dc8aa6bc17172c8a81d63bb2940f09476da..446ae775c9d59ccad2037333c7121000832714bd 100644
+--- a/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java
+@@ -60,10 +60,114 @@ public class AthenaSharedSectionIdsTest extends AbstractTestingBase {
+     @Test
+     public void mixedDataIsKeptAsGiven() {
+         ChunkSection section = new ChunkSection(0, true);
+-        char[] ids = new char[4096];
++        char[] ids = randomIds(states(17), 17); // too many states to pack
+ 
+-        ids[4095] = (char) Block.getStateId(Blocks.STONE.getBlockData());
+         section.setDataSharingUniform(ids);
+         assertSame(ids, section.getIdArray());
+     }
++
++    // --- packed sections ---
++
++    private static IBlockData[] states(int n) {
++        java.util.List<IBlockData> all = new java.util.ArrayList<>();
++
++        for (Block block : Block.REGISTRY) {
++            for (IBlockData state : block.getBlockState().getValidStates()) {
++                if (Block.getStateId(state) > 0 && Block.BLOCK_STATE_IDS.getByValue(Block.getStateId(state)) == state) {
++                    all.add(state);
++                }
++            }
++        }
++        java.util.Collections.shuffle(all, new java.util.Random(n));
++        return all.subList(0, n).toArray(new IBlockData[n]);
++    }
++
++    private static char[] randomIds(IBlockData[] states, long seed) {
++        java.util.Random random = new java.util.Random(seed);
++        char[] ids = new char[4096];
++
++        for (int k = 0; k < 4096; ++k) {
++            ids[k] = (char) Block.getStateId(states[random.nextInt(states.length)]);
++        }
++        return ids;
++    }
++
++    private static void assertSameContents(ChunkSection expected, ChunkSection actual) {
++        assertTrue(java.util.Arrays.equals(expected.getIdArray(), actual.getIdArray()));
++        for (int k = 0; k < 4096; ++k) {
++            assertSame(expected.getType(k & 15, k >> 8, k >> 4 & 15), actual.getType(k & 15, k >> 8, k >> 4 & 15));
++            assertEquals(expected.isTickingAt(k), actual.isTickingAt(k));
++        }
++        assertEquals(expected.isEmpty(), actual.isEmpty());
++        assertEquals(expected.shouldTick(), actual.shouldTick());
++        for (int mask : new int[] {ChunkSection.HAS_WATER, ChunkSection.HAS_LAVA, ChunkSection.HAS_FIRE, ChunkSection.HAS_COLLISION_HANDLER}) {
++            assertEquals(expected.auditCount(mask), actual.auditCount(mask));
++        }
++    }
++
++    @Test
++    public void fewStatesArePackedAndReadBackExactly() {
++        for (int n : new int[] {2, 5, 16}) {
++            char[] ids = randomIds(states(n), n);
++            ChunkSection plain = new ChunkSection(0, true);
++            ChunkSection packed = new ChunkSection(0, true);
++
++            plain.setData(ids.clone());
++            plain.recalcBlockCounts();
++            packed.setDataSharingUniform(ids.clone());
++            packed.recalcBlockCounts();
++
++            assertTrue("packed at " + n + " states", packed.isPacked());
++            assertSameContents(plain, packed);
++        }
++
++        ChunkSection seventeen = new ChunkSection(0, true);
++
++        seventeen.setDataSharingUniform(randomIds(states(17), 17));
++        assertTrue("17 states stay plain", !seventeen.isPacked());
++    }
++
++    @Test
++    public void writesToAPackedSectionMatchAPlainOne() {
++        IBlockData[] palette = states(20);
++        IBlockData[] first = java.util.Arrays.copyOf(palette, 10);
++        char[] ids = randomIds(first, 99);
++        ChunkSection plain = new ChunkSection(0, true);
++        ChunkSection packed = new ChunkSection(0, true);
++        java.util.Random random = new java.util.Random(5);
++
++        plain.setData(ids.clone());
++        plain.recalcBlockCounts();
++        packed.setDataSharingUniform(ids.clone());
++        packed.recalcBlockCounts();
++
++        boolean sawPacked = false;
++        boolean sawUnpacked = false;
++
++        for (int n = 0; n < 3000; ++n) {
++            int k = random.nextInt(4096);
++            // mostly the first 10 states, now and then one of the other 10 - the palette fills up
++            IBlockData state = random.nextInt(200) == 0 ? palette[10 + random.nextInt(10)] : first[random.nextInt(10)];
++
++            plain.setType(k & 15, k >> 8, k >> 4 & 15, state);
++            packed.setType(k & 15, k >> 8, k >> 4 & 15, state);
++            assertSame(plain.getType(k & 15, k >> 8, k >> 4 & 15), packed.getType(k & 15, k >> 8, k >> 4 & 15));
++            sawPacked |= packed.isPacked();
++            sawUnpacked |= !packed.isPacked();
++        }
++        assertTrue(sawPacked);
++        assertTrue("the 17th state unpacked it", sawUnpacked);
++        assertSameContents(plain, packed);
++    }
++
++    @Test
++    public void packedIdArrayIsACopy() {
++        char[] ids = randomIds(states(3), 3);
++        ChunkSection packed = new ChunkSection(0, true);
++
++        packed.setDataSharingUniform(ids.clone());
++        assertTrue(packed.isPacked());
++        assertNotSame(packed.getIdArray(), packed.getIdArray());
++        assertTrue(java.util.Arrays.equals(ids, packed.getIdArray()));
++    }
+ }
