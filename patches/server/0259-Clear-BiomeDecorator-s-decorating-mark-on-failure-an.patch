@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 29 Sep 2026 10:44:33 +0900
+Subject: [PATCH] Clear BiomeDecorator's decorating mark on failure and replay
+ decorations during spawn preparation
+
+
+diff --git a/src/main/java/net/minecraft/server/BiomeDecorator.java b/src/main/java/net/minecraft/server/BiomeDecorator.java
+index 8201c5f84e11f8a0cd782838e196f4ce33290348..701902ea6c7d9295b9f74584e378d4fa09ec8b9b 100644
+--- a/src/main/java/net/minecraft/server/BiomeDecorator.java
++++ b/src/main/java/net/minecraft/server/BiomeDecorator.java
+@@ -67,6 +67,11 @@ public class BiomeDecorator {
+             throw new RuntimeException("Already decorating");
+         } else {
+             this.currentWorld = world;
++            // Athena start - clear the decorating mark however this ends. Chunk decoration runs on
++            // its own thread and a failure there is caught and retried on the server thread; left
++            // set, the mark made the retry, and every later decoration of this biome, throw
++            // "Already decorating".
++            try {
+             String s = world.getWorldData().getGeneratorOptions();
+ 
+             if (s != null) {
+@@ -89,8 +94,11 @@ public class BiomeDecorator {
+             this.diamondGen = new WorldGenMinable(Blocks.DIAMOND_ORE.getBlockData(), this.chunkProviderSettings.diamondSize);
+             this.lapisGen = new WorldGenMinable(Blocks.LAPIS_ORE.getBlockData(), this.chunkProviderSettings.lapisSize);
+             this.genDecorations(biomebase);
++            } finally {
+             this.currentWorld = null;
+             this.randomGenerator = null;
++            }
++            // Athena end
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 6e6dba814a02c9437490266d8cb6ff7cb901174f..2365e87c77742a84155ae23a8aff29e997e00051 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -365,6 +365,11 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+ 
+                     ++i;
+                     worldserver.chunkProviderServer.getChunkAt(blockposition.getX() + k >> 4, blockposition.getZ() + l >> 4);
++                    // Athena - replay the decorations that are ready as we go. The tick loop does
++                    // this every tick; this loop generates 625 chunks without one, and every
++                    // finished decoration held its recorded writes until the first tick - enough,
++                    // on a fresh world, to exhaust a 160 MB heap before the server had started.
++                    ChunkDecorationExecutor.tick();
+                 }
+             }
+         }
