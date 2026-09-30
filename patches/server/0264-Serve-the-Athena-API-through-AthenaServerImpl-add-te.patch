@@ -1,0 +1,410 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 14:13:30 +0900
+Subject: [PATCH] Serve the Athena API through AthenaServerImpl; add
+ teleportAsync and index-paired teleports
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7615de68fcf4d1a5f6d36e0eb4e973e39676a39c
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -0,0 +1,102 @@
++package athena.server;
++
++import athena.api.AthenaServer;
++import java.io.File;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Function;
++import net.minecraft.server.AthenaTeleportQueue;
++import net.minecraft.server.AthenaTemplateDataManager;
++import org.apache.commons.lang.Validate;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.WorldCreator;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++import org.bukkit.event.player.PlayerTeleportEvent;
++
++/**
++ * Athena - the server's side of athena.api.Athena. Template worlds are CraftServer's (they share
++ * createWorld's second half); gradual teleports are AthenaTeleportQueue's, drained in the tick loop.
++ */
++public final class AthenaServerImpl implements AthenaServer {
++
++    private final CraftServer server;
++
++    public AthenaServerImpl(CraftServer server) {
++        this.server = server;
++    }
++
++    @Override
++    public World loadTemplateWorld(String name, File templateFolder) {
++        return this.server.loadTemplateWorld(new WorldCreator(name), templateFolder);
++    }
++
++    @Override
++    public World loadTemplateWorld(WorldCreator creator, File templateFolder) {
++        return this.server.loadTemplateWorld(creator, templateFolder);
++    }
++
++    @Override
++    public boolean isTemplateWorld(World world) {
++        return world instanceof CraftWorld && ((CraftWorld) world).getHandle().getDataManager() instanceof AthenaTemplateDataManager;
++    }
++
++    @Override
++    public CompletableFuture<Boolean> teleportAsync(final Entity entity, Location location) {
++        Validate.notNull(entity, "Entity may not be null");
++        Validate.notNull(location, "Location may not be null");
++        Validate.notNull(location.getWorld(), "Location has no world");
++
++        final Location to = location.clone();
++        final CompletableFuture<Boolean> future = new CompletableFuture<Boolean>();
++
++        // the callback runs on the server thread, straight away if the chunk is loaded already
++        to.getWorld().getChunkAtAsync(to.getBlockX() >> 4, to.getBlockZ() >> 4, chunk -> {
++            try {
++                boolean present = entity instanceof Player ? ((Player) entity).isOnline() : entity.isValid();
++
++                future.complete(present && entity.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN));
++            } catch (Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        });
++        return future;
++    }
++
++    @Override
++    public CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, final Function<? super Player, ? extends Location> destination, int perTick) {
++        Validate.notNull(players, "Players may not be null");
++        Validate.notNull(destination, "Destination may not be null");
++        checkPerTick(perTick);
++        return AthenaTeleportQueue.INSTANCE.teleportGradually(players, (index, player) -> destination.apply(player), perTick);
++    }
++
++    @Override
++    public CompletableFuture<Integer> teleportGradually(List<? extends Player> players, List<? extends Location> destinations, int perTick) {
++        Validate.notNull(players, "Players may not be null");
++        Validate.notNull(destinations, "Destinations may not be null");
++        checkPerTick(perTick);
++        if (players.size() != destinations.size()) {
++            throw new IllegalArgumentException("There are " + players.size() + " players but " + destinations.size() + " destinations");
++        }
++
++        // copied now: player i goes to destination i as the lists are at this call
++        final List<Location> to = new ArrayList<Location>(destinations.size());
++
++        for (Location location : destinations) {
++            to.add(location == null ? null : location.clone());
++        }
++        return AthenaTeleportQueue.INSTANCE.teleportGradually(players, (index, player) -> to.get(index), perTick);
++    }
++
++    private static void checkPerTick(int perTick) {
++        if (perTick < 1) {
++            throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
++        }
++    }
++}
+diff --git a/src/main/java/athena/server/TempTpCommand.java b/src/main/java/athena/server/TempTpCommand.java
+index ea3454a71e6d25848683ea237b6fc522d87bef56..78e0eb7fd3851ad54ec73ffc2fca4988f4ca0f0f 100644
+--- a/src/main/java/athena/server/TempTpCommand.java
++++ b/src/main/java/athena/server/TempTpCommand.java
+@@ -1,6 +1,6 @@
+ package athena.server;
+ 
+-import athena.api.AthenaWorlds;
++import athena.api.Athena;
+ import java.io.File;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import org.bukkit.Bukkit;
+@@ -12,10 +12,9 @@ import org.bukkit.block.BlockFace;
+ import org.bukkit.command.Command;
+ import org.bukkit.command.CommandSender;
+ import org.bukkit.entity.Player;
+-import org.bukkit.event.player.PlayerTeleportEvent;
+ 
+ /**
+- * Athena - {@code /temptp <name> <filepath>}: tries AthenaWorlds.loadTemplate by hand.
++ * Athena - {@code /temptp <name> <filepath>}: tries Athena.loadTemplateWorld by hand.
+  *
+  * Loads the world folder at {@code filepath} as a template world called {@code name} (or reuses
+  * it if a template world by that name is loaded already), preloads the chunks within view distance
+@@ -26,7 +25,7 @@ public final class TempTpCommand extends Command {
+ 
+     public TempTpCommand(String name) {
+         super(name);
+-        this.description = "Loads a template world with AthenaWorlds.loadTemplate and teleports you to its spawn";
++        this.description = "Loads a template world with Athena.loadTemplateWorld and teleports you to its spawn";
+         this.usageMessage = "/temptp <name> <filepath>";
+         this.setPermission("athena.command.temptp");
+     }
+@@ -61,7 +60,7 @@ public final class TempTpCommand extends Command {
+             long start = System.nanoTime();
+ 
+             try {
+-                world = AthenaWorlds.loadTemplate(name, folder);
++                world = Athena.loadTemplateWorld(name, folder);
+             } catch (IllegalArgumentException e) {
+                 // not e.getMessage(): chat turns a file name like level.dat into a link
+                 sender.sendMessage(ChatColor.RED + "There is no world folder at " + folder.getAbsolutePath() + ".");
+@@ -73,7 +72,7 @@ public final class TempTpCommand extends Command {
+             }
+             sender.sendMessage(ChatColor.GRAY + "[Athena] Loaded template world '" + name + "' from " + folder.getAbsolutePath()
+                     + " in " + ms(start) + " ms.");
+-        } else if (!AthenaWorlds.isTemplate(world)) {
++        } else if (!Athena.isTemplateWorld(world)) {
+             sender.sendMessage(ChatColor.RED + "A world named '" + name + "' is already loaded, and it is not a template world.");
+             return true;
+         } else {
+@@ -107,15 +106,18 @@ public final class TempTpCommand extends Command {
+             return;
+         }
+ 
+-        long preloadMs = ms(preloadStart);
+-        Location to = safeSpawn(world);
++        final long preloadMs = ms(preloadStart);
++        final Location to = safeSpawn(world);
+ 
+-        if (player.teleport(to, PlayerTeleportEvent.TeleportCause.COMMAND)) {
+-            player.sendMessage(ChatColor.GRAY + "[Athena] Preloaded " + chunks + " chunks in " + preloadMs + " ms; teleported to "
+-                    + world.getName() + " " + to.getBlockX() + ", " + to.getBlockY() + ", " + to.getBlockZ() + ".");
+-        } else {
+-            player.sendMessage(ChatColor.RED + "The teleport to '" + world.getName() + "' was cancelled.");
+-        }
++        // through the API, so trying the command also tries Athena.teleportAsync
++        Athena.teleportAsync(player, to).thenAccept(teleported -> {
++            if (teleported) {
++                player.sendMessage(ChatColor.GRAY + "[Athena] Preloaded " + chunks + " chunks in " + preloadMs + " ms; teleported to "
++                        + world.getName() + " " + to.getBlockX() + ", " + to.getBlockY() + ", " + to.getBlockZ() + ".");
++            } else if (player.isOnline()) {
++                player.sendMessage(ChatColor.RED + "The teleport to '" + world.getName() + "' was cancelled.");
++            }
++        });
+     }
+ 
+     /** The world's spawn, centred on its block, lifted to the surface if it is inside blocks. */
+diff --git a/src/main/java/net/minecraft/server/AthenaTeleportQueue.java b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+index 16d45cd56f46c998ac098974bee49453c1fb0c28..8182922eb2401612c95ddc2c3cda5fe7bb0dd9a1 100644
+--- a/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
++++ b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+@@ -1,21 +1,19 @@
+ package net.minecraft.server;
+ 
+-import athena.api.AthenaTeleports;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+-import java.util.function.Function;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ import org.bukkit.Location;
+ import org.bukkit.entity.Player;
+ import org.bukkit.event.player.PlayerTeleportEvent;
+ 
+-// Athena - the server side of athena.api.AthenaTeleports: groups of players teleported a few per
+-// tick. Drained once per tick from the tick loop, next to the other hand-back queues, so every
++// Athena - the server side of athena.api.Athena.teleportGradually: groups of players teleported a
++// few per tick. Drained once per tick from the tick loop, next to the other hand-back queues, so every
+ // teleport happens at the same point of a tick a plugin's scheduled task would run at.
+-public final class AthenaTeleportQueue implements AthenaTeleports.Teleporter {
++public final class AthenaTeleportQueue {
+ 
+     public static final AthenaTeleportQueue INSTANCE = new AthenaTeleportQueue();
+     private static final Logger LOGGER = LogManager.getLogger();
+@@ -24,24 +22,30 @@ public final class AthenaTeleportQueue implements AthenaTeleports.Teleporter {
+ 
+     private AthenaTeleportQueue() {}
+ 
++    /** Where the player at a given position of a group goes; null to skip them. */
++    public interface Destination {
++
++        Location of(int index, Player player);
++    }
++
+     private static final class Batch {
+ 
+         final List<Player> players;
+-        final Function<? super Player, ? extends Location> destination;
++        final Destination destination;
+         final int perTick;
+         final CompletableFuture<Integer> future = new CompletableFuture<Integer>();
+         int next;
+         int teleported;
+ 
+-        Batch(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick) {
++        Batch(Collection<? extends Player> players, Destination destination, int perTick) {
+             this.players = new ArrayList<Player>(players);
+             this.destination = destination;
+             this.perTick = perTick;
+         }
+     }
+ 
+-    @Override
+-    public CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick) {
++    /** Queues a group; the players move from the next tick on, {@code perTick} at a time. */
++    public CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Destination destination, int perTick) {
+         Batch batch = new Batch(players, destination, perTick);
+ 
+         if (batch.players.isEmpty()) {
+@@ -64,14 +68,15 @@ public final class AthenaTeleportQueue implements AthenaTeleports.Teleporter {
+         for (Batch batch : this.batches.toArray(new Batch[0])) {
+ 
+             for (int moved = 0; moved < batch.perTick && batch.next < batch.players.size(); ++moved) {
+-                Player player = batch.players.get(batch.next++);
++                int index = batch.next++;
++                Player player = batch.players.get(index);
+ 
+                 try {
+                     if (!player.isOnline()) {
+                         continue;
+                     }
+ 
+-                    Location to = batch.destination.apply(player);
++                    Location to = batch.destination.of(index, player);
+ 
+                     if (to != null && player.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN)) {
+                         ++batch.teleported;
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index e4e3b524b553e2c33e2a90c777951f555ebf46e3..ea8f0d0902521419053df4de021c68ae8a38d1a0 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -5,7 +5,7 @@ import java.io.IOException;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+-// Athena - the chunk loader of a template world (see athena.api.AthenaWorlds): chunks come from
++// Athena - the chunk loader of a template world (see athena.api.Athena): chunks come from
+ // the template's region files, read only, and are never saved.
+ //
+ // It is a ChunkRegionLoader so that every path that loads a chunk - the async chunk IO threads, the
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java b/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java
+index ae88924e6af24a6c43a9cd6b73e854c5ac08f00f..2b3ce6299f3c789bb7646531de4b3b636f4c99bf 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java
+@@ -5,7 +5,7 @@ import java.io.FileInputStream;
+ import java.io.InputStream;
+ import java.util.UUID;
+ 
+-// Athena - the save handler of a template world (see athena.api.AthenaWorlds).
++// Athena - the save handler of a template world (see athena.api.Athena).
+ //
+ // WorldNBTStorage, the normal one, writes into the world folder from its constructor on: it
+ // creates data/ and playerdata/, writes session.lock, and writes uid.dat the first time the world's
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 14541ccd79a99db82a5a0db86f6a1875e685db7c..a869625b36ba95d2758412f6f2a563305d513154 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -189,20 +189,7 @@ public final class CraftServer implements Server {
+         online.value = console.getPropertyManager().getBoolean("online-mode", true);
+ 
+         Bukkit.setServer(this);
+-        // Athena start - the server side of athena.api.AthenaWorlds
+-        athena.api.AthenaWorlds.setLoader(new athena.api.AthenaWorlds.Loader() {
+-            @Override
+-            public World loadTemplate(WorldCreator creator, File templateFolder) {
+-                return CraftServer.this.loadTemplateWorld(creator, templateFolder);
+-            }
+-
+-            @Override
+-            public boolean isTemplate(World world) {
+-                return world instanceof CraftWorld && ((CraftWorld) world).getHandle().getDataManager() instanceof AthenaTemplateDataManager;
+-            }
+-        });
+-        athena.api.AthenaTeleports.setTeleporter(AthenaTeleportQueue.INSTANCE);
+-        // Athena end
++        athena.api.Athena.setServer(new athena.server.AthenaServerImpl(this)); // Athena - the server side of athena.api.Athena
+ 
+         // Register all the Enchantments and PotionTypes now so we can stop new registration immediately after
+         Enchantment.DAMAGE_ALL.getClass();
+@@ -976,7 +963,7 @@ public final class CraftServer implements Server {
+ 
+     /**
+      * Athena - loads a world read straight from a template folder, writing nothing into it; see
+-     * athena.api.AthenaWorlds.
++     * athena.api.Athena.
+      */
+     public World loadTemplateWorld(WorldCreator creator, File template) {
+         Validate.notNull(creator, "Creator may not be null");
+diff --git a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+index 799314907341d6b68107d2843ed8324e14558894..6b22772629dbf62a40a4d0d9e38224be11b9d807 100644
+--- a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
++++ b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+@@ -31,7 +31,9 @@ public class AthenaTeleportQueueTest {
+                 case "getName":
+                     return name;
+                 case "teleport":
+-                    this.log.add(name);
++                    Location to = (Location) args[0];
++
++                    this.log.add(to.getX() == 0 ? name : name + "@" + (int) to.getX());
+                     if (onTeleport != null) {
+                         onTeleport.run();
+                     }
+@@ -61,7 +63,7 @@ public class AthenaTeleportQueueTest {
+         }
+ 
+         CompletableFuture<Integer> done = AthenaTeleportQueue.INSTANCE.teleportGradually(players,
+-                p -> p.getName().equals("p7") ? null : new Location(null, 0, 64, 0), 4);
++                (i, p) -> p.getName().equals("p7") ? null : new Location(null, 0, 64, 0), 4);
+ 
+         assertTrue("nothing moves before the next tick", this.log.isEmpty());
+         drain(1);
+@@ -82,12 +84,12 @@ public class AthenaTeleportQueueTest {
+         final Player late = this.player("late", true, null);
+         // a teleport handler queuing another group while the queue is mid-tick
+         Player first = this.player("first", true, () -> AthenaTeleportQueue.INSTANCE.teleportGradually(
+-                Arrays.asList(late), p -> new Location(null, 0, 64, 0), 1));
++                Arrays.asList(late), (i, p) -> new Location(null, 0, 64, 0), 1));
+ 
+-        AthenaTeleportQueue.INSTANCE.teleportGradually(Arrays.asList(first), p -> new Location(null, 0, 64, 0), 1)
++        AthenaTeleportQueue.INSTANCE.teleportGradually(Arrays.asList(first), (i, p) -> new Location(null, 0, 64, 0), 1)
+                 // and a completion callback queuing one more
+                 .thenRun(() -> AthenaTeleportQueue.INSTANCE.teleportGradually(Arrays.asList(this.player("third", true, null)),
+-                        p -> new Location(null, 0, 64, 0), 1).thenAccept(second::set));
++                        (i, p) -> new Location(null, 0, 64, 0), 1).thenAccept(second::set));
+ 
+         drain(3);
+         assertEquals(Arrays.asList("first", "late", "third"), this.log);
+@@ -96,6 +98,32 @@ public class AthenaTeleportQueueTest {
+ 
+     @Test
+     public void anEmptyGroupIsDoneAtOnce() {
+-        assertTrue(AthenaTeleportQueue.INSTANCE.teleportGradually(new ArrayList<Player>(), p -> null, 5).isDone());
++        assertTrue(AthenaTeleportQueue.INSTANCE.teleportGradually(new ArrayList<Player>(), (i, p) -> null, 5).isDone());
++    }
++
++    @Test
++    public void playerIGoesToLocationI() {
++        athena.server.AthenaServerImpl api = new athena.server.AthenaServerImpl(null);
++        List<Player> players = new ArrayList<Player>();
++        List<Location> destinations = new ArrayList<Location>();
++
++        for (int i = 0; i < 6; ++i) {
++            players.add(this.player("p" + i, true, null));
++            destinations.add(i == 3 ? null : new Location(null, 100 + i, 64, 0));
++        }
++
++        CompletableFuture<Integer> done = api.teleportGradually(players, destinations, 4);
++
++        destinations.set(0, new Location(null, 999, 64, 0)); // changing the list afterwards changes nothing
++        drain(2);
++        // p3's destination is null: skipped
++        assertEquals(Arrays.asList("p0@100", "p1@101", "p2@102", "p4@104", "p5@105"), this.log);
++        assertEquals(Integer.valueOf(5), done.join());
++    }
++
++    @Test(expected = IllegalArgumentException.class)
++    public void listsOfDifferentLengthsAreRefused() {
++        new athena.server.AthenaServerImpl(null).teleportGradually(Arrays.asList(this.player("a", true, null)),
++                new ArrayList<Location>(), 4);
+     }
+ }
