@@ -1,0 +1,2894 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 18:36:02 +0900
+Subject: [PATCH] Let 1.7.10 clients join: translate protocol 5 in the pipeline
+
+A client that says protocol 5 in its handshake gets AthenaLegacy17Encoder and
+AthenaLegacy17Decoder in its pipeline; the server keeps building and reading 1.8
+packets. No compression for such a connection, the server list tells it protocol 5,
+and a cached chunk gets a cached 1.7 packet next to its 1.8 frame. Tables and
+metadata layout follow ViaRewind's 1.8 -> 1.7.10 protocol (GPL-3.0).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/destroystokyo/paper/network/StandardPaperServerListPingEventImpl.java b/src/main/java/com/destroystokyo/paper/network/StandardPaperServerListPingEventImpl.java
+index 274a7501b82f7301dbc0596ef5a3100e899f4fc4..b67bc4084b802fea4ec7fdb5d27ae1d47d766ef3 100644
+--- a/src/main/java/com/destroystokyo/paper/network/StandardPaperServerListPingEventImpl.java
++++ b/src/main/java/com/destroystokyo/paper/network/StandardPaperServerListPingEventImpl.java
+@@ -23,10 +23,18 @@ public class StandardPaperServerListPingEventImpl extends PaperServerListPingEve
+     private GameProfile[] originalSample;
+ 
+     private StandardPaperServerListPingEventImpl(MinecraftServer server, NetworkManager networkManager, ServerPing ping) {
+-        super(server, new PaperStatusClient(networkManager), ping.getProtocolVersionInfo() != null ? ping.getProtocolVersionInfo().getProtocol() : -1, server.server.getServerIcon());
++        super(server, new PaperStatusClient(networkManager), athenaProtocol(networkManager, ping), server.server.getServerIcon()); // Athena
+         this.originalSample = ping.getPlayerCountData() == null ? null : ping.getPlayerCountData().getPlayers();
+     }
+ 
++    // Athena start - a 1.7.10 client is told the server speaks its protocol, which it does
++    private static int athenaProtocol(NetworkManager networkManager, ServerPing ping) {
++        int protocol = ping.getProtocolVersionInfo() != null ? ping.getProtocolVersionInfo().getProtocol() : -1;
++
++        return networkManager.protocolVersion == net.minecraft.server.AthenaLegacy17.PROTOCOL && protocol == 47 ? net.minecraft.server.AthenaLegacy17.PROTOCOL : protocol;
++    }
++    // Athena end
++
+     @Override
+     public List<PlayerProfile> getPlayerSample() {
+         List<PlayerProfile> sample = super.getPlayerSample();
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index accc24ab3614d8a9ccf86cf6251981feba255845..ee0c0072c0ecd6f39dbda055650b2f17dbc80707 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -160,6 +160,71 @@ final class AthenaChunkPacketCache {
+         }
+     }
+ 
++    // Athena start - 1.7.10 clients (AthenaLegacy17)
++    private volatile byte[] legacy17;
++
++    /**
++     * The whole 1.7 packet - id and body - for this chunk, built the first time a 1.7 client needs
++     * it. Its chunk data is deflated inside the packet, so it too is built once and sent as it is.
++     * It is made from the uncompressed data while that is held, and from the 1.8 frame after.
++     */
++    byte[] legacy17(int packetId) {
++        byte[] result = this.legacy17;
++
++        if (result != null) {
++            return result;
++        }
++        synchronized (this) {
++            if (this.legacy17 == null) {
++                PacketPlayOutMapChunk.ChunkMap data = this.map;
++                byte[] data18;
++                int mask;
++
++                if (data != null) {
++                    data18 = data.data;
++                    mask = data.dataSize & 0xFFFF;
++                } else {
++                    // frame is set before map is cleared: map gone means frame is there
++                    PacketDataSerializer body = new PacketDataSerializer(Unpooled.wrappedBuffer(inflateFrame(this.frame)));
++
++                    body.readVarIntFromBuffer();    // packet id
++                    body.skipBytes(4 + 4 + 1);      // x, z, full chunk
++                    mask = body.readUnsignedShort();
++                    data18 = new byte[body.readVarIntFromBuffer()];
++                    body.readBytes(data18);
++                }
++                this.legacy17 = AthenaLegacy17Encoder.fullChunk(packetId, this.chunkX, this.chunkZ, mask, data18);
++            }
++            return this.legacy17;
++        }
++    }
++
++    private static byte[] inflateFrame(byte[] frame) {
++        PacketDataSerializer in = new PacketDataSerializer(Unpooled.wrappedBuffer(frame));
++        byte[] raw = new byte[in.readVarIntFromBuffer()];
++        java.util.zip.Inflater inflater = new java.util.zip.Inflater();
++
++        try {
++            inflater.setInput(frame, in.readerIndex(), frame.length - in.readerIndex());
++            int at = 0;
++
++            while (at < raw.length) {
++                int n = inflater.inflate(raw, at, raw.length - at);
++
++                if (n == 0 && (inflater.finished() || inflater.needsInput())) {
++                    throw new IllegalStateException("A cached chunk frame is shorter than it says");
++                }
++                at += n;
++            }
++        } catch (java.util.zip.DataFormatException e) {
++            throw new IllegalStateException(e);
++        } finally {
++            inflater.end();
++        }
++        return raw;
++    }
++    // Athena end
++
+     static long checksum(byte[] data) {
+         CRC32 crc = new CRC32();
+ 
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17.java b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..25f94cbe860fff77acd878941742f16cfd7367a2
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+@@ -0,0 +1,248 @@
++package net.minecraft.server;
++
++import io.netty.buffer.ByteBufInputStream;
++import io.netty.channel.Channel;
++import io.netty.channel.ChannelPipeline;
++import io.netty.util.AttributeKey;
++import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
++import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap;
++import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataInput;
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.UUID;
++import org.bukkit.craftbukkit.util.CraftChatMessage;
++
++// Athena - 1.7.10 clients (protocol 5) on this 1.8.8 server.
++//
++// A client that says protocol 5 in its handshake gets two more handlers in its pipeline, and
++// nothing else about the connection changes: the server builds and reads 1.8 packets as it always
++// does. AthenaLegacy17Encoder sits between the packet encoder and the length prepender and turns
++// each 1.8 packet into what a 1.7 client expects - or into several, or none - and
++// AthenaLegacy17Decoder sits between the frame splitter and the packet decoder and turns 1.7
++// packets into 1.8 ones. Compression is never enabled for such a connection: 1.7 has none.
++//
++// The ViaVersion/ViaBackwards/ViaRewind plugins do the same from outside the server, at ~65 MB a
++// server (they load every protocol's mapping tables whatever clients connect). This needs a few
++// kilobytes of tables (AthenaLegacy17Data) and, per 1.7 connection, the little state below.
++//
++// A 1.8 client's connection never meets any of this.
++public final class AthenaLegacy17 {
++
++    public static final int PROTOCOL = 5;
++
++    static final AttributeKey<Session> SESSION = AttributeKey.valueOf("athena_legacy17");
++
++    private AthenaLegacy17() {}
++
++    /** Adds the translation handlers to a connection whose handshake said protocol 5. */
++    static void install(NetworkManager networkManager) {
++        Channel channel = networkManager.channel;
++        Session session = new Session();
++        ChannelPipeline pipeline = channel.pipeline();
++
++        channel.attr(SESSION).set(session);
++        pipeline.addAfter("splitter", "athena_legacy17_in", new AthenaLegacy17Decoder(session));
++        pipeline.addAfter("prepender", "athena_legacy17_out", new AthenaLegacy17Encoder(session));
++    }
++
++    /** Whether this connection is a 1.7 client's. */
++    public static boolean isLegacy(NetworkManager networkManager) {
++        return networkManager.channel != null && networkManager.channel.attr(SESSION).get() != null;
++    }
++
++    /**
++     * What one 1.7 connection has to remember to translate the next packet: things 1.8 packets
++     * leave to the client that a 1.7 packet has to spell out. Only the connection's event loop
++     * touches it - both handlers run there.
++     */
++    static final class Session {
++
++        int ownEntityId = Integer.MIN_VALUE;
++        /** Every entity the client has been shown, by kind, for its metadata. */
++        final Int2ObjectOpenHashMap<AthenaLegacy17Data.Kind> kinds = new Int2ObjectOpenHashMap<AthenaLegacy17Data.Kind>();
++        /** Entities a 1.7 client cannot be shown (armor stands): every packet about them is dropped. */
++        final IntOpenHashSet hidden = new IntOpenHashSet();
++        /** The tab list, which 1.7 keys by name and 1.8 by UUID. */
++        final Map<UUID, Profile> profiles = new HashMap<UUID, Profile>();
++        /** Objectives and teams the client knows: a 1.7 client disconnects on a duplicate. */
++        final Set<String> objectives = new HashSet<String>();
++        final Set<String> teams = new HashSet<String>();
++        /** Open windows' 1.7 types, for the enchanting table's missing lapis slot and the furnace bars. */
++        final Int2IntOpenHashMap windowTypes = new Int2IntOpenHashMap();
++        final Int2ObjectOpenHashMap<int[]> furnaces = new Int2ObjectOpenHashMap<int[]>();
++        /** The player's own position as they last reported it, for relative teleports. */
++        double x;
++        double y;
++        double z;
++        float yaw;
++        float pitch;
++        boolean onGround;
++
++        AthenaLegacy17Data.Kind kind(int entityId) {
++            AthenaLegacy17Data.Kind kind = this.kinds.get(entityId);
++
++            return kind == null ? AthenaLegacy17Data.Kind.ENTITY : kind;
++        }
++    }
++
++    static final class Profile {
++        final String name;
++        final List<String[]> properties = new ArrayList<String[]>();
++        String displayName;
++        int ping;
++        int gamemode;
++
++        Profile(String name) {
++            this.name = name;
++        }
++
++        /** The name the 1.7 tab list knows this entry by: at most 16 characters. */
++        String listName() {
++            String name = this.displayName == null ? this.name : this.displayName;
++
++            if (name.length() > 16) {
++                name = org.bukkit.ChatColor.stripColor(name);
++            }
++            return name.length() > 16 ? name.substring(0, 16) : name;
++        }
++    }
++
++    // --- items ----------------------------------------------------------------------------------
++
++    /** The tag an item replaced for a 1.7 client keeps its real id and damage under. */
++    private static final String ORIGINAL = "AthenaLegacy17";
++
++    /** Copies a 1.8 item from in to out as a 1.7 item: gzipped NBT, and 1.8-only items replaced. */
++    static void item(PacketDataSerializer in, PacketDataSerializer out) throws IOException {
++        short id = in.readShort();
++
++        if (id < 0) {
++            out.writeShort(-1);
++            return;
++        }
++        byte count = in.readByte();
++        short damage = in.readShort();
++        NBTTagCompound tag = readNbt(in);
++        int to = AthenaLegacy17Data.item(id, damage);
++
++        if (to != -1) {
++            NBTTagCompound original = new NBTTagCompound();
++
++            original.setShort("id", id);
++            original.setShort("Damage", damage);
++            if (tag == null) {
++                tag = new NBTTagCompound();
++            }
++            tag.set(ORIGINAL, original);
++            id = (short) (to >>> 16);
++            damage = (short) to;
++        }
++        out.writeShort(id);
++        out.writeByte(count);
++        out.writeShort(damage);
++        writeCompressedNbt(out, tag);
++    }
++
++    /** Copies a 1.7 item from in to out as a 1.8 item, putting back what item() replaced. */
++    static void itemToServer(PacketDataSerializer in, PacketDataSerializer out) throws IOException {
++        short id = in.readShort();
++
++        if (id < 0) {
++            out.writeShort(-1);
++            return;
++        }
++        byte count = in.readByte();
++        short damage = in.readShort();
++        NBTTagCompound tag = readCompressedNbt(in);
++
++        if (tag != null && tag.hasKeyOfType(ORIGINAL, 10)) {
++            NBTTagCompound original = tag.getCompound(ORIGINAL);
++
++            id = original.getShort("id");
++            damage = original.getShort("Damage");
++            tag.remove(ORIGINAL);
++            if (tag.isEmpty()) {
++                tag = null;
++            }
++        }
++        out.writeShort(id);
++        out.writeByte(count);
++        out.writeShort(damage);
++        out.writeNBTTagCompoundToBuffer(tag);
++    }
++
++    /** A 1.8 NBT compound as the server wrote it: TAG_End alone for none. */
++    static NBTTagCompound readNbt(PacketDataSerializer in) throws IOException {
++        int start = in.readerIndex();
++
++        if (in.readByte() == 0) {
++            return null;
++        }
++        in.readerIndex(start);
++        // the server wrote it, so no read limit beyond a sanity bound
++        return NBTCompressedStreamTools.read((DataInput) new ByteBufInputStream(in), new NBTReadLimiter(2097152L));
++    }
++
++    /** 1.7's NBT: a short length, then the gzipped compound; -1 for none. */
++    static void writeCompressedNbt(PacketDataSerializer out, NBTTagCompound tag) throws IOException {
++        if (tag == null) {
++            out.writeShort(-1);
++            return;
++        }
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++
++        NBTCompressedStreamTools.writeCompressed(tag, bytes);
++        out.writeShort(bytes.size());
++        out.writeBytes(bytes.toByteArray());
++    }
++
++    static NBTTagCompound readCompressedNbt(PacketDataSerializer in) throws IOException {
++        short length = in.readShort();
++
++        if (length < 0) {
++            return null;
++        }
++        byte[] bytes = new byte[length];
++
++        in.readBytes(bytes);
++        return NBTCompressedStreamTools.readCompressed(new ByteArrayInputStream(bytes));
++    }
++
++    // --- chat -----------------------------------------------------------------------------------
++
++    /** A 1.8 JSON component as 1.7 legacy text, for the places 1.7 takes plain strings. */
++    static String legacyText(String json, EnumChatFormat defaultColor) {
++        IChatBaseComponent component;
++
++        try {
++            component = IChatBaseComponent.ChatSerializer.jsonToComponent(json);
++        } catch (RuntimeException e) {
++            return json;
++        }
++        return legacyText(component, defaultColor);
++    }
++
++    static String legacyText(IChatBaseComponent component, EnumChatFormat defaultColor) {
++        // fromComponent spells the default colour out wherever a part has none; a 1.7 string
++        // shows its own default there anyway, and the codes only eat into the length limits
++        String text = CraftChatMessage.fromComponent(component, defaultColor);
++        String code = defaultColor.toString();
++
++        while (text.startsWith(code)) {
++            text = text.substring(code.length());
++        }
++        return text.replace(code, EnumChatFormat.RESET.toString());
++    }
++
++    static String truncate(String s, int length) {
++        return s.length() > length ? s.substring(0, length) : s;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Data.java b/src/main/java/net/minecraft/server/AthenaLegacy17Data.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..098bf1d09f33d2cc96d038677a80c26215caf1be
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Data.java
+@@ -0,0 +1,370 @@
++package net.minecraft.server;
++
++import java.util.HashMap;
++import java.util.Map;
++
++// Athena - the fixed tables behind 1.7.10 client support (see AthenaLegacy17): which 1.8 blocks,
++// items and entities a 1.7 client has no idea of and what it is shown instead, and where each
++// piece of 1.8 entity metadata lives in 1.7.
++//
++// The replacements and the metadata layout follow ViaRewind's 1.8 -> 1.7.6-1.7.10 protocol
++// (github.com/ViaVersion/ViaRewind, GPL-3.0, as this server is), so a 1.7 player sees here what
++// they would see on a server running that plugin.
++final class AthenaLegacy17Data {
++
++    private AthenaLegacy17Data() {}
++
++    // --- blocks ---------------------------------------------------------------------------------
++
++    /** 1.8 block state (id << 4 | meta) -> the 1.7 one; ids above 255 do not exist in either. */
++    private static final char[] BLOCKS = new char[256 << 4];
++    /** The same for items: key id << 16 | damage, or id << 16 | 0xFFFF for "any damage". */
++    private static final Map<Integer, Integer> ITEMS = new HashMap<Integer, Integer>();
++
++    static {
++        for (int i = 0; i < BLOCKS.length; ++i) {
++            BLOCKS[i] = (char) i;
++        }
++        // both placed blocks and their items; a replacement meta of -1 keeps the meta
++        blockAndItem(157, -1, 28, -1);      // activator rail
++        blockAndItem(165, -1, 95, 5);       // slime block -> lime stained glass
++        blockAndItem(166, -1, 20, 0);       // barrier -> glass
++        blockAndItem(167, -1, 96, -1);      // iron trapdoor -> trapdoor
++        blockAndItem(169, -1, 89, 0);       // sea lantern -> glowstone
++        blockAndItem(180, -1, 128, -1);     // red sandstone stairs
++        blockAndItem(181, -1, 43, 1);       // double red sandstone slab
++        for (int id = 183; id <= 187; ++id) {
++            blockAndItem(id, -1, 107, -1);  // fence gates
++        }
++        for (int id = 188; id <= 192; ++id) {
++            blockAndItem(id, -1, 85, -1);   // fences
++        }
++        for (int meta = 1; meta <= 6; ++meta) {
++            blockAndItem(1, meta, 1, 0);    // granite, diorite, andesite and their polished forms
++        }
++        blockAndItem(168, 0, 1, 0);         // prismarine
++        blockAndItem(168, 1, 98, 0);        // prismarine bricks
++        blockAndItem(168, 2, 98, 1);        // dark prismarine
++        blockAndItem(179, -1, 24, -1);      // red sandstone
++        blockAndItem(19, 1, 19, 0);         // wet sponge
++        // placed blocks only
++        block(176, -1, 63, -1);             // standing banner -> sign post
++        block(177, -1, 68, -1);             // wall banner -> wall sign
++        for (int id = 193; id <= 197; ++id) {
++            block(id, -1, 64, -1);          // doors
++        }
++        block(178, -1, 151, -1);            // inverted daylight sensor
++        block(182, 0, 44, 1);               // red sandstone slab
++        block(182, 8, 44, 9);
++        for (int button : new int[] {77, 143}) {
++            // buttons facing up or down are 1.8's; 1.7 only has levers there
++            block(button, 0, 69, 0);
++            block(button, 8, 69, 8);
++            block(button, 5, 69, 6);
++            block(button, 13, 69, 14);
++        }
++        // items only
++        item(182, -1, 44, 1);               // red sandstone slab
++        item(409, -1, 406, 0);              // prismarine shard -> quartz
++        item(410, -1, 406, 0);              // prismarine crystals
++        item(411, -1, 365, 0);              // raw rabbit -> raw chicken
++        item(412, -1, 366, 0);              // cooked rabbit
++        item(413, -1, 282, 0);              // rabbit stew -> mushroom stew
++        item(414, -1, 375, 0);              // rabbit's foot -> spider eye
++        item(415, -1, 334, 0);              // rabbit hide -> leather
++        item(416, -1, 280, 0);              // armor stand -> stick
++        item(423, -1, 363, 0);              // raw mutton -> raw beef
++        item(424, -1, 364, 0);              // cooked mutton
++        item(425, -1, 323, 0);              // banner -> sign
++        for (int id = 427; id <= 431; ++id) {
++            item(id, -1, 324, 0);           // doors
++        }
++        for (int potion : new int[] {8203, 8235, 8267, 16395, 16427, 16459}) {
++            item(373, potion, 373, 0);      // potions of leaping
++        }
++        for (int egg : new int[] {30, 67, 68, 101}) {
++            item(383, egg, 383, 0);         // spawn eggs of 1.8 mobs
++        }
++    }
++
++    private static void blockAndItem(int id, int meta, int toId, int toMeta) {
++        block(id, meta, toId, toMeta);
++        item(id, meta, toId, toMeta);
++    }
++
++    private static void block(int id, int meta, int toId, int toMeta) {
++        for (int m = 0; m < 16; ++m) {
++            if (meta == -1 || meta == m) {
++                BLOCKS[id << 4 | m] = (char) (toId << 4 | (toMeta == -1 ? m : toMeta));
++            }
++        }
++    }
++
++    private static void item(int id, int damage, int toId, int toDamage) {
++        ITEMS.put(id << 16 | (damage & 0xFFFF), toId << 16 | (toDamage & 0xFFFF));
++    }
++
++    /** The 1.7 block state for a 1.8 one. */
++    static int block(int state) {
++        return state >= 0 && state < BLOCKS.length ? BLOCKS[state] : 0;
++    }
++
++    /**
++     * The 1.7 id << 16 | damage for a 1.8 item, or -1 if the item is shown as it is. A replacement
++     * damage of 0xFFFF keeps the damage.
++     */
++    static int item(int id, int damage) {
++        Integer to = ITEMS.get(id << 16 | (damage & 0xFFFF));
++
++        if (to == null) {
++            to = ITEMS.get(id << 16 | 0xFFFF);
++            if (to != null && (to & 0xFFFF) == 0xFFFF) {
++                to = to & 0xFFFF0000 | damage & 0xFFFF;
++            }
++        }
++        return to == null ? -1 : to;
++    }
++
++    // --- entities -------------------------------------------------------------------------------
++
++    /** 1.8's entity hierarchy, as far as metadata cares: each kind's parent owns the lower indices. */
++    enum Kind {
++        ENTITY(null),
++        HANGING(ENTITY), ITEM_FRAME(HANGING), PAINTING(HANGING), LEASH_KNOT(HANGING),
++        ITEM(ENTITY), EXPERIENCE_ORB(ENTITY), FALLING_BLOCK(ENTITY), TNT(ENTITY), END_CRYSTAL(ENTITY),
++        ARROW(ENTITY), FIREWORK(ENTITY), FISHING_HOOK(ENTITY), PROJECTILE(ENTITY), FIREBALL(ENTITY), BOAT(ENTITY),
++        MINECART(ENTITY), FURNACE_MINECART(MINECART),
++        LIVING_BASE(ENTITY), ARMOR_STAND(LIVING_BASE), PLAYER(LIVING_BASE),
++        LIVING(LIVING_BASE), ENDER_DRAGON(LIVING), SLIME(LIVING), GHAST(LIVING), BAT(LIVING), SQUID(LIVING),
++        CREATURE(LIVING), GOLEM(CREATURE), IRON_GOLEM(GOLEM),
++        AGEABLE(CREATURE), VILLAGER(AGEABLE), ANIMAL(AGEABLE), PIG(ANIMAL), SHEEP(ANIMAL), HORSE(ANIMAL),
++        TAMEABLE(ANIMAL), OCELOT(TAMEABLE), WOLF(TAMEABLE),
++        MONSTER(CREATURE), BLAZE(MONSTER), CREEPER(MONSTER), ENDERMAN(MONSTER), WITCH(MONSTER), WITHER(MONSTER),
++        SKELETON(MONSTER), ZOMBIE(MONSTER), SPIDER(MONSTER), GUARDIAN(MONSTER);
++
++        final Kind parent;
++
++        Kind(Kind parent) {
++            this.parent = parent;
++        }
++    }
++
++    /** The kind of a mob by its 1.8 spawn-mob type id. */
++    static Kind mob(int type) {
++        switch (type) {
++            case 30: return Kind.ARMOR_STAND;
++            case 53: case 60: case 67: return Kind.MONSTER;             // giant, silverfish, endermite
++            case 50: return Kind.CREEPER;
++            case 51: return Kind.SKELETON;
++            case 52: case 59: return Kind.SPIDER;
++            case 54: case 57: return Kind.ZOMBIE;
++            case 55: case 62: return Kind.SLIME;
++            case 56: return Kind.GHAST;
++            case 58: return Kind.ENDERMAN;
++            case 61: return Kind.BLAZE;
++            case 63: return Kind.ENDER_DRAGON;
++            case 64: return Kind.WITHER;
++            case 65: return Kind.BAT;
++            case 66: return Kind.WITCH;
++            case 68: return Kind.GUARDIAN;
++            case 90: return Kind.PIG;
++            case 91: return Kind.SHEEP;
++            case 92: case 93: case 96: case 101: return Kind.ANIMAL;    // cow, chicken, mooshroom, rabbit
++            case 94: return Kind.SQUID;
++            case 95: return Kind.WOLF;
++            case 97: return Kind.GOLEM;
++            case 98: return Kind.OCELOT;
++            case 99: return Kind.IRON_GOLEM;
++            case 100: return Kind.HORSE;
++            case 120: return Kind.VILLAGER;
++            default: return Kind.LIVING;
++        }
++    }
++
++    /** The 1.7 spawn-mob type a 1.7 client is shown for a 1.8 one, or -1 for none (armor stands). */
++    static int mobType17(int type) {
++        switch (type) {
++            case 30: return -1;         // armor stand
++            case 67: return 60;         // endermite -> silverfish
++            case 68: return 94;         // guardian -> squid
++            case 101: return 93;        // rabbit -> chicken
++            default: return type;
++        }
++    }
++
++    /** The kind of an object by its 1.8 spawn-object type id. */
++    static Kind object(int type) {
++        switch (type) {
++            case 1: return Kind.BOAT;
++            case 2: return Kind.ITEM;
++            case 10: return Kind.MINECART;
++            case 50: return Kind.TNT;
++            case 51: return Kind.END_CRYSTAL;
++            case 60: return Kind.ARROW;
++            case 63: case 64: case 66: return Kind.FIREBALL;
++            case 70: return Kind.FALLING_BLOCK;
++            case 71: return Kind.ITEM_FRAME;
++            case 76: return Kind.FIREWORK;
++            case 77: return Kind.LEASH_KNOT;
++            case 78: return Kind.ARMOR_STAND;
++            case 90: return Kind.FISHING_HOOK;
++            default: return Kind.PROJECTILE;
++        }
++    }
++
++    // --- entity metadata ------------------------------------------------------------------------
++
++    static final int BYTE = 0, SHORT = 1, INT = 2, FLOAT = 3, STRING = 4, ITEM_STACK = 5, POSITION = 6, ROTATION = 7;
++
++    /** Where a 1.8 metadata entry goes in 1.7: index and type, and what is done to the value. */
++    static final class Meta {
++        final int index;
++        final int type;        // 1.7 type, or -1: 1.7 has no such entry and it is dropped
++        final int convert;
++
++        Meta(int index, int type, int convert) {
++            this.index = index;
++            this.type = type;
++            this.convert = convert;
++        }
++    }
++
++    static final int SAME = 0, BYTE_TO_INT_AGE = 1, FRAME_ROTATION = 2, SKIN_TO_CAPE = 3;
++
++    private static final Map<Integer, Meta> META = new HashMap<Integer, Meta>();
++
++    static {
++        meta(Kind.ENTITY, 0, 0, BYTE);
++        meta(Kind.ENTITY, 1, 1, SHORT);
++        drop(Kind.ENTITY, 2);                               // name tags of non-living entities
++        drop(Kind.ENTITY, 3);
++        drop(Kind.ENTITY, 4);                               // silent
++        meta(Kind.LIVING_BASE, 6, 6, FLOAT);
++        meta(Kind.LIVING_BASE, 7, 7, INT);
++        meta(Kind.LIVING_BASE, 8, 8, BYTE);
++        meta(Kind.LIVING_BASE, 9, 9, BYTE);
++        meta(Kind.LIVING_BASE, 2, 10, STRING);              // name tag
++        meta(Kind.LIVING_BASE, 3, 11, BYTE);                // name tag always shown
++        drop(Kind.LIVING, 15);                              // no AI
++        META.put(key(Kind.AGEABLE, 12), new Meta(12, INT, BYTE_TO_INT_AGE));
++        for (int i = 10; i <= 16; ++i) {
++            drop(Kind.ARMOR_STAND, i);
++        }
++        META.put(key(Kind.PLAYER, 10), new Meta(16, BYTE, SKIN_TO_CAPE));
++        drop(Kind.PLAYER, 16);
++        meta(Kind.PLAYER, 17, 17, FLOAT);
++        meta(Kind.PLAYER, 18, 18, INT);
++        meta(Kind.HORSE, 16, 16, INT);
++        meta(Kind.HORSE, 19, 19, BYTE);
++        meta(Kind.HORSE, 20, 20, INT);
++        meta(Kind.HORSE, 21, 21, STRING);
++        meta(Kind.HORSE, 22, 22, INT);
++        meta(Kind.BAT, 16, 16, BYTE);
++        meta(Kind.TAMEABLE, 16, 16, BYTE);
++        meta(Kind.TAMEABLE, 17, 17, STRING);
++        meta(Kind.OCELOT, 18, 18, BYTE);
++        meta(Kind.WOLF, 16, 16, BYTE);
++        meta(Kind.WOLF, 18, 18, FLOAT);
++        meta(Kind.WOLF, 19, 19, BYTE);
++        meta(Kind.WOLF, 20, 20, BYTE);
++        meta(Kind.PIG, 16, 16, BYTE);
++        meta(Kind.SHEEP, 16, 16, BYTE);
++        meta(Kind.VILLAGER, 16, 16, INT);
++        drop(Kind.ENDERMAN, 16);
++        drop(Kind.ENDERMAN, 17);
++        meta(Kind.ENDERMAN, 18, 18, BYTE);
++        meta(Kind.ZOMBIE, 12, 12, BYTE);
++        meta(Kind.ZOMBIE, 13, 13, BYTE);
++        meta(Kind.ZOMBIE, 14, 14, BYTE);
++        meta(Kind.BLAZE, 16, 16, BYTE);
++        meta(Kind.SPIDER, 16, 16, BYTE);
++        meta(Kind.CREEPER, 16, 16, BYTE);
++        meta(Kind.CREEPER, 17, 17, BYTE);
++        meta(Kind.CREEPER, 18, 18, BYTE);
++        meta(Kind.GHAST, 16, 16, BYTE);
++        drop(Kind.GHAST, 17);
++        meta(Kind.SLIME, 16, 16, BYTE);
++        meta(Kind.SKELETON, 13, 13, BYTE);
++        meta(Kind.WITCH, 21, 21, BYTE);
++        meta(Kind.IRON_GOLEM, 16, 16, BYTE);
++        for (int i = 17; i <= 19; ++i) {
++            meta(Kind.WITHER, i, i, INT);
++        }
++        meta(Kind.WITHER, 20, 20, INT);
++        drop(Kind.GUARDIAN, 16);
++        drop(Kind.GUARDIAN, 17);
++        meta(Kind.BOAT, 17, 17, INT);
++        meta(Kind.BOAT, 18, 18, INT);
++        meta(Kind.BOAT, 19, 19, FLOAT);
++        meta(Kind.MINECART, 17, 17, INT);
++        meta(Kind.MINECART, 18, 18, INT);
++        meta(Kind.MINECART, 19, 19, FLOAT);
++        meta(Kind.MINECART, 20, 20, INT);
++        meta(Kind.MINECART, 21, 21, INT);
++        meta(Kind.MINECART, 22, 22, BYTE);
++        meta(Kind.FURNACE_MINECART, 16, 16, BYTE);
++        meta(Kind.ITEM, 10, 10, ITEM_STACK);
++        meta(Kind.ARROW, 16, 16, BYTE);
++        meta(Kind.FIREWORK, 8, 8, ITEM_STACK);
++        meta(Kind.ITEM_FRAME, 8, 2, ITEM_STACK);
++        META.put(key(Kind.ITEM_FRAME, 9), new Meta(3, BYTE, FRAME_ROTATION));
++        meta(Kind.END_CRYSTAL, 9, 8, INT);
++    }
++
++    private static int key(Kind kind, int index) {
++        return kind.ordinal() << 8 | index;
++    }
++
++    private static void meta(Kind kind, int index18, int index17, int type17) {
++        META.put(key(kind, index18), new Meta(index17, type17, SAME));
++    }
++
++    private static void drop(Kind kind, int index18) {
++        META.put(key(kind, index18), new Meta(-1, -1, SAME));
++    }
++
++    /** Where a 1.8 entry of an entity of this kind goes in 1.7, or null if 1.7 has no such entry. */
++    static Meta meta(Kind kind, int index18) {
++        for (Kind k = kind; k != null; k = k.parent) {
++            Meta meta = META.get(key(k, index18));
++
++            if (meta != null) {
++                return meta.type == -1 ? null : meta;
++            }
++        }
++        return null;
++    }
++
++    // --- particles and windows ------------------------------------------------------------------
++
++    /** 1.7's particle names, indexed by 1.8's particle ids. */
++    static final String[] PARTICLES = {
++        "explode", "largeexplode", "hugeexplosion", "fireworksSpark", "bubble", "splash", "wake",
++        "suspended", "depthsuspend", "crit", "magicCrit", "smoke", "largesmoke", "spell", "instantSpell",
++        "mobSpell", "mobSpellAmbient", "witchMagic", "dripWater", "dripLava", "angryVillager",
++        "happyVillager", "townaura", "note", "portal", "enchantmenttable", "flame", "lava", "footstep",
++        "cloud", "reddust", "snowballpoof", "snowshovel", "slime", "heart", "barrier", "iconcrack",
++        "blockcrack", "blockdust", "droplet", "take", "mobappearance"
++    };
++
++    static final int PARTICLE_ICON_CRACK = 36, PARTICLE_BLOCK_CRACK = 37, PARTICLE_BLOCK_DUST = 38;
++
++    /** 1.7's window type ids by 1.8's window type names; -1 for anything else. */
++    static int windowType(String name) {
++        switch (name) {
++            case "minecraft:container": case "minecraft:chest": return 0;
++            case "minecraft:crafting_table": return 1;
++            case "minecraft:furnace": return 2;
++            case "minecraft:dispenser": return 3;
++            case "minecraft:enchanting_table": return 4;
++            case "minecraft:brewing_stand": return 5;
++            case "minecraft:villager": return 6;
++            case "minecraft:beacon": return 7;
++            case "minecraft:anvil": return 8;
++            case "minecraft:hopper": return 9;
++            case "minecraft:dropper": return 10;
++            case "EntityHorse": return 11;
++            default: return -1;
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4510830aaf7f8ac8b36f0d175730a2bc03f25892
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+@@ -0,0 +1,285 @@
++package net.minecraft.server;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.handler.codec.MessageToMessageDecoder;
++import java.nio.charset.StandardCharsets;
++import java.util.List;
++
++// Athena - turns what a 1.7.10 client sends into the 1.8 packets the server reads (see
++// AthenaLegacy17). It sits between the frame splitter and the packet decoder: each frame in is
++// one 1.7 packet, each frame out one 1.8 packet, or nothing.
++//
++// Serverbound ids 0x00-0x17 mean the same in both versions. The differences are field formats -
++// 1.7 sends entity ids and block positions as plain ints, gzips item NBT and length-prefixes
++// plugin messages - and a few fields one side has and the other has not.
++final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
++
++    private final AthenaLegacy17.Session session;
++
++    AthenaLegacy17Decoder(AthenaLegacy17.Session session) {
++        this.session = session;
++    }
++
++    @Override
++    protected void decode(ChannelHandlerContext ctx, ByteBuf msg, List<Object> out) throws Exception {
++        if (!msg.isReadable()) {
++            return;
++        }
++        EnumProtocol state = ctx.channel().attr(NetworkManager.attrKeyConnectionState).get();
++        PacketDataSerializer in = new PacketDataSerializer(msg);
++        int id = in.readVarIntFromBuffer();
++
++        if (state == EnumProtocol.LOGIN && id == 0x01) {
++            // encryption response: 1.7 prefixes the arrays with shorts
++            PacketDataSerializer p = packet(ctx, id, out);
++
++            for (int i = 0; i < 2; ++i) {
++                byte[] bytes = new byte[in.readShort()];
++
++                in.readBytes(bytes);
++                p.writeByteArray(bytes);
++            }
++        } else if (state == EnumProtocol.PLAY) {
++            this.play(ctx, id, in, msg, out);
++        } else {
++            msg.readerIndex(0);
++            out.add(msg.retain());
++        }
++    }
++
++    private static PacketDataSerializer packet(ChannelHandlerContext ctx, int id, List<Object> out) {
++        ByteBuf buf = ctx.alloc().buffer();
++        PacketDataSerializer packet = new PacketDataSerializer(buf);
++
++        out.add(buf);
++        packet.writeVarIntToBuffer(id);
++        return packet;
++    }
++
++    private void play(ChannelHandlerContext ctx, int id, PacketDataSerializer in, ByteBuf raw, List<Object> out) throws Exception {
++        AthenaLegacy17.Session s = this.session;
++        PacketDataSerializer p;
++
++        switch (id) {
++            case 0x00: // keep alive
++                packet(ctx, id, out).writeVarIntToBuffer(in.readInt());
++                break;
++            case 0x02: { // use entity: 1.7's mouse button is 1.8's action, 0 interact and 1 attack
++                int target = in.readInt();
++                int action = in.readByte();
++
++                p = packet(ctx, id, out);
++                p.writeVarIntToBuffer(target);
++                p.writeVarIntToBuffer(action == 1 ? 1 : 0);
++                break;
++            }
++            case 0x03: // on ground
++                s.onGround = in.readBoolean();
++                raw.readerIndex(0);
++                out.add(raw.retain());
++                break;
++            case 0x04: // position: 1.7 also sends the eye height
++            case 0x06: { // position and look
++                double x = in.readDouble();
++                double y = in.readDouble();
++
++                in.readDouble();
++                double z = in.readDouble();
++
++                p = packet(ctx, id, out);
++                p.writeDouble(x);
++                p.writeDouble(y);
++                p.writeDouble(z);
++                if (id == 0x06) {
++                    s.yaw = in.readFloat();
++                    s.pitch = in.readFloat();
++                    p.writeFloat(s.yaw);
++                    p.writeFloat(s.pitch);
++                }
++                s.onGround = in.readBoolean();
++                p.writeBoolean(s.onGround);
++                // -999 is "riding: no position", not a place
++                if (y != -999.0D) {
++                    s.x = x;
++                    s.y = y;
++                    s.z = z;
++                }
++                break;
++            }
++            case 0x05: // look
++                s.yaw = in.readFloat();
++                s.pitch = in.readFloat();
++                s.onGround = in.readBoolean();
++                raw.readerIndex(0);
++                out.add(raw.retain());
++                break;
++            case 0x07: { // dig: 1.7 says 255 for "no face", 1.8 has only the six faces
++                int status = in.readUnsignedByte();
++                int x = in.readInt();
++                int y = in.readUnsignedByte();
++                int z = in.readInt();
++                int face = in.readUnsignedByte();
++
++                p = packet(ctx, id, out);
++                p.writeVarIntToBuffer(status);
++                p.writeBlockPos(new BlockPosition(x, y, z));
++                p.writeByte(face > 5 ? 0 : face);
++                break;
++            }
++            case 0x08: { // block placement
++                int x = in.readInt();
++                int y = in.readUnsignedByte();
++                int z = in.readInt();
++                int direction = in.readByte();
++
++                // a use in the air is (-1, -1, -1), which 1.7's unsigned y turned into 255
++                if (x == -1 && y == 255 && z == -1 && direction == -1) {
++                    y = -1;
++                }
++                p = packet(ctx, id, out);
++                p.writeBlockPos(new BlockPosition(x, y, z));
++                p.writeByte(direction);
++                AthenaLegacy17.itemToServer(in, p);
++                p.writeBytes(in, 3); // cursor position
++                break;
++            }
++            case 0x0A: { // animation: 1.8's arm swing has no fields, and is all 1.7 sends here in play
++                in.readInt();
++                if (in.readByte() == 1) {
++                    packet(ctx, id, out);
++                }
++                break;
++            }
++            case 0x0B: { // entity action: 1.7 counts the actions from 1
++                int entityId = in.readInt();
++                int action = in.readByte();
++                int jumpBoost = in.readInt();
++
++                p = packet(ctx, id, out);
++                p.writeVarIntToBuffer(entityId);
++                p.writeVarIntToBuffer(action - 1);
++                p.writeVarIntToBuffer(jumpBoost);
++                break;
++            }
++            case 0x0C: { // steer vehicle: two booleans become flags
++                float sideways = in.readFloat();
++                float forward = in.readFloat();
++                boolean jump = in.readBoolean();
++                boolean unmount = in.readBoolean();
++
++                p = packet(ctx, id, out);
++                p.writeFloat(sideways);
++                p.writeFloat(forward);
++                p.writeByte((jump ? 1 : 0) | (unmount ? 2 : 0));
++                break;
++            }
++            case 0x0D: // close window
++                s.windowTypes.remove(in.readByte() & 0xFF);
++                raw.readerIndex(0);
++                out.add(raw.retain());
++                break;
++            case 0x0E: { // click window
++                int window = in.readByte();
++                int slot = in.readShort();
++
++                if (window != 0 && s.windowTypes.get(window & 0xFF) == 4 && slot > 0) {
++                    ++slot;     // 1.8's enchanting table has the lapis slot at 1
++                }
++                p = packet(ctx, id, out);
++                p.writeByte(window);
++                p.writeShort(slot);
++                p.writeBytes(in, 1 + 2 + 1); // button, action number, mode
++                AthenaLegacy17.itemToServer(in, p);
++                break;
++            }
++            case 0x10: // creative inventory action
++                p = packet(ctx, id, out);
++                p.writeShort(in.readShort());
++                AthenaLegacy17.itemToServer(in, p);
++                break;
++            case 0x12: { // update sign: plain text becomes components
++                int x = in.readInt();
++                int y = in.readShort();
++                int z = in.readInt();
++
++                p = packet(ctx, id, out);
++                p.writeBlockPos(new BlockPosition(x, y, z));
++                for (int i = 0; i < 4; ++i) {
++                    p.writeString(IChatBaseComponent.ChatSerializer.componentToJson(new ChatComponentText(in.readStringFromBuffer(15))));
++                }
++                break;
++            }
++            case 0x14: // tab complete: 1.8 may say which block is looked at
++                p = packet(ctx, id, out);
++                p.writeString(in.readStringFromBuffer(32767));
++                p.writeBoolean(false);
++                break;
++            case 0x15: { // client settings: 1.7's difficulty and cape become 1.8's skin parts
++                p = packet(ctx, id, out);
++                p.writeString(in.readStringFromBuffer(7));
++                p.writeByte(in.readByte());     // view distance
++                p.writeByte(in.readByte());     // chat visibility
++                p.writeBoolean(in.readBoolean());
++                in.readByte();                  // difficulty
++                p.writeByte(in.readBoolean() ? 127 : 126);
++                break;
++            }
++            case 0x16: // client status
++                packet(ctx, id, out).writeVarIntToBuffer(in.readByte());
++                break;
++            case 0x17: // plugin message
++                this.pluginMessage(ctx, id, in, out);
++                break;
++            default:
++                raw.readerIndex(0);
++                out.add(raw.retain());
++        }
++    }
++
++    private void pluginMessage(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<Object> out) throws Exception {
++        String channel = in.readStringFromBuffer(20);
++        int length = in.readShort();
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeString(channel);
++        // 1.7 sends a whole backing array for some channels: read what the channel holds and
++        // drop the rest
++        switch (channel) {
++            case "MC|Brand":
++            case "MC|ItemName": {
++                byte[] bytes = new byte[Math.min(length, in.readableBytes())];
++
++                in.readBytes(bytes);
++                p.writeString(new String(bytes, StandardCharsets.UTF_8));
++                break;
++            }
++            case "MC|BEdit":
++            case "MC|BSign":
++                AthenaLegacy17.itemToServer(in, p);
++                break;
++            case "MC|AdvCdm": {
++                int type = in.readByte();
++
++                p.writeByte(type);
++                if (type == 0) {
++                    p.writeBytes(in, 12);
++                } else if (type == 1) {
++                    p.writeInt(in.readInt());
++                }
++                p.writeString(in.readStringFromBuffer(32767));
++                p.writeBoolean(true);   // track output: 1.8's, and on by default
++                break;
++            }
++            case "MC|TrSel":
++                p.writeInt(in.readInt());
++                break;
++            case "MC|Beacon":
++                p.writeInt(in.readInt());
++                p.writeInt(in.readInt());
++                break;
++            default:
++                p.writeBytes(in, Math.min(length, in.readableBytes()));
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc16120d626df1b4edfe0aa0e20478345797b5c1
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+@@ -0,0 +1,1337 @@
++package net.minecraft.server;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.ChannelOutboundHandlerAdapter;
++import io.netty.channel.ChannelPromise;
++import io.netty.util.concurrent.FastThreadLocal;
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.zip.Deflater;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.bukkit.craftbukkit.util.CraftChatMessage;
++
++// Athena - turns the 1.8 packets the server writes into the 1.7 packets a 1.7.10 client reads (see
++// AthenaLegacy17). It sits between the packet encoder and the length prepender, so it sees each
++// packet as its id and body, and may write it on as it is, rewrite it, split it into several
++// packets or drop it.
++//
++// Packet ids 0x00-0x40 mean the same in both versions; 1.8 added 0x41-0x49, which 1.7 has no use
++// for. Most of the rewriting is field formats: 1.8 made entity ids and many counts VarInts and
++// packed block positions into a long, and 1.7 gzips item NBT.
++final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
++
++    private static final Logger LOGGER = LogManager.getLogger();
++    private static final FastThreadLocal<Deflater> DEFLATER = new FastThreadLocal<Deflater>() {
++        @Override
++        protected Deflater initialValue() {
++            return new Deflater(4);
++        }
++    };
++
++    private final AthenaLegacy17.Session session;
++    /** Set by PacketEncoder when it wrote a packet already in 1.7's format (a cached chunk). */
++    boolean passThroughNext;
++    /** The packet being translated, for the packets that go out as they came. */
++    private ByteBuf current;
++    private boolean loggedFailure;
++
++    AthenaLegacy17Encoder(AthenaLegacy17.Session session) {
++        this.session = session;
++    }
++
++    @Override
++    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
++        if (!(msg instanceof ByteBuf) || !((ByteBuf) msg).isReadable()) {
++            ctx.write(msg, promise);
++            return;
++        }
++        if (this.passThroughNext) {
++            this.passThroughNext = false;
++            ctx.write(msg, promise);
++            return;
++        }
++        ByteBuf in = (ByteBuf) msg;
++        List<ByteBuf> out = new ArrayList<ByteBuf>(2);
++
++        this.current = in;
++        try {
++            EnumProtocol state = ctx.channel().attr(NetworkManager.attrKeyConnectionState).get();
++            PacketDataSerializer packet = new PacketDataSerializer(in);
++            int id = packet.readVarIntFromBuffer();
++
++            if (state == EnumProtocol.PLAY) {
++                this.play(ctx, id, packet, out);
++            } else if (state == EnumProtocol.LOGIN) {
++                this.login(ctx, id, packet, out);
++            } else {
++                in.readerIndex(0);
++                out.add(in.retain());
++            }
++        } catch (Exception e) {
++            for (ByteBuf buf : out) {
++                buf.release();
++            }
++            out.clear();
++            if (!this.loggedFailure) {
++                this.loggedFailure = true;
++                LOGGER.warn("Could not translate a packet for a 1.7 client; dropping it", e);
++            }
++        } finally {
++            this.current = null;
++            in.release();
++        }
++
++        if (out.isEmpty()) {
++            promise.trySuccess();
++            return;
++        }
++        for (int i = 0; i < out.size() - 1; ++i) {
++            ctx.write(out.get(i), ctx.voidPromise());
++        }
++        ctx.write(out.get(out.size() - 1), promise);
++    }
++
++    private static PacketDataSerializer packet(ChannelHandlerContext ctx, int id, List<ByteBuf> out) {
++        ByteBuf buf = ctx.alloc().buffer();
++        PacketDataSerializer packet = new PacketDataSerializer(buf);
++
++        out.add(buf);
++        packet.writeVarIntToBuffer(id);
++        return packet;
++    }
++
++    /** The packet as it came: the 1.7 packet with this id is the same. */
++    private void same(PacketDataSerializer in, List<ByteBuf> out) {
++        this.current.readerIndex(0);
++        out.add(this.current.retain());
++    }
++
++    private static void rest(PacketDataSerializer in, PacketDataSerializer out) {
++        out.writeBytes(in, in.readableBytes());
++    }
++
++    private void login(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        switch (id) {
++            case 0x01: { // encryption request: 1.7 prefixes the arrays with shorts
++                PacketDataSerializer p = packet(ctx, id, out);
++
++                p.writeString(in.readStringFromBuffer(20));
++                for (int i = 0; i < 2; ++i) {
++                    byte[] bytes = in.readByteArray();
++
++                    p.writeShort(bytes.length);
++                    p.writeBytes(bytes);
++                }
++                break;
++            }
++            case 0x03: // set compression: never enabled for 1.7
++                break;
++            default:
++                same(in, out);
++        }
++    }
++
++    private void play(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        AthenaLegacy17.Session s = this.session;
++        PacketDataSerializer p;
++
++        switch (id) {
++            case 0x00: // keep alive
++                packet(ctx, id, out).writeInt(in.readVarIntFromBuffer());
++                break;
++            case 0x01: { // join game: 1.8 added reduced debug info
++                p = packet(ctx, id, out);
++                int entityId = in.readInt();
++
++                s.ownEntityId = entityId;
++                s.kinds.clear();
++                s.hidden.clear();
++                s.kinds.put(entityId, AthenaLegacy17Data.Kind.PLAYER);
++                p.writeInt(entityId);
++                p.writeByte(in.readUnsignedByte());
++                p.writeByte(in.readByte());
++                p.writeByte(in.readUnsignedByte());
++                p.writeByte(in.readUnsignedByte());
++                p.writeString(in.readStringFromBuffer(16));
++                break;
++            }
++            case 0x02: { // chat: no action bar in 1.7, and no line breaks
++                String json = in.readStringFromBuffer(32767);
++                int position = in.readByte();
++
++                if (position == 2) {
++                    break;
++                }
++                if (json.indexOf("\\n") < 0) {
++                    packet(ctx, id, out).writeString(json);
++                    break;
++                }
++                String text = AthenaLegacy17.legacyText(json, EnumChatFormat.WHITE);
++
++                for (IChatBaseComponent line : CraftChatMessage.fromString(text)) {
++                    packet(ctx, id, out).writeString(IChatBaseComponent.ChatSerializer.componentToJson(line));
++                }
++                break;
++            }
++            case 0x04: { // entity equipment
++                int entityId = in.readVarIntFromBuffer();
++                short slot = in.readShort();
++
++                if (s.hidden.contains(entityId) || slot > (entityId == s.ownEntityId ? 3 : 4)) {
++                    break;
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                p.writeShort(slot);
++                AthenaLegacy17.item(in, p);
++                break;
++            }
++            case 0x05: // spawn position
++            case 0x36: // sign editor
++                p = packet(ctx, id, out);
++                writeIntPosition(p, in.readBlockPos());
++                break;
++            case 0x06: // health
++                p = packet(ctx, id, out);
++                p.writeFloat(in.readFloat());
++                p.writeShort(clampShort(in.readVarIntFromBuffer()));
++                p.writeFloat(in.readFloat());
++                break;
++            case 0x07: // respawn: a new world, a new set of entities
++                s.kinds.clear();
++                s.hidden.clear();
++                s.kinds.put(s.ownEntityId, AthenaLegacy17Data.Kind.PLAYER);
++                same(in, out);
++                break;
++            case 0x08: { // position and look: 1.7 has no relative flags and takes the eye height
++                double x = in.readDouble();
++                double y = in.readDouble();
++                double z = in.readDouble();
++                float yaw = in.readFloat();
++                float pitch = in.readFloat();
++                int flags = in.readByte();
++
++                if ((flags & 0x01) != 0) x += s.x;
++                if ((flags & 0x02) != 0) y += s.y;
++                if ((flags & 0x04) != 0) z += s.z;
++                if ((flags & 0x08) != 0) yaw += s.yaw;
++                if ((flags & 0x10) != 0) pitch += s.pitch;
++                p = packet(ctx, id, out);
++                p.writeDouble(x);
++                p.writeDouble(y + 1.62D);
++                p.writeDouble(z);
++                p.writeFloat(yaw);
++                p.writeFloat(pitch);
++                p.writeBoolean(s.onGround);
++                break;
++            }
++            case 0x0A: { // use bed
++                int entityId = in.readVarIntFromBuffer();
++                BlockPosition pos = in.readBlockPos();
++
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                p.writeInt(pos.getX());
++                p.writeByte(pos.getY());
++                p.writeInt(pos.getZ());
++                break;
++            }
++            case 0x0B: // animation
++            case 0x19: // head look
++            case 0x1E: // remove effect
++                entityIdToInt(ctx, id, in, out, id == 0x0B);
++                break;
++            case 0x0C: // spawn player: 1.7 takes the name and skin here, 1.8 from the tab list
++                this.spawnPlayer(ctx, id, in, out);
++                break;
++            case 0x0D: { // collect item
++                int collected = in.readVarIntFromBuffer();
++                int collector = in.readVarIntFromBuffer();
++
++                p = packet(ctx, id, out);
++                p.writeInt(collected);
++                p.writeInt(collector);
++                break;
++            }
++            case 0x0E: // spawn object
++                this.spawnObject(ctx, id, in, out);
++                break;
++            case 0x0F: // spawn mob
++                this.spawnMob(ctx, id, in, out);
++                break;
++            case 0x10: { // spawn painting: the position of the painting, not of the block behind it
++                int entityId = in.readVarIntFromBuffer();
++                String title = in.readStringFromBuffer(13);
++                BlockPosition pos = in.readBlockPos();
++                int direction = in.readUnsignedByte();
++                int dx = direction == 1 ? 1 : direction == 3 ? -1 : 0;
++                int dz = direction == 0 ? -1 : direction == 2 ? 1 : 0;
++
++                s.kinds.put(entityId, AthenaLegacy17Data.Kind.PAINTING);
++                p = packet(ctx, id, out);
++                p.writeVarIntToBuffer(entityId);
++                p.writeString(title);
++                p.writeInt(pos.getX() + dx);
++                p.writeInt(pos.getY());
++                p.writeInt(pos.getZ() + dz);
++                p.writeInt(direction);
++                break;
++            }
++            case 0x11: { // spawn experience orb
++                int start = in.readerIndex();
++
++                s.kinds.put(in.readVarIntFromBuffer(), AthenaLegacy17Data.Kind.EXPERIENCE_ORB);
++                in.readerIndex(start);
++                same(in, out);
++                break;
++            }
++            case 0x12: // velocity
++            case 0x14: // entity
++            case 0x20: // properties
++                if (id == 0x20) {
++                    this.properties(ctx, id, in, out);
++                } else {
++                    entityIdToInt(ctx, id, in, out, false);
++                }
++                break;
++            case 0x13: // destroy entities: 1.7 counts them in a byte
++                this.destroy(ctx, id, in, out);
++                break;
++            case 0x15: // relative move
++            case 0x16: // look
++            case 0x17: { // relative move and look: 1.8 added on-ground
++                int entityId = in.readVarIntFromBuffer();
++
++                if (s.hidden.contains(entityId)) {
++                    break;
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                p.writeBytes(in, id == 0x17 ? 5 : id == 0x15 ? 3 : 2);
++                break;
++            }
++            case 0x18: { // teleport
++                int entityId = in.readVarIntFromBuffer();
++
++                if (s.hidden.contains(entityId)) {
++                    break;
++                }
++                int x = in.readInt();
++                int y = in.readInt();
++                int z = in.readInt();
++
++                if (s.kind(entityId) == AthenaLegacy17Data.Kind.MINECART || s.kind(entityId) == AthenaLegacy17Data.Kind.FURNACE_MINECART) {
++                    y += 12;    // 1.7 draws minecarts from a different origin
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                p.writeInt(x);
++                p.writeInt(y);
++                p.writeInt(z);
++                p.writeByte(in.readByte());
++                p.writeByte(in.readByte());
++                break;
++            }
++            case 0x1A: // entity status
++            case 0x1B: { // attach
++                int start = in.readerIndex();
++
++                if (s.hidden.contains(in.readInt())) {
++                    break;
++                }
++                in.readerIndex(start);
++                same(in, out);
++                break;
++            }
++            case 0x1C: { // metadata
++                int entityId = in.readVarIntFromBuffer();
++
++                if (s.hidden.contains(entityId)) {
++                    break;
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                metadata(s.kind(entityId), in, p);
++                break;
++            }
++            case 0x1D: { // effect
++                int entityId = in.readVarIntFromBuffer();
++
++                if (s.hidden.contains(entityId)) {
++                    break;
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(entityId);
++                p.writeByte(in.readByte());
++                p.writeByte(in.readByte());
++                p.writeShort(clampShort(in.readVarIntFromBuffer()));
++                break;
++            }
++            case 0x1F: // experience
++                p = packet(ctx, id, out);
++                p.writeFloat(in.readFloat());
++                p.writeShort(clampShort(in.readVarIntFromBuffer()));
++                p.writeShort(clampShort(in.readVarIntFromBuffer()));
++                break;
++            case 0x21: // chunk
++                this.chunk(ctx, id, in, out);
++                break;
++            case 0x22: // multi block change
++                this.multiBlockChange(ctx, id, in, out);
++                break;
++            case 0x23: { // block change
++                BlockPosition pos = in.readBlockPos();
++                int state = AthenaLegacy17Data.block(in.readVarIntFromBuffer());
++
++                p = packet(ctx, id, out);
++                p.writeInt(pos.getX());
++                p.writeByte(pos.getY());
++                p.writeInt(pos.getZ());
++                p.writeVarIntToBuffer(state >> 4);
++                p.writeByte(state & 15);
++                break;
++            }
++            case 0x24: { // block action
++                BlockPosition pos = in.readBlockPos();
++
++                p = packet(ctx, id, out);
++                p.writeInt(pos.getX());
++                p.writeShort(pos.getY());
++                p.writeInt(pos.getZ());
++                rest(in, p);
++                break;
++            }
++            case 0x25: { // block break animation
++                int entityId = in.readVarIntFromBuffer();
++
++                p = packet(ctx, id, out);
++                p.writeVarIntToBuffer(entityId);
++                writeIntPosition(p, in.readBlockPos());
++                p.writeByte(in.readByte());
++                break;
++            }
++            case 0x26: // chunk bulk
++                this.chunkBulk(ctx, id, in, out);
++                break;
++            case 0x28: { // world event
++                int effect = in.readInt();
++                BlockPosition pos = in.readBlockPos();
++                int data = in.readInt();
++
++                if (effect == 2001) {   // block break: the block's id and meta
++                    int state = AthenaLegacy17Data.block((data & 4095) << 4 | data >> 12 & 15);
++
++                    data = state >> 4 | (state & 15) << 12;
++                }
++                p = packet(ctx, id, out);
++                p.writeInt(effect);
++                p.writeInt(pos.getX());
++                p.writeByte(pos.getY());
++                p.writeInt(pos.getZ());
++                p.writeInt(data);
++                p.writeBoolean(in.readBoolean());
++                break;
++            }
++            case 0x2A: // particles
++                this.particles(ctx, id, in, out);
++                break;
++            case 0x2D: // open window
++                this.openWindow(ctx, id, in, out);
++                break;
++            case 0x2E: // close window
++                s.windowTypes.remove(in.readUnsignedByte());
++                same(in, out);
++                break;
++            case 0x2F: { // set slot
++                int window = in.readByte();
++                int slot = in.readShort();
++
++                if (s.windowTypes.get(window) == 4 && window != 0) {    // enchanting table: no lapis slot
++                    if (slot == 1) {
++                        break;
++                    }
++                    if (slot > 1) {
++                        --slot;
++                    }
++                }
++                p = packet(ctx, id, out);
++                p.writeByte(window);
++                p.writeShort(slot);
++                AthenaLegacy17.item(in, p);
++                break;
++            }
++            case 0x30: { // window items
++                int window = in.readUnsignedByte();
++                int count = in.readShort();
++                boolean enchanting = window != 0 && s.windowTypes.get(window) == 4;
++
++                p = packet(ctx, id, out);
++                p.writeByte(window);
++                p.writeShort(enchanting ? count - 1 : count);
++                for (int i = 0; i < count; ++i) {
++                    if (enchanting && i == 1) {
++                        AthenaLegacy17.item(in, new PacketDataSerializer(io.netty.buffer.Unpooled.buffer()));
++                        continue;
++                    }
++                    AthenaLegacy17.item(in, p);
++                }
++                break;
++            }
++            case 0x31: // window property
++                this.windowProperty(ctx, id, in, out);
++                break;
++            case 0x33: { // update sign: plain text, at most 15 characters a line
++                BlockPosition pos = in.readBlockPos();
++
++                p = packet(ctx, id, out);
++                p.writeInt(pos.getX());
++                p.writeShort(pos.getY());
++                p.writeInt(pos.getZ());
++                for (int i = 0; i < 4; ++i) {
++                    String line = AthenaLegacy17.legacyText(in.readStringFromBuffer(32767), EnumChatFormat.BLACK);
++
++                    if (line.length() > 15) {
++                        line = org.bukkit.ChatColor.stripColor(line);
++                    }
++                    p.writeString(AthenaLegacy17.truncate(line, 15));
++                }
++                break;
++            }
++            case 0x34: // map
++                this.map(ctx, id, in, out);
++                break;
++            case 0x35: { // tile entity data: gzipped NBT
++                BlockPosition pos = in.readBlockPos();
++                int action = in.readUnsignedByte();
++                NBTTagCompound tag = AthenaLegacy17.readNbt(in);
++
++                p = packet(ctx, id, out);
++                p.writeInt(pos.getX());
++                p.writeShort(pos.getY());
++                p.writeInt(pos.getZ());
++                p.writeByte(action);
++                AthenaLegacy17.writeCompressedNbt(p, tag);
++                break;
++            }
++            case 0x38: // player list item
++                this.playerInfo(ctx, id, in, out);
++                break;
++            case 0x3B: // scoreboard objective
++                this.objective(ctx, id, in, out);
++                break;
++            case 0x3C: { // update score
++                String name = in.readStringFromBuffer(40);
++                int action = in.readByte();
++                String objective = in.readStringFromBuffer(16);
++
++                if (name.length() > 16) {
++                    name = AthenaLegacy17.truncate(org.bukkit.ChatColor.stripColor(name), 16);
++                }
++                p = packet(ctx, id, out);
++                p.writeString(name);
++                p.writeByte(action);
++                if (action != 1) {
++                    p.writeString(objective);
++                    p.writeInt(in.readVarIntFromBuffer());
++                }
++                break;
++            }
++            case 0x3D: { // display scoreboard: no per-team sidebars in 1.7
++                int start = in.readerIndex();
++
++                if (in.readByte() > 2) {
++                    break;
++                }
++                in.readerIndex(start);
++                same(in, out);
++                break;
++            }
++            case 0x3E: // teams
++                this.team(ctx, id, in, out);
++                break;
++            case 0x3F: // plugin message
++                this.pluginMessage(ctx, id, in, out);
++                break;
++            case 0x48: { // resource pack: 1.7 took the URL in a plugin message
++                byte[] url = in.readStringFromBuffer(32767).getBytes(StandardCharsets.UTF_8);
++
++                p = packet(ctx, 0x3F, out);
++                p.writeString("MC|RPack");
++                p.writeShort(url.length);
++                p.writeBytes(url);
++                break;
++            }
++            case 0x41: // difficulty
++            case 0x42: // combat
++            case 0x43: // camera
++            case 0x44: // world border
++            case 0x45: // title
++            case 0x46: // set compression
++            case 0x47: // tab list header and footer
++            case 0x49: // update entity NBT
++                break;
++            default:
++                same(in, out);
++        }
++    }
++
++    // --- entities -------------------------------------------------------------------------------
++
++    private void entityIdToInt(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out, boolean keepVarInt) {
++        int entityId = in.readVarIntFromBuffer();
++
++        if (this.session.hidden.contains(entityId)) {
++            return;
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        if (keepVarInt) {
++            p.writeVarIntToBuffer(entityId);
++        } else {
++            p.writeInt(entityId);
++        }
++        rest(in, p);
++    }
++
++    private void spawnPlayer(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        int entityId = in.readVarIntFromBuffer();
++        UUID uuid = in.readUuid();
++        AthenaLegacy17.Profile profile = this.session.profiles.get(uuid);
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        this.session.kinds.put(entityId, AthenaLegacy17Data.Kind.PLAYER);
++        p.writeVarIntToBuffer(entityId);
++        p.writeString(uuid.toString());
++        if (profile == null) {
++            p.writeString("");
++            p.writeVarIntToBuffer(0);
++        } else {
++            p.writeString(AthenaLegacy17.truncate(profile.name, 16));
++            p.writeVarIntToBuffer(profile.properties.size());
++            for (String[] property : profile.properties) {
++                p.writeString(property[0]);
++                p.writeString(property[1]);
++                p.writeString(property[2] == null ? "" : property[2]);
++            }
++        }
++        p.writeBytes(in, 4 + 4 + 4 + 1 + 1 + 2); // position, rotation, held item
++        metadata(AthenaLegacy17Data.Kind.PLAYER, in, p);
++    }
++
++    private void spawnObject(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int entityId = in.readVarIntFromBuffer();
++        int type = in.readByte();
++        int x = in.readInt();
++        int y = in.readInt();
++        int z = in.readInt();
++        int pitch = in.readByte();
++        int yaw = in.readByte();
++        int data = in.readInt();
++        AthenaLegacy17Data.Kind kind = AthenaLegacy17Data.object(type);
++
++        if (kind == AthenaLegacy17Data.Kind.ARMOR_STAND) {
++            this.session.hidden.add(entityId);
++            return;
++        }
++        this.session.kinds.put(entityId, kind);
++        if (kind == AthenaLegacy17Data.Kind.ITEM_FRAME) {
++            // 1.7 places an item frame by the block it hangs on
++            switch (yaw) {
++                case -128: z += 32; yaw = 0; break;
++                case -64: x -= 32; break;
++                case 0: z -= 32; yaw = -128; break;
++                case 64: x += 32; break;
++                default: break;
++            }
++        } else if (kind == AthenaLegacy17Data.Kind.FALLING_BLOCK) {
++            // 1.8: id | meta << 12; 1.7: id | meta << 16
++            int state = AthenaLegacy17Data.block((data & 4095) << 4 | data >> 12 & 15);
++
++            data = state >> 4 | (state & 15) << 16;
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeVarIntToBuffer(entityId);
++        p.writeByte(type);
++        p.writeInt(x);
++        p.writeInt(y);
++        p.writeInt(z);
++        p.writeByte(pitch);
++        p.writeByte(yaw);
++        p.writeInt(data);
++        rest(in, p); // the velocity, when data > 0
++    }
++
++    private void spawnMob(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        int entityId = in.readVarIntFromBuffer();
++        int type = in.readUnsignedByte();
++        int type17 = AthenaLegacy17Data.mobType17(type);
++
++        if (type17 == -1) {
++            this.session.hidden.add(entityId);
++            return;
++        }
++        // metadata is laid out by the mob the client is shown, not the one it replaces
++        AthenaLegacy17Data.Kind kind = AthenaLegacy17Data.mob(type17);
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        this.session.kinds.put(entityId, kind);
++        p.writeVarIntToBuffer(entityId);
++        p.writeByte(type17);
++        p.writeBytes(in, 4 + 4 + 4 + 1 + 1 + 1 + 2 + 2 + 2); // position, rotation, head, velocity
++        metadata(kind, in, p);
++    }
++
++    private void destroy(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int count = in.readVarIntFromBuffer();
++        int[] ids = new int[count];
++        int kept = 0;
++
++        for (int i = 0; i < count; ++i) {
++            int entityId = in.readVarIntFromBuffer();
++
++            this.session.kinds.remove(entityId);
++            if (!this.session.hidden.remove(entityId)) {
++                ids[kept++] = entityId;
++            }
++        }
++        for (int from = 0; from < kept; from += 127) {
++            int n = Math.min(127, kept - from);
++            PacketDataSerializer p = packet(ctx, id, out);
++
++            p.writeByte(n);
++            for (int i = from; i < from + n; ++i) {
++                p.writeInt(ids[i]);
++            }
++        }
++    }
++
++    private void properties(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int entityId = in.readVarIntFromBuffer();
++
++        if (this.session.hidden.contains(entityId)) {
++            return;
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++        int count = in.readInt();
++
++        p.writeInt(entityId);
++        p.writeInt(count);
++        for (int i = 0; i < count; ++i) {
++            p.writeString(in.readStringFromBuffer(64));
++            p.writeDouble(in.readDouble());
++            int modifiers = in.readVarIntFromBuffer();
++
++            p.writeShort(modifiers);
++            p.writeBytes(in, modifiers * (16 + 8 + 1));
++        }
++    }
++
++    /** Rewrites a 1.8 metadata list for a 1.7 client: entries move, change type or go. */
++    static void metadata(AthenaLegacy17Data.Kind kind, PacketDataSerializer in, PacketDataSerializer out) throws IOException {
++        while (true) {
++            int header = in.readUnsignedByte();
++
++            if (header == 127) {
++                break;
++            }
++            int type = header >> 5;
++            int index = header & 31;
++            AthenaLegacy17Data.Meta meta = AthenaLegacy17Data.meta(kind, index);
++
++            switch (type) {
++                case AthenaLegacy17Data.BYTE: {
++                    byte value = in.readByte();
++
++                    if (meta == null) {
++                        break;
++                    }
++                    if (meta.convert == AthenaLegacy17Data.BYTE_TO_INT_AGE) {
++                        out.writeByte(AthenaLegacy17Data.INT << 5 | meta.index);
++                        out.writeInt(value < 0 ? -25000 : value);
++                    } else if (meta.type == AthenaLegacy17Data.BYTE) {
++                        if (meta.convert == AthenaLegacy17Data.FRAME_ROTATION) {
++                            value = (byte) (value % 4);
++                        } else if (meta.convert == AthenaLegacy17Data.SKIN_TO_CAPE) {
++                            value = (byte) ((value & 0x01) != 0 ? 0 : 2);
++                        }
++                        out.writeByte(AthenaLegacy17Data.BYTE << 5 | meta.index);
++                        out.writeByte(value);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.SHORT: {
++                    short value = in.readShort();
++
++                    if (meta != null && meta.type == AthenaLegacy17Data.SHORT) {
++                        out.writeByte(AthenaLegacy17Data.SHORT << 5 | meta.index);
++                        out.writeShort(value);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.INT: {
++                    int value = in.readInt();
++
++                    if (meta != null && meta.type == AthenaLegacy17Data.INT) {
++                        out.writeByte(AthenaLegacy17Data.INT << 5 | meta.index);
++                        out.writeInt(value);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.FLOAT: {
++                    float value = in.readFloat();
++
++                    if (meta != null && meta.type == AthenaLegacy17Data.FLOAT) {
++                        out.writeByte(AthenaLegacy17Data.FLOAT << 5 | meta.index);
++                        out.writeFloat(value);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.STRING: {
++                    String value = in.readStringFromBuffer(32767);
++
++                    if (meta != null && meta.type == AthenaLegacy17Data.STRING) {
++                        out.writeByte(AthenaLegacy17Data.STRING << 5 | meta.index);
++                        out.writeString(value);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.ITEM_STACK:
++                    if (meta != null && meta.type == AthenaLegacy17Data.ITEM_STACK) {
++                        out.writeByte(AthenaLegacy17Data.ITEM_STACK << 5 | meta.index);
++                        AthenaLegacy17.item(in, out);
++                    } else {
++                        AthenaLegacy17.item(in, new PacketDataSerializer(io.netty.buffer.Unpooled.buffer()));
++                    }
++                    break;
++                case AthenaLegacy17Data.POSITION: {
++                    int x = in.readInt();
++                    int y = in.readInt();
++                    int z = in.readInt();
++
++                    if (meta != null && meta.type == AthenaLegacy17Data.POSITION) {
++                        out.writeByte(AthenaLegacy17Data.POSITION << 5 | meta.index);
++                        out.writeInt(x);
++                        out.writeInt(y);
++                        out.writeInt(z);
++                    }
++                    break;
++                }
++                case AthenaLegacy17Data.ROTATION:
++                    in.skipBytes(12);   // armor stand poses: nothing in 1.7 has them
++                    break;
++                default:
++                    throw new IOException("Unknown metadata type " + type);
++            }
++        }
++        out.writeByte(127);
++    }
++
++    // --- the tab list and scoreboards -----------------------------------------------------------
++
++    private void playerInfo(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int action = in.readVarIntFromBuffer();
++        int count = in.readVarIntFromBuffer();
++
++        for (int i = 0; i < count; ++i) {
++            UUID uuid = in.readUuid();
++            AthenaLegacy17.Profile profile;
++
++            switch (action) {
++                case 0: { // add
++                    profile = new AthenaLegacy17.Profile(in.readStringFromBuffer(16));
++                    int properties = in.readVarIntFromBuffer();
++
++                    for (int j = 0; j < properties; ++j) {
++                        String name = in.readStringFromBuffer(32767);
++                        String value = in.readStringFromBuffer(32767);
++                        String signature = in.readBoolean() ? in.readStringFromBuffer(32767) : null;
++
++                        profile.properties.add(new String[] {name, value, signature});
++                    }
++                    profile.gamemode = in.readVarIntFromBuffer();
++                    profile.ping = in.readVarIntFromBuffer();
++                    if (in.readBoolean()) {
++                        profile.displayName = AthenaLegacy17.legacyText(in.readStringFromBuffer(32767), EnumChatFormat.WHITE);
++                    }
++                    AthenaLegacy17.Profile old = this.session.profiles.put(uuid, profile);
++
++                    if (old != null && !old.listName().equals(profile.listName())) {
++                        listEntry(ctx, id, out, old.listName(), false, 0);
++                    }
++                    listEntry(ctx, id, out, profile.listName(), true, profile.ping);
++                    break;
++                }
++                case 1: // game mode
++                    profile = this.session.profiles.get(uuid);
++                    int gamemode = in.readVarIntFromBuffer();
++
++                    if (profile != null) {
++                        profile.gamemode = gamemode;
++                    }
++                    break;
++                case 2: // latency
++                    profile = this.session.profiles.get(uuid);
++                    int ping = in.readVarIntFromBuffer();
++
++                    if (profile != null && profile.ping != ping) {
++                        profile.ping = ping;
++                        listEntry(ctx, id, out, profile.listName(), true, ping);
++                    }
++                    break;
++                case 3: { // display name
++                    profile = this.session.profiles.get(uuid);
++                    String displayName = in.readBoolean() ? AthenaLegacy17.legacyText(in.readStringFromBuffer(32767), EnumChatFormat.WHITE) : null;
++
++                    if (profile != null) {
++                        String before = profile.listName();
++
++                        profile.displayName = displayName;
++                        if (!before.equals(profile.listName())) {
++                            listEntry(ctx, id, out, before, false, 0);
++                            listEntry(ctx, id, out, profile.listName(), true, profile.ping);
++                        }
++                    }
++                    break;
++                }
++                case 4: // remove
++                    profile = this.session.profiles.remove(uuid);
++                    if (profile != null) {
++                        listEntry(ctx, id, out, profile.listName(), false, 0);
++                    }
++                    break;
++                default:
++                    return;
++            }
++        }
++    }
++
++    private static void listEntry(ChannelHandlerContext ctx, int id, List<ByteBuf> out, String name, boolean online, int ping) {
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeString(name);
++        p.writeBoolean(online);
++        p.writeShort(clampShort(ping));
++    }
++
++    private void objective(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        String name = in.readStringFromBuffer(16);
++        int mode = in.readByte();
++        String displayName = "";
++
++        if (mode == 0 || mode == 2) {
++            displayName = in.readStringFromBuffer(32);
++            in.readStringFromBuffer(16); // how to display the score: 1.7 has only numbers
++        }
++        // a 1.7 client disconnects on an objective it already has, or on one it does not
++        if (mode == 0 ? !this.session.objectives.add(name) : !this.session.objectives.contains(name)) {
++            return;
++        }
++        if (mode == 1) {
++            this.session.objectives.remove(name);
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeString(name);
++        p.writeString(displayName);
++        p.writeByte(mode);
++    }
++
++    private void team(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        String name = in.readStringFromBuffer(16);
++        int mode = in.readByte();
++
++        // as with objectives, a duplicate or unknown team disconnects a 1.7 client
++        if (mode == 0) {
++            if (!this.session.teams.add(name)) {
++                PacketDataSerializer remove = packet(ctx, id, out);
++
++                remove.writeString(name);
++                remove.writeByte(1);
++            }
++        } else if (!this.session.teams.contains(name)) {
++            return;
++        } else if (mode == 1) {
++            this.session.teams.remove(name);
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeString(name);
++        p.writeByte(mode);
++        if (mode == 0 || mode == 2) {
++            p.writeString(in.readStringFromBuffer(32));   // display name
++            p.writeString(in.readStringFromBuffer(16));   // prefix
++            p.writeString(in.readStringFromBuffer(16));   // suffix
++            p.writeByte(in.readByte());                   // friendly fire
++            in.readStringFromBuffer(32);                  // name tag visibility: 1.8's
++            in.readByte();                                // colour: 1.8's
++        }
++        if (mode == 0 || mode == 3 || mode == 4) {
++            int count = in.readVarIntFromBuffer();
++
++            p.writeShort(count);
++            for (int i = 0; i < count; ++i) {
++                p.writeString(in.readStringFromBuffer(40));
++            }
++        }
++    }
++
++    // --- windows --------------------------------------------------------------------------------
++
++    private void openWindow(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int window = in.readUnsignedByte();
++        int type = AthenaLegacy17Data.windowType(in.readStringFromBuffer(32));
++        String title = AthenaLegacy17.legacyText(in.readStringFromBuffer(32767), EnumChatFormat.DARK_GRAY);
++        int slots = in.readUnsignedByte();
++
++        if (type == -1) {
++            type = 0;
++        }
++        this.session.windowTypes.put(window, type);
++        this.session.furnaces.remove(window);
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeByte(window);
++        p.writeByte(type);
++        p.writeString(AthenaLegacy17.truncate(title, 32));
++        p.writeByte(type == 4 ? Math.max(0, slots - 1) : slots);
++        p.writeBoolean(true);
++        if (type == 11) {
++            p.writeInt(in.readInt());
++        }
++    }
++
++    private void windowProperty(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int window = in.readUnsignedByte();
++        int property = in.readShort();
++        int value = in.readShort();
++        int type = this.session.windowTypes.get(window);
++
++        if (type == 2) {
++            // 1.8 sends the furnace's fuel and progress with their totals; 1.7 wants each out of 200
++            int[] furnace = this.session.furnaces.get(window);
++
++            if (furnace == null) {
++                this.session.furnaces.put(window, furnace = new int[4]);
++            }
++            furnace[property & 3] = value;
++            if (property == 0 || property == 1) {
++                if (furnace[1] == 0) {
++                    return;
++                }
++                property = 1;
++                value = 200 * furnace[0] / furnace[1];
++            } else {
++                if (furnace[3] == 0) {
++                    return;
++                }
++                property = 0;
++                value = 200 * furnace[2] / furnace[3];
++            }
++        } else if (type == 4 && property > 2) {
++            return;
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeByte(window);
++        p.writeShort(property);
++        p.writeShort(value);
++    }
++
++    private void pluginMessage(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        String channel = in.readStringFromBuffer(20);
++        PacketDataSerializer data = new PacketDataSerializer(ctx.alloc().buffer());
++
++        try {
++            if (channel.equals("MC|Brand")) {
++                data.writeBytes(in.readStringFromBuffer(32767).getBytes(StandardCharsets.UTF_8));
++            } else if (channel.equals("MC|TrList")) {
++                // villager trades: items in 1.7's format, and no use counts
++                data.writeInt(in.readInt());
++                int count = in.readUnsignedByte();
++
++                data.writeByte(count);
++                for (int i = 0; i < count; ++i) {
++                    AthenaLegacy17.item(in, data);
++                    AthenaLegacy17.item(in, data);
++                    boolean third = in.readBoolean();
++
++                    data.writeBoolean(third);
++                    if (third) {
++                        AthenaLegacy17.item(in, data);
++                    }
++                    data.writeBoolean(in.readBoolean());
++                    in.readInt();
++                    in.readInt();
++                }
++            } else {
++                rest(in, data);
++            }
++            if (data.readableBytes() > Short.MAX_VALUE) {
++                return;
++            }
++            PacketDataSerializer p = packet(ctx, id, out);
++
++            p.writeString(channel);
++            p.writeShort(data.readableBytes());
++            p.writeBytes(data);
++        } finally {
++            data.release();
++        }
++    }
++
++    // --- world ----------------------------------------------------------------------------------
++
++    private void multiBlockChange(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int chunkX = in.readInt();
++        int chunkZ = in.readInt();
++        int count = in.readVarIntFromBuffer();
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeInt(chunkX);
++        p.writeInt(chunkZ);
++        p.writeShort(count);
++        p.writeInt(count * 4);
++        for (int i = 0; i < count; ++i) {
++            int xz = in.readUnsignedByte();
++            int y = in.readUnsignedByte();
++
++            p.writeShort(xz << 8 | y);
++            p.writeShort(AthenaLegacy17Data.block(in.readVarIntFromBuffer()));
++        }
++    }
++
++    private void chunk(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        int chunkX = in.readInt();
++        int chunkZ = in.readInt();
++        boolean groundUp = in.readBoolean();
++        int mask = in.readUnsignedShort();
++        int size = in.readVarIntFromBuffer();
++        int sections = Integer.bitCount(mask);
++        boolean sky = size == sections * (8192 + 2048 + 2048) + (groundUp ? 256 : 0);
++        byte[] data = convertChunk(in, sections, sky, groundUp);
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeInt(chunkX);
++        p.writeInt(chunkZ);
++        p.writeBoolean(groundUp);
++        p.writeShort(mask);
++        p.writeShort(0);        // no block ids above 255
++        writeDeflated(p, data, data.length);
++    }
++
++    private void chunkBulk(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) throws IOException {
++        boolean sky = in.readBoolean();
++        int count = in.readVarIntFromBuffer();
++        int[] xs = new int[count];
++        int[] zs = new int[count];
++        int[] masks = new int[count];
++        int total = 0;
++
++        for (int i = 0; i < count; ++i) {
++            xs[i] = in.readInt();
++            zs[i] = in.readInt();
++            masks[i] = in.readUnsignedShort();
++            total += Integer.bitCount(masks[i]) * (4096 + 2048 + 2048 + (sky ? 2048 : 0)) + 256;
++        }
++        byte[] all = new byte[total];
++        int at = 0;
++
++        for (int i = 0; i < count; ++i) {
++            byte[] data = convertChunk(in, Integer.bitCount(masks[i]), sky, true);
++
++            System.arraycopy(data, 0, all, at, data.length);
++            at += data.length;
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeShort(count);
++        int lengthAt = p.writerIndex();
++
++        p.writeInt(0);
++        p.writeBoolean(sky);
++        int start = p.writerIndex();
++
++        deflate(p, all, at);
++        p.setInt(lengthAt, p.writerIndex() - start);
++        for (int i = 0; i < count; ++i) {
++            p.writeInt(xs[i]);
++            p.writeInt(zs[i]);
++            p.writeShort(masks[i]);
++            p.writeShort(0);
++        }
++    }
++
++    /** A whole 1.7 chunk packet, id first, from a full chunk's 1.8 data: see AthenaChunkPacketCache. */
++    static byte[] fullChunk(int packetId, int chunkX, int chunkZ, int mask, byte[] data18) {
++        int sections = Integer.bitCount(mask);
++        boolean sky = data18.length == sections * (8192 + 2048 + 2048) + 256;
++        byte[] data = convertChunk(new PacketDataSerializer(io.netty.buffer.Unpooled.wrappedBuffer(data18)), sections, sky, true);
++        PacketDataSerializer p = new PacketDataSerializer(io.netty.buffer.Unpooled.buffer(data.length / 4 + 64));
++
++        p.writeVarIntToBuffer(packetId);
++        p.writeInt(chunkX);
++        p.writeInt(chunkZ);
++        p.writeBoolean(true);
++        p.writeShort(mask);
++        p.writeShort(0);
++        writeDeflated(p, data, data.length);
++        byte[] bytes = new byte[p.readableBytes()];
++
++        p.readBytes(bytes);
++        return bytes;
++    }
++
++    /**
++     * One chunk's 1.8 data - per section 4096 little-endian chars of id << 4 | meta, then the
++     * light - as 1.7's: the ids as bytes, then the metas as nibbles, then the same light.
++     */
++    static byte[] convertChunk(PacketDataSerializer in, int sections, boolean sky, boolean biomes) {
++        int blocks = sections * 4096;
++        int light = sections * 2048 * (sky ? 2 : 1);
++        byte[] data = new byte[blocks + blocks / 2 + light + (biomes ? 256 : 0)];
++
++        for (int i = 0; i < blocks; ++i) {
++            int state = AthenaLegacy17Data.block(in.readUnsignedByte() | in.readUnsignedByte() << 8);
++
++            data[i] = (byte) (state >> 4);
++            int meta = state & 15;
++            int at = blocks + (i >> 1);
++
++            data[at] = (byte) ((i & 1) == 0 ? data[at] & 0xF0 | meta : data[at] & 0x0F | meta << 4);
++        }
++        in.readBytes(data, blocks + blocks / 2, light + (biomes ? 256 : 0));
++        return data;
++    }
++
++    private static void writeDeflated(PacketDataSerializer p, byte[] data, int length) {
++        int lengthAt = p.writerIndex();
++
++        p.writeInt(0);
++        int start = p.writerIndex();
++
++        deflate(p, data, length);
++        p.setInt(lengthAt, p.writerIndex() - start);
++    }
++
++    private static void deflate(PacketDataSerializer p, byte[] data, int length) {
++        Deflater deflater = DEFLATER.get();
++        byte[] chunk = new byte[8192];
++
++        deflater.reset();
++        deflater.setInput(data, 0, length);
++        deflater.finish();
++        while (!deflater.finished()) {
++            int n = deflater.deflate(chunk);
++
++            p.writeBytes(chunk, 0, n);
++        }
++    }
++
++    private void particles(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        int particle = in.readInt();
++
++        in.readBoolean(); // long distance: 1.8's
++        float[] floats = new float[7];
++
++        for (int i = 0; i < floats.length; ++i) {
++            floats[i] = in.readFloat();
++        }
++        int count = in.readInt();
++        String name = particle >= 0 && particle < AthenaLegacy17Data.PARTICLES.length ? AthenaLegacy17Data.PARTICLES[particle] : "crit";
++
++        if (particle == AthenaLegacy17Data.PARTICLE_ICON_CRACK) {
++            int item = in.readVarIntFromBuffer();
++            int damage = in.readVarIntFromBuffer();
++            int to = AthenaLegacy17Data.item(item, damage);
++
++            if (to != -1) {
++                item = to >>> 16;
++                damage = to & 0xFFFF;
++            }
++            name = name + "_" + item + "_" + damage;
++        } else if (particle == AthenaLegacy17Data.PARTICLE_BLOCK_CRACK || particle == AthenaLegacy17Data.PARTICLE_BLOCK_DUST) {
++            int arg = in.readVarIntFromBuffer();
++            int state = AthenaLegacy17Data.block((arg & 4095) << 4 | arg >> 12 & 15);
++
++            // blockdust is 1.8's; 1.7 only knows the cracks
++            name = "blockcrack_" + (state >> 4) + "_" + (state & 15);
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeString(name);
++        for (float f : floats) {
++            p.writeFloat(f);
++        }
++        p.writeInt(count);
++    }
++
++    private void map(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<ByteBuf> out) {
++        // 1.8 sends a map's icons and a rectangle of its colours in one packet; 1.7 took one
++        // column of colours per packet, the icons in another and the scale in a third
++        int map = in.readVarIntFromBuffer();
++        int scale = in.readByte();
++        int icons = in.readVarIntFromBuffer();
++        byte[] iconData = new byte[icons * 3 + 1];
++
++        iconData[0] = 1;
++        for (int i = 0; i < icons; ++i) {
++            int directionAndType = in.readByte();
++
++            iconData[i * 3 + 1] = (byte) directionAndType;
++            iconData[i * 3 + 2] = in.readByte();
++            iconData[i * 3 + 3] = in.readByte();
++        }
++        int columns = in.readUnsignedByte();
++
++        if (columns > 0) {
++            int rows = in.readUnsignedByte();
++            int x = in.readUnsignedByte();
++            int z = in.readUnsignedByte();
++            byte[] colours = in.readByteArray();
++
++            for (int column = 0; column < columns; ++column) {
++                PacketDataSerializer p = packet(ctx, id, out);
++
++                p.writeVarIntToBuffer(map);
++                p.writeShort(rows + 3);
++                p.writeByte(0);
++                p.writeByte(x + column);
++                p.writeByte(z);
++                for (int row = 0; row < rows; ++row) {
++                    p.writeByte(colours[column + row * columns]);
++                }
++            }
++        }
++        if (icons > 0) {
++            PacketDataSerializer p = packet(ctx, id, out);
++
++            p.writeVarIntToBuffer(map);
++            p.writeShort(iconData.length);
++            p.writeBytes(iconData);
++        }
++        PacketDataSerializer p = packet(ctx, id, out);
++
++        p.writeVarIntToBuffer(map);
++        p.writeShort(2);
++        p.writeByte(2);
++        p.writeByte(scale);
++    }
++
++    // --- formats --------------------------------------------------------------------------------
++
++    private static void writeIntPosition(PacketDataSerializer p, BlockPosition pos) {
++        p.writeInt(pos.getX());
++        p.writeInt(pos.getY());
++        p.writeInt(pos.getZ());
++    }
++
++    private static int clampShort(int value) {
++        return Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE, value));
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index 2d835d4f36f6757ec9963b82c7487df2c12f0464..ec67ca8badefc648ac44080269f2df3d8b81939c 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -69,12 +69,17 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                 chatcomponenttext = new ChatComponentText( java.text.MessageFormat.format( org.spigotmc.SpigotConfig.outdatedServerMessage.replaceAll("'", "''"), "1.8.8" ) ); // Spigot
+                 this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
+                 this.networkManager.close(chatcomponenttext);
+-            } else if (packethandshakinginsetprotocol.getProtocolVersion() < 47) {
++            } else if (packethandshakinginsetprotocol.getProtocolVersion() < 47 && packethandshakinginsetprotocol.getProtocolVersion() != AthenaLegacy17.PROTOCOL) { // Athena - 1.7.10 clients may join
+                 chatcomponenttext = new ChatComponentText( java.text.MessageFormat.format( org.spigotmc.SpigotConfig.outdatedClientMessage.replaceAll("'", "''"), "1.8.8" ) ); // Spigot
+                 this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
+                 this.networkManager.close(chatcomponenttext);
+             } else {
+                 this.networkManager.setNetHandler((PacketListener) (new LoginListener(this.server, this.networkManager)));
++                // Athena start - a 1.7.10 client's packets are translated from here on
++                if (packethandshakinginsetprotocol.getProtocolVersion() == AthenaLegacy17.PROTOCOL) {
++                    AthenaLegacy17.install(this.networkManager);
++                }
++                // Athena end
+                 // PandaSpigot start - handshake event
+                 boolean proxyLogicEnabled = org.spigotmc.SpigotConfig.bungee;
+                 boolean handledByEvent = false;
+diff --git a/src/main/java/net/minecraft/server/LoginListener.java b/src/main/java/net/minecraft/server/LoginListener.java
+index c7ff9ba72cff2f37ada9447689fc37165e8cf387..e9d9d79aff81390fdd9343546ab47b1cacd553c9 100644
+--- a/src/main/java/net/minecraft/server/LoginListener.java
++++ b/src/main/java/net/minecraft/server/LoginListener.java
+@@ -132,7 +132,7 @@ public class LoginListener implements PacketLoginInListener, IUpdatePlayerListBo
+             // CraftBukkit end
+         } else {
+             this.currentLoginState = LoginListener.EnumProtocolState.ACCEPTED;
+-            if (this.server.aK() >= 0 && !this.networkManager.isLocalChannel()) {
++            if (this.server.aK() >= 0 && !this.networkManager.isLocalChannel() && !AthenaLegacy17.isLegacy(this.networkManager)) { // Athena - 1.7 has no compression
+                 this.networkManager.sendPacket(new PacketLoginOutSetCompression(this.server.aK()), new ChannelFutureListener() {
+                     public void a(ChannelFuture channelfuture) throws Exception {
+                         LoginListener.this.networkManager.setCompressionTreshold(LoginListener.this.server.aK());
+diff --git a/src/main/java/net/minecraft/server/PacketEncoder.java b/src/main/java/net/minecraft/server/PacketEncoder.java
+index f126a1d2583193a76b2af7906d2e5cf7f9e8e60f..934439ce6c8b0df8d01da32363c3f17265973f7f 100644
+--- a/src/main/java/net/minecraft/server/PacketEncoder.java
++++ b/src/main/java/net/minecraft/server/PacketEncoder.java
+@@ -32,6 +32,14 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+         } else {
+             // Athena start - a chunk packet with a cached compressed frame goes out as that frame
+             if (packet instanceof PacketPlayOutMapChunk && ((PacketPlayOutMapChunk) packet).athenaCache != null) {
++                // a 1.7 client gets the chunk's cached 1.7 packet, which needs no more translation
++                io.netty.channel.ChannelHandler legacy17 = channelhandlercontext.pipeline().get("athena_legacy17_out");
++
++                if (legacy17 instanceof AthenaLegacy17Encoder) {
++                    bytebuf.writeBytes(((PacketPlayOutMapChunk) packet).athenaCache.legacy17(integer));
++                    ((AthenaLegacy17Encoder) legacy17).passThroughNext = true;
++                    return;
++                }
+                 io.netty.channel.ChannelHandler handler = channelhandlercontext.pipeline().get("compress");
+ 
+                 if (handler instanceof PacketCompressor) {
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..85baa04354d8d222e8e9683cf9ea2b4267b7d12e
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+@@ -0,0 +1,456 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import java.util.zip.Inflater;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - 1.7.10 client support: the translating handlers turn 1.8 packets into exactly the bytes
++ * a 1.7 client reads, and back.
++ */
++public class AthenaLegacy17Test extends AbstractTestingBase {
++
++    private final AthenaLegacy17.Session session = new AthenaLegacy17.Session();
++
++    private EmbeddedChannel out() {
++        EmbeddedChannel channel = new EmbeddedChannel(new AthenaLegacy17Encoder(this.session));
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        return channel;
++    }
++
++    private EmbeddedChannel in() {
++        EmbeddedChannel channel = new EmbeddedChannel(new AthenaLegacy17Decoder(this.session));
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        return channel;
++    }
++
++    private static PacketDataSerializer packet(int id) {
++        PacketDataSerializer p = new PacketDataSerializer(Unpooled.buffer());
++
++        p.writeVarIntToBuffer(id);
++        return p;
++    }
++
++    /** Every packet the channel wrote, id read off. */
++    private static List<PacketDataSerializer> sent(EmbeddedChannel channel, PacketDataSerializer... packets) {
++        for (PacketDataSerializer p : packets) {
++            channel.writeOutbound(p);
++        }
++        List<PacketDataSerializer> result = new ArrayList<PacketDataSerializer>();
++        Object o;
++
++        while ((o = channel.readOutbound()) != null) {
++            result.add(new PacketDataSerializer((ByteBuf) o));
++        }
++        return result;
++    }
++
++    private static List<PacketDataSerializer> received(EmbeddedChannel channel, PacketDataSerializer packet) {
++        channel.writeInbound(packet);
++        List<PacketDataSerializer> result = new ArrayList<PacketDataSerializer>();
++        Object o;
++
++        while ((o = channel.readInbound()) != null) {
++            result.add(new PacketDataSerializer((ByteBuf) o));
++        }
++        return result;
++    }
++
++    @Test
++    public void keepAliveIdIsAnInt() {
++        PacketDataSerializer p = packet(0x00);
++
++        p.writeVarIntToBuffer(300);
++        PacketDataSerializer sent = sent(this.out(), p).get(0);
++
++        assertEquals(0x00, sent.readVarIntFromBuffer());
++        assertEquals(300, sent.readInt());
++        assertFalse(sent.isReadable());
++    }
++
++    @Test
++    public void chunkIdsAndMetasSplitAnd18OnlyBlocksAreReplaced() throws Exception {
++        // one section at y 0: granite, lime wool, a slime block, then air; light and biomes as given
++        byte[] data = new byte[8192 + 2048 + 2048 + 256];
++        int[] states = {1 << 4 | 1, 35 << 4 | 5, 165 << 4};
++
++        for (int i = 0; i < states.length; ++i) {
++            data[i * 2] = (byte) states[i];
++            data[i * 2 + 1] = (byte) (states[i] >> 8);
++        }
++        data[8192] = 0x5A;              // block light
++        data[8192 + 2048] = 0x3C;       // sky light
++        data[data.length - 1] = 7;      // a biome
++        PacketDataSerializer p = packet(0x21);
++
++        p.writeInt(3);
++        p.writeInt(-4);
++        p.writeBoolean(true);
++        p.writeShort(1);
++        p.writeVarIntToBuffer(data.length);
++        p.writeBytes(data);
++        PacketDataSerializer sent = sent(this.out(), p).get(0);
++
++        assertEquals(0x21, sent.readVarIntFromBuffer());
++        assertEquals(3, sent.readInt());
++        assertEquals(-4, sent.readInt());
++        assertTrue(sent.readBoolean());
++        assertEquals(1, sent.readUnsignedShort());
++        assertEquals("no add mask", 0, sent.readUnsignedShort());
++        byte[] compressed = new byte[sent.readInt()];
++
++        sent.readBytes(compressed);
++        assertFalse(sent.isReadable());
++        byte[] data17 = inflate(compressed, 4096 + 2048 + 2048 + 2048 + 256);
++
++        assertEquals("granite is stone", 1, data17[0]);
++        assertEquals(35, data17[1]);
++        assertEquals("slime is stained glass", 95, data17[2]);
++        assertEquals(0, data17[3]);
++        assertEquals("granite's meta 1 becomes 0, wool's 5 stays", 0x50, data17[4096] & 0xFF);
++        assertEquals("stained glass is lime", 5, data17[4096 + 1] & 0x0F);
++        assertEquals(0x5A, data17[4096 + 2048]);
++        assertEquals(0x3C, data17[4096 + 2048 + 2048]);
++        assertEquals(7, data17[data17.length - 1]);
++    }
++
++    @Test
++    public void theCachedChunkIsTheSameAsATranslatedOne() {
++        byte[] data = new byte[8192 + 4096 + 256];
++
++        for (int i = 0; i < 4096; ++i) {
++            int state = (i % 200) << 4 | i % 16;
++
++            data[i * 2] = (byte) state;
++            data[i * 2 + 1] = (byte) (state >> 8);
++        }
++        PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
++        map.data = data;
++        map.dataSize = 1;
++        byte[] beforeFrame = new AthenaChunkPacketCache(5, 6, map).legacy17(0x21);
++        AthenaChunkPacketCache compressed = new AthenaChunkPacketCache(5, 6, map);
++
++        assertTrue(compressed.frame(0x21, 256) != null);
++        assertNull("the uncompressed data is gone", compressed.map());
++        assertArrayEquals("built from the 1.8 frame, the same bytes", beforeFrame, compressed.legacy17(0x21));
++
++        PacketDataSerializer p = packet(0x21);
++
++        p.writeInt(5);
++        p.writeInt(6);
++        p.writeBoolean(true);
++        p.writeShort(1);
++        p.writeVarIntToBuffer(data.length);
++        p.writeBytes(data);
++        PacketDataSerializer sent = sent(this.out(), p).get(0);
++        byte[] translated = new byte[sent.readableBytes()];
++
++        sent.readBytes(translated);
++        assertArrayEquals(beforeFrame, translated);
++    }
++
++    @Test
++    public void destroyingManyEntitiesSplitsIntoBytesWorth() {
++        PacketDataSerializer p = packet(0x13);
++
++        p.writeVarIntToBuffer(300);
++        for (int i = 0; i < 300; ++i) {
++            p.writeVarIntToBuffer(i);
++        }
++        List<PacketDataSerializer> sent = sent(this.out(), p);
++
++        assertEquals(3, sent.size());
++        int next = 0;
++
++        for (PacketDataSerializer packet : sent) {
++            assertEquals(0x13, packet.readVarIntFromBuffer());
++            int count = packet.readUnsignedByte();
++
++            assertTrue(count <= 127);
++            for (int i = 0; i < count; ++i) {
++                assertEquals(next++, packet.readInt());
++            }
++            assertFalse(packet.isReadable());
++        }
++        assertEquals(300, next);
++    }
++
++    @Test
++    public void aSpawnedPlayerCarriesTheNameAndSkinFromTheTabList() {
++        UUID uuid = UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5");
++        PacketDataSerializer info = packet(0x38);
++
++        info.writeVarIntToBuffer(0);
++        info.writeVarIntToBuffer(1);
++        info.writeUuid(uuid);
++        info.writeString("Notch");
++        info.writeVarIntToBuffer(1);
++        info.writeString("textures");
++        info.writeString("dmFsdWU=");
++        info.writeBoolean(true);
++        info.writeString("c2ln");
++        info.writeVarIntToBuffer(0);      // game mode
++        info.writeVarIntToBuffer(42);     // ping
++        info.writeBoolean(false);
++        PacketDataSerializer spawn = packet(0x0C);
++
++        spawn.writeVarIntToBuffer(7);
++        spawn.writeUuid(uuid);
++        spawn.writeInt(32);
++        spawn.writeInt(64);
++        spawn.writeInt(96);
++        spawn.writeByte(1);
++        spawn.writeByte(2);
++        spawn.writeShort(0);
++        spawn.writeByte(0 << 5 | 10);     // skin parts: cape shown
++        spawn.writeByte(0x7F);
++        spawn.writeByte(3 << 5 | 6);      // health
++        spawn.writeFloat(20F);
++        spawn.writeByte(127);
++        List<PacketDataSerializer> sent = sent(this.out(), info, spawn);
++
++        assertEquals(2, sent.size());
++        PacketDataSerializer tab = sent.get(0);
++
++        assertEquals(0x38, tab.readVarIntFromBuffer());
++        assertEquals("Notch", tab.readStringFromBuffer(16));
++        assertTrue(tab.readBoolean());
++        assertEquals(42, tab.readShort());
++        PacketDataSerializer player = sent.get(1);
++
++        assertEquals(0x0C, player.readVarIntFromBuffer());
++        assertEquals(7, player.readVarIntFromBuffer());
++        assertEquals(uuid.toString(), player.readStringFromBuffer(36));
++        assertEquals("Notch", player.readStringFromBuffer(16));
++        assertEquals(1, player.readVarIntFromBuffer());
++        assertEquals("textures", player.readStringFromBuffer(32767));
++        assertEquals("dmFsdWU=", player.readStringFromBuffer(32767));
++        assertEquals("c2ln", player.readStringFromBuffer(32767));
++        assertEquals(32, player.readInt());
++        assertEquals(64, player.readInt());
++        assertEquals(96, player.readInt());
++        player.skipBytes(1 + 1 + 2);
++        assertEquals("skin parts become 1.7's cape flag at 16", 0 << 5 | 16, player.readUnsignedByte());
++        assertEquals("cape shown", 0, player.readByte());
++        assertEquals(3 << 5 | 6, player.readUnsignedByte());
++        assertEquals(20F, player.readFloat(), 0F);
++        assertEquals(127, player.readUnsignedByte());
++        assertFalse(player.isReadable());
++    }
++
++    @Test
++    public void aReplacedItemComesBackAsItself() {
++        PacketDataSerializer slot = packet(0x2F);
++
++        slot.writeByte(0);
++        slot.writeShort(36);
++        slot.writeShort(416);             // armor stand
++        slot.writeByte(3);
++        slot.writeShort(0);
++        slot.writeByte(0);                // no NBT
++        PacketDataSerializer sent = sent(this.out(), slot).get(0);
++
++        assertEquals(0x2F, sent.readVarIntFromBuffer());
++        sent.skipBytes(1 + 2);
++        assertEquals("shown as a stick", 280, sent.readShort());
++        assertEquals(3, sent.readByte());
++        assertEquals(0, sent.readShort());
++        int nbtLength = sent.readShort();
++
++        assertTrue(nbtLength > 0);
++        byte[] nbt = new byte[nbtLength];
++
++        sent.readBytes(nbt);
++        // the 1.7 client puts it back in creative mode: the server gets the armor stand again
++        PacketDataSerializer creative = packet(0x10);
++
++        creative.writeShort(36);
++        creative.writeShort(280);
++        creative.writeByte(3);
++        creative.writeShort(0);
++        creative.writeShort(nbtLength);
++        creative.writeBytes(nbt);
++        PacketDataSerializer received = received(this.in(), creative).get(0);
++
++        assertEquals(0x10, received.readVarIntFromBuffer());
++        assertEquals(36, received.readShort());
++        assertEquals(416, received.readShort());
++        assertEquals(3, received.readByte());
++        assertEquals(0, received.readShort());
++        assertEquals("and no tag left over", 0, received.readByte());
++        assertFalse(received.isReadable());
++    }
++
++    @Test
++    public void armorStandsAreNeverShown() {
++        PacketDataSerializer spawn = packet(0x0E);
++
++        spawn.writeVarIntToBuffer(9);
++        spawn.writeByte(78);
++        spawn.writeInt(0);
++        spawn.writeInt(0);
++        spawn.writeInt(0);
++        spawn.writeByte(0);
++        spawn.writeByte(0);
++        spawn.writeInt(0);
++        PacketDataSerializer meta = packet(0x1C);
++
++        meta.writeVarIntToBuffer(9);
++        meta.writeByte(0 << 5 | 10);
++        meta.writeByte(1);
++        meta.writeByte(127);
++        PacketDataSerializer destroy = packet(0x13);
++
++        destroy.writeVarIntToBuffer(1);
++        destroy.writeVarIntToBuffer(9);
++        assertTrue(sent(this.out(), spawn, meta, destroy).isEmpty());
++    }
++
++    @Test
++    public void aDuplicateTeamIsRemovedFirst() {
++        EmbeddedChannel channel = this.out();
++        PacketDataSerializer first = team("red");
++        PacketDataSerializer second = team("red");
++
++        assertEquals(1, sent(channel, first).size());
++        List<PacketDataSerializer> sent = sent(channel, second);
++
++        assertEquals(2, sent.size());
++        PacketDataSerializer remove = sent.get(0);
++
++        assertEquals(0x3E, remove.readVarIntFromBuffer());
++        assertEquals("red", remove.readStringFromBuffer(16));
++        assertEquals(1, remove.readByte());
++        PacketDataSerializer create = sent.get(1);
++
++        create.readVarIntFromBuffer();
++        assertEquals("red", create.readStringFromBuffer(16));
++        assertEquals(0, create.readByte());
++        assertEquals("Red", create.readStringFromBuffer(32));
++        assertEquals("[R]", create.readStringFromBuffer(16));
++        assertEquals("", create.readStringFromBuffer(16));
++        assertEquals(1, create.readByte());
++        assertEquals("members counted in a short", 1, create.readShort());
++        assertEquals("Steve", create.readStringFromBuffer(40));
++        assertFalse(create.isReadable());
++    }
++
++    private static PacketDataSerializer team(String name) {
++        PacketDataSerializer p = packet(0x3E);
++
++        p.writeString(name);
++        p.writeByte(0);
++        p.writeString("Red");
++        p.writeString("[R]");
++        p.writeString("");
++        p.writeByte(1);
++        p.writeString("always");
++        p.writeByte(12);
++        p.writeVarIntToBuffer(1);
++        p.writeString("Steve");
++        return p;
++    }
++
++    @Test
++    public void relativeTeleportsAreMadeAbsoluteAtEyeHeight() {
++        PacketDataSerializer move = packet(0x04);
++
++        move.writeDouble(10.5);
++        move.writeDouble(64);
++        move.writeDouble(65.62);          // 1.7's eye height
++        move.writeDouble(-3.5);
++        move.writeBoolean(true);
++        PacketDataSerializer received = received(this.in(), move).get(0);
++
++        assertEquals(0x04, received.readVarIntFromBuffer());
++        assertEquals(10.5, received.readDouble(), 0);
++        assertEquals(64, received.readDouble(), 0);
++        assertEquals(-3.5, received.readDouble(), 0);
++        assertTrue(received.readBoolean());
++        assertFalse(received.isReadable());
++
++        PacketDataSerializer teleport = packet(0x08);
++
++        teleport.writeDouble(1);
++        teleport.writeDouble(0);
++        teleport.writeDouble(100);
++        teleport.writeFloat(90F);
++        teleport.writeFloat(0F);
++        teleport.writeByte(0x01 | 0x02);  // x and y relative
++        PacketDataSerializer sent = sent(this.out(), teleport).get(0);
++
++        assertEquals(0x08, sent.readVarIntFromBuffer());
++        assertEquals(11.5, sent.readDouble(), 1e-9);
++        assertEquals(64 + 1.62, sent.readDouble(), 1e-9);
++        assertEquals(100, sent.readDouble(), 0);
++        assertEquals(90F, sent.readFloat(), 0);
++        assertEquals(0F, sent.readFloat(), 0);
++        assertTrue("on the ground, as last reported", sent.readBoolean());
++        assertFalse(sent.isReadable());
++    }
++
++    @Test
++    public void digAndUseInTheAirAreRead() {
++        PacketDataSerializer dig = packet(0x07);
++
++        dig.writeByte(5);                 // release use item
++        dig.writeInt(0);
++        dig.writeByte(0);
++        dig.writeInt(0);
++        dig.writeByte(255);               // no face
++        PacketDataSerializer received = received(this.in(), dig).get(0);
++
++        assertEquals(0x07, received.readVarIntFromBuffer());
++        assertEquals(5, received.readVarIntFromBuffer());
++        assertEquals(new BlockPosition(0, 0, 0), received.readBlockPos());
++        assertEquals("a face 1.8 knows", 0, received.readUnsignedByte());
++
++        PacketDataSerializer use = packet(0x08);
++
++        use.writeInt(-1);
++        use.writeByte(255);
++        use.writeInt(-1);
++        use.writeByte(-1);
++        use.writeShort(-1);               // empty hand
++        use.writeByte(0);
++        use.writeByte(0);
++        use.writeByte(0);
++        received = received(this.in(), use).get(0);
++        assertEquals(0x08, received.readVarIntFromBuffer());
++        assertEquals(new BlockPosition(-1, -1, -1), received.readBlockPos());
++        assertEquals(255, received.readUnsignedByte());
++        assertEquals(-1, received.readShort());
++        received.skipBytes(3);
++        assertFalse(received.isReadable());
++    }
++
++    private static byte[] inflate(byte[] compressed, int length) throws Exception {
++        Inflater inflater = new Inflater();
++        byte[] out = new byte[length + 1];
++
++        inflater.setInput(compressed);
++        int n = inflater.inflate(out);
++
++        inflater.end();
++        assertEquals(length, n);
++        byte[] exact = new byte[n];
++
++        System.arraycopy(out, 0, exact, 0, n);
++        return exact;
++    }
++}
