@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 18:48:37 +0900
+Subject: [PATCH] Test that a below-name objective reaches a 1.7 client
+ unchanged
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+index 85baa04354d8d222e8e9683cf9ea2b4267b7d12e..62dec99560a739865f9885578e32d674010255f9 100644
+--- a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+@@ -350,6 +350,50 @@ public class AthenaLegacy17Test extends AbstractTestingBase {
+         assertFalse(create.isReadable());
+     }
+ 
++    @Test
++    public void aBelowNameObjectiveReachesA17Client() {
++        PacketDataSerializer objective = packet(0x3B);
++
++        objective.writeString("hp");
++        objective.writeByte(0);
++        objective.writeString("§c❤");     // a red heart
++        objective.writeString("integer");
++        PacketDataSerializer display = packet(0x3D);
++
++        display.writeByte(2);                       // below name
++        display.writeString("hp");
++        PacketDataSerializer score = packet(0x3C);
++
++        score.writeString("Kurono");
++        score.writeByte(0);
++        score.writeString("hp");
++        score.writeVarIntToBuffer(20);
++        List<PacketDataSerializer> sent = sent(this.out(), objective, display, score);
++
++        assertEquals(3, sent.size());
++        PacketDataSerializer o = sent.get(0);
++
++        assertEquals(0x3B, o.readVarIntFromBuffer());
++        assertEquals("hp", o.readStringFromBuffer(16));
++        assertEquals("§c❤", o.readStringFromBuffer(32));
++        assertEquals(0, o.readByte());
++        assertFalse(o.isReadable());
++        PacketDataSerializer d = sent.get(1);
++
++        assertEquals(0x3D, d.readVarIntFromBuffer());
++        assertEquals(2, d.readByte());
++        assertEquals("hp", d.readStringFromBuffer(16));
++        assertFalse(d.isReadable());
++        PacketDataSerializer s = sent.get(2);
++
++        assertEquals(0x3C, s.readVarIntFromBuffer());
++        assertEquals("Kurono", s.readStringFromBuffer(16));
++        assertEquals(0, s.readByte());
++        assertEquals("hp", s.readStringFromBuffer(16));
++        assertEquals(20, s.readInt());
++        assertFalse(s.isReadable());
++    }
++
+     private static PacketDataSerializer team(String name) {
+         PacketDataSerializer p = packet(0x3E);
+ 
