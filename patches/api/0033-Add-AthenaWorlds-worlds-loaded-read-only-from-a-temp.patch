@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 12:02:25 +0900
+Subject: [PATCH] Add AthenaWorlds: worlds loaded read-only from a template
+ folder
+
+
+diff --git a/src/main/java/athena/api/AthenaWorlds.java b/src/main/java/athena/api/AthenaWorlds.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1bf854b8c31e255be2eed7d7cb94b522f32fdfc8
+--- /dev/null
++++ b/src/main/java/athena/api/AthenaWorlds.java
+@@ -0,0 +1,96 @@
++package athena.api;
++
++import java.io.File;
++import org.bukkit.World;
++import org.bukkit.WorldCreator;
++
++/**
++ * Athena - worlds read straight from a template folder and never written.
++ *
++ * <p>A template world is loaded from a map folder that stays exactly as it is: no copy, no unzip,
++ * no {@code session.lock}, no {@code uid.dat}, and no chunk, player or level data is ever saved into
++ * it. Several worlds - on this server or on other servers of the same machine - can use the same
++ * template at once, and the operating system's file cache holds the map's region files once for all
++ * of them.
++ *
++ * <p>What a template world does differently:
++ * <ul>
++ *   <li>The spawn area is not kept loaded, so loading one costs tens of milliseconds, not the
++ *       seconds a normal {@code createWorld} spends reading 625 spawn chunks. Preload the chunks
++ *       players will need with {@link World#getChunkAtAsync} before teleporting them.</li>
++ *   <li>Every change lives only in memory. A chunk that unloads loses its changes and is read
++ *       from the template again when it next loads; {@link World#save()} and unloading with
++ *       {@code save = true} write nothing.</li>
++ *   <li>Chunks the template does not have are generated in memory by the world's generator (the
++ *       creator's, or the one the template's {@code level.dat} names), and are gone once
++ *       unloaded.</li>
++ *   <li>Each load gets a fresh random {@link World#getUID()}, so the same template can be
++ *       loaded twice under different names.</li>
++ * </ul>
++ *
++ * <p>Unload it with {@link org.bukkit.Server#unloadWorld(World, boolean)} as usual once no player
++ * is left in it; the template's files are closed then.
++ *
++ * <p>All methods must be called on the server thread.
++ */
++public final class AthenaWorlds {
++
++    private static Loader loader;
++
++    private AthenaWorlds() {}
++
++    /**
++     * Loads the map in {@code templateFolder} as a new world called {@code name}.
++     *
++     * @param name the new world's name; must not be the name of a loaded world
++     * @param templateFolder a world folder: {@code level.dat} and {@code region/}
++     * @return the loaded world
++     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
++     */
++    public static World loadTemplate(String name, File templateFolder) {
++        return loadTemplate(new WorldCreator(name), templateFolder);
++    }
++
++    /**
++     * Loads the map in {@code templateFolder} as a new world, with the name, environment and
++     * generator of {@code creator}. The creator's seed and world type are ignored: the template's
++     * {@code level.dat} decides them.
++     *
++     * @param creator the new world's name, environment and generator
++     * @param templateFolder a world folder: {@code level.dat} and {@code region/} (for the nether
++     *        {@code DIM-1/region/}, for the end {@code DIM1/region/})
++     * @return the loaded world
++     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
++     */
++    public static World loadTemplate(WorldCreator creator, File templateFolder) {
++        return loader().loadTemplate(creator, templateFolder);
++    }
++
++    /** Whether {@code world} was loaded with {@link #loadTemplate}. */
++    public static boolean isTemplate(World world) {
++        return loader().isTemplate(world);
++    }
++
++    private static Loader loader() {
++        if (loader == null) {
++            throw new IllegalStateException("AthenaWorlds is only available on an Athena server");
++        }
++        return loader;
++    }
++
++    /** The server's side of this API. Set once by the server; not for plugins. */
++    public interface Loader {
++
++        World loadTemplate(WorldCreator creator, File templateFolder);
++
++        boolean isTemplate(World world);
++    }
++
++    /** Called once by the server at startup; not for plugins. */
++    public static void setLoader(Loader serverLoader) {
++        if (loader != null) {
++            throw new IllegalStateException("the loader is already set");
++        }
++        loader = serverLoader;
++    }
++}
