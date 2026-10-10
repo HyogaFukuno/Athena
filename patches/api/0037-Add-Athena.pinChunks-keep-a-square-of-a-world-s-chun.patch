@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 10 Oct 2026 20:46:26 +0900
+Subject: [PATCH] Add Athena.pinChunks: keep a square of a world's chunks
+ loaded
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index f7827841e0b9f094ada5250ad3c7e6eb31dd7a00..53fed073fa936e57d87e193e389e334d614d837c 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -28,7 +28,8 @@ import org.bukkit.entity.Player;
+  *       seconds a normal {@code createWorld} spends reading 625 spawn chunks. Preload the chunks
+  *       players will need with {@link World#getChunkAtAsync} before teleporting them.</li>
+  *   <li>Every change lives only in memory. A chunk that unloads loses its changes and is read
+- *       from the template again when it next loads; saving writes nothing.</li>
++ *       from the template again when it next loads; saving writes nothing. Pin the play area
++ *       with {@link #pinChunks} to keep its chunks, and their changes, for the whole match.</li>
+  *   <li>Chunks the template does not have are generated in memory by the world's generator, and
+  *       are gone once unloaded.</li>
+  *   <li>Each load gets a fresh random {@link World#getUID()}, so one template can be loaded twice
+@@ -102,6 +103,38 @@ public final class Athena {
+         return getServer().isTemplateWorld(world);
+     }
+ 
++    // ---- pinned chunks ----
++
++    /**
++     * Keeps every chunk of {@code center}'s world that overlaps the square of {@code radius}
++     * blocks around {@code center} loaded, once loaded, until {@link #unpinChunks} or the world
++     * unloads. It loads nothing itself: chunks load as players reach them, or as a plugin
++     * preloads them, and then stay. Outside the square chunks load and unload as usual. Pinning
++     * again replaces the world's previous square.
++     *
++     * <p>Meant for a match map: a chunk is read once per match instead of again each time players
++     * come back to it, its changes stay (on a template world an unloaded chunk loses them), and
++     * the server stops filling its heap with chunks it has dropped. On a 20-player match that
++     * removed every full collection the heap filling up had caused (four in 15 minutes, 130-170 ms
++     * each). Size the square to the map's play area: every chunk inside it that is ever loaded
++     * stays in memory.
++     *
++     * @param center the middle of the square, and the world
++     * @param radius half the square's side, in blocks
++     * @throws IllegalArgumentException if {@code center} has no world or {@code radius} is negative
++     */
++    public static void pinChunks(Location center, int radius) {
++        getServer().pinChunks(center, radius);
++    }
++
++    /**
++     * Ends {@code world}'s pin, if it has one; the chunks it kept that no player is using are
++     * queued to unload as usual.
++     */
++    public static void unpinChunks(World world) {
++        getServer().unpinChunks(world);
++    }
++
+     // ---- teleports ----
+ 
+     /**
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 816f58ccfbf862d0f729cdc170915d4e7346a416..7ac88717d3fe16b69e96cbcba6e1d4be95945364 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -24,6 +24,10 @@ public interface AthenaServer {
+ 
+     boolean isTemplateWorld(World world);
+ 
++    void pinChunks(Location center, int radius);
++
++    void unpinChunks(World world);
++
+     CompletableFuture<Boolean> teleportAsync(Entity entity, Location location);
+ 
+     CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick);
