@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Athena - start one small minigame server (a ~256 MB share of a box). Run it from the server
+# Athena - start one small minigame server (a ~320 MB share of a box). Run it from the server
 # directory, the one holding paperclip.jar:
 #
 #   cd /opt/mc/arena1 && /path/to/start-small.sh
 #
-# Measured for 20 players on the production maps with LuckPerms: 256 MB and -Xmx128M holds with
-# ~35 MB to spare, at 0.13-0.14 of an M1 core. What it does, and why:
+# Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through whole SurvivalGames matches: the live
+# heap is ~40 MB plus ~11 KB per loaded chunk, and Par_72 with the players spread over the map holds
+# up to ~3,100 chunks. At -Xmx128M that map ran a full GC every ~25 s; at 160M, none from
+# allocation; 192M was no better. RSS ~290 MB, 0.13-0.18 vCPU in the live game. What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
 #   jar to the class path at run time, which keeps the server's classes out of the AOT cache.
@@ -22,20 +24,25 @@
 # - MALLOC_ARENA_MAX=2 and TrimNativeHeapInterval keep glibc from holding ~60 MB of freed native
 #   memory; maxOrder=7 makes Netty's buffer pool grow in 1 MB chunks instead of 4 MB; the code
 #   cache is capped well above the ~29 MB it uses.
+# - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
+#   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
+# - The AOT cache is also tied to these flags: changing one (HEAP, the GC) drops the cache, and it
+#   is recorded and rebuilt as after a new jar.
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
-HEAP="${HEAP:-128M}"
+HEAP="${HEAP:-160M}"
 PAPERCLIP="paperclip.jar"
 PATCHED="cache/patched_1.8.8.jar"
 AOT="cache/athena.aot"
 AOT_CONF="cache/athena.aotconf"
 STAMP="cache/athena.stamp"
+FLAGS_STAMP="cache/athena.flags"
 MAIN="org.bukkit.craftbukkit.Main"
 
 FLAGS=(
     "-Xms$HEAP" "-Xmx$HEAP"
-    -XX:+UseSerialGC
+    -XX:+UseParallelGC
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=32m
@@ -59,6 +66,16 @@ if [ "$want" != "$have" ] || [ ! -f "$PATCHED" ]; then
     "$JAVA" -Xmx512M -Dpaperclip.patchonly=true -jar "$PAPERCLIP"
     rm -f "$AOT" "$AOT_CONF"
     echo "$want" > "$STAMP"
+fi
+
+# What else the cache was built for: these flags (a cache made under another GC or heap size is
+# rejected or only partly used)
+if [ "${FLAGS[*]}" != "$(cat "$FLAGS_STAMP" 2>/dev/null || true)" ]; then
+    if [ -f "$AOT" ] || [ -f "$AOT_CONF" ]; then
+        echo "[start-small] JVM flags changed: dropping the old AOT cache"
+    fi
+    rm -f "$AOT" "$AOT_CONF"
+    echo "${FLAGS[*]}" > "$FLAGS_STAMP"
 fi
 
 if [ ! -f "$AOT" ] && [ -f "$AOT_CONF" ]; then
