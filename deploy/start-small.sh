@@ -24,6 +24,9 @@
 # - MALLOC_ARENA_MAX=2 and TrimNativeHeapInterval keep glibc from holding ~60 MB of freed native
 #   memory; maxOrder=7 makes Netty's buffer pool grow in 1 MB chunks instead of 4 MB; the code
 #   cache is capped well above the ~29 MB it uses.
+# - SweeperThreshold=50: by default every 15% of the code cache cap (~5 MB) of new JIT code
+#   triggers a full GC ("CodeCache GC Threshold"); that was 5-6 full GCs of 50-200 ms in a match's
+#   first two minutes. At 50% there were none, at no memory cost.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
 # - The AOT cache is also tied to these flags: changing one (HEAP, the GC) drops the cache, and it
@@ -46,6 +49,7 @@ FLAGS=(
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=32m
+    -XX:SweeperThreshold=50
     -Dio.netty.allocator.maxOrder=7
     -XX:+UnlockDiagnosticVMOptions
     -XX:ArchiveRelocationMode=0
