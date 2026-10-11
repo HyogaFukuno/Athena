@@ -2,8 +2,8 @@
 #
 # Several of these share one box. start-small.sh picks the JVM flags, patches on a new jar and keeps
 # the AOT cache current; see the comments in it. MemoryMax is a backstop so one server that runs
-# away cannot take the others down with it - with the 160M heap, the measured RSS peak for 20
-# players through a whole SurvivalGames match is ~290-320 MB.
+# away cannot take the others down with it - with the 144M heap, the measured RSS peak for 20
+# players through a whole SurvivalGames match is ~305 MB.
 [Unit]
 Description=Minecraft minigame server (%i)
 After=network-online.target

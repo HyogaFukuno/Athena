@@ -5,9 +5,12 @@
 #   cd /opt/mc/arena1 && /path/to/start-small.sh
 #
 # Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through whole SurvivalGames matches: the live
-# heap is ~40 MB plus ~11 KB per loaded chunk, and Par_72 with the players spread over the map holds
-# up to ~3,100 chunks. At -Xmx128M that map ran a full GC every ~25 s; at 160M, none from
-# allocation; 192M was no better. RSS ~290 MB, 0.13-0.18 vCPU in the live game. What it does, and why:
+# heap is ~40 MB plus ~11 KB per loaded chunk. 144M assumes the plugin pins the play area and
+# preloads it in pre-game (Athena.pinChunks / preloadChunks): the map then sits in the heap from the
+# start (~1,200 chunks, live heap up to ~100 MB) and the live game reads no chunk. That way 144M ran
+# 15-minute matches on Par_72 and Lobby_Games with no full GC outside pre-game; 128M had three on
+# Par_72 (120-165 ms). Without the pin, chunks unloaded and reloaded fill the old generation and
+# 160M ran a full GC every 3-5 minutes. RSS ~305 MB, 0.13 vCPU in the live game. What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
 #   jar to the class path at run time, which keeps the server's classes out of the AOT cache.
@@ -35,7 +38,7 @@
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
-HEAP="${HEAP:-160M}"
+HEAP="${HEAP:-144M}"
 PAPERCLIP="paperclip.jar"
 PATCHED="cache/patched_1.8.8.jar"
 AOT="cache/athena.aot"
