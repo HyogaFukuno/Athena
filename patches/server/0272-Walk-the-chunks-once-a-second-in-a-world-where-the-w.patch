@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 05:32:14 +0900
+Subject: [PATCH] Walk the chunks once a second in a world where the walk
+ changes nothing
+
+With randomTickSpeed 0 and mood sounds, ice and snow and thunder off, the
+per-chunk work left is housekeeping (sky light gap rechecks, the relight
+queue, queued tile entities) that may run up to a second late; finding the
+chunks still cost ~20% of the server thread every tick.
+
+VPS, 20 bots, live 15 min, production set: server thread samples 1,633 ->
+847 (updateBlocks 41.8% -> 3.0%), live process CPU 0.119 -> 0.102 cores
+(Lobby_Games) and 0.099 -> 0.084 (Par_72), TPS unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 42e8d40a951f3cb3d0bf4fd629eaf5a740f1ecc3..3e4546ff9e66ad43d12859819e208447e5fffda1 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -502,6 +502,18 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     // PandaSpigot start - Alternative Chunk Ticking Selection
+     protected void updateBlocks() {
+         super.updateBlocks();
++        // Athena start - a world where the chunk walk changes nothing: once a second, not every tick.
++        //
++        // With random ticks at 0 and mood sounds, ice and snow and thunder off, what the walk still
++        // does for a chunk is housekeeping that nobody waits on - the sky light gap recheck after a
++        // block changed, the slow relight queue, tile entities queued for creation - and the walk to
++        // find the chunks cost a match server ~20% of its thread, every tick. Done every 20th tick
++        // instead, that work lands at most a second later; the client lights its own blocks, and
++        // Spigot sends chunks whether or not they have ticked (Chunk.isReady).
++        if (MinecraftServer.currentTick % 20 != 0 && this.athenaChunkWalkIsIdle()) {
++            return;
++        }
++        // Athena end
+         if (this.pandaSpigotConfig.useSpigotChunkTickingSelection) {
+             tickSpigotChunkTickSelection();
+         } else {
+@@ -509,6 +521,14 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         }
+     }
+ 
++    // Athena - nothing the walk does per chunk can change the world or reach a player
++    private boolean athenaChunkWalkIsIdle() {
++        return this.paperSpigotConfig.disableMoodSounds && this.paperSpigotConfig.disableIceAndSnow
++                && (this.paperSpigotConfig.disableThunder || !(this.isRaining() && this.isThundering()))
++                && this.worldData.getType() != WorldType.DEBUG_ALL_BLOCK_STATES
++                && this.getGameRules().getInt("randomTickSpeed") <= 0;
++    }
++
+     private void tickSpigotChunkTickSelection() {
+         if (this.worldData.getType() == WorldType.DEBUG_ALL_BLOCK_STATES) {
+             gnu.trove.iterator.TLongShortIterator iterator = this.chunkTickList.iterator();
