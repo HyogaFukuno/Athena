@@ -64,8 +64,10 @@ export MALLOC_ARENA_MAX=2
 [ -f "$PAPERCLIP" ] || { echo "no $PAPERCLIP here - run this from the server directory" >&2; exit 1; }
 mkdir -p cache
 
-# What the cache was built for: this paperclip.jar and this JDK.
-want="$( (sha256sum "$PAPERCLIP" 2>/dev/null || shasum -a 256 "$PAPERCLIP") | cut -d' ' -f1) $("$JAVA" -version 2>&1 | grep -v 'Picked up' | head -1)"
+# What the cache was built for: this paperclip.jar and this JDK. The version is read with the
+# JVM option variables unset: an option there that prints at startup (a JFR recording, say) would
+# otherwise look like another JDK, drop the cache and make the run a recording one.
+want="$( (sha256sum "$PAPERCLIP" 2>/dev/null || shasum -a 256 "$PAPERCLIP") | cut -d' ' -f1) $(env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS "$JAVA" -version 2>&1 | head -1)"
 have="$(cat "$STAMP" 2>/dev/null || true)"
 
 if [ "$want" != "$have" ] || [ ! -f "$PATCHED" ]; then
