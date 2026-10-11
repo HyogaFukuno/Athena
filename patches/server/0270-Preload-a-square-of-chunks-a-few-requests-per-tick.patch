@@ -1,0 +1,210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 11 Oct 2026 10:23:40 +0900
+Subject: [PATCH] Preload a square of chunks a few requests per tick
+
+AthenaChunkPreloader, drained in the tick loop after AthenaTeleportQueue,
+sends at most perTick async chunk requests a tick, nearest the centre
+first, skipping chunks already loaded and chunks the storage does not hold
+(those would be generated on the server thread).
+
+VPS, 20 bots, pin + preload 300 blocks at 4 per tick during pre-game:
+1,165-1,186 chunks in 15-17 s, slowest 5 s of pre-game at 20.0 TPS; live
+CPU 0.140 -> 0.129 (Par_72) and 0.135 -> 0.124 (Lobby_Games), young GCs
+-5% / -30%.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 422299195f74e8a204a485afcff972fd8d788c3e..aeb22322241b3679c1fd16dbc6d90e5cf2f26b32 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -48,14 +48,31 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void pinChunks(Location center, int radius) {
++        int[] square = chunkSquare(center, radius);
++
++        ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(square[0], square[1], square[2], square[3]);
++    }
++
++    @Override
++    public CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick) {
++        int[] square = chunkSquare(center, radius);
++        checkPerTick(perTick);
++
++        return net.minecraft.server.AthenaChunkPreloader.INSTANCE.preload(((CraftWorld) center.getWorld()).getHandle(),
++                square[0], square[1], square[2], square[3], perTick);
++    }
++
++    /** The chunks overlapping the square of radius blocks round center: min x, min z, max x, max z. */
++    private static int[] chunkSquare(Location center, int radius) {
+         Validate.notNull(center, "Center may not be null");
+         Validate.notNull(center.getWorld(), "Center has no world");
+         Validate.isTrue(radius >= 0, "Radius may not be negative");
+         double x = center.getX(), z = center.getZ();
+ 
+-        ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(
++        return new int[] {
+                 (int) Math.floor(x - radius) >> 4, (int) Math.floor(z - radius) >> 4,
+-                (int) Math.floor(x + radius) >> 4, (int) Math.floor(z + radius) >> 4);
++                (int) Math.floor(x + radius) >> 4, (int) Math.floor(z + radius) >> 4
++        };
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..32baa0131b46eaf9b13108a98f8a9ea8de405d09
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+@@ -0,0 +1,121 @@
++package net.minecraft.server;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++
++// Athena - the server side of athena.api.Athena.preloadChunks: a square of chunks read off the server
++// thread, a few requests per tick so that what the reads hand back to the server thread (the chunk's
++// entities, its neighbours, ChunkLoadEvent) is spread over the ticks too. Drained once per tick from
++// the tick loop, next to AthenaTeleportQueue.
++public final class AthenaChunkPreloader {
++
++    public static final AthenaChunkPreloader INSTANCE = new AthenaChunkPreloader();
++
++    private final List<Batch> batches = new ArrayList<Batch>();
++
++    private AthenaChunkPreloader() {}
++
++    private static final class Batch {
++
++        final WorldServer world;
++        final long[] chunks; // nearest the centre first
++        final int perTick;
++        final CompletableFuture<Integer> future = new CompletableFuture<Integer>();
++        int next;
++        int pending;
++        int loaded;
++
++        Batch(WorldServer world, long[] chunks, int perTick) {
++            this.world = world;
++            this.chunks = chunks;
++            this.perTick = perTick;
++        }
++    }
++
++    /**
++     * Queues the chunks from (minX, minZ) to (maxX, maxZ), chunk coordinates inclusive, that the
++     * world's storage holds; requests start on the next tick.
++     */
++    public CompletableFuture<Integer> preload(WorldServer world, int minX, int minZ, int maxX, int maxZ, int perTick) {
++        final double centreX = (minX + maxX) / 2.0;
++        final double centreZ = (minZ + maxZ) / 2.0;
++        int width = maxX - minX + 1;
++        long[] keyed = new long[width * (maxZ - minZ + 1)];
++        int n = 0;
++
++        for (int x = minX; x <= maxX; ++x) {
++            for (int z = minZ; z <= maxZ; ++z) {
++                double dx = x - centreX, dz = z - centreZ;
++                // sort key: squared distance from the centre (in quarter chunks), then the index
++                long distance = (long) ((dx * dx + dz * dz) * 16.0);
++                keyed[n++] = distance << 32 | (long) ((x - minX) * (maxZ - minZ + 1) + (z - minZ));
++            }
++        }
++        Arrays.sort(keyed);
++
++        long[] chunks = new long[n];
++        int height = maxZ - minZ + 1;
++        for (int k = 0; k < n; ++k) {
++            int index = (int) keyed[k];
++            chunks[k] = ChunkCoordIntPair.chunkXZ2Int(minX + index / height, minZ + index % height);
++        }
++
++        Batch batch = new Batch(world, chunks, perTick);
++        this.batches.add(batch);
++        return batch.future;
++    }
++
++    /** Sends the next requests of every pending square. Server thread, once per tick. */
++    public void tick() {
++        if (this.batches.isEmpty()) {
++            return;
++        }
++
++        List<Batch> finished = null;
++
++        for (Batch batch : this.batches.toArray(new Batch[0])) {
++            boolean worldGone = !MinecraftServer.getServer().worlds.contains(batch.world);
++
++            if (!worldGone) {
++                ChunkProviderServer provider = batch.world.chunkProviderServer;
++                int sent = 0;
++
++                while (sent < batch.perTick && batch.next < batch.chunks.length) {
++                    long key = batch.chunks[batch.next++];
++                    int x = (int) key, z = (int) (key >>> 32);
++
++                    if (provider.isChunkLoaded(x, z) || !provider.chunkExistsInStorage(x, z)) {
++                        continue; // costs no request
++                    }
++                    ++sent;
++                    ++batch.pending;
++                    final Batch owner = batch;
++                    provider.getChunkAt(x, z, new Runnable() {
++                        @Override
++                        public void run() {
++                            --owner.pending;
++                            ++owner.loaded;
++                        }
++                    });
++                }
++            }
++
++            if (worldGone || (batch.next >= batch.chunks.length && batch.pending == 0)) {
++                this.batches.remove(batch);
++                if (finished == null) {
++                    finished = new ArrayList<Batch>();
++                }
++                finished.add(batch);
++            }
++        }
++
++        // after the loop: a completion callback may well queue another square
++        if (finished != null) {
++            for (Batch batch : finished) {
++                batch.future.complete(batch.loaded);
++            }
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 566e0536fd64f9e31f2f24fbb643f22382372cba..6f4a8f3856278a7de950e4d3266cca9d64af3da9 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -84,6 +84,11 @@ public class ChunkProviderServer implements IChunkProvider {
+         }
+     }
+ 
++    /** Whether the world's storage holds the chunk; false where it would have to be generated. */
++    public boolean chunkExistsInStorage(int x, int z) {
++        return this.chunkLoader instanceof ChunkRegionLoader && ((ChunkRegionLoader) this.chunkLoader).chunkExists(this.world, x, z);
++    }
++
+     public boolean isPinned(int x, int z) {
+         return this.pinned && x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ;
+     }
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index d79f849274d9f9bcfd17ae390b891330c70d0ce8..ea0f99b08331d411a2fa4b22373c3e3d410a32f5 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -867,6 +867,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(); // Athena - hand finished chunk shapes back to the server thread
+         ChunkDecorationExecutor.tick(); // Athena - and finished chunk decorations
+         AthenaTeleportQueue.INSTANCE.tick(); // Athena - the next few players of a gradual teleport
++        AthenaChunkPreloader.INSTANCE.tick(); // Athena - the next few chunk requests of a preload
+         SpigotTimings.chunkIOTickTimer.stopTiming(); // Spigot
+ 
+         SpigotTimings.timeUpdateTimer.startTiming(); // Spigot
