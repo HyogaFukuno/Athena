@@ -1,0 +1,75 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 10:50:01 +0900
+Subject: [PATCH] Resolve a statistic's Bukkit counterpart once
+
+Every movement statistic increment asked CraftStatistic for the Bukkit
+statistic by name (six prefix tests and a map probe) and read the current value
+twice. The answer is cached on the Statistic, and the value is read once unless
+an event ran.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Statistic.java b/src/main/java/net/minecraft/server/Statistic.java
+index 153f97ff1db7b229c6ab54376865b35ef386061b..28bf5424da6e13c11159374db7bff2d6f3a15f18 100644
+--- a/src/main/java/net/minecraft/server/Statistic.java
++++ b/src/main/java/net/minecraft/server/Statistic.java
+@@ -14,6 +14,20 @@ public class Statistic {
+     private final IScoreboardCriteria objectiveCriteria;
+     // 命名: 手動 (MCPに可読名なし: searge field_150956_d)
+     private Class<? extends IJsonStatistic> serializable;
++    // Athena start - CraftStatistic.getBukkitStatistic's answer, worked out once. The name never changes
++    // and the table it is looked up in is fixed at startup; the lookup itself is six prefix tests
++    // and a map probe, asked several times a tick for every player who moves.
++    org.bukkit.Statistic athenaBukkitStatistic;
++    volatile boolean athenaBukkitStatisticResolved; // written after the answer, so a reader that sees true sees it
++
++    public org.bukkit.Statistic athenaBukkitStatistic() {
++        if (!this.athenaBukkitStatisticResolved) {
++            this.athenaBukkitStatistic = org.bukkit.craftbukkit.CraftStatistic.getBukkitStatisticByName(this.name);
++            this.athenaBukkitStatisticResolved = true;
++        }
++        return this.athenaBukkitStatistic;
++    }
++    // Athena end
+     private static NumberFormat numberFormat = NumberFormat.getIntegerInstance(Locale.US);
+     public static Counter simpleStatType = new Counter() {
+     };
+diff --git a/src/main/java/net/minecraft/server/StatisticManager.java b/src/main/java/net/minecraft/server/StatisticManager.java
+index 9a68847b6e69435d2de3e25bf8d700e5bf1dcfce..5886c63a6d5afa9efd357ab6c7acb015d24e7120 100644
+--- a/src/main/java/net/minecraft/server/StatisticManager.java
++++ b/src/main/java/net/minecraft/server/StatisticManager.java
+@@ -21,12 +21,16 @@ public class StatisticManager {
+     public void increaseStat(EntityHuman entityhuman, Statistic statistic, int i) {
+         if (!statistic.isAchievement() || this.canUnlockAchievement((Achievement) statistic)) {
+             // CraftBukkit start - fire Statistic events
+-            org.bukkit.event.Cancellable cancellable = org.bukkit.craftbukkit.event.CraftEventFactory.handleStatisticsIncrease(entityhuman, statistic, this.getStatisticValue(statistic), i);
+-            if (cancellable != null && cancellable.isCancelled()) {
+-                return;
++            int current = this.getStatisticValue(statistic); // Athena - read once when no event runs
++            org.bukkit.event.Cancellable cancellable = org.bukkit.craftbukkit.event.CraftEventFactory.handleStatisticsIncrease(entityhuman, statistic, current, i);
++            if (cancellable != null) { // Athena
++                if (cancellable.isCancelled()) {
++                    return;
++                }
++                current = this.getStatisticValue(statistic); // Athena - a listener may have set it
+             }
+             // CraftBukkit end
+-            this.setStatistic(entityhuman, statistic, this.getStatisticValue(statistic) + i);
++            this.setStatistic(entityhuman, statistic, current + i); // Athena
+         }
+     }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftStatistic.java b/src/main/java/org/bukkit/craftbukkit/CraftStatistic.java
+index f7bf64a30f765a46687615cd52309a90f7c036da..a7f6371230ca54b8fda60a60de22841cfb2212e2 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftStatistic.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftStatistic.java
+@@ -66,7 +66,7 @@ public class CraftStatistic {
+     }
+ 
+     public static org.bukkit.Statistic getBukkitStatistic(net.minecraft.server.Statistic statistic) {
+-        return getBukkitStatisticByName(statistic.name);
++        return statistic.athenaBukkitStatistic(); // Athena - resolved once per statistic
+     }
+ 
+     public static org.bukkit.Statistic getBukkitStatisticByName(String name) {
