@@ -18,9 +18,21 @@
 #   of built in native memory: about 35 MB less per server, and less JIT work after a start.
 #   ArchiveRelocationMode=0 maps it without rewriting pointers; with the default, the pages it
 #   rewrote stayed private memory and the saving mostly vanished.
-# - The cache belongs to one jar and one JDK. When either changes this script re-patches and
-#   throws the cache away; the next run records a new one and the run after uses it. A cache that
-#   does not fit is ignored by the JVM with a warning, never fatal.
+# - The patched jar and the AOT cache are shared by every server on the box that runs the same
+#   paperclip.jar with the same JDK and flags. They live in $ATHENA_CACHE_ROOT/<key>/ (default
+#   /opt/mc/shared-cache when it exists, else ./cache), where the key is a hash of those three
+#   things, and every server puts the same absolute path on its class path - the AOT cache is
+#   only accepted for the class path it was made with. The servers then map the same files, so
+#   the page cache holds one copy of them for the whole box instead of one per server.
+# - A key's directory is never rewritten in place: the jar and the cache are made under a
+#   temporary name and renamed into it, so a server still running from them keeps its mapping.
+#   A new jar, JDK or flag set is simply another key. Patching and building the cache take a lock
+#   (flock), so two servers starting together do the work once; the second waits and reuses it.
+# - The cache belongs to one jar, one JDK and one flag set. The first run under a new key records
+#   (AOTMode=record), each server into its own record-<server>.aotconf; the next server to start
+#   builds the shared cache from the newest record, and every start after that uses it. Stop the
+#   recording run with "stop" so its record is written. A cache that does not fit is ignored by the
+#   JVM with a warning, never fatal.
 # - Recording and creating are separate steps (AOTMode=record, then AOTMode=create before the
 #   next start). The one-step AOTCacheOutput starts a second JVM at shutdown to build the cache,
 #   which on a small box is two JVMs' worth of memory at once.
@@ -33,18 +45,11 @@
 #   what it uses (~21 MB), so it costs no memory.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
-# - The AOT cache is also tied to these flags: changing one (HEAP, the GC) drops the cache, and it
-#   is recorded and rebuilt as after a new jar.
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
 HEAP="${HEAP:-144M}"
 PAPERCLIP="paperclip.jar"
-PATCHED="cache/patched_1.8.8.jar"
-AOT="cache/athena.aot"
-AOT_CONF="cache/athena.aotconf"
-STAMP="cache/athena.stamp"
-FLAGS_STAMP="cache/athena.flags"
 MAIN="org.bukkit.craftbukkit.Main"
 
 FLAGS=(
@@ -62,47 +67,72 @@ FLAGS=(
 export MALLOC_ARENA_MAX=2
 
 [ -f "$PAPERCLIP" ] || { echo "no $PAPERCLIP here - run this from the server directory" >&2; exit 1; }
-mkdir -p cache
 
-# What the cache was built for: this paperclip.jar and this JDK. The version is read with the
-# JVM option variables unset: an option there that prints at startup (a JFR recording, say) would
-# otherwise look like another JDK, drop the cache and make the run a recording one.
-want="$( (sha256sum "$PAPERCLIP" 2>/dev/null || shasum -a 256 "$PAPERCLIP") | cut -d' ' -f1) $(env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS "$JAVA" -version 2>&1 | head -1)"
-have="$(cat "$STAMP" 2>/dev/null || true)"
+if [ -z "${ATHENA_CACHE_ROOT:-}" ]; then
+    if [ -d /opt/mc/shared-cache ]; then ATHENA_CACHE_ROOT=/opt/mc/shared-cache; else ATHENA_CACHE_ROOT=cache; fi
+fi
+mkdir -p "$ATHENA_CACHE_ROOT"
+ROOT="$(cd "$ATHENA_CACHE_ROOT" && pwd)"
+SERVER="$(basename "$PWD")"
 
-if [ "$want" != "$have" ] || [ ! -f "$PATCHED" ]; then
-    echo "[start-small] new jar or JDK: patching, and dropping the old AOT cache"
+sha() { (sha256sum 2>/dev/null || shasum -a 256) | cut -d' ' -f1; }
+
+# What the jar and cache are built for: this paperclip.jar, this JDK and these flags. The version is
+# read with the JVM option variables unset: an option there that prints at startup (a JFR recording,
+# say) would otherwise look like another JDK.
+JDK="$(env -u JAVA_TOOL_OPTIONS -u JDK_JAVA_OPTIONS "$JAVA" -version 2>&1 | head -1)"
+KEY="$( { sha < "$PAPERCLIP"; echo "$JDK"; echo "${FLAGS[*]}"; } | sha | cut -c1-16)"
+DIR="$ROOT/$KEY"
+PATCHED="$DIR/patched_1.8.8.jar"
+AOT="$DIR/athena.aot"
+mkdir -p "$DIR"
+
+# Patching and building the cache happen under the lock; running does not
+exec 9>"$ROOT/.lock"
+command -v flock >/dev/null && flock 9
+
+if [ ! -f "$PATCHED" ]; then
+    echo "[start-small] new jar, JDK or flags ($KEY): patching"
+    SRC="$PWD/$PAPERCLIP"
+    WORK="$(mktemp -d "$ROOT/.patch.XXXXXX")"
+    mkdir -p "$WORK/cache"
+    # the vanilla jar paperclip patches from; kept once per box so it is not downloaded again
+    [ -f "$ROOT/mojang_1.8.8.jar" ] && cp "$ROOT/mojang_1.8.8.jar" "$WORK/cache/"
     # patching holds the vanilla jar, the patch and the output at once: give it room
-    "$JAVA" -Xmx512M -Dpaperclip.patchonly=true -jar "$PAPERCLIP"
-    rm -f "$AOT" "$AOT_CONF"
-    echo "$want" > "$STAMP"
+    (cd "$WORK" && "$JAVA" -Xmx512M -Dpaperclip.patchonly=true -jar "$SRC")
+    [ -f "$ROOT/mojang_1.8.8.jar" ] || cp "$WORK/cache/mojang_1.8.8.jar" "$ROOT/" 2>/dev/null || true
+    mv "$WORK/cache/patched_1.8.8.jar" "$PATCHED"
+    rm -rf "$WORK"
 fi
 
-# What else the cache was built for: these flags (a cache made under another GC or heap size is
-# rejected or only partly used)
-if [ "${FLAGS[*]}" != "$(cat "$FLAGS_STAMP" 2>/dev/null || true)" ]; then
-    if [ -f "$AOT" ] || [ -f "$AOT_CONF" ]; then
-        echo "[start-small] JVM flags changed: dropping the old AOT cache"
+if [ ! -f "$AOT" ]; then
+    RECORD="$(ls -t "$DIR"/record-*.aotconf 2>/dev/null | head -1 || true)"
+    if [ -n "$RECORD" ] && [ -s "$RECORD" ]; then
+        echo "[start-small] building the shared AOT cache from $(basename "$RECORD")"
+        if "$JAVA" "${FLAGS[@]}" -XX:AOTMode=create -XX:AOTConfiguration="$RECORD" -XX:AOTCache="$AOT.tmp.$$" -cp "$PATCHED"; then
+            mv "$AOT.tmp.$$" "$AOT"
+        else
+            echo "[start-small] building the AOT cache failed; recording again this run" >&2
+            rm -f "$AOT.tmp.$$" "$RECORD"
+        fi
     fi
-    rm -f "$AOT" "$AOT_CONF"
-    echo "${FLAGS[*]}" > "$FLAGS_STAMP"
 fi
 
-if [ ! -f "$AOT" ] && [ -f "$AOT_CONF" ]; then
-    echo "[start-small] building the AOT cache from the last run's record"
-    if ! "$JAVA" "${FLAGS[@]}" -XX:AOTMode=create -XX:AOTConfiguration="$AOT_CONF" -XX:AOTCache="$AOT" -cp "$PATCHED"; then
-        echo "[start-small] building the AOT cache failed; recording again this run" >&2
-        rm -f "$AOT" "$AOT_CONF"
-    fi
-fi
+# Keep this key and the two most recently used others; a server still running from an older one
+# keeps its open files either way
+touch "$DIR"
+ls -1dt "$ROOT"/*/ 2>/dev/null | tail -n +4 | while read -r old; do rm -rf "$old"; done
+
+command -v flock >/dev/null && flock -u 9
+exec 9>&-
 
 if [ -f "$AOT" ]; then
     AOT_FLAGS=(-XX:AOTCache="$AOT")
 else
-    # this run is the training run: play normally, and stop the server with "stop" so the record
-    # is written; the next start builds the cache from it
-    echo "[start-small] no AOT cache yet: recording this run"
-    AOT_FLAGS=(-XX:AOTMode=record -XX:AOTConfiguration="$AOT_CONF")
+    # this run is a training run: play normally, and stop the server with "stop" so the record is
+    # written; the next start (of any server sharing the key) builds the cache from it
+    echo "[start-small] no AOT cache yet ($KEY): recording this run"
+    AOT_FLAGS=(-XX:AOTMode=record -XX:AOTConfiguration="$DIR/record-$SERVER.aotconf")
 fi
 
 exec "$JAVA" "${FLAGS[@]}" "${AOT_FLAGS[@]}" -cp "$PATCHED" "$MAIN" nogui "$@"
