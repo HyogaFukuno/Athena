@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 18:11:21 +0900
+Subject: [PATCH] Check a 1.7 client's moves by 1.7's step-up rules
+
+The server re-makes every move a client reports and pulls the player back when
+the result differs. A 1.7.10 client steps up by different rules from 1.8's: at
+most 0.5 instead of 0.6, one trial (lift, move, settle) instead of the longer
+of two, and not again until the camera smoothing a fractional step started
+(ySize += frac(minY) + 0.01, x0.4 per move) is under 0.05. Along a staggered
+edge of slabs the server stepped where the client had not, and the player was
+set back. PlayerConnection now makes a 1.7 player's checking move with those
+rules (Entity.athenaLegacy17Move, ySize tracked per player and zeroed whenever
+a position is sent); 1.8 clients and every other move are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 7ce7068f927a9fbb4ea6d952d211724c533634e6..f7396da4059709f28ec8e024fbcbca8b9ad7d30e 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -466,6 +466,21 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+ 
++    // Athena start - 1.7 step-up, for checking where a 1.7 client says it moved.
++    //
++    // The server checks each move a client reports by making it again itself. A 1.7.10 client steps
++    // up by its own rules, which differ from 1.8's in three ways: it steps at most 0.5 (1.8: 0.6);
++    // it tries one way up (lift, move, settle) where 1.8 tries two and keeps the longer; and after
++    // it steps up onto anything that is not a whole block it may not step again until ySize - the
++    // camera smoothing that step started, frac(minY) + 0.01, shrunk by 0.4 each move - is under
++    // 0.05. Where those disagree, along a staggered edge of slabs, the server stepped where the
++    // client had not (or the reverse) and pulled the player back. PlayerConnection sets
++    // athenaLegacy17Move around that one checking call for a 1.7 player; nothing else sees it.
++    public boolean athenaLegacy17Move;
++    /** The 1.7 client's ySize as far as stepping goes; 0 again whenever it is sent a position. */
++    public float athenaLegacy17YSize;
++    // Athena end
++
+     public void move(double d0, double d1, double d2) {
+         if (this.loadChunks) loadChunks(); // PaperSpigot - Load chunks
+         if (this.noclip) {
+@@ -619,6 +634,74 @@ public abstract class Entity implements ICommandListener {
+ 
+             this.setEntityBoundingBox(this.boundingBoxMinX, this.boundingBoxMinY, this.boundingBoxMinZ + d2, this.boundingBoxMaxX, this.boundingBoxMaxY, this.boundingBoxMaxZ + d2);
+             // Athena end
++            if (this.athenaLegacy17Move) {
++                // Athena start - see athenaLegacy17Move
++                if (flag1 && (flag || this.athenaLegacy17YSize < 0.05F) && (d6 != d0 || d8 != d2)) {
++                    double d10 = d0;
++                    double d11 = d1;
++                    double d12 = d2;
++                    double postMinX = this.boundingBoxMinX, postMinY = this.boundingBoxMinY, postMinZ = this.boundingBoxMinZ;
++                    double postMaxX = this.boundingBoxMaxX, postMaxY = this.boundingBoxMaxY, postMaxZ = this.boundingBoxMaxZ;
++                    double up = 0.5D; // (double) 1.7's 0.5F stepHeight
++
++                    int stepMark = sink.mark();
++                    this.world.getCubes(this,
++                            preMinX + Math.min(d6, 0.0D), preMinY, preMinZ + Math.min(d8, 0.0D),
++                            preMaxX + Math.max(d6, 0.0D), preMaxY + up, preMaxZ + Math.max(d8, 0.0D), sink);
++
++                    double bMinX = preMinX, bMinY = preMinY, bMinZ = preMinZ;
++                    double bMaxX = preMaxX, bMaxY = preMaxY, bMaxZ = preMaxZ;
++
++                    for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                        up = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
++                                bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, up);
++                    }
++
++                    bMinY += up; bMaxY += up;
++                    double sx = d6;
++
++                    for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                        sx = AxisAlignedBBHelper.calcXOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
++                                bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, sx);
++                    }
++
++                    bMinX += sx; bMaxX += sx;
++                    double sz2 = d8;
++
++                    for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                        sz2 = AxisAlignedBBHelper.calcZOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
++                                bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, sz2);
++                    }
++
++                    bMinZ += sz2; bMaxZ += sz2;
++                    double down = -0.5D;
++
++                    for (int idx = stepMark, sz = sink.end(); idx < sz; idx += 6) {
++                        down = AxisAlignedBBHelper.calcYOffset(sink.get(idx), sink.get(idx + 1), sink.get(idx + 2), sink.get(idx + 3), sink.get(idx + 4), sink.get(idx + 5),
++                                bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ, down);
++                    }
++
++                    bMinY += down; bMaxY += down;
++
++                    if (d10 * d10 + d12 * d12 >= sx * sx + sz2 * sz2) {
++                        d0 = d10;
++                        d1 = d11;
++                        d2 = d12;
++                        this.setEntityBoundingBox(postMinX, postMinY, postMinZ, postMaxX, postMaxY, postMaxZ);
++                    } else {
++                        d0 = sx;
++                        d1 = down;
++                        d2 = sz2;
++                        this.setEntityBoundingBox(bMinX, bMinY, bMinZ, bMaxX, bMaxY, bMaxZ);
++                        double frac = bMinY - (double) ((int) bMinY);
++
++                        if (frac > 0.0D) {
++                            this.athenaLegacy17YSize = (float) ((double) this.athenaLegacy17YSize + frac + 0.01D);
++                        }
++                    }
++                }
++                // Athena end
++            } else
+             if (this.stepHeight > 0.0F && flag1 && (d6 != d0 || d8 != d2)) {
+                 // Athena start - the step-up trial keeps four distinct boxes alive at once (the
+                 // pre-move box, the box the main pass produced, and two step candidates that are
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 3b0e727cf65b1e2ae0d7b6465d91b94f5c0d2264..21431944c25b6990244e5d27a278f0e940191a1a 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -99,12 +99,15 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     private boolean checkMovement = true;
+     private boolean processedDisconnect; // CraftBukkit - added
+ 
++    private final boolean legacy17; // Athena - a 1.7.10 client, translated by AthenaLegacy17
++
+     public PlayerConnection(MinecraftServer minecraftserver, NetworkManager networkmanager, EntityPlayer entityplayer) {
+         this.minecraftServer = minecraftserver;
+         this.networkManager = networkmanager;
+         networkmanager.setNetHandler((PacketListener) this);
+         this.player = entityplayer;
+         entityplayer.playerConnection = this;
++        this.legacy17 = AthenaLegacy17.isLegacy(networkmanager); // Athena
+ 
+         // CraftBukkit start - add fields and methods
+         this.server = minecraftserver.server;
+@@ -291,9 +294,11 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         if (event.isCancelled()) {
+                             // PandaSpigot start - Smooth teleportation
+                             if (this.player.world.pandaSpigotConfig.smoothTeleportation) {
++                                this.player.athenaLegacy17YSize = 0.0F; // Athena - a 1.7 client zeroes ySize on a position
+                                 this.player.playerConnection.sendPacket(new PacketPlayOutPosition(from.getX(), from.getY(), from.getZ(), 0, 0, TELEPORT_NO_ROT));
+                             } else {
+                             // PandaSpigot end
++                            this.player.athenaLegacy17YSize = 0.0F; // Athena - a 1.7 client zeroes ySize on a position
+                             this.player.playerConnection.sendPacket(new PacketPlayOutPosition(from.getX(), from.getY(), from.getZ(), from.getYaw(), from.getPitch(), Collections.<PacketPlayOutPosition.EnumPlayerTeleportFlags>emptySet()));
+                             } // PandaSpigot - closing bracket
+                             return;
+@@ -429,6 +434,17 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         this.player.jump();
+                     }
+ 
++                    // Athena start - a 1.7 client's move is checked by 1.7's step-up rules; see Entity.athenaLegacy17Move
++                    if (this.legacy17) {
++                        this.player.athenaLegacy17YSize *= 0.4F; // what each 1.7 move starts with
++                        this.player.athenaLegacy17Move = true;
++                        try {
++                            this.player.move(d11, d12, d13);
++                        } finally {
++                            this.player.athenaLegacy17Move = false;
++                        }
++                    } else
++                    // Athena end
+                     this.player.move(d11, d12, d13);
+                     this.player.onGround = packetplayinflying.isOnGround();
+                     double d16 = d12;
+@@ -601,6 +617,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         // CraftBukkit end
+ 
+         this.player.setLocation(this.o, this.p, this.q, f2, f3);
++        this.player.athenaLegacy17YSize = 0.0F; // Athena - a 1.7 client zeroes ySize on a position
+         this.player.playerConnection.sendPacket(new PacketPlayOutPosition(d0, d1, d2, f, f1, set));
+     }
+ 
