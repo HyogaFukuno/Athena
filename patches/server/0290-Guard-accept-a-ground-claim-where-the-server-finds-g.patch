@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 20:06:15 +0900
+Subject: [PATCH] Guard: accept a ground claim where the server finds ground
+ possible
+
+From enforcing on sg1: a 1.7 player held in pre-game, walking off the
+pedestal and pushed back onto it again and again, was kicked for NoFall,
+"claims ground 3.2 blocks into a fall". A teleport resets neither the
+client's onGround nor the server's fallDistance, so the client's answer to
+the teleport - at the pedestal position 0.01 over the slab, still on the
+ground as far as it knows - looked like ground claimed mid-fall.
+
+The claim now stands, and is not flagged, wherever the guard's own idea of
+the ground allows it: under the feet, an edge the box touches, floating
+against a wall after a step, or the first move after a teleport. Mid-air,
+where none of those hold, it is still refused and flagged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index b7d9d30997be2631a65faa574f7ebd9710500fab..1246b85b6fa5899ddf628b5f474adf713f87e7bc 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -138,10 +138,15 @@ public final class AthenaGuard {
+         if (!enabled || !movement || this.exempt() || !this.known) {
+             return clientGround;
+         }
+-        if (clientGround && !this.groundSeen && this.player.fallDistance > 3.0F) {
++        // The claim stands where the server finds the ground at least possible: under the feet, on an
++        // edge the box touches, floating against a wall after a step, or just after a teleport, which
++        // leaves the client's onGround as it was (fallDistance is not reset by one either: a player
++        // pushed back onto a pedestal again and again keeps adding to it).
++        boolean plausible = this.groundSeen || this.groundStart;
++        if (clientGround && !plausible && this.player.fallDistance > 3.0F) {
+             this.flag(6, "nofall", "claims ground %.1f blocks into a fall", this.player.fallDistance);
+         }
+-        return enforce ? this.groundSeen : clientGround;
++        return enforce ? this.groundSeen || clientGround && plausible : clientGround;
+     }
+ 
+     /** Positions are not the client's to decide from here on: a teleport, a respawn, a dismount. */
