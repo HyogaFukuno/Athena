@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 14 Oct 2026 00:02:10 +0900
+Subject: [PATCH] Guard: a move that starts in the water is a water move, and
+ leaving it keeps the swim
+
+From enforcing on sg1: a 1.7 player walking along the lobby's channel with
+jump held was kicked for rising 0.012 in the air. Holding jump in water adds
+0.04 a tick; the player was touching the water at the start of the move but
+not at its end, and the guard looked for a liquid at the end only. It now
+looks at both ends, and for three moves after one in a liquid the vertical
+check stands aside: the client keeps the speed it swam up with, and the 0.3
+a water edge gives a player climbing out, which gravity alone does not
+explain.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 015e1899ddaf5fdf31fbda98c2b429b91dbc4581..ff4fc068a13ea7718cba63867bd8df1e9b8f98eb 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -68,6 +68,7 @@ public final class AthenaGuard {
+     private int ticksSincePos;      // client ticks since the last packet with a position
+     private int freshTicks;         // ticks since the state was seeded, while still unsure of the client's onGround
+     private double landRise;        // for this move: how far over the start the client could have landed
++    private int liquidGrace;        // moves since the last one in a liquid: leaving it, the client keeps what it swam up with
+     private double repX, repY, repZ = Double.NaN; // the last position the client reported, checked or not
+     private double carriedH, carriedVy, carriedDown; // motion as of a teleport: the client keeps it, the position it moved by is lost
+     private double grantH, grantV;  // knockback the server sent, and until when it may show up
+@@ -353,7 +354,8 @@ public final class AthenaGuard {
+         }
+ 
+         this.refreshEffects();
+-        boolean inLiquid = this.player.isInWater() || this.player.isInLava() || liquidAt(world, x, y, z);
++        // at either end: a move that starts in the water (swimming up along it, climbing out) is a water move
++        boolean inLiquid = this.player.isInWater() || this.player.isInLava() || liquidAt(world, x, y, z) || liquidAt(world, fromX, fromY, fromZ);
+         boolean climbing = this.player.isOnLadder();
+         // a jump cut short by a ceiling: the client moves up before it moves sideways, so the ceiling
+         // that stopped it is over where it started (or, after sideways, over where it ended)
+@@ -443,7 +445,9 @@ public final class AthenaGuard {
+         }
+ 
+         // vertical: up from the ground is a jump, a step or a ceiling; in the air it is gravity
+-        if (result == 0 && dy > 0.0D && !inLiquid && !climbing && !granted) {
++        // out of the water the client keeps the speed it swam up with (and the 0.3 a water edge gives),
++        // which gravity alone does not explain for a few ticks
++        if (result == 0 && dy > 0.0D && !inLiquid && this.liquidGrace == 0 && !climbing && !granted) {
+             double maxUp;
+ 
+             if (fromGround) {
+@@ -517,6 +521,7 @@ public final class AthenaGuard {
+             this.grantH = this.grantV = 0.0D;
+         }
+ 
++        this.liquidGrace = inLiquid ? 3 : Math.max(this.liquidGrace - 1, 0);
+         this.carriedH = this.carriedVy = this.carriedDown = 0.0D; // a checked move: the bounds carry the motion from here
+         // several ticks: the net distance can be less than the last tick's when the direction turned, so
+         // keep the bound
