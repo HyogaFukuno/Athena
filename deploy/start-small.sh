@@ -62,6 +62,8 @@ FLAGS=(
     -Dio.netty.allocator.maxOrder=7
     -XX:+UnlockDiagnosticVMOptions
     -XX:ArchiveRelocationMode=0
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:HeapDumpPath=oom.hprof
 )
 
 export MALLOC_ARENA_MAX=2
