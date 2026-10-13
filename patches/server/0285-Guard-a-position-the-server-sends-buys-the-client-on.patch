@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 13:07:10 +0900
+Subject: [PATCH] Guard: a position the server sends buys the client one packet
+
+From play on sg1: a 1.8 player flagged 228 ms ahead of real time six seconds
+into the match teleport. The client answers each PacketPlayOutPosition with a
+C06 of its own (NetHandlerPlayClient.handlePlayerPosLook, 1.7 as well), on top
+of the one its tick sends, so every teleport and setback looked like 50 ms of
+fast clock. Each one sent now credits the balance by 50 ms.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 9282ff2ce397342272552133013b55d7ab6bb3f0..e54d8ab53db5570dfee3393bae9fbf8be02efd04 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -151,6 +151,14 @@ public final class AthenaGuard {
+     }
+ 
+     // ------------------------------------------------------------------ timer
++    /**
++     * The client answers every position the server sends with a movement packet of its own, on top
++     * of its tick's: one packet that took no time.
++     */
++    void onPositionSent() {
++        this.balanceMillis = Math.min(this.balanceMillis + 50.0D, 1000.0D);
++    }
++
+     /** Called on the Netty thread as a movement packet arrives; the clock is the arrival time. */
+     static void stamp(PacketPlayInFlying packet) {
+         packet.athenaReceivedNanos = System.nanoTime();
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index a663d95c5c6349f4ab758685462401a59550913e..90f6cc60f01d3c3b3e25f9bf05b963e7709298df 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -991,6 +991,8 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             PacketPlayOutExplosion explosion = (PacketPlayOutExplosion) packet;
+ 
+             this.guard.onVelocitySent(explosion.athenaPushX(), explosion.athenaPushY(), explosion.athenaPushZ());
++        } else if (packet instanceof PacketPlayOutPosition) {
++            this.guard.onPositionSent();
+         }
+         // Athena end
+         if (packet instanceof PacketPlayOutChat) {
