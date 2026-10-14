@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 14 Oct 2026 15:07:12 +0900
+Subject: [PATCH] Guard: a position sent twice to one spot is answered twice
+
+From sg1 after 0293: a 1.7 player was set back (1/5) a second after login
+for rising 0.784 at spawn. A login sends the spawn twice - the server's
+position and the plugin's teleport to the lobby spawn - and the client's
+answer to the first matched the second as well, so the guard stopped
+waiting, checked the fall through the chunk the client did not have yet,
+and then took the answer to the second for a rise. Positions sent to the
+spot already awaited now add an answer to wait for; one sent elsewhere
+starts over.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index a487c6faaec83f8b08302b3790f22eb59ee2f7da..3a60a37bfa32761175de8d3c1137050749ad83bf 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -90,6 +90,7 @@ public final class AthenaGuard {
+ 
+     // a position the server sent: until the client reports it, its moves are the old position's
+     private boolean awaiting;
++    private int awaitAnswers;      // positions sent and not yet answered: two sent to one spot are answered twice
+     private double awaitX, awaitY, awaitZ;
+     private int awaitBudget;       // packets to wait before giving up (a relative teleport, a lost answer)
+ 
+@@ -234,6 +235,9 @@ public final class AthenaGuard {
+         // the client's answer, at exactly this position
+         this.carry();
+         this.known = false;
++        // answers to an earlier position elsewhere do not match this one; only repeats of the same spot add up
++        boolean same = this.awaiting && Math.abs(packet.athenaX() - this.awaitX) < 0.01D && Math.abs(packet.athenaY() - this.awaitY) < 0.01D && Math.abs(packet.athenaZ() - this.awaitZ) < 0.01D;
++        this.awaitAnswers = same ? Math.min(this.awaitAnswers + 1, 8) : 1;
+         this.awaiting = true;
+         this.awaitX = packet.athenaX();
+         this.awaitY = packet.athenaY();
+@@ -352,8 +356,11 @@ public final class AthenaGuard {
+         if (this.awaiting) {
+             boolean arrived = Math.abs(x - this.awaitX) < 0.01D && Math.abs(y - this.awaitY) < 0.01D && Math.abs(z - this.awaitZ) < 0.01D;
+ 
+-            if (arrived || --this.awaitBudget <= 0) {
++            // a login sends the spawn twice (the server's and a plugin's teleport): the first answer
++            // matches the second position too, and the fall in between must not be checked from it
++            if (arrived && --this.awaitAnswers <= 0 || --this.awaitBudget <= 0) {
+                 this.awaiting = false;
++                this.awaitAnswers = 0;
+             }
+             this.known = false;
+         }
+@@ -595,8 +602,8 @@ public final class AthenaGuard {
+     boolean fresh() { return this.freshTicks == 0; }
+     boolean athenaRecent() { return this.freshTicks < 3; }
+     void athenaLandRise(double rise) { this.landRise = rise; }
+-    void athenaAwait(double x, double y, double z) { this.carry(); this.known = false; this.awaiting = true; this.awaitX = x; this.awaitY = y; this.awaitZ = z; }
+-    void athenaArrived() { this.awaiting = false; }
++    void athenaAwait(double x, double y, double z) { this.carry(); this.known = false; this.awaiting = true; this.awaitAnswers = 1; this.awaitX = x; this.awaitY = y; this.awaitZ = z; }
++    void athenaArrived() { this.awaiting = false; this.awaitAnswers = 0; }
+     boolean athenaGroundCertain() { return this.groundCertain; }
+     void athenaSeed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) { this.seedFresh(h, dy, groundNow, maybeGround, certain, slipNow); }
+     void athenaTestEffects(int speedAmp, int jumpAmp) { this.speedAmp = speedAmp; this.jumpAmp = jumpAmp; }
