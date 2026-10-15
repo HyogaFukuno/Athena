@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Build PlayerMoveEvent's locations only when it fires
+
+Every movement packet made three Locations and looked up the Bukkit world twice to decide that
+it fires nothing. The comparison runs on plain values.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 86e627992ed3fa0cfedd0b9f411814ae4b879c73..dabecadefac1f347d1d358306bf16ad9b3a3a657 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -273,27 +273,39 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     hasMoved = true;
+                 }
+                 // Spigot End
+-                Location from = new Location(player.getWorld(), lastPosX, lastPosY, lastPosZ, lastYaw, lastPitch); // Get the Players previous Event location.
+-                Location to = player.getLocation().clone(); // Start off the To location as the Players current location.
++                // Athena start - the move is compared on plain values; the two Locations the event
++                // carries are only built when it fires. Every movement packet used to make three
++                // (from, getLocation, its clone) and look up the Bukkit world twice, to decide that
++                // most packets - a head turn, a player standing still - fire nothing.
++                double toX = this.player.locX; // Start off the To location as the Players current location.
++                double toY = this.player.locY;
++                double toZ = this.player.locZ;
++                float toYaw = this.player.yaw;
++                float toPitch = this.player.pitch;
+ 
+                 // If the packet contains movement information then we update the To location with the correct XYZ.
+                 if (packetplayinflying.hasPos && !(packetplayinflying.hasPos && packetplayinflying.y == -999.0D)) {
+-                    to.setX(packetplayinflying.x);
+-                    to.setY(packetplayinflying.y);
+-                    to.setZ(packetplayinflying.z);
++                    toX = packetplayinflying.x;
++                    toY = packetplayinflying.y;
++                    toZ = packetplayinflying.z;
+                 }
+ 
+                 // If the packet contains look information then we update the To location with the correct Yaw & Pitch.
+                 if (packetplayinflying.hasLook) {
+-                    to.setYaw(packetplayinflying.yaw);
+-                    to.setPitch(packetplayinflying.pitch);
++                    toYaw = packetplayinflying.yaw;
++                    toPitch = packetplayinflying.pitch;
+                 }
+ 
+                 // Prevent 40 event-calls for less than a single pixel of movement >.>
+-                double delta = Math.pow(this.lastPosX - to.getX(), 2) + Math.pow(this.lastPosY - to.getY(), 2) + Math.pow(this.lastPosZ - to.getZ(), 2);
+-                float deltaAngle = Math.abs(this.lastYaw - to.getYaw()) + Math.abs(this.lastPitch - to.getPitch());
++                double deltaX = this.lastPosX - toX, deltaY = this.lastPosY - toY, deltaZ = this.lastPosZ - toZ;
++                double delta = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ; // Math.pow(d, 2) is d * d
++                float deltaAngle = Math.abs(this.lastYaw - toYaw) + Math.abs(this.lastPitch - toPitch);
+ 
+                 if ((delta > 1f / 256 || deltaAngle > 10f) && (this.checkMovement && !this.player.dead)) {
++                    org.bukkit.World bukkitWorld = player.getWorld();
++                    Location from = new Location(bukkitWorld, lastPosX, lastPosY, lastPosZ, lastYaw, lastPitch); // Get the Players previous Event location.
++                    Location to = new Location(bukkitWorld, toX, toY, toZ, toYaw, toPitch);
++                    // Athena end
+                     this.lastPosX = to.getX();
+                     this.lastPosY = to.getY();
+                     this.lastPosZ = to.getZ();
