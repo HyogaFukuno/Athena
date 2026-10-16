@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 23:14:23 +0900
+Subject: [PATCH] Pass an uncompressed packet on as a slice of its frame
+
+Nearly every packet a client sends is under the compression threshold, and each was copied into a
+buffer of its own only to drop the leading 0. The decompressor now hands on a retained slice of the
+splitter's frame. VPS SG bench: PacketDecompressor.decode 0.85% -> 0.20% of the process.
+
+Holding the event loop wake-ups during the tracker's flush hold was tried in the same run and
+dropped: eventfd writes stayed at 1.2% (enableAutomaticFlush still wakes the loop once per
+connection) and the bunched tracker packets got a bot kicked by the packet limiter.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index c13e0cda44092b64f1d9d9159718c8a4b2de5ecb..80a3d5a9dd34b990c3f4bc5e7cc8cba3cb65f9da 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -30,7 +30,11 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+             int i = packetdataserializer.readVarIntFromBuffer();
+ 
+             if (i == 0) {
+-                list.add(packetdataserializer.readBytes(packetdataserializer.readableBytes()));
++                // Athena - a slice of the frame, not a copy: nearly every packet a client sends is under
++                // the threshold, and each was copied into a buffer of its own just to drop the
++                // leading 0. The splitter's frame is itself a retained slice; this holds it until the
++                // packet decoder has read it, as the copy was held.
++                list.add(packetdataserializer.readRetainedSlice(packetdataserializer.readableBytes()));
+             } else {
+                 if (i < this.treshold) {
+                     throw new DecoderException("Badly compressed packet - size of " + i + " is below server threshold of " + this.treshold);
