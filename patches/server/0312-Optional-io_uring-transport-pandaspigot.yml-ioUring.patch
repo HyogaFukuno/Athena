@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:49:56 +0900
+Subject: [PATCH] Optional io_uring transport (pandaspigot.yml ioUring)
+
+Off by default. When on and the kernel allows it (Linux 5.9+, not blocked by seccomp), player
+connections use netty-incubator io_uring; otherwise the server logs why and uses epoll. In a 1 vCPU
+container it removed the write syscalls (75,000 -> 0 per flight) for no CPU difference; the VPS,
+where each syscall pays for its security hooks, is where it has to be measured.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index a5e47813a2853283b950748e4f1dc256672568a7..6a8ef0285a3f417b88ba8d59d092238e14b587ec 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -21,6 +21,9 @@ dependencies {
+ 
+     // Minecraft libraries:
+     implementation("io.netty:netty-all:4.1.132.Final") // PandaSpigot - Update Netty to 4.1.x
++    // Athena - io_uring transport, used when pandaspigot.yml ioUring is on and the kernel allows it
++    implementation("io.netty.incubator:netty-incubator-transport-native-io_uring:0.0.26.Final:linux-x86_64")
++    implementation("io.netty.incubator:netty-incubator-transport-native-io_uring:0.0.26.Final:linux-aarch_64")
+     implementation("com.mojang:authlib:1.5.21")
+     // PandaSpigot start - Update log4j
+     implementation("org.apache.logging.log4j:log4j-api:2.25.3")
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 25cca9676972899bd68bea7ec73d4d5193acc926..61efe20391fd8269f4eae6bcb44c28429c362a74 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -151,6 +151,15 @@ public class PandaSpigotConfig {
+     public boolean debugVerifyAthenaIndexes = false;
+     // Athena end
+ 
++    // Athena start - io_uring
++    @Comment("Use Linux io_uring for player connections instead of epoll: reads and writes go to the\n" +
++        "kernel in batches rather than one system call each. Needs Linux 5.9 or newer, and a\n" +
++        "container may block it (Docker's default seccomp profile does); when it is not available\n" +
++        "the server says why and uses epoll. Takes effect on restart.\n" +
++        "Default: false")
++    public boolean ioUring = false;
++    // Athena end
++
+     // Athena start - network compression level
+     @Comment("The zlib level (1-9) packets over the network compression threshold are compressed\n" +
+         "at. Chunks are compressed once and cached (see cacheChunkPackets) and always use the\n" +
+diff --git a/src/main/java/net/minecraft/server/ServerConnection.java b/src/main/java/net/minecraft/server/ServerConnection.java
+index 7c56a749fdf9fcf79f0febefa6db336e326ea15b..99eb7d2562be19c25344cf5bc3efef70b2c7b3e9 100644
+--- a/src/main/java/net/minecraft/server/ServerConnection.java
++++ b/src/main/java/net/minecraft/server/ServerConnection.java
+@@ -66,6 +66,35 @@ public class ServerConnection {
+             return this.load();
+         }
+     };
++    // Athena start - io_uring: one ring per event loop, reads and writes submitted to the kernel in
++    // batches instead of an epoll_wait and a read or write syscall each. On the VPS, kernel entry
++    // and exit and the per-syscall security hooks were most of Netty's time. Opt in with
++    // pandaspigot.yml ioUring; without kernel support it falls back to epoll and says why.
++    public static final LazyInitVar<io.netty.incubator.channel.uring.IOUringEventLoopGroup> SERVER_IO_URING_EVENTLOOP = new LazyInitVar() {
++        protected io.netty.incubator.channel.uring.IOUringEventLoopGroup load() {
++            return new io.netty.incubator.channel.uring.IOUringEventLoopGroup(0, nettyThreads("Netty io_uring Server IO #%d"));
++        }
++
++        protected Object init() {
++            return this.load();
++        }
++    };
++
++    private static boolean athenaIoUring() {
++        if (!com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().ioUring) {
++            return false;
++        }
++        try {
++            if (io.netty.incubator.channel.uring.IOUring.isAvailable()) {
++                return true;
++            }
++            ServerConnection.logger.warn("io_uring is not available, using epoll: {}", String.valueOf(io.netty.incubator.channel.uring.IOUring.unavailabilityCause()));
++        } catch (Throwable t) {
++            ServerConnection.logger.warn("io_uring is not available, using epoll: {}", t.toString());
++        }
++        return false;
++    }
++    // Athena end
+     public static final LazyInitVar<LocalEventLoopGroup> SERVER_LOCAL_EVENTLOOP = new LazyInitVar() {
+         protected LocalEventLoopGroup load() {
+             return new LocalEventLoopGroup(0, nettyThreads("Netty Local Server IO #%d") /* Athena */);
+@@ -108,7 +137,11 @@ public class ServerConnection {
+             Class oclass;
+             LazyInitVar lazyinitvar;
+ 
+-            if (Epoll.isAvailable() && this.mcServer.ai()) {
++            if (!(address instanceof io.netty.channel.unix.DomainSocketAddress) && athenaIoUring()) { // Athena
++                oclass = io.netty.incubator.channel.uring.IOUringServerSocketChannel.class;
++                lazyinitvar = ServerConnection.SERVER_IO_URING_EVENTLOOP;
++                ServerConnection.logger.info("Using io_uring channel type");
++            } else if (Epoll.isAvailable() && this.mcServer.ai()) {
+                 // PandaSpigot start - Unix domain socket support
+                 if (address instanceof io.netty.channel.unix.DomainSocketAddress) {
+                     oclass = io.netty.channel.epoll.EpollServerDomainSocketChannel.class;
