@@ -1,0 +1,274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:13:28 +0900
+Subject: [PATCH] Frame packets in the compressor and encrypt frames in place
+
+The prepender copied every compressed packet into a new buffer to put the frame length in front,
+and the encrypter copied every frame through two arrays into another. The compressor now reserves
+three bytes for the frame length (a padded varint, which 1.7 and 1.8 clients read) and writes past
+the prepender; the encrypter encrypts the frame over itself, AES/CFB8 being a stream cipher.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 6011f2c62e44c31ca817e5cbb57a7fd45ef0aee5..2ca86d994b760ec0f4042732b3b3bccaab663a1c 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -109,6 +109,64 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+         this.treshold = i;
+     }
+ 
++    // Athena start - frame the packet here, and skip the prepender.
++    //
++    // The prepender's only job is the frame length in front of each packet, and it did that by
++    // allocating a second buffer and copying the whole packet into it, after this handler had just
++    // done the same to add the data length: two buffers and two copies per packet, small packets
++    // included. This writes the frame length itself, into three bytes reserved in front, and hands
++    // the frame on from the prepender's context, so the prepender never sees it.
++    //
++    // Three bytes because the length is only known once the packet is compressed. A varint padded
++    // with continuation bits decodes to the same number - 0x85 0x80 0x00 is 5 - and both the 1.8 and
++    // the 1.7 client read the frame length as a varint of up to three bytes, which is exactly what
++    // this always writes (it is how Velocity frames compressed packets for every version). Three
++    // bytes hold up to 2^21 - 1, the most a client accepts in any case.
++    private ChannelHandlerContext athenaPrepender;
++
++    @Override
++    public void write(ChannelHandlerContext ctx, Object msg, io.netty.channel.ChannelPromise promise) throws Exception {
++        ChannelHandlerContext prepender = this.athenaPrepender;
++
++        if (prepender == null || prepender.isRemoved()) {
++            prepender = this.athenaPrepender = ctx.pipeline().context("prepender");
++        }
++        if (prepender == null || !(msg instanceof ByteBuf)) {
++            super.write(ctx, msg, promise); // no prepender to stand in for: frame nothing
++            return;
++        }
++
++        ByteBuf in = (ByteBuf) msg;
++        ByteBuf out = null;
++
++        try {
++            out = ctx.alloc().ioBuffer(in.readableBytes() + 8);
++            int lengthAt = out.writerIndex();
++
++            out.writeMedium(0);
++            this.a(ctx, in, out);
++
++            int frame = out.writerIndex() - lengthAt - 3;
++
++            if (frame >= 1 << 21) {
++                throw new io.netty.handler.codec.EncoderException("a frame of " + frame + " bytes is more than a client reads");
++            }
++            out.setByte(lengthAt, frame & 0x7F | 0x80);
++            out.setByte(lengthAt + 1, frame >>> 7 & 0x7F | 0x80);
++            out.setByte(lengthAt + 2, frame >>> 14);
++        } catch (Throwable t) {
++            if (out != null) {
++                out.release();
++            }
++            throw t instanceof io.netty.handler.codec.EncoderException ? (io.netty.handler.codec.EncoderException) t : new io.netty.handler.codec.EncoderException(t);
++        } finally {
++            in.release();
++        }
++
++        prepender.write(out, promise);
++    }
++    // Athena end
++
+     protected void encode(ChannelHandlerContext channelhandlercontext, ByteBuf object, ByteBuf bytebuf) throws Exception {
+         this.a(channelhandlercontext, object, bytebuf);
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketEncrypter.java b/src/main/java/net/minecraft/server/PacketEncrypter.java
+index b7cbe76158742c71473aa46230498bc3420e3a83..fdd5cdca7f1b89c5125d3fc6ef0907f0d179e81e 100644
+--- a/src/main/java/net/minecraft/server/PacketEncrypter.java
++++ b/src/main/java/net/minecraft/server/PacketEncrypter.java
+@@ -21,4 +21,29 @@ public class PacketEncrypter extends MessageToByteEncoder<ByteBuf> {
+     protected void encode(ChannelHandlerContext channelhandlercontext, ByteBuf object, ByteBuf bytebuf) throws Exception {
+         this.a(channelhandlercontext, object, bytebuf);
+     }
++
++    // Athena start - encrypt the frame where it lies.
++    //
++    // AES/CFB8 turns n bytes into n bytes, one after the other, so a frame can be encrypted in its
++    // own buffer and passed on. This handler allocated a buffer per frame and copied the frame
++    // through two arrays into it; every frame reaching it is one the pipeline just made for this
++    // connection, so writing over it is safe. A read-only buffer still takes the copying way.
++    @Override
++    public void write(ChannelHandlerContext ctx, Object msg, io.netty.channel.ChannelPromise promise) throws Exception {
++        if (!(msg instanceof ByteBuf) || ((ByteBuf) msg).isReadOnly()) {
++            super.write(ctx, msg, promise);
++            return;
++        }
++
++        ByteBuf buf = (ByteBuf) msg;
++
++        try {
++            this.encryptionCodec.cipherInPlace(buf);
++        } catch (Throwable t) {
++            buf.release();
++            throw new io.netty.handler.codec.EncoderException(t);
++        }
++        ctx.write(buf, promise);
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/PacketEncryptionHandler.java b/src/main/java/net/minecraft/server/PacketEncryptionHandler.java
+index 4dd4e7ba47324dff4ff1f0f188ed80263902cda3..d67abe5a27cfd4a17712b1bc46a75133bbd7182b 100644
+--- a/src/main/java/net/minecraft/server/PacketEncryptionHandler.java
++++ b/src/main/java/net/minecraft/server/PacketEncryptionHandler.java
+@@ -36,6 +36,36 @@ public class PacketEncryptionHandler {
+         return bytebuf1;
+     }
+ 
++    // Athena start - encrypts the readable bytes of the buffer over themselves (see PacketEncrypter)
++    protected void cipherInPlace(ByteBuf bytebuf) throws ShortBufferException {
++        int i = bytebuf.readableBytes();
++        int at = bytebuf.readerIndex();
++
++        if (i == 0) {
++            return;
++        }
++        if (bytebuf.hasArray()) {
++            byte[] array = bytebuf.array();
++            int offset = bytebuf.arrayOffset() + at;
++
++            // a stream cipher's update is copy-safe: input and output may be the same bytes
++            if (this.cipher.update(array, offset, i, array, offset) != i) {
++                throw new IllegalStateException("the cipher is not a stream cipher");
++            }
++            return;
++        }
++
++        if (this.c.length < i) {
++            this.c = new byte[i];
++        }
++        bytebuf.getBytes(at, this.c, 0, i);
++        if (this.cipher.update(this.c, 0, i, this.c, 0) != i) {
++            throw new IllegalStateException("the cipher is not a stream cipher");
++        }
++        bytebuf.setBytes(at, this.c, 0, i);
++    }
++    // Athena end
++
+     protected void cipher(ByteBuf bytebuf, ByteBuf bytebuf1) throws ShortBufferException {
+         int i = bytebuf.readableBytes();
+         byte[] abyte = this.a(bytebuf);
+diff --git a/src/test/java/net/minecraft/server/AthenaFramingTest.java b/src/test/java/net/minecraft/server/AthenaFramingTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ec0493977cfb1300a24fc22acfa2e91b453bc52
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaFramingTest.java
+@@ -0,0 +1,112 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNull;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import javax.crypto.spec.SecretKeySpec;
++import org.junit.Test;
++
++/**
++ * Athena - the compressor frames packets itself, past the prepender, and the encrypter encrypts
++ * frames in their own buffers. A client reading the stream must get exactly the packets, and the
++ * cipher stream exactly the bytes, it got before.
++ */
++public class AthenaFramingTest {
++
++    private static byte[] random(Random random, int size) {
++        byte[] data = new byte[size];
++
++        // half random, half repetitive, so that some of it compresses
++        for (int i = 0; i < size; ++i) {
++            data[i] = (byte) (i % 2 == 0 ? random.nextInt(256) : i / 64);
++        }
++        return data;
++    }
++
++    @Test
++    public void framedPacketsDecodeAsTheyWereSent() {
++        EmbeddedChannel out = new EmbeddedChannel();
++
++        out.pipeline().addLast("prepender", PacketPrepender.INSTANCE).addLast("compress", new PacketCompressor(256));
++
++        Random random = new Random(7L);
++        List<byte[]> sent = new ArrayList<byte[]>();
++
++        for (int size : new int[] {1, 10, 255, 256, 257, 4000, 70000, 300000}) {
++            byte[] packet = random(random, size);
++
++            sent.add(packet);
++            out.writeOutbound(Unpooled.wrappedBuffer(packet));
++        }
++
++        // the server's own splitter and decompressor read what a client reads
++        EmbeddedChannel in = new EmbeddedChannel(new PacketSplitter(), new PacketDecompressor(256));
++        Object frame;
++
++        while ((frame = out.readOutbound()) != null) {
++            ByteBuf buf = (ByteBuf) frame;
++
++            assertEquals("a three-byte frame length", 0x80, buf.getByte(buf.readerIndex()) & 0x80);
++            in.writeInbound(buf);
++        }
++
++        for (byte[] packet : sent) {
++            ByteBuf got = (ByteBuf) in.readInbound();
++            byte[] bytes = new byte[got.readableBytes()];
++
++            got.readBytes(bytes);
++            got.release();
++            assertArrayEquals("a packet of " + packet.length + " bytes", packet, bytes);
++        }
++        assertNull(in.readInbound());
++    }
++
++    @Test
++    public void withoutAPrependerNothingIsFramed() {
++        EmbeddedChannel out = new EmbeddedChannel(new PacketCompressor(256));
++
++        out.writeOutbound(Unpooled.wrappedBuffer(new byte[] {1, 2, 3}));
++        ByteBuf buf = (ByteBuf) out.readOutbound();
++
++        assertEquals("the data length 0, then the packet", 4, buf.readableBytes());
++        assertEquals(0, buf.readByte());
++        buf.release();
++    }
++
++    @Test
++    public void inPlaceEncryptionIsTheSameStream() throws Exception {
++        SecretKeySpec key = new SecretKeySpec(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, "AES");
++        PacketEncryptionHandler old = new PacketEncryptionHandler(MinecraftEncryption.a(1, key));
++        PacketEncryptionHandler heap = new PacketEncryptionHandler(MinecraftEncryption.a(1, key));
++        PacketEncryptionHandler direct = new PacketEncryptionHandler(MinecraftEncryption.a(1, key));
++        Random random = new Random(11L);
++
++        for (int size : new int[] {0, 1, 17, 1000, 9000, 65536}) {
++            byte[] frame = random(random, size);
++            ByteBuf expected = Unpooled.buffer();
++
++            old.cipher(Unpooled.wrappedBuffer(frame), expected);
++
++            ByteBuf onHeap = Unpooled.buffer(size + 8);
++
++            onHeap.writeBytes(new byte[3]).readerIndex(3); // a frame that does not start the buffer
++            onHeap.writeBytes(frame);
++            heap.cipherInPlace(onHeap);
++
++            ByteBuf offHeap = Unpooled.directBuffer(size);
++
++            offHeap.writeBytes(frame);
++            direct.cipherInPlace(offHeap);
++
++            assertEquals(expected, onHeap);
++            assertEquals(expected, offHeap);
++        }
++    }
++}
