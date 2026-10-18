@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>サーバー診断 — sg1</title>
+<style>
+:root { --bg:#f5f6f4; --surface:#fff; --fg:#1c2125; --muted:#5c666e; --line:#dce1e0; --accent:#2b5d7d;
+  --c1:#2b5d7d; --c2:#3a8f6a; --c3:#b07d2a; --c4:#c0463a;
+  --warn:#b3261e; --warn-soft:#fbe9e7; --rec:#2b5d7d; --rec-soft:#e3edf3; --dec:#9a5b00; --dec-soft:#fbf0df; --ok:#2f7a4f; --ok-soft:#e3f1e8;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg:#121619; --surface:#192025; --fg:#e2e8ea; --muted:#98a4ab; --line:#2a343a; --accent:#7fb6d8;
+  --c1:#7fb6d8; --c2:#6fcf97; --c3:#e0b060; --c4:#f08070; --warn:#f08070; --warn-soft:#2e1a18; --rec:#7fb6d8; --rec-soft:#1b2c37; --dec:#f0b360; --dec-soft:#2d2215; --ok:#6fcf97; --ok-soft:#17291f; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font: 15px/1.7 "Hiragino Sans","Noto Sans JP",system-ui,sans-serif; padding: 32px max(16px, env(safe-area-inset-left)) 64px; }
+main { max-width: 880px; margin: 0 auto; display: grid; gap: 36px; }
+h1 { font-size: 28px; margin: 0; line-height: 1.3; } h2 { font-size: 20px; margin: 0; } h3 { font-size: 16px; margin: 0; }
+p { margin: 0; } .muted { color: var(--muted); } .small { font-size: 13px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+header.top { display: grid; gap: 8px; }
+section { display: grid; gap: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.kpi { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 2px; min-width: 0; }
+.kpi .v { font-family: var(--mono); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi .k { font-size: 13px; font-weight: 600; } .kpi .c { font-size: 12px; color: var(--muted); }
+.rec { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 8px; padding: 12px 16px; display: grid; gap: 8px; }
+.rec header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.badge { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 99px; }
+.rec.lv-warn { border-left-color: var(--warn); } .rec.lv-warn .badge { background: var(--warn-soft); color: var(--warn); }
+.rec.lv-rec { border-left-color: var(--rec); } .rec.lv-rec .badge { background: var(--rec-soft); color: var(--rec); }
+.rec.lv-dec { border-left-color: var(--dec); } .rec.lv-dec .badge { background: var(--dec-soft); color: var(--dec); }
+.rec.lv-ok { border-left-color: var(--ok); } .rec.lv-ok .badge { background: var(--ok-soft); color: var(--ok); }
+dl { margin: 0; display: grid; grid-template-columns: 64px 1fr; gap: 4px 12px; font-size: 14px; }
+dt { color: var(--muted); } dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+code { font-family: var(--mono); font-size: 12.5px; background: var(--rec-soft); border-radius: 4px; padding: 1px 5px; }
+figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px 8px; }
+figcaption { font-weight: 600; font-size: 14px; } figcaption small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+svg { width: 100%; height: auto; display: block; }
+svg .grid { stroke: var(--line); stroke-width: 1; } svg .axis { fill: var(--muted); font-size: 11px; font-family: var(--mono); }
+svg .hline { stroke: var(--c4); stroke-dasharray: 5 4; stroke-width: 1.2; } svg .hl { fill: var(--c4); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.tbl { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child th, tr:last-child td { border-bottom: none; }
+th { font-weight: 500; color: var(--muted); white-space: nowrap; }
+td.r { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+.bar { display: inline-block; height: 10px; border-radius: 3px; background: var(--c1); min-width: 2px; }
+.okh { margin-top: 6px; font-size: 15px; } .okdot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 8px; vertical-align: 1px; }
+.note.good { border-left-color: var(--ok); background: var(--ok-soft); }
+.note { border-left: 3px solid var(--dec); background: var(--dec-soft); padding: 10px 14px; border-radius: 0 8px 8px 0; font-size: 14px; }
+ul { margin: 0; padding-left: 1.2em; }
+footer { font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 12px; }
+@media (max-width: 520px) { dl { grid-template-columns: 1fr; } dt { margin-top: 4px; } }
+@media print { body { background: #fff; } figure, .rec, .kpi { break-inside: avoid; } }
+</style></head>
+<body><main>
+<header class="top">
+  <span class="eyebrow">Athena サーバー診断</span>
+  <h1>sg1</h1>
+  <p class="muted">2026-10-18 21:07 〜 21:09（2 分） · Intel Xeon Processor (Icelake) · 2 CPU · 960 MB · kernel 6.8.0-147-generic</p>
+</header>
+<p class="note">このサーバーからは、Athenaのtickの記録（athena-diag.csv）が取れませんでした。Athena 0317より前の版か、Athena以外のサーバーです。TPS、tickの時間、プレイヤー数、チャンク数は、このレポートに含まれていません。</p>
+<section>
+  <h2>要点</h2>
+  <div class="kpis"><div class="kpi"><span class="v">—</span><span class="k">使ったCPU（プレイ中の平均）</span><span class="c">コア数。待機中 —、95%値 0.004</span></div><div class="kpi"><span class="v">110 MB</span><span class="k">プロセスのメモリ（anonの最大）</span><span class="c">RSSの最大 144 MB</span></div><div class="kpi"><span class="v">— MB</span><span class="k">GC後のヒープの最大</span><span class="c">上限 -Xmx 144 M</span></div><div class="kpi"><span class="v">0 回</span><span class="k">フルGC</span><span class="c">最長の停止 — ms</span></div></div>
+</section>
+<section>
+  <h2>提案</h2>
+  <p class="muted small">「要対応」は今の設定で問題が出ているもの、「推奨」は計測の結果から変えた方がよいもの、「要判断」はゲームの内容によって決めるものです。「見込み」は、Athenaの開発で同じ変更を計測したときの値です。負荷が違うので、このサーバーで同じ値になるとは限りません。変更したら、もう一度このキットで測って比べてください。</p>
+  <article class="rec lv-dec"><header><span class="badge">要判断</span><h3>ヒープの大きさを判断できません</h3></header><dl><dt>今</dt><dd>-Xmx144M、測った時間にGCが一度も起きなかった</dd><dt>変更</dt><dd>プレイヤーがいる時間帯を含めて、もっと長く測る</dd><dt>根拠</dt><dd>ヒープの大きさは、GCの後に残った量から決めます。GCが起きないほど負荷が軽い時間だけでは、必要な量が分かりません。</dd></dl></article><h3 class="okh">確認して問題がなかった項目</h3><div class="tbl"><table><tbody><tr><th><span class="okdot"></span>GCの種類</th><td>ParallelGC</td></tr><tr><th><span class="okdot"></span>オブジェクトのヘッダ</th><td>UseCompactObjectHeaders あり</td></tr><tr><th><span class="okdot"></span>glibc のメモリ領域</th><td>MALLOC_ARENA_MAX=2</td></tr><tr><th><span class="okdot"></span>AOTキャッシュ</th><td>あり（ArchiveRelocationMode=0）</td></tr><tr><th><span class="okdot"></span>Nettyのスレッド数</th><td>netty-threads: 1（CPU 2個）</td></tr><tr><th><span class="okdot"></span>視界の外のチャンク</th><td>chunkUnloadMargin: 2</td></tr><tr><th><span class="okdot"></span>アンチXray</th><td>anti-xray: 無効（チャンクのキャッシュが効く）</td></tr><tr><th><span class="okdot"></span>マシンの空きメモリ</th><td>空きの最小 513 MB（全体 960 MB）</td></tr><tr><th><span class="okdot"></span>VPSのCPUのsteal</th><td>平均 0.1%</td></tr></tbody></table></div>
+</section>
+<section>
+  <h2>時間ごとの変化</h2>
+  <figure><figcaption>使ったCPU <small>コア数</small></figcaption><svg viewBox="0 0 760 200" role="img" aria-label="使ったCPU"><line x1="52" x2="746" y1="174.0" y2="174.0" class="grid"/><text x="46" y="178.0" class="axis" text-anchor="end">0</text><line x1="52" x2="746" y1="120.7" y2="120.7" class="grid"/><text x="46" y="124.7" class="axis" text-anchor="end">0.002</text><line x1="52" x2="746" y1="67.3" y2="67.3" class="grid"/><text x="46" y="71.3" class="axis" text-anchor="end">0.004</text><line x1="52" x2="746" y1="14.0" y2="14.0" class="grid"/><text x="46" y="18.0" class="axis" text-anchor="end">0.006</text><text x="52.0" y="194" class="axis" text-anchor="start">21:07</text><text x="190.8" y="194" class="axis" text-anchor="middle">21:07</text><text x="329.6" y="194" class="axis" text-anchor="middle">21:08</text><text x="468.4" y="194" class="axis" text-anchor="middle">21:08</text><text x="607.2" y="194" class="axis" text-anchor="middle">21:09</text><text x="746.0" y="194" class="axis" text-anchor="end">21:09</text><path d="M89.4,67.3 L116.1,94.0 L142.8,85.1 L174.8,107.3 L201.5,99.3 L228.2,94.0 L254.9,97.8 L281.6,100.7 L308.2,97.0 L334.9,99.3 L361.6,101.3 L388.3,98.4 L415.0,102.9 L441.7,102.9 L468.4,102.9 L495.1,98.4 L521.8,102.9 L548.5,107.3 L575.2,102.9 L601.9,102.9 L628.6,102.9 L655.2,102.9 L681.9,102.9" fill="none" stroke="var(--c1)" stroke-width="1.6"/></svg><div class="legend"><span><i style="background:var(--c1)"></i>CPU（1分平均）</span></div></figure><figure><figcaption>メモリ <small>MB</small></figcaption><svg viewBox="0 0 760 200" role="img" aria-label="メモリ"><line x1="52" x2="746" y1="174.0" y2="174.0" class="grid"/><text x="46" y="178.0" class="axis" text-anchor="end">0</text><line x1="52" x2="746" y1="120.7" y2="120.7" class="grid"/><text x="46" y="124.7" class="axis" text-anchor="end">200</text><line x1="52" x2="746" y1="67.3" y2="67.3" class="grid"/><text x="46" y="71.3" class="axis" text-anchor="end">400</text><line x1="52" x2="746" y1="14.0" y2="14.0" class="grid"/><text x="46" y="18.0" class="axis" text-anchor="end">600</text><text x="52.0" y="194" class="axis" text-anchor="start">21:07</text><text x="190.8" y="194" class="axis" text-anchor="middle">21:07</text><text x="329.6" y="194" class="axis" text-anchor="middle">21:08</text><text x="468.4" y="194" class="axis" text-anchor="middle">21:08</text><text x="607.2" y="194" class="axis" text-anchor="middle">21:09</text><text x="746.0" y="194" class="axis" text-anchor="end">21:09</text><path d="M62.7,135.7 L89.4,135.7 L116.1,135.7 L142.8,135.7 L174.8,135.7 L201.5,135.7 L228.2,135.7 L254.9,135.7 L281.6,135.7 L308.2,135.7 L334.9,135.7 L361.6,135.7 L388.3,135.7 L415.0,135.7 L441.7,135.7 L468.4,135.7 L495.1,135.7 L521.8,135.7 L548.5,135.7 L575.2,135.7 L601.9,135.7 L628.6,135.7 L655.2,135.7 L681.9,135.7" fill="none" stroke="var(--c1)" stroke-width="1.6"/><path d="M62.7,144.7 L89.4,144.7 L116.1,144.7 L142.8,144.7 L174.8,144.7 L201.5,144.7 L228.2,144.7 L254.9,144.7 L281.6,144.7 L308.2,144.7 L334.9,144.7 L361.6,144.7 L388.3,144.7 L415.0,144.7 L441.7,144.7 L468.4,144.7 L495.1,144.7 L521.8,144.7 L548.5,144.7 L575.2,144.7 L601.9,144.7 L628.6,144.7 L655.2,144.7 L681.9,144.7" fill="none" stroke="var(--c2)" stroke-width="1.6"/><path d="M62.7,37.3 L89.4,31.9 L116.1,29.8 L142.8,29.3 L174.8,25.5 L201.5,25.6 L228.2,25.7 L254.9,25.8 L281.6,25.8 L308.2,25.9 L334.9,26.0 L361.6,25.7 L388.3,25.2 L415.0,25.7 L441.7,25.8 L468.4,25.8 L495.1,25.8 L521.8,25.8 L548.5,26.1 L575.2,26.1 L601.9,26.2 L628.6,26.2 L655.2,26.2 L681.9,26.2" fill="none" stroke="var(--c3)" stroke-width="1.6"/></svg><div class="legend"><span><i style="background:var(--c1)"></i>RSS</span><span><i style="background:var(--c2)"></i>anon</span><span><i style="background:var(--c3)"></i>マシンの空き</span></div></figure>
+</section>
+<section>
+  <h2>CPUの内訳（スレッドごと）</h2>
+  <div class="tbl"><table><thead><tr><th>スレッド</th><th class="r">コア数</th><th class="r">割合</th><th style="width:40%"></th></tr></thead><tbody><tr><td>サーバースレッド（ゲームの処理）</td><td class="r">0.002</td><td class="r">87%</td><td><span class="bar" style="width:87%"></span></td></tr><tr><td>その他（プラグインなど）</td><td class="r">0.000</td><td class="r">13%</td><td><span class="bar" style="width:13%"></span></td></tr></tbody></table></div>
+  <p class="muted small">期間全体の平均です。VPSのCPUのsteal（他の利用者に取られた時間）の平均は 0.1% でした。</p>
+</section>
+<section>
+  <h2>GC</h2>
+  <div class="tbl"><table><thead><tr><th>種類と原因</th><th class="r">回数</th><th class="r">最長の停止 ms</th></tr></thead><tbody><tr><td colspan="3">GCのログが取れませんでした</td></tr></tbody></table></div>
+  <p class="muted small">ヤングGCは1分あたり — 回、停止の95%値は — ms。50 msを超える停止は、プレイヤーにはカクつきとして見えます。</p>
+</section>
+<section>
+  <h2>設定</h2>
+  <div class="tbl"><table><tbody><tr><th>Java</th><td>OpenJDK 64-Bit Server VM version 25.0.4.1+1-1-24.04.4-Ubuntu</td></tr><tr><th>GC</th><td>Parallel</td></tr><tr><th>ヒープ（-Xmx）</th><td>144 M</td></tr><tr><th>view-distance</th><td>spigot.yml 8（server.properties 8）</td></tr><tr><th>max-players</th><td>24</td></tr><tr><th>netty-threads</th><td>1</td></tr><tr><th>chunkUnloadMargin</th><td>2</td></tr><tr><th>network-compression-threshold</th><td>256</td></tr><tr><th>MALLOC_ARENA_MAX</th><td>2</td></tr><tr><th>AOTキャッシュ</th><td>あり</td></tr></tbody></table></div>
+  <p class="muted small">プラグイン：SurvivalGames</p>
+</section>
+<section>
+  <h2>測り方</h2>
+  <ul class="small muted">
+    <li>サーバーを止めずに、5 秒ごとにプロセスのCPU時間とメモリ（/proc）を記録しました。</li>
+    <li>GCのログは、測っている間だけJVMに追加し（jcmd VM.log）、終わったら外しました。</li>
+    <li>TPS・tickの時間・プレイヤー数・チャンク数は、Athena本体が5秒ごとに書き出した値です。</li>
+    <li>プレイヤー名、チャット、プレイヤーのIPアドレス、ワールドのデータは集めていません。設定ファイルのパスワードやトークン、アドレスは消してあります。</li>
+  </ul>
+</section>
+<footer>sg1_diag.tar.gz から作成 · 2026-10-18 21:09 · Athena diagnostics kit</footer>
+</main></body></html>
