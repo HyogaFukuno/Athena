@@ -1,0 +1,498 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 19 Oct 2026 02:42:42 +0900
+Subject: [PATCH] Spread a match start's chunk work over ticks
+
+The diagnostics kit found a 0.5-1.4 s tick whenever an SG match started (20 bots, Lobby_Games).
+JFR showed what it was made of, and each part is now spread out or gone:
+
+- ChunkIOExecutor finished every load the I/O threads had completed in one tick: ~660 chunks'
+  entities, ChunkLoadEvent and neighbours (0.55 s) when 20 players arrived in a new world. A tick
+  now spends at most chunkLoadFinishMillisPerTick (pandaspigot.yml, default 10) and leaves the rest
+  for the next ticks. A load a synchronous get() finishes meanwhile is not finished twice; a world
+  unloaded meanwhile does not get its chunk put back (WorldServer.athenaUnloaded).
+- A waiting load held its whole NBT, block arrays included: the compound is trimmed to what the
+  main-thread half reads once the chunk is built (only for compounds read from disk, not ones taken
+  from the save queue). Without this the budget ran a 144M heap into seven full GCs.
+- Unloading saves every chunk of an ordinary world, changed or not, ~1 ms each on this thread, 100 a
+  tick: an emptied lobby made ~140 ms ticks. chunkUnloadMillisPerTick (default 10) stops earlier.
+- Template worlds skip recreateStructures on load: they generate nothing, and the village and
+  stronghold checks ran hundreds of random seeds per chunk.
+- Chunks loaded by AthenaChunkPreloader get their packet cache built as they load and compressed on
+  a low-priority thread, instead of on the first send when every player arrives at once.
+
+sgbench3, 20 bots, longest tick at the match start (with SG loading the arena 10 s ahead):
+base 995 / 1,439 ms -> 136 / 129 ms; this server alone with the old SG: 352 ms. Heap after GC peak
+101-105 MB -> 56-61 MB. Server tests 5518/5518.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 80c9fb65d1b2500a032c4b5da4909a2a0a10c012..30d13005923e53bbd8ed30df8986f1b8f7c4f475 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -70,6 +70,10 @@ public class PandaSpigotConfig {
+             net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
+             // Athena - the network deflate level, read by each Netty thread's deflater as it is made
+             net.minecraft.server.PacketCompressor.setLevel(config.networkCompressionLevel);
++            // Athena - how long a tick may spend finishing chunk loads
++            org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.setFinishBudgetMillis(config.chunkLoadFinishMillisPerTick);
++            // Athena - and unloading (saving) them
++            net.minecraft.server.ChunkProviderServer.setUnloadBudgetMillis(config.chunkUnloadMillisPerTick);
+             // Athena - and the guard's switches
+             net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log, config.guard.kick, config.guard.kickMessage, config.guard.kickViolations, config.guard.kickWindowSeconds);
+             
+@@ -187,6 +191,21 @@ public class PandaSpigotConfig {
+     public int networkCompressionLevel = 6;
+     // Athena end
+ 
++    // Athena start - spread finished chunk loads over ticks
++    @Comment("How many milliseconds one tick may spend finishing chunks read from disk (their entities,\n" +
++        "ChunkLoadEvent, neighbours); the rest wait for the next ticks. Many players arriving in a\n" +
++        "world at once request hundreds of chunks together, and finishing them all in one tick froze\n" +
++        "the server for up to a second. 0 finishes everything in the tick it was read, as vanilla.\n" +
++        "Default: 10")
++    public int chunkLoadFinishMillisPerTick = 10;
++
++    @Comment("How many milliseconds one tick may spend unloading chunks (an ordinary world saves each\n" +
++        "one as it goes); the rest stay queued for the next ticks. Everyone leaving a world at once\n" +
++        "queued its whole view and made ~140 ms ticks. 0 keeps only vanilla's 100 chunks a tick.\n" +
++        "Default: 10")
++    public int chunkUnloadMillisPerTick = 10;
++    // Athena end
++
+     // Athena start - server-authoritative movement and combat checks; see net.minecraft.server.AthenaGuard
+     @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
+         "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index ee2e2efbc1c9f186865716226da12e31459288a9..02734d1d5f94a325c6e1d0f5881896dab9423108 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -31,6 +31,19 @@ final class AthenaChunkPacketCache {
+ 
+     private static final ThreadLocal<Deflater> DEFLATER = ThreadLocal.withInitial(Deflater::new);
+ 
++    // Athena - one low-priority thread that compresses caches built ahead of their first send; see
++    // Chunk.athenaWarmPacketCache
++    private static final java.util.concurrent.ExecutorService AHEAD = java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
++        Thread thread = new Thread(runnable, "Athena chunk packet compressor");
++        thread.setDaemon(true);
++        thread.setPriority(Thread.MIN_PRIORITY);
++        return thread;
++    });
++
++    static void compressAhead(final AthenaChunkPacketCache cache, final int packetId, final int threshold) {
++        AHEAD.execute(() -> cache.frame(packetId, threshold));
++    }
++
+     final int chunkX;
+     final int chunkZ;
+     private final ChunkSection[] sections = new ChunkSection[16];
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+index 32baa0131b46eaf9b13108a98f8a9ea8de405d09..9ae1cfa3de7c3b757909778983ee97c7820b9b09 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+@@ -92,11 +92,18 @@ public final class AthenaChunkPreloader {
+                     ++sent;
+                     ++batch.pending;
+                     final Batch owner = batch;
++                    final int chunkX = x, chunkZ = z;
+                     provider.getChunkAt(x, z, new Runnable() {
+                         @Override
+                         public void run() {
+                             --owner.pending;
+                             ++owner.loaded;
++                            // the players this preload is for will be sent it: build its packet now,
++                            // spread over the preload, rather than all at once when they arrive
++                            Chunk chunk = owner.world.chunkProviderServer.getChunkIfLoaded(chunkX, chunkZ);
++                            if (chunk != null) {
++                                chunk.athenaWarmPacketCache();
++                            }
+                         }
+                     });
+                 }
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index 2080b7861b1377d5351a84577289a99aebf4382d..ee913abfe86b20aed134f3e4b24a12fa04e41ef9 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -71,7 +71,7 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+         AthenaTemplateRegion region = this.region(i, j);
+         NBTTagCompound nbttagcompound = region == null ? null : region.read(i & 31, j & 31);
+ 
+-        return nbttagcompound == null ? null : this.a(world, i, j, nbttagcompound);
++        return nbttagcompound == null ? null : athenaTrimAfterBuild(this.a(world, i, j, nbttagcompound)); // Athena - see there
+     }
+ 
+     /** Nothing is saved: a template world's changes live in memory only. */
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 72e79bf2c66bc301121bf9d49b3a26d04e88cefc..22315f3959b73ebcc25ce494beddd40114a132e4 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -162,6 +162,34 @@ public class Chunk {
+ 
+         return new PacketPlayOutMapChunk(cache);
+     }
++
++    /**
++     * Builds the packet cache ahead of the first player to need it, and has it compressed off the
++     * server thread. For chunks preloaded before players arrive (AthenaChunkPreloader): otherwise the
++     * first send of every chunk of a newly loaded match map builds its cache on the server thread, and
++     * players arriving together made that ~0.2 s of one tick. The extraction stays here - it reads the
++     * chunk - and is spread over the preload's ticks; the deflate, ~1 ms a chunk, is not the server
++     * thread's, and once it is done the cache keeps only the compressed frame.
++     */
++    void athenaWarmPacketCache() {
++        MinecraftServer server = MinecraftServer.getServer();
++        int threshold = server == null ? -1 : server.aK();
++
++        if (threshold < 0) {
++            return; // no compression: packets are never served from the cache
++        }
++        AthenaChunkPacketCache cache = this.athenaPacketCache;
++
++        if (cache != null && cache.matches(this)) {
++            return;
++        }
++        PacketPlayOutMapChunk packet = this.athenaFullChunkPacket();
++        Integer id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, packet);
++
++        if (id != null) {
++            AthenaChunkPacketCache.compressAhead(packet.athenaCache, id, threshold);
++        }
++    }
+     // Athena end
+ 
+     // PaperSpigot start - ChunkMap caching
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 046bb2a55fd043d7012f1445a15f61d8bc2800ee..6fd52acd15f3d71bf5c3c9a0f196eeeb246465f3 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -584,6 +584,15 @@ public class ChunkProviderServer implements IChunkProvider {
+         // CraftBukkit end
+     }
+ 
++    // Athena start - whether a chunk read from storage has its villages, strongholds and the like
++    // registered again with the generator. That is for generating the chunks round it later; a template
++    // world generates nothing (outside its pinned square there are no chunks at all), and the checks ran
++    // a few hundred random seeds per chunk, per structure type, on every load of a match map.
++    public boolean athenaRecreatesStructures() {
++        return this.chunkProvider != null && !(this.world.getDataManager() instanceof AthenaTemplateDataManager);
++    }
++    // Athena end
++
+     public Chunk loadChunk(int i, int j) {
+         if (this.chunkLoader == null) {
+             return null;
+@@ -593,7 +602,7 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+                 if (chunk != null) {
+                     chunk.setLastSaved(this.world.getTime());
+-                    if (this.chunkProvider != null) {
++                    if (this.athenaRecreatesStructures()) { // Athena - not for a template world
+                         world.timings.syncChunkLoadStructuresTimer.startTiming(); // Spigot
+                         this.chunkProvider.recreateStructures(chunk, i, j);
+                         world.timings.syncChunkLoadStructuresTimer.stopTiming(); // Spigot
+@@ -755,11 +764,31 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+     }
+ 
++    // Athena start - how long one tick may spend unloading chunks.
++    //
++    // Unloading a chunk of an ordinary world saves it - always, changed or not - and the snapshot of
++    // its sections is taken on this thread (AthenaDeferredSectionData.attach): about a millisecond a
++    // chunk. When everyone leaves a world at once - a lobby emptied by a match start, players passing
++    // through the default world on their way in - its whole view square is queued together and the
++    // fixed cap of 100 a tick made ~140 ms ticks. The cap stays; this stops earlier when the time is
++    // spent. Set from pandaspigot.yml (chunkUnloadMillisPerTick); 0 is the cap alone.
++    private static volatile long athenaUnloadBudgetNanos = 10_000_000L;
++
++    public static void setUnloadBudgetMillis(int millis) {
++        athenaUnloadBudgetNanos = Math.max(0, millis) * 1_000_000L;
++    }
++    // Athena end
++
+     public boolean unloadChunks() {
+         if (!this.world.savingDisabled) {
+             // CraftBukkit start
+             Server server = this.world.getServer();
++            long athenaStart = System.nanoTime(); // Athena - see athenaUnloadBudgetNanos
+             for (int i = 0; i < 100 && !this.unloadQueue.isEmpty(); ++i) {
++                // Athena - within the per-tick budget; what is left stays queued for the next ticks
++                if (i > 0 && athenaUnloadBudgetNanos > 0L && System.nanoTime() - athenaStart >= athenaUnloadBudgetNanos) {
++                    break;
++                }
+                 long chunkcoordinates = this.unloadQueue.popFirst();
+                 Chunk chunk = this.chunks.get(chunkcoordinates);
+                 if (chunk == null) continue;
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index e37d0214459d1657a71d1c7eae8d9c94e2661c1d..0241fd1fc6035fbec9d4e645e71d19592adcae45 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -70,11 +70,34 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             }
+ 
+             nbttagcompound = NBTCompressedStreamTools.read(datainputstream);
++            // Athena - read from disk, so nobody else holds it: drop what the chunk is built from
++            return athenaTrimAfterBuild(this.a(world, i, j, nbttagcompound));
+         }
+ 
+-        return this.a(world, i, j, nbttagcompound);
++        return this.a(world, i, j, nbttagcompound); // Athena - a save still queued: it is written later, leave it whole
+     }
+ 
++    // Athena start - what an asynchronous load keeps until its main-thread half runs.
++    //
++    // The compound a load returns is held by the queued load until ChunkIOProvider.callStage2 reads the
++    // entities, tile entities and scheduled ticks out of it, and that can now be a few ticks later (the
++    // per-tick budget in ChunkIOExecutor). The block, light, biome and height data in it have been made
++    // into the Chunk by then - a section's arrays are taken over, not copied, where they are kept - so
++    // the compound's own references to them only kept the rest alive: with hundreds of loads waiting at
++    // a match start, enough to run a 144M heap into seven full GCs. Only a compound read from disk for
++    // this load may be trimmed; one taken from the save queue is still to be written.
++    static Object[] athenaTrimAfterBuild(Object[] data) {
++        if (data != null && data[1] instanceof NBTTagCompound) {
++            NBTTagCompound level = ((NBTTagCompound) data[1]).getCompound("Level");
++
++            level.remove("Sections");
++            level.remove("Biomes");
++            level.remove("HeightMap");
++        }
++        return data;
++    }
++    // Athena end
++
+     protected Object[] a(World world, int i, int j, NBTTagCompound nbttagcompound) { // CraftBukkit - return Chunk -> Object[]
+         if (!nbttagcompound.hasKeyOfType("Level", 10)) {
+             ChunkRegionLoader.logger.error("Chunk file at " + i + "," + j + " is missing level data, skipping");
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 3e4546ff9e66ad43d12859819e208447e5fffda1..2a2db852605f0051024d07c7c39cc620abe4b4f9 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -40,6 +40,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     private final Map<UUID, Entity> entitiesByUUID = Maps.newHashMap();
+     public ChunkProviderServer chunkProviderServer;
+     public boolean savingDisabled;
++    // Athena - set once CraftServer.unloadWorld has taken the world out: a chunk load finished after
++    // that (they can wait a few ticks, see ChunkIOExecutor) must not put its chunk back
++    public boolean athenaUnloaded;
+     private boolean allPlayersSleeping;
+     private int emptyTime;
+     private final PortalTravelAgent worldTeleporter;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index a869625b36ba95d2758412f6f2a563305d513154..3669c93709daaf082340d6bee568da3f070d3add 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1091,6 +1091,7 @@ public final class CraftServer implements Server {
+ 
+         worlds.remove(world.getName().toLowerCase());
+         console.worlds.remove(console.worlds.indexOf(handle));
++        handle.athenaUnloaded = true; // Athena - see ChunkIOProvider.callStage2
+ 
+         // Athena - a template world keeps its own read-only region files; the cache below never had them
+         if (handle.getDataManager() instanceof AthenaTemplateDataManager) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+index 4f7b89cabd99176a1eb706ccf052f4f4a89a24fd..c541c93aca19b222ca2c32d55ddcd0c81ef78014 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+@@ -31,7 +31,15 @@ public class ChunkIOExecutor {
+         instance.setActiveThreads(size);
+     }
+ 
++    // Athena - how long one tick may spend finishing chunk loads; 0 finishes all of them. Set from
++    // pandaspigot.yml (chunkLoadFinishMillisPerTick) before the worlds load
++    private static volatile long finishBudgetNanos = 10_000_000L;
++
++    public static void setFinishBudgetMillis(int millis) {
++        finishBudgetNanos = Math.max(0, millis) * 1_000_000L;
++    }
++
+     public static void tick() {
+-        instance.finishActive();
++        instance.finishActive(finishBudgetNanos); // Athena - within the per-tick budget
+     }
+ }
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+index f5ce20c4e6133f141be2ceac00e2ff5a72f24280..b263818b2fa0b7fe1c6da6c2f2a90489df6b3cd2 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+@@ -38,6 +38,12 @@ class ChunkIOProvider implements AsynchronousExecutor.CallBackProvider<QueuedChu
+ 
+     // sync stuff
+     public void callStage2(QueuedChunk queuedChunk, Chunk chunk) throws RuntimeException {
++        // Athena - loads can now wait a few ticks to be finished (ChunkIOExecutor's budget): a world
++        // unloaded in the meantime must not get a chunk put back into its map, which would keep the
++        // whole world alive
++        if (queuedChunk.provider.world.athenaUnloaded) {
++            return;
++        }
+         if (chunk == null) {
+             // If the chunk loading failed just do it synchronously (may generate)
+             queuedChunk.provider.originalGetChunkAt(queuedChunk.x, queuedChunk.z);
+@@ -50,7 +56,7 @@ class ChunkIOProvider implements AsynchronousExecutor.CallBackProvider<QueuedChu
+         queuedChunk.provider.creatureCensus.chunkAdded(chunk); // Athena - fold the chunk's tally in
+         chunk.addEntities();
+ 
+-        if (queuedChunk.provider.chunkProvider != null) {
++        if (queuedChunk.provider.athenaRecreatesStructures()) { // Athena - not for a template world
+             queuedChunk.provider.world.timings.syncChunkLoadStructuresTimer.startTiming(); // Spigot
+             queuedChunk.provider.chunkProvider.recreateStructures(chunk, queuedChunk.x, queuedChunk.z);
+             queuedChunk.provider.world.timings.syncChunkLoadStructuresTimer.stopTiming(); // Spigot
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+index d4861d5580f9466dddcdc89d020e4ed141c93501..67a3e6d370e49a2c5e2ac5fe96143d4171ea7026 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+@@ -349,6 +349,34 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+         }
+     }
+ 
++    // Athena start - finish what the worker threads completed, but stop once budgetNanos have gone.
++    //
++    // Everything a tick's worth of reads completed used to be finished in that tick. When many
++    // requests go out together - players arriving in a newly loaded world ask for their whole view at
++    // once - the reads come back within a fraction of a second and their main-thread halves (entities,
++    // ChunkLoadEvent, neighbours) landed in one tick: ~660 chunks, 0.55 s, at an SG match start. What
++    // is left over is finished on the next ticks, oldest first. At least one task is finished per call,
++    // so the queue always moves. A task that a synchronous get() finishes in the meantime is FINISHED,
++    // and finish() does nothing for it when its turn comes.
++    public void finishActive(long budgetNanos) throws E {
++        if (budgetNanos <= 0L) {
++            finishActive();
++            return;
++        }
++
++        final Queue<Task> finished = this.finished;
++        final long start = System.nanoTime();
++        Task task;
++
++        while ((task = finished.poll()) != null) {
++            task.finish();
++            if (System.nanoTime() - start >= budgetNanos) {
++                break;
++            }
++        }
++    }
++    // Athena end
++
+     public void setActiveThreads(final int coreSize) {
+         pool.setCorePoolSize(coreSize);
+     }
+diff --git a/src/test/java/org/bukkit/craftbukkit/util/AthenaFinishBudgetTest.java b/src/test/java/org/bukkit/craftbukkit/util/AthenaFinishBudgetTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2ae19d928930cb4ad24b21fd2a2a9f15302c08d6
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/util/AthenaFinishBudgetTest.java
+@@ -0,0 +1,114 @@
++package org.bukkit.craftbukkit.util;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.Test;
++
++/**
++ * Athena - AsynchronousExecutor.finishActive(budget): finished loads wait for later ticks once a tick's
++ * budget is spent, are finished in the order they completed, and a load a synchronous get() finished
++ * in the meantime is not finished twice.
++ */
++public class AthenaFinishBudgetTest {
++
++    private static final class Provider implements AsynchronousExecutor.CallBackProvider<Integer, Integer, Runnable, RuntimeException> {
++        final List<Integer> stage2 = new ArrayList<Integer>();
++        final long stage2Nanos;
++
++        Provider(long stage2Nanos) {
++            this.stage2Nanos = stage2Nanos;
++        }
++
++        public Integer callStage1(Integer parameter) {
++            return parameter;
++        }
++
++        public void callStage2(Integer parameter, Integer object) {
++            long until = System.nanoTime() + this.stage2Nanos;
++            while (System.nanoTime() < until) {
++                // a chunk's main-thread half takes time
++            }
++            this.stage2.add(parameter);
++        }
++
++        public void callStage3(Integer parameter, Integer object, Runnable callback) {
++            callback.run();
++        }
++
++        public Thread newThread(Runnable runnable) {
++            Thread thread = new Thread(runnable, "test loader");
++            thread.setDaemon(true);
++            return thread;
++        }
++    }
++
++    private static void awaitReads(AsynchronousExecutor<?, ?, ?, ?> executor, int count) throws InterruptedException {
++        for (int i = 0; i < 500 && executor.finished.size() < count; ++i) {
++            Thread.sleep(2);
++        }
++        assertEquals("reads completed", count, executor.finished.size());
++    }
++
++    @Test
++    public void aBudgetSpreadsTheFinishingOverTicks() throws InterruptedException {
++        Provider provider = new Provider(2_000_000L); // 2 ms each
++        AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException> executor = new AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException>(provider, 1);
++        final int[] callbacks = new int[1];
++
++        for (int i = 0; i < 20; ++i) {
++            executor.add(i, () -> ++callbacks[0]);
++        }
++        awaitReads(executor, 20);
++
++        executor.finishActive(5_000_000L); // 5 ms: three or so
++        int first = provider.stage2.size();
++        assertTrue("some finished: " + first, first >= 1);
++        assertTrue("not all in one tick: " + first, first < 20);
++
++        int ticks = 1;
++        while (provider.stage2.size() < 20 && ticks < 100) {
++            executor.finishActive(5_000_000L);
++            ++ticks;
++        }
++        assertEquals(20, provider.stage2.size());
++        assertEquals("every callback ran once", 20, callbacks[0]);
++        // one worker thread completes them in order, and they are finished in that order
++        for (int i = 0; i < 20; ++i) {
++            assertEquals(Integer.valueOf(i), provider.stage2.get(i));
++        }
++    }
++
++    @Test
++    public void aLoadFinishedSynchronouslyWhileWaitingIsNotFinishedAgain() throws InterruptedException {
++        Provider provider = new Provider(0L);
++        AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException> executor = new AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException>(provider, 1);
++        final int[] callbacks = new int[1];
++
++        executor.add(7, () -> ++callbacks[0]);
++        awaitReads(executor, 1);
++
++        // the chunk is needed now (a teleport): it is finished before its turn in the queue
++        assertEquals(Integer.valueOf(7), executor.getSkipQueue(7));
++        assertEquals(1, provider.stage2.size());
++
++        executor.finishActive(1L); // its turn: nothing more happens
++        assertEquals(1, provider.stage2.size());
++        assertEquals(0, executor.finished.size());
++    }
++
++    @Test
++    public void noBudgetFinishesEverything() throws InterruptedException {
++        Provider provider = new Provider(1_000_000L);
++        AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException> executor = new AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException>(provider, 1);
++
++        for (int i = 0; i < 10; ++i) {
++            executor.add(i, () -> {});
++        }
++        awaitReads(executor, 10);
++        executor.finishActive(0L);
++        assertEquals(10, provider.stage2.size());
++    }
++}

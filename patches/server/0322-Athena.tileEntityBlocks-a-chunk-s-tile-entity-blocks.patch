@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 19 Oct 2026 02:42:42 +0900
+Subject: [PATCH] Athena.tileEntityBlocks: a chunk's tile entity blocks without
+ BlockStates
+
+Chunk.getTileEntities() builds a BlockState for every tile entity - for a chest, a copy of its
+inventory - and plugins that only look for chests by type paid for that on every ChunkLoadEvent.
+This returns the positions as Blocks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 148a076e0970371491ff83525c9438c3242e2bde..162c7959eb7e77e1f2392c9e8fb1ea365acabd4a 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -10,9 +10,12 @@ import java.util.function.Function;
+ import net.minecraft.server.AthenaTeleportQueue;
+ import net.minecraft.server.AthenaTemplateDataManager;
+ import org.apache.commons.lang.Validate;
++import org.bukkit.Chunk;
+ import org.bukkit.Location;
+ import org.bukkit.World;
+ import org.bukkit.WorldCreator;
++import org.bukkit.block.Block;
++import org.bukkit.craftbukkit.CraftChunk;
+ import org.bukkit.craftbukkit.CraftServer;
+ import org.bukkit.craftbukkit.CraftWorld;
+ import org.bukkit.entity.Entity;
+@@ -69,6 +72,20 @@ public final class AthenaServerImpl implements AthenaServer {
+                 square[0], square[1], square[2], square[3], perTick);
+     }
+ 
++    @Override
++    public List<Block> tileEntityBlocks(Chunk chunk) {
++        Validate.notNull(chunk, "Chunk may not be null");
++        net.minecraft.server.Chunk handle = ((CraftChunk) chunk).getHandle();
++        World world = chunk.getWorld();
++        List<Block> blocks = new ArrayList<Block>(handle.tileEntities.size());
++
++        // keyed by BlockPosition.asLong(); see CraftChunk.getTileEntities
++        for (long key : handle.tileEntities.keySet()) {
++            blocks.add(world.getBlockAt(net.minecraft.server.BlockPosition.unpackX(key), net.minecraft.server.BlockPosition.unpackY(key), net.minecraft.server.BlockPosition.unpackZ(key)));
++        }
++        return blocks;
++    }
++
+     /** The chunks overlapping the square of radius blocks round center: min x, min z, max x, max z. */
+     private static int[] chunkSquare(Location center, int radius) {
+         Validate.notNull(center, "Center may not be null");
