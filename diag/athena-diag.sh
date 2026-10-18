@@ -141,7 +141,7 @@ scrub() {
             print
         }'
 }
-for f in server.properties bukkit.yml spigot.yml paper.yml pandaspigot.yml; do
+for f in server.properties bukkit.yml spigot.yml paper.yml pandaspigot.yml athena.yml; do
     [ -f "$DIR/$f" ] && scrub < "$DIR/$f" > "$D/config/$f"
 done
 ls -l "$DIR/plugins" 2>/dev/null | awk '/\.jar$/ {print $5, $NF}' > "$D/plugins.txt"

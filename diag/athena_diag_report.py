@@ -406,10 +406,12 @@ def rules(a):
                         effect="Athenaの計測（20人、1 CPU）：Nettyの CPU時間 13.1 s → 11.6 s（1回の計測あたり）。"))
     elif nt:
         out.append(dict(level="ok", title='Nettyのスレッド数', now="netty-threads: %s（CPU %d個）" % (nt, nproc), change="", why="", effect=""))
-    margin = yml(cfg.get("pandaspigot.yml"), "chunkUnloadMargin")
+    # athena.yml since 0323; older servers kept it in pandaspigot.yml
+    margin_file = "athena.yml" if cfg.get("athena.yml") else "pandaspigot.yml"
+    margin = yml(cfg.get(margin_file), "chunkUnloadMargin")
     if margin is None or margin == "0":
         out.append(dict(level="decide", title="視界の外のチャンクを少し残す",
-                        now="chunkUnloadMargin: %s" % (margin or "なし（0）"), change="pandaspigot.yml の worlds.default.chunkUnloadMargin: 2",
+                        now="chunkUnloadMargin: %s" % (margin or "なし（0）"), change="athena.yml の worlds.default.chunkUnloadMargin: 2",
                         why="チャンクの境界を行き来するたびに、チャンクを消して送り直しています。",
                         effect="Athenaの計測（20人、境界を往復するbot）：Netty −22%、通信量 −83%。その分、読み込むチャンクが増えます（1つ約11 KB）。"))
     else:
@@ -635,7 +637,7 @@ def page(a, recs, source_name):
         ("view-distance", "spigot.yml %s（server.properties %s）" % (yml(cfg.get("spigot.yml"), "view-distance") or "—", prop(sp, "view-distance") or "—")),
         ("max-players", prop(sp, "max-players") or "—"),
         ("netty-threads", yml(cfg.get("spigot.yml"), "netty-threads") or "—"),
-        ("chunkUnloadMargin", yml(cfg.get("pandaspigot.yml"), "chunkUnloadMargin") or "—"),
+        ("chunkUnloadMargin", yml(cfg.get("athena.yml") or cfg.get("pandaspigot.yml"), "chunkUnloadMargin") or "—"),
         ("network-compression-threshold", prop(sp, "network-compression-threshold") or "—"),
         ("MALLOC_ARENA_MAX", m.get("env_MALLOC_ARENA_MAX", "なし")),
         ("AOTキャッシュ", "あり" if flag(a["flags_text"], "AOTCache") else "なし"),

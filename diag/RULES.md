@@ -38,7 +38,7 @@
 | 条件 | 区分 | 変更 | 根拠 |
 |---|---|---|---|
 | netty-threads が2以上で、CPU が2個以下 | 推奨 | spigot.yml `settings.netty-threads: 1` | Netty の CPU時間 13.1 s → 11.6 s |
-| chunkUnloadMargin が 0 | 要判断 | pandaspigot.yml `chunkUnloadMargin: 2` | Netty −22%、通信量 −83%（境界を往復する最悪のケース）。チャンク1つ約11 KB増える |
+| chunkUnloadMargin が 0 | 要判断 | athena.yml `worlds.default.chunkUnloadMargin: 2`（0323 より前は pandaspigot.yml） | Netty −22%、通信量 −83%（境界を往復する最悪のケース）。チャンク1つ約11 KB増える |
 | アンチXray が有効 | 要判断 | spigot.yml `world-settings.default.anti-xray.enabled: false` | チャンクのキャッシュが効き、CPU 0.475 → 0.14 コア。鉱石の位置が勝負に関係しないマップなら |
 
 ## マシン
