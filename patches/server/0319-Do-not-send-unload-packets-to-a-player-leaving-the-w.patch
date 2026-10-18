@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 18 Oct 2026 21:30:09 +0900
+Subject: [PATCH] Do not send unload packets to a player leaving the world
+
+
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index ad0e44c1a0eb281182159e0d6fe4e721ce137e07..e293b065ae703a78f4523781cbfb712dfb8f971a 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -505,6 +505,27 @@ public class PlayerChunkMap {
+ 
+     }
+ 
++    // Athena start - a player leaving the world is not told to drop its chunks one by one.
++    //
++    // removePlayer sent an empty chunk packet for every chunk the player had: 289 at view distance
++    // 8. A player leaving a world is either disconnecting or changing worlds, and a world change
++    // always reaches the client as a respawn into another dimension first (PlayerList.moveToWorld
++    // forces that so the client clears its chunk cache), which throws every chunk away at once. So
++    // both get removed from here without the packets; a player who stays in the world (moving away,
++    // a view distance change) still gets them.
++    private boolean athenaLeaving;
++
++    /** removePlayer for a player who is leaving this world or the server: no unload packets. */
++    public void athenaRemoveLeavingPlayer(EntityPlayer entityplayer) {
++        this.athenaLeaving = true;
++        try {
++            this.removePlayer(entityplayer);
++        } finally {
++            this.athenaLeaving = false;
++        }
++    }
++    // Athena end
++
+     public void removePlayer(EntityPlayer entityplayer) {
+         int i = (int) entityplayer.managedPosX >> 4;
+         int j = (int) entityplayer.managedPosZ >> 4;
+@@ -790,7 +811,7 @@ public class PlayerChunkMap {
+                 // CraftBukkit end
+                 Chunk chunk = PlayerChunkMap.this.world.getChunkAt(this.location.x, this.location.z);
+ 
+-                if (chunk.isReady()) {
++                if (chunk.isReady() && !PlayerChunkMap.this.athenaLeaving) { // Athena - see athenaRemoveLeavingPlayer
+                     entityplayer.playerConnection.sendPacket(PacketPlayOutMapChunk.unload(this.location.x, this.location.z)); // Athena - no biomes; see unload
+                 }
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 50c188400470c5bd28e891b165c83669e6c76710..5ad54a98959c8906b3f76017833b58c23e455573 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -384,7 +384,7 @@ public abstract class PlayerList {
+         }
+ 
+         worldserver.kill(entityplayer);
+-        worldserver.getPlayerChunkMap().removePlayer(entityplayer);
++        worldserver.getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer); // Athena - disconnecting: no unload packets
+         this.players.remove(entityplayer);
+         this.playersByName.remove(entityplayer.getName()); // Spigot
+         UUID uuid = entityplayer.getUniqueID();
+@@ -536,7 +536,7 @@ public abstract class PlayerList {
+     public EntityPlayer moveToWorld(EntityPlayer entityplayer, int i, boolean flag, Location location, boolean avoidSuffocation) {
+         entityplayer.getServerForPlayer().getTracker().untrackPlayer(entityplayer);
+         // entityplayer.u().getTracker().untrackEntity(entityplayer); // CraftBukkit
+-        entityplayer.getServerForPlayer().getPlayerChunkMap().removePlayer(entityplayer);
++        entityplayer.getServerForPlayer().getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer); // Athena - the respawn below clears the client's chunks
+         this.players.remove(entityplayer);
+         this.playersByName.remove(entityplayer.getName()); // Spigot
+         this.server.getWorldServer(entityplayer.dimension).removeEntity(entityplayer);
