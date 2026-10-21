@@ -1,6 +1,25 @@
 # PandaSpigot [![Build](https://img.shields.io/github/actions/workflow/status/hpfxd/PandaSpigot/build.yml?branch=master&label=Build)](https://github.com/hpfxd/PandaSpigot/actions/workflows/build.yml) [![Discord](https://img.shields.io/discord/1048733138655924274?label=Discord)](https://discord.gg/m6vCCX6Hvr) [![Servers](https://img.shields.io/bstats/servers/15154?label=Servers)](https://bstats.org/plugin/bukkit/PandaSpigot/15154)
 Fork of Paper for 1.8.8 focused on improved performance and stability.
 
+## Athena
+This repository is **Athena**, a fork of PandaSpigot for small 1.8.8 PvP minigame servers
+(one ~320 MB, sub-vCPU share of a box per server). The PandaSpigot sections below still describe
+the base it is built on; the download and Javadoc links there are PandaSpigot's, not Athena's.
+On top of PandaSpigot it adds:
+
+- **Lower CPU and memory**: entity, collision, chunk ticking, tracker and network work cut down
+  (`patches/server/0138` onwards); a 20-player match runs in 320 MB with `-Xmx160M`.
+- **Template worlds** (`Athena.loadTemplateWorld`): match maps opened read only, with block ids
+  and light read from a memory-mapped `athena-sections-<hash>.bin` beside the region files. Never
+  overwrite that file in place while a server runs (`cp`, `scp` onto it): a mapped file changed
+  underneath a running JVM crashes it. Copy maps with `rsync` (which writes a new file and renames
+  it), or stop the servers first.
+- **Athena API** (`io.github.hyogafukuno:athena-api`, see `patches/api`): template worlds, pinned
+  and preloaded chunk squares, gradual and asynchronous teleports. Call it from the server thread.
+- **AthenaGuard**, a server-side movement and combat check; **BungeeGuard** tokens for forwarded
+  logins; **1.7.10 clients** joining natively; optional **io_uring**.
+- Athena's settings are in `athena.yml`, next to `pandaspigot.yml`.
+
 ## Highlights
 - **Backported API enhancements from newer versions**
     - ServerTickStartEvent & ServerTickEndEvent
@@ -66,12 +85,14 @@ dependencies {
 </details>
 
 ## Requirements
-To work with PandaSpigot, you will need:
-- JDK 17 or higher
+To work with Athena, you will need:
+- JDK 25 (the Gradle toolchain is pinned to 25 and is not downloaded for you)
 - Git
 - Bash
 
-🧩 Although JDK 17 is required for building, the compiled JAR remains fully compatible with Java 8.
+The compiled JAR needs Java 25 to run as well: Athena uses the foreign memory API (Java 22+) for
+template worlds and `Deflater.setInput(ByteBuffer)` (Java 11+) for compression. Unlike PandaSpigot,
+it is not compatible with Java 8.
 
 ### Panda Bash build script
 The `panda` Bash script is the entry point for setup, patching, and builds.

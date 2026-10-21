@@ -1,0 +1,161 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 10:53:55 +0900
+Subject: [PATCH] Chunk generation: one lock for decoration, re-queue skipped
+ unloads, pooled shaping copies
+
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 22315f3959b73ebcc25ce494beddd40114a132e4..8456974455fbe67f78abc323c71117cef77285ed 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -295,6 +295,7 @@ public class Chunk {
+     public org.bukkit.Chunk bukkitChunk;
+     public boolean mustSave;
+     public boolean decorationPending; // Athena - a deferred decoration still has to land in this chunk
++    public boolean athenaUnloadSkipped; // Athena - came off the unload queue while decorationPending; queued again when it lands
+     // CraftBukkit end
+ 
+     public Chunk(World world, ChunkSnapshot chunksnapshot, int i, int j) {
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+index 665fe3646b53cbc93a39979662f79e2fa6a034bf..37f6ea31d2add19b222ea0235307f5ab41c62dab 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -25,7 +25,12 @@ public final class ChunkDecorationExecutor {
+     private static final BlockingQueue<ChunkPopulateJob> pending = new LinkedBlockingQueue<ChunkPopulateJob>();
+     private static final Queue<ChunkPopulateJob> finished = new ConcurrentLinkedQueue<ChunkPopulateJob>();
+     private static volatile Thread worker;
+-    private static final java.util.concurrent.atomic.AtomicBoolean busy = new java.util.concurrent.atomic.AtomicBoolean();
++    // Athena - held for the whole of every decoration, the worker's and the server thread's own on
++    // the escape path. A flag the escape path waited on only showed that the worker was between
++    // two jobs: it could take the next one the moment the server thread started, and then both
++    // were inside the same BiomeDecorator singleton - "Already decorating", thrown into the tick
++    // loop. With the lock the server thread waits for the job in progress and the worker for it.
++    private static final Object DECORATING = new Object();
+     /** Jobs handed to the worker but not yet drained. Read on the server thread only. */
+     private static int inFlight;
+ 
+@@ -57,12 +62,8 @@ public final class ChunkDecorationExecutor {
+                 return;
+             }
+ 
+-            ChunkDecorationExecutor.busy.set(true);
+-
+-            try {
++            synchronized (ChunkDecorationExecutor.DECORATING) {
+                 run(job);
+-            } finally {
+-                ChunkDecorationExecutor.busy.set(false);
+             }
+ 
+             ChunkDecorationExecutor.finished.add(job);
+@@ -128,24 +129,18 @@ public final class ChunkDecorationExecutor {
+         }
+     }
+ 
+-    /** Blocks until the decoration thread is between jobs. Only used on the escape path. */
+-    private static void waitForIdleWorker() {
+-        while (ChunkDecorationExecutor.busy.get()) {
+-            Thread.yield();
+-        }
+-    }
+-
+     private static void complete(ChunkPopulateJob job) {
+         if (job.buffer.hasEscaped()) {
+             // Decoration is single threaded on purpose - BiomeDecorator, WorldGenBigTree and the
+             // flower generator all keep state on the biome singleton while they run. Doing one here
+-            // means waiting until the worker is not doing one of its own.
+-            waitForIdleWorker();
+-            // The sandbox could not finish it; do the whole decoration here, against the real world.
+-            // The abandoned attempt drew from the sequence, so put it back first.
+-            job.buffer.reset();
+-            job.random.restore(job.randomAtDecoration);
+-            job.generator.decorate(job);
++            // means holding the lock the worker holds for each of its own.
++            synchronized (ChunkDecorationExecutor.DECORATING) {
++                // The sandbox could not finish it; do the whole decoration here, against the real
++                // world. The abandoned attempt drew from the sequence, so put it back first.
++                job.buffer.reset();
++                job.random.restore(job.randomAtDecoration);
++                job.generator.decorate(job);
++            }
+         } else {
+             BlockFalling.instaFall = true; // vanilla held this across the whole of populate
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index b9b2fad9478f4480f78845fa280d7ce6aef033d2..efe910e755c711e0f096a14590a686ae36bda1a4 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -271,9 +271,11 @@ public class ChunkProviderServer implements IChunkProvider {
+     // since chunk loading went async; callers that need a chunk immediately still get one, shaped
+     // inline or by waiting on a worker that has already started it.
+     //
+-    // Each thread that shapes gets its own copy of the generator, because its scratch fields cannot
+-    // be entered twice at once.
+-    private final ThreadLocal<ChunkProviderGenerate> shapingCopies = new ThreadLocal<ChunkProviderGenerate>();
++    // Each shape borrows a copy of the generator for its duration, because the copy's scratch
++    // fields cannot be entered twice at once. Borrowed from this provider's own pool, not kept per
++    // thread: a ThreadLocal value leads back through the copy's world to this provider and so to
++    // the ThreadLocal itself, which kept the entry from ever being cleared - every world unloaded
++    // after generating a chunk stayed reachable from the shaping threads and the server thread.
+     private final ConcurrentLinkedQueue<ChunkProviderGenerate> spareShapingCopies = new ConcurrentLinkedQueue<ChunkProviderGenerate>();
+     private Boolean asyncShaping; // decided once, on the server thread
+     private ChunkProviderGenerate shapingGenerator; // the real generator, unwrapped
+@@ -330,20 +332,19 @@ public class ChunkProviderServer implements IChunkProvider {
+         return this.asyncShaping;
+     }
+ 
+-    /** Runs the pure half of generation on whichever thread calls this, using that thread's copy. */
++    /** Runs the pure half of generation on whichever thread calls this, on a borrowed copy. */
+     public ChunkShape shapeChunkForWorker(int i, int j) {
+-        ChunkProviderGenerate generator = this.shapingCopies.get();
++        ChunkProviderGenerate generator = this.spareShapingCopies.poll();
+ 
+         if (generator == null) {
+-            generator = this.spareShapingCopies.poll();
+-            if (generator == null) {
+-                generator = this.shapingGenerator.createShapingCopy();
+-            }
+-
+-            this.shapingCopies.set(generator);
++            generator = this.shapingGenerator.createShapingCopy(); // as many as threads shape at once
+         }
+ 
+-        return generator.shapeChunk(i, j);
++        try {
++            return generator.shapeChunk(i, j);
++        } finally {
++            this.spareShapingCopies.offer(generator);
++        }
+     }
+ 
+     /**
+@@ -664,6 +665,14 @@ public class ChunkProviderServer implements IChunkProvider {
+                         public void run() {
+                             chunk.decorationPending = false;
+                             ChunkProviderServer.this.finishPopulate(chunk);
++                            // Athena - an unload skipped while the decoration was on its way, unless
++                            // a player has come back to the chunk since
++                            if (chunk.athenaUnloadSkipped) {
++                                chunk.athenaUnloadSkipped = false;
++                                if (!ChunkProviderServer.this.world.getPlayerChunkMap().isChunkInUse(chunk.locX, chunk.locZ)) {
++                                    ChunkProviderServer.this.queueUnload(chunk.locX, chunk.locZ);
++                                }
++                            }
+                         }
+                     };
+                     ChunkDecorationExecutor.queue(job);
+@@ -792,7 +801,12 @@ public class ChunkProviderServer implements IChunkProvider {
+                 long chunkcoordinates = this.unloadQueue.popFirst();
+                 Chunk chunk = this.chunks.get(chunkcoordinates);
+                 if (chunk == null) continue;
+-                if (chunk.decorationPending) continue; // Athena - a decoration is still on its way to this chunk
++                // Athena - a decoration is still on its way to this chunk. It has come off the queue,
++                // so say so: the completion puts it back, or nothing would ever unload it
++                if (chunk.decorationPending) {
++                    chunk.athenaUnloadSkipped = true;
++                    continue;
++                }
+                 if (this.isPinned(chunk.locX, chunk.locZ)) continue; // Athena - queued before the pin
+ 
+                 ChunkUnloadEvent event = new ChunkUnloadEvent(chunk.bukkitChunk);

@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 10:53:56 +0900
+Subject: [PATCH] Athena API: server thread only, checked with AsyncCatcher
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 162c7959eb7e77e1f2392c9e8fb1ea365acabd4a..ed912e067fc2e16c44ed48f582975f7b1796a52c 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -28,6 +28,10 @@ import org.bukkit.event.player.PlayerTeleportEvent;
+  */
+ public final class AthenaServerImpl implements AthenaServer {
+ 
++    // Athena - every method here works on the chunk map, the preload and teleport queues or a
++    // player, none of which is safe off the server thread: each checks the thread the way Bukkit's
++    // own unsafe calls do (AsyncCatcher, which spigot.yml can turn off). teleportAsync is
++    // asynchronous in the chunk load it waits for, not in the thread it may be called from.
+     private final CraftServer server;
+ 
+     public AthenaServerImpl(CraftServer server) {
+@@ -36,11 +40,13 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public World loadTemplateWorld(String name, File templateFolder) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena load a template world"); // Athena - server thread only; see the class comment
+         return this.server.loadTemplateWorld(new WorldCreator(name), templateFolder);
+     }
+ 
+     @Override
+     public World loadTemplateWorld(WorldCreator creator, File templateFolder) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena load a template world"); // Athena - server thread only; see the class comment
+         return this.server.loadTemplateWorld(creator, templateFolder);
+     }
+ 
+@@ -51,6 +57,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void pinChunks(Location center, int radius) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
+ 
+         ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(square[0], square[1], square[2], square[3]);
+@@ -58,6 +65,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void addPinnedChunks(Location center, int radius) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
+ 
+         ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.addPin(square[0], square[1], square[2], square[3]);
+@@ -65,6 +73,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena chunk preload"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
+         checkPerTick(perTick);
+ 
+@@ -74,6 +83,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public List<Block> tileEntityBlocks(Chunk chunk) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena tile entity lookup"); // Athena - server thread only; see the class comment
+         Validate.notNull(chunk, "Chunk may not be null");
+         net.minecraft.server.Chunk handle = ((CraftChunk) chunk).getHandle();
+         World world = chunk.getWorld();
+@@ -101,12 +111,14 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void unpinChunks(World world) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena unpin chunks"); // Athena - server thread only; see the class comment
+         Validate.notNull(world, "World may not be null");
+         ((CraftWorld) world).getHandle().chunkProviderServer.unpin();
+     }
+ 
+     @Override
+     public CompletableFuture<Boolean> teleportAsync(final Entity entity, Location location) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena teleport"); // Athena - server thread only; see the class comment
+         Validate.notNull(entity, "Entity may not be null");
+         Validate.notNull(location, "Location may not be null");
+         Validate.notNull(location.getWorld(), "Location has no world");
+@@ -129,6 +141,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, final Function<? super Player, ? extends Location> destination, int perTick) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena teleport"); // Athena - server thread only; see the class comment
+         Validate.notNull(players, "Players may not be null");
+         Validate.notNull(destination, "Destination may not be null");
+         checkPerTick(perTick);
+@@ -137,6 +150,7 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public CompletableFuture<Integer> teleportGradually(List<? extends Player> players, List<? extends Location> destinations, int perTick) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena teleport"); // Athena - server thread only; see the class comment
+         Validate.notNull(players, "Players may not be null");
+         Validate.notNull(destinations, "Destinations may not be null");
+         checkPerTick(perTick);
+diff --git a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+index 6b22772629dbf62a40a4d0d9e38224be11b9d807..40c915b46b166ceede455ac0ede27ad536121a1d 100644
+--- a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
++++ b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+@@ -20,6 +20,12 @@ import org.junit.Test;
+  */
+ public class AthenaTeleportQueueTest {
+ 
++    static {
++        // the API checks it is on the server thread; there is no server here, and the queue is
++        // what is under test, so the check is off as spigot.yml can turn it off
++        org.spigotmc.AsyncCatcher.enabled = false;
++    }
++
+     private final List<String> log = new ArrayList<String>();
+ 
+     /** A Player that only answers the calls the queue makes. */

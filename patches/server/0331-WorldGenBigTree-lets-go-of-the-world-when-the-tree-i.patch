@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 11:51:17 +0900
+Subject: [PATCH] WorldGenBigTree lets go of the world when the tree is done
+
+
+diff --git a/src/main/java/net/minecraft/server/WorldGenBigTree.java b/src/main/java/net/minecraft/server/WorldGenBigTree.java
+index 40299dbe2a47cb677e9d9cc751866a920c53bf28..721f96dcb41add13075197a9bafb2cee5e08f022 100644
+--- a/src/main/java/net/minecraft/server/WorldGenBigTree.java
++++ b/src/main/java/net/minecraft/server/WorldGenBigTree.java
+@@ -241,6 +241,11 @@ public class WorldGenBigTree extends WorldGenTreeAbstract {
+             this.heightLimit = 5 + this.rand.nextInt(this.heightLimitLimit);
+         }
+ 
++        // Athena start - let go of the world when the tree is done. Every biome is a singleton
++        // with one of these, so each kept the last world it grew a big tree in: worlds created
++        // and unloaded per match stayed reachable, one per biome, until another world grew a tree
++        // in the same biome. The field is only read inside this call.
++        try {
+         if (!this.validTreeLocation()) {
+             return false;
+         } else {
+@@ -250,6 +255,10 @@ public class WorldGenBigTree extends WorldGenTreeAbstract {
+             this.generateLeafNodeBases();
+             return true;
+         }
++        } finally {
++            this.world = null;
++        }
++        // Athena end
+     }
+ 
+     private boolean validTreeLocation() {

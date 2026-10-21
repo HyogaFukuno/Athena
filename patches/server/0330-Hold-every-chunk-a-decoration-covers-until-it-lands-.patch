@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 11:51:17 +0900
+Subject: [PATCH] Hold every chunk a decoration covers until it lands; land
+ them before a direct unload
+
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 8456974455fbe67f78abc323c71117cef77285ed..be38f8999a74d7bfbda909e49af7ad4ad57b2db5 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -295,7 +295,10 @@ public class Chunk {
+     public org.bukkit.Chunk bukkitChunk;
+     public boolean mustSave;
+     public boolean decorationPending; // Athena - a deferred decoration still has to land in this chunk
+-    public boolean athenaUnloadSkipped; // Athena - came off the unload queue while decorationPending; queued again when it lands
++    // Athena - decorations that will still read or write this chunk: its own and its -x/-z neighbours'
++    // (a decoration covers x..x+1, z..z+1). It must not unload while any is on its way.
++    public int athenaDecorationHolds;
++    public boolean athenaUnloadSkipped; // Athena - came off the unload queue while held; queued again when the last hold goes
+     // CraftBukkit end
+ 
+     public Chunk(World world, ChunkSnapshot chunksnapshot, int i, int j) {
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index efe910e755c711e0f096a14590a686ae36bda1a4..c8f54568b819ffa27ef31decc9a88981ba7f2261 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -660,17 +660,26 @@ public class ChunkProviderServer implements IChunkProvider {
+                     ChunkPopulateJob job = this.shapingGenerator.beginPopulate(i, j);
+ 
+                     job.captureChunks(this);
+-                    chunk.decorationPending = true; // this chunk must not unload before the replay
++                    chunk.decorationPending = true;
++                    // the chunks the decoration covers - this one and its +x/+z neighbours, loaded now,
++                    // since population only starts once they are - must not unload before the replay,
++                    // nor before the server thread decorates them itself if the worker escapes: with a
++                    // neighbour gone, getHighestBlockYAt answers 0 and the biome's nextInt(0) throws
++                    // into the tick loop
++                    final Chunk[] held = new Chunk[4];
++                    for (int k = 0; k < 4; ++k) {
++                        held[k] = this.getChunkIfLoaded(i + (k & 1), j + (k >> 1));
++                        if (held[k] != null) {
++                            ++held[k].athenaDecorationHolds;
++                        }
++                    }
+                     job.completion = new Runnable() {
+                         public void run() {
+                             chunk.decorationPending = false;
+                             ChunkProviderServer.this.finishPopulate(chunk);
+-                            // Athena - an unload skipped while the decoration was on its way, unless
+-                            // a player has come back to the chunk since
+-                            if (chunk.athenaUnloadSkipped) {
+-                                chunk.athenaUnloadSkipped = false;
+-                                if (!ChunkProviderServer.this.world.getPlayerChunkMap().isChunkInUse(chunk.locX, chunk.locZ)) {
+-                                    ChunkProviderServer.this.queueUnload(chunk.locX, chunk.locZ);
++                            for (Chunk c : held) {
++                                if (c != null) {
++                                    ChunkProviderServer.this.releaseDecorationHold(c);
+                                 }
+                             }
+                         }
+@@ -788,6 +797,19 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+     // Athena end
+ 
++    // Athena - a decoration no longer needs this chunk. An unload skipped while it was held goes back
++    // on the queue with the last hold, unless a player has come back to the chunk since.
++    private void releaseDecorationHold(Chunk chunk) {
++        if (--chunk.athenaDecorationHolds > 0 || !chunk.athenaUnloadSkipped) {
++            return;
++        }
++        chunk.athenaUnloadSkipped = false;
++        if (this.chunks.get(LongHash.toLong(chunk.locX, chunk.locZ)) == chunk
++                && !this.world.getPlayerChunkMap().isChunkInUse(chunk.locX, chunk.locZ)) {
++            this.queueUnload(chunk.locX, chunk.locZ);
++        }
++    }
++
+     public boolean unloadChunks() {
+         if (!this.world.savingDisabled) {
+             // CraftBukkit start
+@@ -801,9 +823,10 @@ public class ChunkProviderServer implements IChunkProvider {
+                 long chunkcoordinates = this.unloadQueue.popFirst();
+                 Chunk chunk = this.chunks.get(chunkcoordinates);
+                 if (chunk == null) continue;
+-                // Athena - a decoration is still on its way to this chunk. It has come off the queue,
+-                // so say so: the completion puts it back, or nothing would ever unload it
+-                if (chunk.decorationPending) {
++                // Athena - a decoration is still on its way to this chunk (or will read or write it).
++                // It has come off the queue, so say so: the last completion puts it back, or nothing
++                // would ever unload it
++                if (chunk.athenaDecorationHolds > 0) {
+                     chunk.athenaUnloadSkipped = true;
+                     continue;
+                 }
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index e0befd0ca3b0803d8347654da5e635d64ca6ee1e..d034b56715850f73d00d8b078d5efae88a01025a 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -217,6 +217,15 @@ public class CraftWorld implements World {
+             return false;
+         }
+         // PaperSpigot end
++        // Athena start - a decoration still on its way reads or writes this chunk: land it first.
++        // This unload does not go through the queue, which is where held chunks wait; taking one
++        // out from under its decoration left the server thread decorating against a missing
++        // neighbour (getHighestBlockYAt answering 0, the biome's nextInt(0) throwing into the tick
++        // loop). flush is what saving and shutdown already do.
++        if (chunk.athenaDecorationHolds > 0) {
++            net.minecraft.server.ChunkDecorationExecutor.flush();
++        }
++        // Athena end
+         if (chunk.mustSave) {   // If chunk had previously been queued to save, must do save to avoid loss of that data
+             save = true;
+         }

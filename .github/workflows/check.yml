@@ -8,10 +8,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup JDK 17
+      - name: Setup JDK 25
         uses: actions/setup-java@v5
         with:
-          java-version: 17
+          java-version: 25 # the Gradle toolchain is pinned to 25, with nothing to download it
           distribution: temurin
           cache: gradle
 
