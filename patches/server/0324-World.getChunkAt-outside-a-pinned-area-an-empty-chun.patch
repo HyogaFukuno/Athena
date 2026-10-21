@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 19 Oct 2026 10:10:31 +0900
+Subject: [PATCH] World.getChunkAt outside a pinned area: an empty chunk, not
+ null
+
+The provider answers a chunk outside a pinned area with its one shared
+EmptyChunk, which has no Bukkit chunk, so CraftWorld.getChunkAt returned
+null and getBlockAt threw. SurvivalGames' chest pairing looks at the block
+beside a chest at the edge of the map and failed there (sg1, 10-19).
+CraftWorld.getChunkAt now wraps an EmptyChunk at the asked coordinates,
+which reads air, and CraftChunk accepts one.
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftChunk.java b/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
+index 4b91ba6bd7ff888c17c2d9a52a2c0329dea5aa43..205329b9d00a909fe745fcff18eb972eaa2dd8de 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftChunk.java
+@@ -24,9 +24,9 @@ public class CraftChunk implements Chunk {
+     private static final byte[] emptySkyLight = new byte[2048];
+ 
+     public CraftChunk(net.minecraft.server.Chunk chunk) {
+-        if (!(chunk instanceof EmptyChunk)) {
+-            this.weakChunk = new WeakReference<net.minecraft.server.Chunk>(chunk);
+-        }
++        // Athena - an EmptyChunk too: CraftWorld.getChunkAt hands one out outside a pinned area. Only
++        // a weak reference, so once it is gone getHandle looks the chunk up again as usual
++        this.weakChunk = new WeakReference<net.minecraft.server.Chunk>(chunk);
+ 
+         worldServer = (WorldServer) getHandle().world;
+         x = getHandle().locX;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index 3a2af5c39539fa521d9cc841f87173333610022e..e0befd0ca3b0803d8347654da5e635d64ca6ee1e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -143,7 +143,15 @@ public class CraftWorld implements World {
+     // PaperSpigot end
+ 
+     public Chunk getChunkAt(int x, int z) {
+-        return this.world.chunkProviderServer.getChunkAt(x, z).bukkitChunk;
++        // Athena start - outside a pinned area the provider answers with its one shared EmptyChunk,
++        // which has no Bukkit chunk; give the caller an empty one at these coordinates, so that
++        // getBlockAt and the like read air there instead of throwing
++        net.minecraft.server.Chunk chunk = this.world.chunkProviderServer.getChunkAt(x, z);
++        if (chunk.bukkitChunk == null) {
++            return new CraftChunk(new net.minecraft.server.EmptyChunk(this.world, x, z));
++        }
++        return chunk.bukkitChunk;
++        // Athena end
+     }
+ 
+     public Chunk getChunkAt(Block block) {
