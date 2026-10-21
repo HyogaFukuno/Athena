@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 02:05:29 +0900
+Subject: [PATCH] Reuse the main pass's collision boxes for the step-up trial
+
+Entity.move runs World.getCubes twice for a mob that can step up, over two boxes that
+overlap almost completely: the step-up box sweeps the same x and z as the main pass, its
+floor is the pre-move box's floor where the main pass's floor is that minus whatever
+downward motion was asked for, and it only reaches higher. So the only blocks the second
+scan can find that the first did not are the rows between the two ceilings.
+
+Boxes the main pass collected outside the step-up box cannot clamp anything it does: the
+offset helpers test overlap on the two axes they are not moving along, strictly, and every
+candidate the trial builds stays inside its own swept volume. That is the same argument
+vanilla relies on to scan a swept box at all. So the main pass's boxes can be kept and
+only the rows above its ceiling collected, instead of reading the blocks under the entity
+a second time.
+
+Under the axis-by-axis scan the sink holds one axis' worth of boxes rather than the whole
+swept volume, so there is nothing to reuse and the full scan stands.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 0d03516914051ff5076a0a9b25099907fd50e0f2..d8703e257f5e188d599c7fba6f86599d9c83d128 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -632,11 +632,38 @@ public abstract class Entity implements ICommandListener {
+ 
+                 this.setEntityBoundingBox(preMinX, preMinY, preMinZ, preMaxX, preMaxY, preMaxZ);
+                 d1 = (double) this.stepHeight;
+-                // Athena - the step-up scan stacks on top of the main pass's boxes in the same sink
+-                int stepMark = sink.mark();
+-                this.world.getCubes(this,
+-                        this.boundingBoxMinX + Math.min(d6, 0.0D), this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ + Math.min(d8, 0.0D),
+-                        this.boundingBoxMaxX + Math.max(d6, 0.0D), this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ + Math.max(d8, 0.0D), sink);
++                // Athena start - the step-up scan stacks on top of the main pass's boxes in the same
++                // sink, and where it can it reuses them instead of collecting them again.
++                //
++                // The step-up box sweeps the same x and z as the main pass did, starts no lower
++                // (stepHeight is positive, so its floor is the pre-move box's floor, and the main
++                // pass's floor was that minus whatever downward motion was asked for), and only
++                // reaches higher. So the blocks it would find that the main pass did not are exactly
++                // the rows between the two ceilings. Boxes the main pass collected outside the
++                // step-up box cannot clamp anything: the offset helpers test overlap on the two axes
++                // they are not moving along, strictly, and every candidate the step-up trial builds
++                // stays inside its own swept volume.
++                //
++                // Under the axis-by-axis scan the sink holds one axis' worth of boxes rather than
++                // the whole swept volume, so there is nothing to reuse and the full scan stands.
++                double stepMinX = this.boundingBoxMinX + Math.min(d6, 0.0D);
++                double stepMinZ = this.boundingBoxMinZ + Math.min(d8, 0.0D);
++                double stepMaxX = this.boundingBoxMaxX + Math.max(d6, 0.0D);
++                double stepMaxZ = this.boundingBoxMaxZ + Math.max(d8, 0.0D);
++                double stepMaxY = this.boundingBoxMaxY + d1;
++                int stepMark;
++
++                if (axisScan) {
++                    stepMark = sink.mark();
++                    this.world.getCubes(this, stepMinX, this.boundingBoxMinY, stepMinZ, stepMaxX, stepMaxY, stepMaxZ, sink);
++                } else {
++                    stepMark = sinkMark;
++
++                    if (stepMaxY > totalMaxY) {
++                        this.world.getCubes(this, stepMinX, totalMaxY, stepMinZ, stepMaxX, stepMaxY, stepMaxZ, sink);
++                    }
++                }
++                // Athena end
+ 
+                 // candidate A (was axisalignedbb4), starting from the current box
+                 double aMinX = this.boundingBoxMinX, aMinY = this.boundingBoxMinY, aMinZ = this.boundingBoxMinZ;

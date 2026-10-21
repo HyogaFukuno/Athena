@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 13:40:32 +0900
+Subject: [PATCH] Teleport groups of players gradually from the tick loop
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaTeleportQueue.java b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..16d45cd56f46c998ac098974bee49453c1fb0c28
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+@@ -0,0 +1,100 @@
++package net.minecraft.server;
++
++import athena.api.AthenaTeleports;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Function;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.bukkit.Location;
++import org.bukkit.entity.Player;
++import org.bukkit.event.player.PlayerTeleportEvent;
++
++// Athena - the server side of athena.api.AthenaTeleports: groups of players teleported a few per
++// tick. Drained once per tick from the tick loop, next to the other hand-back queues, so every
++// teleport happens at the same point of a tick a plugin's scheduled task would run at.
++public final class AthenaTeleportQueue implements AthenaTeleports.Teleporter {
++
++    public static final AthenaTeleportQueue INSTANCE = new AthenaTeleportQueue();
++    private static final Logger LOGGER = LogManager.getLogger();
++
++    private final List<Batch> batches = new ArrayList<Batch>();
++
++    private AthenaTeleportQueue() {}
++
++    private static final class Batch {
++
++        final List<Player> players;
++        final Function<? super Player, ? extends Location> destination;
++        final int perTick;
++        final CompletableFuture<Integer> future = new CompletableFuture<Integer>();
++        int next;
++        int teleported;
++
++        Batch(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick) {
++            this.players = new ArrayList<Player>(players);
++            this.destination = destination;
++            this.perTick = perTick;
++        }
++    }
++
++    @Override
++    public CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick) {
++        Batch batch = new Batch(players, destination, perTick);
++
++        if (batch.players.isEmpty()) {
++            batch.future.complete(0);
++        } else {
++            this.batches.add(batch);
++        }
++        return batch.future;
++    }
++
++    /** Moves the next players of every pending group. Server thread, once per tick. */
++    public void tick() {
++        if (this.batches.isEmpty()) {
++            return;
++        }
++
++        List<Batch> finished = null;
++
++        // over a copy: a teleport fires events, and a handler may queue another group
++        for (Batch batch : this.batches.toArray(new Batch[0])) {
++
++            for (int moved = 0; moved < batch.perTick && batch.next < batch.players.size(); ++moved) {
++                Player player = batch.players.get(batch.next++);
++
++                try {
++                    if (!player.isOnline()) {
++                        continue;
++                    }
++
++                    Location to = batch.destination.apply(player);
++
++                    if (to != null && player.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN)) {
++                        ++batch.teleported;
++                    }
++                } catch (Throwable throwable) {
++                    LOGGER.warn("[Athena] Teleporting " + player.getName() + " failed", throwable);
++                }
++            }
++
++            if (batch.next >= batch.players.size()) {
++                this.batches.remove(batch);
++                if (finished == null) {
++                    finished = new ArrayList<Batch>();
++                }
++                finished.add(batch);
++            }
++        }
++
++        // after the loop: a completion callback may well queue the next group
++        if (finished != null) {
++            for (Batch batch : finished) {
++                batch.future.complete(batch.teleported);
++            }
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 2365e87c77742a84155ae23a8aff29e997e00051..d79f849274d9f9bcfd17ae390b891330c70d0ce8 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -866,6 +866,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick();
+         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(); // Athena - hand finished chunk shapes back to the server thread
+         ChunkDecorationExecutor.tick(); // Athena - and finished chunk decorations
++        AthenaTeleportQueue.INSTANCE.tick(); // Athena - the next few players of a gradual teleport
+         SpigotTimings.chunkIOTickTimer.stopTiming(); // Spigot
+ 
+         SpigotTimings.timeUpdateTimer.startTiming(); // Spigot
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 8f064ed13b2c449d3d3ee6dcb52bd30e40a99ec5..14541ccd79a99db82a5a0db86f6a1875e685db7c 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -201,6 +201,7 @@ public final class CraftServer implements Server {
+                 return world instanceof CraftWorld && ((CraftWorld) world).getHandle().getDataManager() instanceof AthenaTemplateDataManager;
+             }
+         });
++        athena.api.AthenaTeleports.setTeleporter(AthenaTeleportQueue.INSTANCE);
+         // Athena end
+ 
+         // Register all the Enchantments and PotionTypes now so we can stop new registration immediately after
+diff --git a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..799314907341d6b68107d2843ed8324e14558894
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+@@ -0,0 +1,101 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.lang.reflect.Proxy;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.bukkit.Location;
++import org.bukkit.entity.Player;
++import org.junit.Test;
++
++/**
++ * Athena - AthenaTeleportQueue moves a group a few players per tick, in order, skips players who
++ * left or have nowhere to go, and survives groups queued from inside its own callbacks.
++ */
++public class AthenaTeleportQueueTest {
++
++    private final List<String> log = new ArrayList<String>();
++
++    /** A Player that only answers the calls the queue makes. */
++    private Player player(final String name, final boolean online, final Runnable onTeleport) {
++        return (Player) Proxy.newProxyInstance(Player.class.getClassLoader(), new Class<?>[] {Player.class}, (proxy, method, args) -> {
++            switch (method.getName()) {
++                case "isOnline":
++                    return online;
++                case "getName":
++                    return name;
++                case "teleport":
++                    this.log.add(name);
++                    if (onTeleport != null) {
++                        onTeleport.run();
++                    }
++                    return Boolean.TRUE;
++                case "hashCode":
++                    return System.identityHashCode(proxy);
++                case "equals":
++                    return proxy == args[0];
++                default:
++                    throw new UnsupportedOperationException(method.getName());
++            }
++        });
++    }
++
++    private static void drain(int ticks) {
++        for (int i = 0; i < ticks; ++i) {
++            AthenaTeleportQueue.INSTANCE.tick();
++        }
++    }
++
++    @Test
++    public void movesAFewPerTickInOrder() {
++        List<Player> players = new ArrayList<Player>();
++
++        for (int i = 0; i < 11; ++i) {
++            players.add(this.player("p" + i, i != 5, null));
++        }
++
++        CompletableFuture<Integer> done = AthenaTeleportQueue.INSTANCE.teleportGradually(players,
++                p -> p.getName().equals("p7") ? null : new Location(null, 0, 64, 0), 4);
++
++        assertTrue("nothing moves before the next tick", this.log.isEmpty());
++        drain(1);
++        assertEquals(Arrays.asList("p0", "p1", "p2", "p3"), this.log);
++        drain(1);
++        // p5 is offline, p7 has no destination: both use up their turn
++        assertEquals(Arrays.asList("p0", "p1", "p2", "p3", "p4", "p6"), this.log);
++        assertFalse(done.isDone());
++        drain(1);
++        assertEquals(Arrays.asList("p0", "p1", "p2", "p3", "p4", "p6", "p8", "p9", "p10"), this.log);
++        assertTrue(done.isDone());
++        assertEquals(Integer.valueOf(9), done.join());
++    }
++
++    @Test
++    public void callbacksMayQueueMore() {
++        final AtomicInteger second = new AtomicInteger();
++        final Player late = this.player("late", true, null);
++        // a teleport handler queuing another group while the queue is mid-tick
++        Player first = this.player("first", true, () -> AthenaTeleportQueue.INSTANCE.teleportGradually(
++                Arrays.asList(late), p -> new Location(null, 0, 64, 0), 1));
++
++        AthenaTeleportQueue.INSTANCE.teleportGradually(Arrays.asList(first), p -> new Location(null, 0, 64, 0), 1)
++                // and a completion callback queuing one more
++                .thenRun(() -> AthenaTeleportQueue.INSTANCE.teleportGradually(Arrays.asList(this.player("third", true, null)),
++                        p -> new Location(null, 0, 64, 0), 1).thenAccept(second::set));
++
++        drain(3);
++        assertEquals(Arrays.asList("first", "late", "third"), this.log);
++        assertEquals(1, second.get());
++    }
++
++    @Test
++    public void anEmptyGroupIsDoneAtOnce() {
++        assertTrue(AthenaTeleportQueue.INSTANCE.teleportGradually(new ArrayList<Player>(), p -> null, 5).isDone());
++    }
++}

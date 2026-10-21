@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 18 Oct 2026 21:30:09 +0900
+Subject: [PATCH] Count a section's blocks from a table of what each state id
+ is
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 4f9a644598956083ec5ccbde7d4df62069a401c0..187bf360eae31424902ab8c2b30961b60874c715 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -239,7 +239,136 @@ public class ChunkSection {
+         return this.emittedLight.get(i, j, k);
+     }
+ 
++    // Athena start - the counts from a table of what each state id is, not from the block of each.
++    //
++    // Every section a chunk load produces is counted here, and the count asked the registry for
++    // the state and the state for its block 4096 times, then the block four questions more: 58% of
++    // the chunk IO thread while a match map preloads its square at the start of every match. What
++    // a block contributes depends only on its state id, so one table answers it for every id, built
++    // once from the registry; the loop reads the ids in whatever form the section holds them.
++    // athenaRecalcBlockCountsByBlock is the old count, kept for the test that compares the two.
++    private static final int FLAG_NON_AIR = 1;
++    private static final int FLAG_TICKING = 2;
++    private static final int FLAG_WATER = 4;
++    private static final int FLAG_LAVA = 8;
++    private static final int FLAG_FIRE = 16;
++    private static final int FLAG_COLLISION = 32;
++    private static volatile byte[] stateFlags;
++
++    /** What each state id counts as, or null while the registry is still empty (before bootstrap). */
++    static byte[] stateFlags() {
++        byte[] flags = stateFlags;
++
++        if (flags == null) {
++            if (Block.BLOCK_STATE_IDS.getByValue(Block.getStateId(Blocks.STONE.getBlockData())) == null) {
++                return null; // not bootstrapped: a table built now would say air for everything
++            }
++            flags = new byte[65536];
++            for (int id = 0; id < 65536; ++id) {
++                IBlockData state = (IBlockData) Block.BLOCK_STATE_IDS.getByValue(id);
++                Block block = state != null ? state.getBlock() : Blocks.AIR; // as getType answers
++
++                if (block == Blocks.AIR) {
++                    continue;
++                }
++                int f = FLAG_NON_AIR;
++
++                if (block.isTicking()) {
++                    f |= FLAG_TICKING;
++                }
++                Material material = block.getMaterial();
++
++                if (material == Material.WATER) {
++                    f |= FLAG_WATER;
++                } else if (material == Material.LAVA) {
++                    f |= FLAG_LAVA;
++                } else if (material == Material.FIRE) {
++                    f |= FLAG_FIRE;
++                }
++                if (block.hasEntityCollisionHandler()) {
++                    f |= FLAG_COLLISION;
++                }
++                flags[id] = (byte) f;
++            }
++            stateFlags = flags;
++        }
++        return flags;
++    }
++
+     public void recalcBlockCounts() {
++        byte[] flags = stateFlags();
++
++        if (flags == null) {
++            this.athenaRecalcBlockCountsByBlock();
++            return;
++        }
++        ++this.modCount; // follows a bulk write of the id array (loader, plugin generator)
++
++        int nonEmpty = 0, ticking = 0, water = 0, lava = 0, fire = 0, collision = 0;
++        long[] bits = null;
++        char[] ids = this.blockIds;
++        byte[] packed = this.packedIds;
++        java.lang.foreign.MemorySegment mapped = this.mappedIds;
++        char[] palette = this.palette;
++
++        // the ids read in place, whatever form they are in: unpacking them into an array first, and
++        // a branch-free loop over a histogram of the flags, both measured slower than this
++        for (int index = 0; index < 4096; ++index) {
++            int id;
++
++            if (ids != null) {
++                id = ids[index];
++            } else if (packed != null) {
++                id = palette[packed[index >> 1] >> ((index & 1) << 2) & 15];
++            } else if (this.mappedRaw) {
++                id = mapped.get(AthenaSectionStore.CHAR_LE, this.mappedAt + ((long) index << 1));
++            } else {
++                id = palette[mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (index >> 1)) >> ((index & 1) << 2) & 15];
++            }
++
++            int f = flags[id];
++
++            if (f == 0) {
++                continue;
++            }
++            ++nonEmpty;
++            if ((f & FLAG_TICKING) != 0) {
++                ++ticking;
++                if (bits == null) {
++                    bits = this.tickingBits != null ? this.tickingBits : new long[64];
++                    java.util.Arrays.fill(bits, 0L);
++                }
++                bits[index >>> 6] |= 1L << index;
++            }
++            if ((f & FLAG_WATER) != 0) {
++                ++water;
++            } else if ((f & FLAG_LAVA) != 0) {
++                ++lava;
++            } else if ((f & FLAG_FIRE) != 0) {
++                ++fire;
++            }
++            if ((f & FLAG_COLLISION) != 0) {
++                ++collision;
++            }
++        }
++
++        if (bits == null && this.tickingBits != null) {
++            java.util.Arrays.fill(this.tickingBits, 0L); // nothing ticks now: as the old count left it
++        } else if (bits != null) {
++            this.tickingBits = bits;
++        }
++        this.nonEmptyBlockCount = nonEmpty;
++        this.tickingBlockCount = ticking;
++        this.waterCount = water;
++        this.lavaCount = lava;
++        this.fireCount = fire;
++        this.collisionHandlerCount = collision;
++        this.notifyTickingOwner();
++    }
++
++    /** The count as it was, a block at a time; the test checks recalcBlockCounts against it. */
++    void athenaRecalcBlockCountsByBlock() {
++    // Athena end
+         ++this.modCount; // Athena - follows a bulk write of the id array (loader, plugin generator)
+         this.nonEmptyBlockCount = 0;
+         this.tickingBlockCount = 0;
+diff --git a/src/test/java/net/minecraft/server/AthenaRecalcTiming.java b/src/test/java/net/minecraft/server/AthenaRecalcTiming.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0efde8b504fd4e3ac194c3d039767eb461c09d38
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaRecalcTiming.java
+@@ -0,0 +1,58 @@
++package net.minecraft.server;
++
++import java.io.File;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Assume;
++import org.junit.Test;
++
++/**
++ * Athena - not a test: times recalcBlockCounts against the old block-by-block count over every
++ * section of a real template, read from its section store. Runs only with ATHENA_TIMING_TEMPLATE
++ * set to a template folder that has a built store:
++ * ATHENA_TIMING_TEMPLATE=/path/to/map_par_72_revamp ./gradlew :PandaSpigot-Server:test --tests '*AthenaRecalcTiming'
++ */
++public class AthenaRecalcTiming extends AbstractTestingBase {
++
++    @Test
++    public void time() throws Exception {
++        String path = System.getenv("ATHENA_TIMING_TEMPLATE");
++
++        Assume.assumeTrue(path != null);
++        AthenaSectionStore store = AthenaSectionStore.open(new File(path));
++
++        if (store == null) {
++            AthenaSectionStore.awaitBuilds();
++            store = AthenaSectionStore.open(new File(path));
++        }
++        java.util.List<ChunkSection> sections = new java.util.ArrayList<ChunkSection>();
++
++        for (int x = -200; x <= 200; ++x) {
++            for (int z = -200; z <= 200; ++z) {
++                for (int y = 0; y < 16; ++y) {
++                    ChunkSection section = new ChunkSection(y << 4, true);
++
++                    if (store.apply(x, z, y, section, true)) {
++                        sections.add(section);
++                    }
++                }
++            }
++        }
++        System.out.println("sections: " + sections.size());
++        for (int round = 0; round < 6; ++round) {
++            long a = System.nanoTime();
++
++            for (ChunkSection section : sections) {
++                section.athenaRecalcBlockCountsByBlock();
++            }
++            long b = System.nanoTime();
++
++            for (ChunkSection section : sections) {
++                section.recalcBlockCounts();
++            }
++            long c = System.nanoTime();
++
++            System.out.printf("round %d: by block %.1f ms, by table %.1f ms (%.1f vs %.1f us/section)%n", round,
++                    (b - a) / 1e6, (c - b) / 1e6, (b - a) / 1e3 / sections.size(), (c - b) / 1e3 / sections.size());
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index d490b28f93b493c89595b0d9203764f2ca358bec..f1819a17ec6f7c40177d7626e79eb0067b8fa309 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -243,4 +243,75 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         AthenaSectionStore.awaitBuilds();
+         assertNotNull("and is rebuilt", AthenaSectionStore.open(dir));
+     }
++
++    /** The counts recalcBlockCounts keeps, and the ticking bitmap, as one comparable string. */
++    private static String counts(ChunkSection section) throws Exception {
++        StringBuilder out = new StringBuilder();
++
++        for (String name : new String[] {"nonEmptyBlockCount", "tickingBlockCount", "waterCount", "lavaCount", "fireCount", "collisionHandlerCount"}) {
++            java.lang.reflect.Field field = ChunkSection.class.getDeclaredField(name);
++
++            field.setAccessible(true);
++            out.append(name).append('=').append(field.getInt(section)).append(' ');
++        }
++        out.append(java.util.Arrays.toString(section.tickingBits == null || java.util.Arrays.stream(section.tickingBits).allMatch(w -> w == 0L) ? null : section.tickingBits));
++        return out.toString();
++    }
++
++    private static void assertSameCounts(String where, ChunkSection section) throws Exception {
++        section.recalcBlockCounts();
++        String byTable = counts(section);
++
++        section.athenaRecalcBlockCountsByBlock();
++        assertEquals(where, counts(section), byTable);
++    }
++
++    @Test
++    public void theCountsFromTheStateTableMatchACountByBlock() throws Exception {
++        File dir = template(3L);
++        AthenaSectionStore store = built(dir);
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++        int mapped = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                NBTTagList sections = region.read(x, z).getCompound("Level").getList("Sections", 10);
++
++                for (int k = 0; k < sections.size(); ++k) {
++                    NBTTagCompound nbt = sections.get(k);
++                    ChunkSection section = new ChunkSection(nbt.getByte("Y") << 4, true);
++
++                    assertTrue(store.apply(-32 + x, z, nbt.getByte("Y"), section, true));
++                    mapped += section.isMapped() ? 1 : 0;
++                    assertSameCounts("mapped " + x + "," + k + "," + z, section);
++                    assertSameCounts("heap " + x + "," + k + "," + z, fromNbt(nbt));
++                }
++            }
++        }
++        region.close();
++        assertTrue(mapped > 0);
++
++        // every kind of block the counts tell apart, packed (<= 16 states) and raw, and every state id
++        // the server knows, unregistered ids among them
++        int[] special = new int[] {0, STONE, Block.getStateId(Blocks.WATER.getBlockData()), Block.getStateId(Blocks.FLOWING_LAVA.getBlockData()),
++                Block.getStateId(Blocks.FIRE.getBlockData()), Block.getStateId(Blocks.GRASS.getBlockData()), Block.getStateId(Blocks.LEAVES.getBlockData()),
++                Block.getStateId(Blocks.WEB.getBlockData()), Block.getStateId(Blocks.STONE_PRESSURE_PLATE.getBlockData()), Block.getStateId(Blocks.CACTUS.getBlockData())};
++        Random random = new Random(7L);
++        char[] packed = new char[4096];
++        char[] raw = new char[4096];
++
++        for (int i = 0; i < 4096; ++i) {
++            packed[i] = (char) special[random.nextInt(special.length)];
++            raw[i] = (char) random.nextInt(65536);
++        }
++        ChunkSection packedSection = new ChunkSection(0, true);
++
++        packedSection.setDataSharingUniform(packed);
++        assertSameCounts("packed", packedSection);
++
++        ChunkSection rawSection = new ChunkSection(0, true);
++
++        rawSection.setData(raw);
++        assertSameCounts("raw, any id", rawSection);
++    }
+ }

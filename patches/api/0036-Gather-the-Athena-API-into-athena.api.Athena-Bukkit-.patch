@@ -1,0 +1,389 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 14:13:30 +0900
+Subject: [PATCH] Gather the Athena API into athena.api.Athena, Bukkit style
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f7827841e0b9f094ada5250ad3c7e6eb31dd7a00
+--- /dev/null
++++ b/src/main/java/athena/api/Athena.java
+@@ -0,0 +1,157 @@
++package athena.api;
++
++import java.io.File;
++import java.util.Collection;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Function;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.WorldCreator;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - the entry point to what an Athena server adds to the Bukkit API, used the way
++ * {@link org.bukkit.Bukkit} is: static methods that pass through to the server's
++ * {@link AthenaServer}.
++ *
++ * <h2>Template worlds</h2>
++ *
++ * A template world is loaded from a map folder that stays exactly as it is: no copy, no unzip,
++ * no {@code session.lock}, no {@code uid.dat}, and no chunk, player or level data is ever saved into
++ * it. Several worlds - on this server or on other servers of the same machine - can use one
++ * template at once, and the operating system's file cache holds the map's files once for all of
++ * them.
++ * <ul>
++ *   <li>The spawn area is not kept loaded, so loading one costs tens of milliseconds, not the
++ *       seconds a normal {@code createWorld} spends reading 625 spawn chunks. Preload the chunks
++ *       players will need with {@link World#getChunkAtAsync} before teleporting them.</li>
++ *   <li>Every change lives only in memory. A chunk that unloads loses its changes and is read
++ *       from the template again when it next loads; saving writes nothing.</li>
++ *   <li>Chunks the template does not have are generated in memory by the world's generator, and
++ *       are gone once unloaded.</li>
++ *   <li>Each load gets a fresh random {@link World#getUID()}, so one template can be loaded twice
++ *       under different names.</li>
++ *   <li>Unload it with {@link org.bukkit.Server#unloadWorld(World, boolean)} as usual once no
++ *       player is left in it.</li>
++ * </ul>
++ *
++ * <h2>Teleports</h2>
++ *
++ * Moving a player into another world costs the server most in the ticks right after: the first
++ * chunk packets for everything around the player, and every entity nearby shown to them. Twenty
++ * players moved in one tick stopped a 1-core server for 160-260 ms; moved four per tick with
++ * {@code teleportGradually}, the longest tick stayed under 100 ms.
++ *
++ * <p>Everything here must be called on the server thread.
++ */
++public final class Athena {
++
++    private static AthenaServer server;
++
++    private Athena() {}
++
++    /** The server's implementation of the Athena API. */
++    public static AthenaServer getServer() {
++        if (server == null) {
++            throw new IllegalStateException("The Athena API is only available on an Athena server");
++        }
++        return server;
++    }
++
++    /** Called once by the server at startup; not for plugins. */
++    public static void setServer(AthenaServer athenaServer) {
++        if (server != null) {
++            throw new IllegalStateException("The Athena server is already set");
++        }
++        server = athenaServer;
++    }
++
++    // ---- template worlds ----
++
++    /**
++     * Loads the map in {@code templateFolder} as a new template world called {@code name}.
++     *
++     * @param name the new world's name; must not be the name of a loaded world
++     * @param templateFolder a world folder: {@code level.dat} and {@code region/}
++     * @return the loaded world
++     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
++     */
++    public static World loadTemplateWorld(String name, File templateFolder) {
++        return getServer().loadTemplateWorld(name, templateFolder);
++    }
++
++    /**
++     * Loads the map in {@code templateFolder} as a new template world, with the name,
++     * environment and generator of {@code creator}. The creator's seed and world type are
++     * ignored: the template's {@code level.dat} decides them.
++     *
++     * @param creator the new world's name, environment and generator
++     * @param templateFolder a world folder: {@code level.dat} and {@code region/} (for the nether
++     *        {@code DIM-1/region/}, for the end {@code DIM1/region/})
++     * @return the loaded world
++     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
++     */
++    public static World loadTemplateWorld(WorldCreator creator, File templateFolder) {
++        return getServer().loadTemplateWorld(creator, templateFolder);
++    }
++
++    /** Whether {@code world} was loaded with {@code loadTemplateWorld}. */
++    public static boolean isTemplateWorld(World world) {
++        return getServer().isTemplateWorld(world);
++    }
++
++    // ---- teleports ----
++
++    /**
++     * Teleports {@code entity} once the chunk at {@code location} is loaded, loading it off the
++     * server thread first if it is not - Paper's {@code Entity#teleportAsync}. The teleport itself
++     * happens on the server thread; what is asynchronous is the chunk read. It does not make the
++     * work after the teleport any lighter: for many players at once, see
++     * {@link #teleportGradually(List, List, int)}.
++     *
++     * @return completes on the server thread: true if the entity was teleported, false if it was
++     *         gone by then or a plugin cancelled the teleport
++     */
++    public static CompletableFuture<Boolean> teleportAsync(Entity entity, Location location) {
++        return getServer().teleportAsync(entity, location);
++    }
++
++    /**
++     * Teleports {@code players}, {@code perTick} of them per tick in the order given, starting on
++     * the next tick. {@code destination} is asked for each player's location when that player's
++     * turn comes.
++     *
++     * <p>A player who is offline by their turn, or whose destination is null, is skipped; a
++     * teleport a plugin cancels counts as not done.
++     *
++     * @param perTick players moved per tick; 4 or 5 keeps a 20-player match start smooth
++     * @return completes on the server thread once every player's turn has come, with the number
++     *         actually teleported
++     * @throws IllegalArgumentException if {@code perTick} is below 1
++     */
++    public static CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players,
++                                                               Function<? super Player, ? extends Location> destination,
++                                                               int perTick) {
++        return getServer().teleportGradually(players, destination, perTick);
++    }
++
++    /**
++     * Teleports player {@code i} to {@code destinations.get(i)}, {@code perTick} players per tick
++     * in list order, starting on the next tick.
++     *
++     * <p>A player who is offline by their turn, or whose destination is null, is skipped; a
++     * teleport a plugin cancels counts as not done.
++     *
++     * @param perTick players moved per tick; 4 or 5 keeps a 20-player match start smooth
++     * @return completes on the server thread once every player's turn has come, with the number
++     *         actually teleported
++     * @throws IllegalArgumentException if the lists differ in length or {@code perTick} is below 1
++     */
++    public static CompletableFuture<Integer> teleportGradually(List<? extends Player> players,
++                                                               List<? extends Location> destinations,
++                                                               int perTick) {
++        return getServer().teleportGradually(players, destinations, perTick);
++    }
++}
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..816f58ccfbf862d0f729cdc170915d4e7346a416
+--- /dev/null
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -0,0 +1,32 @@
++package athena.api;
++
++import java.io.File;
++import java.util.Collection;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Function;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.WorldCreator;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - what an Athena server offers beyond the Bukkit API. Plugins use it through the static
++ * methods of {@link Athena}, as they use {@link org.bukkit.Server} through {@link org.bukkit.Bukkit};
++ * see there for what each method does.
++ */
++public interface AthenaServer {
++
++    World loadTemplateWorld(String name, File templateFolder);
++
++    World loadTemplateWorld(WorldCreator creator, File templateFolder);
++
++    boolean isTemplateWorld(World world);
++
++    CompletableFuture<Boolean> teleportAsync(Entity entity, Location location);
++
++    CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick);
++
++    CompletableFuture<Integer> teleportGradually(List<? extends Player> players, List<? extends Location> destinations, int perTick);
++}
+diff --git a/src/main/java/athena/api/AthenaTeleports.java b/src/main/java/athena/api/AthenaTeleports.java
+deleted file mode 100644
+index a7094b7e58f215761e95365fcbb33750485ee845..0000000000000000000000000000000000000000
+--- a/src/main/java/athena/api/AthenaTeleports.java
++++ /dev/null
+@@ -1,74 +0,0 @@
+-package athena.api;
+-
+-import java.util.Collection;
+-import java.util.concurrent.CompletableFuture;
+-import java.util.function.Function;
+-import org.bukkit.Location;
+-import org.bukkit.entity.Player;
+-
+-/**
+- * Athena - teleport many players without stopping the server.
+- *
+- * <p>Moving a player into another world costs the server the most in the ticks right after: the
+- * first chunk packets for everything around the player, and every entity nearby shown to them.
+- * Twenty players moved in one tick put all of that into the same few ticks, and a 1-core server
+- * stood still for 160-210 ms. Moving a few players per tick spreads the same work thinly enough
+- * that the ticks stay near 50 ms.
+- *
+- * <p>All methods must be called on the server thread.
+- */
+-public final class AthenaTeleports {
+-
+-    private static Teleporter teleporter;
+-
+-    private AthenaTeleports() {}
+-
+-    /**
+-     * Teleports {@code players}, {@code perTick} of them per tick in the order given, starting on
+-     * the next tick.
+-     *
+-     * <p>{@code destination} is asked for each player's location at the moment that player's
+-     * turn comes, so it may depend on state that changes meanwhile. A player who is offline by
+-     * then, or whose destination is null, is skipped; a teleport that a plugin cancels counts as
+-     * not done.
+-     *
+-     * @param players the players, in the order they should go
+-     * @param destination where each player goes
+-     * @param perTick players moved per tick; 4 or 5 keeps a 20-player match start smooth on a
+-     *        small server
+-     * @return completes on the server thread once every player's turn has come, with the number
+-     *         actually teleported
+-     * @throws IllegalArgumentException if {@code perTick} is below 1
+-     */
+-    public static CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players,
+-                                                               Function<? super Player, ? extends Location> destination,
+-                                                               int perTick) {
+-        if (perTick < 1) {
+-            throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
+-        }
+-        return teleporter().teleportGradually(players, destination, perTick);
+-    }
+-
+-    private static Teleporter teleporter() {
+-        if (teleporter == null) {
+-            throw new IllegalStateException("AthenaTeleports is only available on an Athena server");
+-        }
+-        return teleporter;
+-    }
+-
+-    /** The server's side of this API. Set once by the server; not for plugins. */
+-    public interface Teleporter {
+-
+-        CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players,
+-                                                     Function<? super Player, ? extends Location> destination,
+-                                                     int perTick);
+-    }
+-
+-    /** Called once by the server at startup; not for plugins. */
+-    public static void setTeleporter(Teleporter serverTeleporter) {
+-        if (teleporter != null) {
+-            throw new IllegalStateException("the teleporter is already set");
+-        }
+-        teleporter = serverTeleporter;
+-    }
+-}
+diff --git a/src/main/java/athena/api/AthenaWorlds.java b/src/main/java/athena/api/AthenaWorlds.java
+deleted file mode 100644
+index 1bf854b8c31e255be2eed7d7cb94b522f32fdfc8..0000000000000000000000000000000000000000
+--- a/src/main/java/athena/api/AthenaWorlds.java
++++ /dev/null
+@@ -1,96 +0,0 @@
+-package athena.api;
+-
+-import java.io.File;
+-import org.bukkit.World;
+-import org.bukkit.WorldCreator;
+-
+-/**
+- * Athena - worlds read straight from a template folder and never written.
+- *
+- * <p>A template world is loaded from a map folder that stays exactly as it is: no copy, no unzip,
+- * no {@code session.lock}, no {@code uid.dat}, and no chunk, player or level data is ever saved into
+- * it. Several worlds - on this server or on other servers of the same machine - can use the same
+- * template at once, and the operating system's file cache holds the map's region files once for all
+- * of them.
+- *
+- * <p>What a template world does differently:
+- * <ul>
+- *   <li>The spawn area is not kept loaded, so loading one costs tens of milliseconds, not the
+- *       seconds a normal {@code createWorld} spends reading 625 spawn chunks. Preload the chunks
+- *       players will need with {@link World#getChunkAtAsync} before teleporting them.</li>
+- *   <li>Every change lives only in memory. A chunk that unloads loses its changes and is read
+- *       from the template again when it next loads; {@link World#save()} and unloading with
+- *       {@code save = true} write nothing.</li>
+- *   <li>Chunks the template does not have are generated in memory by the world's generator (the
+- *       creator's, or the one the template's {@code level.dat} names), and are gone once
+- *       unloaded.</li>
+- *   <li>Each load gets a fresh random {@link World#getUID()}, so the same template can be
+- *       loaded twice under different names.</li>
+- * </ul>
+- *
+- * <p>Unload it with {@link org.bukkit.Server#unloadWorld(World, boolean)} as usual once no player
+- * is left in it; the template's files are closed then.
+- *
+- * <p>All methods must be called on the server thread.
+- */
+-public final class AthenaWorlds {
+-
+-    private static Loader loader;
+-
+-    private AthenaWorlds() {}
+-
+-    /**
+-     * Loads the map in {@code templateFolder} as a new world called {@code name}.
+-     *
+-     * @param name the new world's name; must not be the name of a loaded world
+-     * @param templateFolder a world folder: {@code level.dat} and {@code region/}
+-     * @return the loaded world
+-     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
+-     */
+-    public static World loadTemplate(String name, File templateFolder) {
+-        return loadTemplate(new WorldCreator(name), templateFolder);
+-    }
+-
+-    /**
+-     * Loads the map in {@code templateFolder} as a new world, with the name, environment and
+-     * generator of {@code creator}. The creator's seed and world type are ignored: the template's
+-     * {@code level.dat} decides them.
+-     *
+-     * @param creator the new world's name, environment and generator
+-     * @param templateFolder a world folder: {@code level.dat} and {@code region/} (for the nether
+-     *        {@code DIM-1/region/}, for the end {@code DIM1/region/})
+-     * @return the loaded world
+-     * @throws IllegalArgumentException if the folder holds no world, or the name is taken
+-     */
+-    public static World loadTemplate(WorldCreator creator, File templateFolder) {
+-        return loader().loadTemplate(creator, templateFolder);
+-    }
+-
+-    /** Whether {@code world} was loaded with {@link #loadTemplate}. */
+-    public static boolean isTemplate(World world) {
+-        return loader().isTemplate(world);
+-    }
+-
+-    private static Loader loader() {
+-        if (loader == null) {
+-            throw new IllegalStateException("AthenaWorlds is only available on an Athena server");
+-        }
+-        return loader;
+-    }
+-
+-    /** The server's side of this API. Set once by the server; not for plugins. */
+-    public interface Loader {
+-
+-        World loadTemplate(WorldCreator creator, File templateFolder);
+-
+-        boolean isTemplate(World world);
+-    }
+-
+-    /** Called once by the server at startup; not for plugins. */
+-    public static void setLoader(Loader serverLoader) {
+-        if (loader != null) {
+-            throw new IllegalStateException("the loader is already set");
+-        }
+-        loader = serverLoader;
+-    }
+-}

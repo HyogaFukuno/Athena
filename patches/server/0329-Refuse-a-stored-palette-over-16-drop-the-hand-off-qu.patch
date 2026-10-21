@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 10:53:56 +0900
+Subject: [PATCH] Refuse a stored palette over 16; drop the hand-off queue when
+ its event loop refuses the drain
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index e7b9ebc10bfd7d9e411ae433dd71dd01ca00b99d..a5d1c880ebf3645cd6a9d5fbeb494db579f49e96 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -261,6 +261,10 @@ final class AthenaSectionStore {
+             case KIND_PACKED: {
+                 long offset = value(ids);
+                 int paletteSize = (int) (ids >>> 48 & 0xFF);
++
++                if (paletteSize < 2 || paletteSize > 16) {
++                    return false; // Athena - not something this file writes: read the section from NBT instead
++                }
+                 char[] palette = new char[16];
+ 
+                 for (int i = 0; i < paletteSize; ++i) {
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index 31f76d8dd2b649bd79009483cb83f117b56c0be4..b95e26045ed983863504c2fe829bdfce8790682b 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -408,7 +408,14 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     private void athenaHandOff(Object entry) {
+         this.athenaHandOff.offer(entry);
+         if (this.athenaDrainPosted.compareAndSet(false, true)) {
+-            this.channel.eventLoop().execute(this.athenaDrain);
++            try {
++                this.channel.eventLoop().execute(this.athenaDrain);
++            } catch (java.util.concurrent.RejectedExecutionException rejected) {
++                // the event loop is shutting down and will run nothing more: drop what is queued
++                // rather than leave the flag up and keep queueing behind a drain that never comes
++                this.athenaHandOff.clear();
++                this.athenaDrainPosted.set(false);
++            }
+         }
+     }
+ 

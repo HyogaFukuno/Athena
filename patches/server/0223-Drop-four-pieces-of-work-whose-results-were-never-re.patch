@@ -1,0 +1,156 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 06:42:06 +0900
+Subject: [PATCH] Drop four pieces of work whose results were never read
+
+Four independent cleanups on the mob AI and pathfinding paths, none of which
+changes an answer:
+
+- ChunkCache computed a hasExtendedLevels flag that nothing reads. Building it
+  called getAreLevelsEmpty once per chunk of the query box, and the box spans
+  25 chunks for a follow-range pathfinding request.
+- World.rayTrace allocated a MISS MovingObjectPosition on every step of its
+  block walk even when the caller passed flag2 false and could never see it.
+  hasLineOfSight - the target selectors' visibility test - is such a caller,
+  and the walk runs up to 200 steps.
+- Pathfinder recomputed the closest-so-far point's distance to the target for
+  every node the search expanded, though that point only changes when it is
+  replaced.
+- PathfinderGoalSelector.canUse walked every goal a mob has to find the one or
+  two that are running. Those are already kept in their own list, so it now
+  walks that instead, by index rather than through UnsafeList's iterator pool.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkCache.java b/src/main/java/net/minecraft/server/ChunkCache.java
+index 5bdbe0de7692e0239759282b270b7a9aadbe3482..213060438e6764a6ed0ee752dc33acea8a7710da 100644
+--- a/src/main/java/net/minecraft/server/ChunkCache.java
++++ b/src/main/java/net/minecraft/server/ChunkCache.java
+@@ -6,7 +6,6 @@ public class ChunkCache implements IBlockAccess {
+     protected int chunkX;
+     protected int chunkZ;
+     protected Chunk[][] chunkArray;
+-    protected boolean hasExtendedLevels;
+     protected World worldObj;
+ 
+     public ChunkCache(World world, BlockPosition blockposition, BlockPosition blockposition1, int i) {
+@@ -17,7 +16,6 @@ public class ChunkCache implements IBlockAccess {
+         int k = blockposition1.getZ() + i >> 4;
+ 
+         this.chunkArray = new Chunk[j - this.chunkX + 1][k - this.chunkZ + 1];
+-        this.hasExtendedLevels = true;
+ 
+         for (int l = this.chunkX; l <= j; ++l) {
+             for (int i1 = this.chunkZ; i1 <= k; ++i1) {
+@@ -25,16 +23,12 @@ public class ChunkCache implements IBlockAccess {
+             }
+         }
+ 
+-        for (int j1 = blockposition.getX() >> 4; j1 <= blockposition1.getX() >> 4; ++j1) {
+-            for (int k1 = blockposition.getZ() >> 4; k1 <= blockposition1.getZ() >> 4; ++k1) {
+-                Chunk chunk = this.chunkArray[j1 - this.chunkX][k1 - this.chunkZ];
+-
+-                if (chunk != null && !chunk.getAreLevelsEmpty(blockposition.getY(), blockposition1.getY())) {
+-                    this.hasExtendedLevels = false;
+-                }
+-            }
+-        }
+-
++        // Athena - the second loop that used to stand here computed a `hasExtendedLevels` flag that
++        // nothing in the server ever read: the field was written here and nowhere else, and it has
++        // no reader in NMS, in CraftBukkit, or in the deprecation mappings. Computing it was not
++        // free - it asked getAreLevelsEmpty, which walks the sections of a chunk over the whole
++        // y range of the query box, once per chunk of the box. This runs for every pathfinding
++        // request, so the work was pure loss. The flag and its loop are gone.
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/Pathfinder.java b/src/main/java/net/minecraft/server/Pathfinder.java
+index 22728ab338e3f8902063727ba1c817295e9ec634..8c933e72833b96aceb7cd5cd72cd554245ea716e 100644
+--- a/src/main/java/net/minecraft/server/Pathfinder.java
++++ b/src/main/java/net/minecraft/server/Pathfinder.java
+@@ -37,6 +37,9 @@ public class Pathfinder {
+         this.path.clearPath();
+         this.path.addPoint(pathpoint);
+         PathPoint pathpoint2 = pathpoint;
++        // Athena - the closest point seen so far never moves unless it is replaced, so its distance
++        // to the target does not have to be recomputed for every node the search expands.
++        float bestDistance = pathpoint2.distanceToSquared(pathpoint1);
+ 
+         while (!this.path.isPathEmpty()) {
+             PathPoint pathpoint3 = this.path.dequeue();
+@@ -45,8 +48,11 @@ public class Pathfinder {
+                 return this.createEntityPath(pathpoint, pathpoint1);
+             }
+ 
+-            if (pathpoint3.distanceToSquared(pathpoint1) < pathpoint2.distanceToSquared(pathpoint1)) {
++            float distance = pathpoint3.distanceToSquared(pathpoint1); // Athena
++
++            if (distance < bestDistance) { // Athena
+                 pathpoint2 = pathpoint3;
++                bestDistance = distance; // Athena
+             }
+ 
+             pathpoint3.visited = true;
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+index b00ec49ccefab40ce58285e8d0e4520254d995b4..00ac5543c51503b868de0ce4fb657aae22ddab67 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+@@ -106,19 +106,28 @@ public class PathfinderGoalSelector {
+     }
+ 
+     private boolean canUse(PathfinderGoalSelector.PathfinderGoalSelectorItem pathfindergoalselector_pathfindergoalselectoritem) {
+-        Iterator iterator = this.taskEntries.iterator();
++        // Athena - only a running goal can stop another one from starting.
++        //
++        // This used to walk taskEntries - every goal the mob has - and test `executing` last, so a
++        // mob with n goals paid n iterations to reach the one or two that are actually running.
++        // The running entries already have their own list, and the flag on an entry mirrors its
++        // membership in it, so walking that list asks the same question over m entries instead of
++        // n. The `executing` test is then implied by membership and drops out.
++        //
++        // Indexed rather than iterated: UnsafeList hands out iterators from a pool that has to be
++        // searched and reset, and the early returns below had to hand theirs back by clearing the
++        // `valid` flag. An index needs neither. See the entity slice walk for the same trade.
++        List<PathfinderGoalSelector.PathfinderGoalSelectorItem> running = this.executingTaskEntries;
+ 
+-        while (iterator.hasNext()) {
+-            PathfinderGoalSelector.PathfinderGoalSelectorItem pathfindergoalselector_pathfindergoalselectoritem1 = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
++        for (int i = 0, size = running.size(); i < size; ++i) {
++            PathfinderGoalSelector.PathfinderGoalSelectorItem other = running.get(i);
+ 
+-            if (pathfindergoalselector_pathfindergoalselectoritem1 != pathfindergoalselector_pathfindergoalselectoritem) {
+-                if (pathfindergoalselector_pathfindergoalselectoritem.priority >= pathfindergoalselector_pathfindergoalselectoritem1.priority) {
+-                    if (!this.areTasksCompatible(pathfindergoalselector_pathfindergoalselectoritem, pathfindergoalselector_pathfindergoalselectoritem1) && pathfindergoalselector_pathfindergoalselectoritem1.executing) { // Athena - flag instead of a scan
+-                        ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
++            if (other != pathfindergoalselector_pathfindergoalselectoritem) {
++                if (pathfindergoalselector_pathfindergoalselectoritem.priority >= other.priority) {
++                    if (!this.areTasksCompatible(pathfindergoalselector_pathfindergoalselectoritem, other)) {
+                         return false;
+                     }
+-                } else if (!pathfindergoalselector_pathfindergoalselectoritem1.action.isInterruptible() && pathfindergoalselector_pathfindergoalselectoritem1.executing) { // Athena - flag instead of a scan
+-                    ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
++                } else if (!other.action.isInterruptible()) {
+                     return false;
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 8a187414bf225849e942646ef9477dd86246e863..3676eaa4ee5fe84e8ef35c754a8eec43026efaaa 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1177,7 +1177,14 @@ public abstract class World implements IBlockAccess {
+                             if (movingobjectposition2 != null) {
+                                 return movingobjectposition2;
+                             }
+-                        } else {
++                        } else if (flag2) {
++                            // Athena - only build the miss position when the caller asked for it.
++                            // movingobjectposition1 is read by exactly two statements, both of them
++                            // `return flag2 ? movingobjectposition1 : null`, so with flag2 false the
++                            // object was allocated on every step of the walk and then thrown away.
++                            // hasLineOfSight - the target selectors' visibility check, run for every
++                            // mob against every candidate - passes false, and the walk is capped at
++                            // 200 steps.
+                             movingobjectposition1 = new MovingObjectPosition(MovingObjectPosition.EnumMovingObjectType.MISS, vec3d, enumdirection, blockposition);
+                         }
+                     }

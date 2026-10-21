@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 18 Oct 2026 20:53:21 +0900
+Subject: [PATCH] Write tick, player and chunk counts for the diagnostics kit
+ while it asks
+
+diag/athena-diag.sh measures a running server from outside the JVM (/proc, a GC log added with jcmd)
+but cannot see how long ticks take or how many players and chunks there are. While the kit keeps
+athena-diag.request in the server directory, Athena appends one line every 100 ticks to
+athena-diag.csv: the window's tick count, total and longest tick, ticks over 50 ms, then players,
+worlds, chunks, entities, tile entities and used heap. No restart, command or plugin is needed, and
+idle it costs one file lookup every five seconds. No player names or addresses are written.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaDiagnostics.java b/src/main/java/net/minecraft/server/AthenaDiagnostics.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a813fe9cd5909108188256b17492fd9b680f7e9a
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaDiagnostics.java
+@@ -0,0 +1,146 @@
++package net.minecraft.server;
++
++import java.io.BufferedWriter;
++import java.io.File;
++import java.io.FileOutputStream;
++import java.io.IOException;
++import java.io.OutputStreamWriter;
++import java.io.Writer;
++import java.nio.charset.StandardCharsets;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena - what the diagnostics kit (diag/athena-diag.sh) cannot read from outside the JVM: how long
++// ticks take, how many players are on, and how many chunks and entities the worlds hold.
++//
++// Nothing runs until the kit asks. Every 100 ticks the server looks for athena-diag.request in its
++// directory; while the file is there, it appends one line every 100 ticks to athena-diag.csv, and
++// when the file goes away it stops and closes the output. The kit creates and removes the file, so
++// a running server can be measured without a restart, a command or a plugin, whatever runs it
++// (tmux, screen, systemd). When idle the cost is one file lookup every five seconds.
++//
++// Each line covers the 100 ticks before it: their count, total and longest duration, and how many
++// ran over 50 ms (a tick a player can feel), then the state at the end of the window. The duration
++// is the tick itself - from the start of the loop iteration to the end of the tick, the wait for the
++// next one excluded. No player names or addresses are written.
++final class AthenaDiagnostics {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena/Diagnostics");
++    private static final File REQUEST = new File("athena-diag.request");
++    private static final File OUTPUT = new File("athena-diag.csv");
++    private static final int EVERY = 100;
++    private static final String HEADER = "epoch_ms,tick,ticks,tick_ms_sum,tick_ms_max,ticks_over_50ms,players,worlds,chunks,entities,tile_entities,heap_used_mb";
++
++    private static Writer out;
++    private static int ticks;
++    private static long sumNanos;
++    private static long maxNanos;
++    private static int over50;
++
++    private AthenaDiagnostics() {}
++
++    /** Called by the tick loop after every tick, on the server thread. */
++    static void afterTick(MinecraftServer server, long tickNanos) {
++        if (out != null) {
++            ++ticks;
++            sumNanos += tickNanos;
++            if (tickNanos > maxNanos) {
++                maxNanos = tickNanos;
++            }
++            if (tickNanos > 50_000_000L) {
++                ++over50;
++            }
++        }
++        if (MinecraftServer.currentTick % EVERY != 0) {
++            return;
++        }
++
++        boolean requested = REQUEST.isFile();
++
++        if (out == null) {
++            if (requested) {
++                start();
++            }
++            return;
++        }
++        try {
++            write(server);
++            if (!requested) {
++                stop();
++            }
++        } catch (IOException | RuntimeException e) {
++            LOGGER.warn("Stopping diagnostics: cannot write {}", OUTPUT, e);
++            stop();
++        }
++    }
++
++    private static void start() {
++        try {
++            boolean fresh = !OUTPUT.isFile() || OUTPUT.length() == 0L;
++
++            out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(OUTPUT, true), StandardCharsets.UTF_8));
++            if (fresh) {
++                out.write(HEADER);
++                out.write('\n');
++                out.flush();
++            }
++            reset();
++            LOGGER.info("Diagnostics started: {} every {} ticks", OUTPUT, EVERY);
++        } catch (IOException e) {
++            LOGGER.warn("Cannot start diagnostics: {}", OUTPUT, e);
++            out = null;
++        }
++    }
++
++    private static void stop() {
++        if (out != null) {
++            try {
++                out.close();
++            } catch (IOException ignored) {
++            }
++            out = null;
++            LOGGER.info("Diagnostics stopped");
++        }
++    }
++
++    private static void reset() {
++        ticks = 0;
++        sumNanos = 0L;
++        maxNanos = 0L;
++        over50 = 0;
++    }
++
++    private static void write(MinecraftServer server) throws IOException {
++        long chunks = 0L;
++        long entities = 0L;
++        long tileEntities = 0L;
++
++        for (int i = 0; i < server.worlds.size(); ++i) {
++            WorldServer world = server.worlds.get(i);
++
++            chunks += world.chunkProviderServer.chunks.size();
++            entities += world.entityList.size();
++            tileEntities += world.tileEntityList.size();
++        }
++
++        Runtime runtime = Runtime.getRuntime();
++        StringBuilder line = new StringBuilder(128)
++                .append(System.currentTimeMillis()).append(',')
++                .append(MinecraftServer.currentTick).append(',')
++                .append(ticks).append(',')
++                .append(String.format(java.util.Locale.ROOT, "%.3f", sumNanos / 1.0E6D)).append(',')
++                .append(String.format(java.util.Locale.ROOT, "%.3f", maxNanos / 1.0E6D)).append(',')
++                .append(over50).append(',')
++                .append(server.getPlayerList().getPlayerCount()).append(',')
++                .append(server.worlds.size()).append(',')
++                .append(chunks).append(',')
++                .append(entities).append(',')
++                .append(tileEntities).append(',')
++                .append((runtime.totalMemory() - runtime.freeMemory()) >> 20);
++
++        out.write(line.toString());
++        out.write('\n');
++        out.flush();
++        reset();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index ea0f99b08331d411a2fa4b22373c3e3d410a32f5..92f1e449b9e0deeb081eec3cc28663100ec1d7c0 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -654,6 +654,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     lastTick = curTime;
+ 
+                     this.A();
++                    AthenaDiagnostics.afterTick(this, System.nanoTime() - curTime); // Athena - for the diagnostics kit, while it asks
+                     // PandaSpigot start - New Tick Loop System
+                     this.ab += 50L;
+ 

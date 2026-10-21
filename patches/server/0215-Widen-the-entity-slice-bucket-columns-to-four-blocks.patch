@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 30 Aug 2026 20:06:34 +0900
+Subject: [PATCH] Widen the entity slice bucket columns to four blocks as well
+
+0214 coarsened the Z rows to four blocks because a one-block cell was crossed almost
+every tick and the maintenance ate the whole query gain. The X columns were left at one
+block, which is what they had been since the index was introduced - but the same
+argument applies to them, and it turns out they were past the same optimum.
+
+Four-block columns as well, so a bucket is (x << 2) | z over sixteen cells. Verified
+with debugVerifyAthenaIndexes against the flat slice walk - 6,905,955 bucketed entity
+checks, no mismatch.
+
+Measured +1.62% TPS, 6/6 pairwise wins, on top of 0214 at 30,000 golems with four bots.
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 3864d805db2b8e1725c2fd002953c88fb79baa41..3d67d0a90ff8879a33bd011c6da83fffc49998e8 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -786,10 +786,10 @@ public class Chunk {
+     }
+ 
+     // Athena start - bucket index maintenance
+-    /** The bucket column a world X coordinate falls in, clamped to this chunk. */
++    /** The bucket column a world X coordinate falls in, clamped to this chunk. Four blocks wide. */
+     private int bucketOf(double x) {
+-        int b = MathHelper.floor(x) - (this.locX << 4);
+-        return b < 0 ? 0 : (b > 15 ? 15 : b);
++        int b = (MathHelper.floor(x) - (this.locX << 4)) >> 2;
++        return b < 0 ? 0 : (b > 3 ? 3 : b);
+     }
+ 
+     /** The bucket row a world Z coordinate falls in, clamped to this chunk. Four blocks deep. */
+@@ -832,7 +832,7 @@ public class Chunk {
+ 
+     /** Builds (or rebuilds) the bucket index of one slice from the slice itself. */
+     private void buildBuckets(int slice) {
+-        List<Entity>[] buckets = (List<Entity>[]) new List[64]; // Athena - 16 x 4
++        List<Entity>[] buckets = (List<Entity>[]) new List[16]; // Athena - 4 x 4
+ 
+         this.entityBuckets[slice] = buckets;
+         this.bucketPadX[slice] = 1;

@@ -1,0 +1,276 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 12:52:55 +0900
+Subject: [PATCH] Compute a liquid's push without allocating or reading a block
+ twice
+
+getFlowVector built a BlockPosition for each of the four neighbours, another
+for the block under one of them, and a fresh Vec3D for every partial sum -
+about ten and five objects for a single water block. getEffectiveFlowDecay
+went through getLevel(IBlockAccess, BlockPosition), which reads the same
+position twice, once for the material and once for the level, and the
+fall-through branch then read the neighbour a third time to ask whether it was
+solid.
+
+An entity standing in water pays all of that twice a tick for every water
+block its box touches - handleWaterMovement and updateFallState - and a
+profile of the saturating bench put modifyAcceleration and everything under it
+at 4.69% of the server thread.
+
+Block gains a scalar addAcceleration that adds into the caller's three doubles
+instead of handing back a fresh Vec3D, BlockStairs forwards it, and
+handleMaterialAcceleration accumulates into a per-thread array. The centre
+block and each neighbour are now read exactly once: about eleven getType calls
+become six.
+
+Nothing observable moves. The neighbour order, the normalize before the
+fall-through check, the -6 on Y and the final normalize are as they were, and
+MathHelper.sqrt - which returns a float - is kept on both paths so the numbers
+do not shift. normalize() answered (0,0,0) below its 1.0E-4 guard, which added
+nothing, so the scalar form skips instead.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 587f41e465e013e074b3499dcef360540404f972..6e9a3a7f6a4a954f2d7edcefa6387abde7e82489 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -589,6 +589,11 @@ public class Block {
+         return vec3d;
+     }
+ 
++    // Athena - scalar form: adds this block's contribution into the caller's three doubles instead
++    // of handing back a fresh Vec3D. The default adds nothing, which is what returning the vector
++    // unchanged meant.
++    public void addAcceleration(World world, int x, int y, int z, Entity entity, double[] accel) {}
++
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {}
+ 
+     public final double getBlockBoundsMinX() {
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index 37082bc079b10152588dc31644fc6532ce4d5b5d..07843e061aeffe0903d8aa21f9dd57d6828662f1 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -127,6 +127,139 @@ public abstract class BlockFluids extends Block {
+         return vec3d.add(this.getFlowVector(world, blockposition));
+     }
+ 
++    // Athena start - the flow scan without allocating, and without reading a position twice.
++    //
++    // getFlowVector builds a BlockPosition for each of the four neighbours, another for the block
++    // under or over one of them, and a fresh Vec3D for every partial sum - about ten and five
++    // objects for one water block. Worse, getEffectiveFlowDecay goes through
++    // getLevel(IBlockAccess, BlockPosition), which reads the same position twice: once for the
++    // material and once for the level. An entity standing in water pays all of it twice a tick for
++    // every water block its box touches, and the profile put modifyAcceleration and everything
++    // under it at 4.69% of the server thread.
++    //
++    // Everything observable is the shape the Vec3D version had: the same neighbour order, the same
++    // normalize before the fall-through check, the same -6 on Y, the same final normalize, and
++    // MathHelper.sqrt - which returns a float - kept in both so the numbers do not shift.
++    @Override
++    public void addAcceleration(World world, int x, int y, int z, Entity entity, double[] accel) {
++        double fx = 0.0D;
++        double fy = 0.0D;
++        double fz = 0.0D;
++        // The centre is read once for both the decay and the level test at the bottom. The caller
++        // only reaches this for a block of this liquid, so the level is always present; where the
++        // Vec3D version would have thrown asking an unrelated block for a level, this reads -1 and
++        // skips the test.
++        IBlockData centre = world.getType(x, y, z);
++        int centreLevel = centre.getBlock().getMaterial() == this.material
++                ? ((Integer) centre.get(BlockFluids.LEVEL)).intValue()
++                : -1;
++        int i = centreLevel >= 8 ? 0 : centreLevel;
++        EnumDirection[] horizontals = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
++
++        for (int d = 0; d < horizontals.length; ++d) {
++            EnumDirection enumdirection = horizontals[d];
++            int nx = x + enumdirection.getAdjacentX();
++            int ny = y + enumdirection.getAdjacentY();
++            int nz = z + enumdirection.getAdjacentZ();
++            // One read answers both "is it my liquid, and at what level" and, when it is not, the
++            // solidity test below.
++            IBlockData neighbour = world.getType(nx, ny, nz);
++            Material neighbourMaterial = neighbour.getBlock().getMaterial();
++            int j;
++
++            if (neighbourMaterial == this.material) {
++                int level = ((Integer) neighbour.get(BlockFluids.LEVEL)).intValue();
++
++                j = level >= 8 ? 0 : level;
++            } else {
++                j = -1;
++            }
++
++            if (j < 0) {
++                if (!neighbourMaterial.isSolid()) {
++                    j = this.flowDecayAt(world, nx, ny - 1, nz);
++                    if (j >= 0) {
++                        int k = j - (i - 8);
++
++                        fx += (nx - x) * k;
++                        fy += (ny - y) * k;
++                        fz += (nz - z) * k;
++                    }
++                }
++            } else {
++                int k = j - i;
++
++                fx += (nx - x) * k;
++                fy += (ny - y) * k;
++                fz += (nz - z) * k;
++            }
++        }
++
++        if (centreLevel >= 8) {
++            for (int d = 0; d < horizontals.length; ++d) {
++                EnumDirection enumdirection = horizontals[d];
++                int nx = x + enumdirection.getAdjacentX();
++                int ny = y + enumdirection.getAdjacentY();
++                int nz = z + enumdirection.getAdjacentZ();
++
++                if (this.faceIsSolid(world, nx, ny, nz, enumdirection) || this.faceIsSolid(world, nx, ny + 1, nz, enumdirection)) {
++                    // normalize, then straight down by 6
++                    double length = (double) MathHelper.sqrt(fx * fx + fy * fy + fz * fz);
++
++                    if (length < 1.0E-4D) {
++                        fx = 0.0D;
++                        fy = 0.0D;
++                        fz = 0.0D;
++                    } else {
++                        fx /= length;
++                        fy /= length;
++                        fz /= length;
++                    }
++
++                    fy -= 6.0D;
++                    break;
++                }
++            }
++        }
++
++        double length = (double) MathHelper.sqrt(fx * fx + fy * fy + fz * fz);
++
++        if (length >= 1.0E-4D) {
++            accel[0] += fx / length;
++            accel[1] += fy / length;
++            accel[2] += fz / length;
++        }
++    }
++
++    /** getEffectiveFlowDecay over plain coordinates, reading the position once. */
++    private int flowDecayAt(World world, int x, int y, int z) {
++        IBlockData iblockdata = world.getType(x, y, z);
++
++        if (iblockdata.getBlock().getMaterial() != this.material) {
++            return -1; // getLevel's answer for "not my liquid"; -1 is never >= 8
++        }
++
++        int level = ((Integer) iblockdata.get(BlockFluids.LEVEL)).intValue();
++
++        return level >= 8 ? 0 : level;
++    }
++
++    /** isBlockSolid over plain coordinates, reading the position once rather than twice. */
++    private boolean faceIsSolid(World world, int x, int y, int z, EnumDirection enumdirection) {
++        Material material = world.getType(x, y, z).getBlock().getMaterial();
++
++        if (material == this.material) {
++            return false;
++        }
++
++        if (enumdirection == EnumDirection.UP) {
++            return true;
++        }
++
++        return material != Material.ICE && material.isBuildable();
++    }
++    // Athena end
++
+     public int tickRate(World world) {
+         return this.material == Material.WATER ? 5 : (this.material == Material.LAVA ? (world.worldProvider.getHasNoSky() ? 10 : 30) : 0);
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockStairs.java b/src/main/java/net/minecraft/server/BlockStairs.java
+index 2f1b0847b0fcbfa4766ebe95e078866fb01a0ad7..c64a9f087b86396765b9f7b1f459033bdfff7bc9 100644
+--- a/src/main/java/net/minecraft/server/BlockStairs.java
++++ b/src/main/java/net/minecraft/server/BlockStairs.java
+@@ -431,6 +431,12 @@ public class BlockStairs extends Block {
+         return this.modelBlock.tickRate(world);
+     }
+ 
++    // Athena - the scalar form has to be forwarded too
++    @Override
++    public void addAcceleration(World world, int x, int y, int z, Entity entity, double[] accel) {
++        this.modelBlock.addAcceleration(world, x, y, z, entity, accel);
++    }
++
+     @Override
+     public Vec3D modifyAcceleration(World world, BlockPosition blockposition, Entity entity, Vec3D vec3d) {
+         return this.modelBlock.modifyAcceleration(world, blockposition, entity, vec3d);
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 3676eaa4ee5fe84e8ef35c754a8eec43026efaaa..9d9273634c5da14b285f094449c4ca001f220dff 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1668,6 +1668,15 @@ public abstract class World implements IBlockAccess {
+         }
+     }
+ 
++    // Athena - the push a box of liquid applies, accumulated across the blocks in it. Held per
++    // thread rather than allocated per call; handleMaterialAcceleration does not re-enter itself,
++    // and the array never escapes it.
++    private static final ThreadLocal<double[]> ACCELERATION = new ThreadLocal<double[]>() {
++        protected double[] initialValue() {
++            return new double[3];
++        }
++    };
++
+     private static final ThreadLocal<CollisionBoxSink> COLLISION_SINK = new ThreadLocal<CollisionBoxSink>() {
+         protected CollisionBoxSink initialValue() {
+             return new CollisionBoxSink();
+@@ -2558,7 +2567,13 @@ public abstract class World implements IBlockAccess {
+             return false; // Athena - no section in the box holds this liquid, so the scan finds nothing and applies nothing
+         } else {
+             boolean flag = false;
+-            Vec3D vec3d = new Vec3D(0.0D, 0.0D, 0.0D);
++            // Athena - accumulate the push into three doubles. The old Vec3D was replaced by a new
++            // one for every liquid block in the box, and the blocks handed one back in turn.
++            double[] accel = World.ACCELERATION.get();
++
++            accel[0] = 0.0D;
++            accel[1] = 0.0D;
++            accel[2] = 0.0D;
+             BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(6); // Athena - reuse a per-thread scratch position
+             // Athena start - remember the chunk the last block came from
+             boolean memo = !this.decorating() && !this.captureTreeGeneration;
+@@ -2596,20 +2611,24 @@ public abstract class World implements IBlockAccess {
+ 
+                             if ((double) l >= d0) {
+                                 flag = true;
+-                                vec3d = block.modifyAcceleration(this, blockposition_mutableblockposition, entity, vec3d);
++                                block.addAcceleration(this, k1, l1, i2, entity, accel); // Athena - scalar
+                             }
+                         }
+                     }
+                 }
+             }
+ 
+-            if (vec3d.lengthVector() > 0.0D && entity.isPushedByWater()) {
+-                vec3d = vec3d.normalize();
++            // Athena - lengthVector then normalize, both of which used MathHelper.sqrt, so the one
++            // length serves for the test and the division. normalize() answered (0,0,0) below its
++            // 1.0E-4 guard, which added nothing; skipping is the same.
++            double length = (double) MathHelper.sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
++
++            if (length > 0.0D && entity.isPushedByWater() && length >= 1.0E-4D) {
+                 double d1 = 0.014D;
+ 
+-                entity.motX += vec3d.xCoord * d1;
+-                entity.motY += vec3d.yCoord * d1;
+-                entity.motZ += vec3d.zCoord * d1;
++                entity.motX += accel[0] / length * d1;
++                entity.motY += accel[1] / length * d1;
++                entity.motZ += accel[2] / length * d1;
+             }
+ 
+             return flag;

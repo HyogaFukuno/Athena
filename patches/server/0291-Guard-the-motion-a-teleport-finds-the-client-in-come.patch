@@ -1,0 +1,146 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 20:26:11 +0900
+Subject: [PATCH] Guard: the motion a teleport finds the client in comes from
+ moves the server threw away
+
+From enforcing on sg2: a player walking off its pre-game pedestal and jumping
+was kicked for rising 0.333 where 0.127 was allowed, the second tick of a
+jump. The jump's first tick was in flight when the plugin sent the player
+back; vanilla's checkMovement throws such moves away, so the guard never saw
+the jump, and the client carried its speed to the pedestal.
+
+Every position packet is now observed before anything filters it; while the
+client has not yet arrived where it was sent, the motion between those
+packets is carried into the seed - and a rise at all counts as a jump, since
+ticks the client did not report can sit between them. For the first three
+moves after a teleport, the depth the client could have come down by assumes
+it started at rest, not the vertical speed the guard guessed.
+
+AthenaGuardMovementTest's teleport run now sometimes lets one more client
+tick go out before the teleport arrives; 24 seeds x 3000 runs are clean.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 1246b85b6fa5899ddf628b5f474adf713f87e7bc..015e1899ddaf5fdf31fbda98c2b429b91dbc4581 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -68,6 +68,7 @@ public final class AthenaGuard {
+     private int ticksSincePos;      // client ticks since the last packet with a position
+     private int freshTicks;         // ticks since the state was seeded, while still unsure of the client's onGround
+     private double landRise;        // for this move: how far over the start the client could have landed
++    private double repX, repY, repZ = Double.NaN; // the last position the client reported, checked or not
+     private double carriedH, carriedVy, carriedDown; // motion as of a teleport: the client keeps it, the position it moved by is lost
+     private double grantH, grantV;  // knockback the server sent, and until when it may show up
+     private long grantUntil;
+@@ -182,6 +183,33 @@ public final class AthenaGuard {
+         this.grantSentTick = MinecraftServer.currentTick;
+     }
+ 
++    /**
++     * Every movement packet with a position, before anything filters it. While the client has not yet
++     * arrived where the server sent it, its moves are thrown away (vanilla's checkMovement) - but they
++     * are what its motion is when the teleport reaches it, and it keeps that motion: a jump just
++     * before the teleport goes on rising from the new position.
++     */
++    void observe(PacketPlayInFlying packet) {
++        if (!packet.isMoving() || packet.getPositionY() == -999.0D) {
++            return;
++        }
++        this.observe(packet.getPositionX(), packet.getPositionY(), packet.getPositionZ());
++    }
++
++    void observe(double x, double y, double z) {
++        if (this.awaiting && !Double.isNaN(this.repZ)
++                && !(Math.abs(x - this.awaitX) < 0.01D && Math.abs(y - this.awaitY) < 0.01D && Math.abs(z - this.awaitZ) < 0.01D)) {
++            double dx = x - this.repX, dy = y - this.repY, dz = z - this.repZ;
++
++            this.carriedH = Math.min(Math.max(this.carriedH, Math.sqrt(dx * dx + dz * dz)), 1.0D);
++            // ticks it did not report can sit between two in-flight positions: rising at all, it may
++            // have just jumped
++            this.carriedVy = Math.max(this.carriedVy, dy > 0.0D ? JUMP + 0.1D * (this.jumpAmp + 1) : dy);
++            this.carriedDown = Math.min(Math.max(this.carriedDown, -dy), 4.0D);
++        }
++        this.repX = x; this.repY = y; this.repZ = z;
++    }
++
+     // ------------------------------------------------------------------ timer
+     /**
+      * The client answers every position the server sends with a movement packet of its own, on top
+@@ -295,9 +323,11 @@ public final class AthenaGuard {
+         // Right after a teleport the client's onGround is the one it had before, so it may step up from
+         // the air: against a wall it meets on the way down this tick, and end floating where it began.
+         boolean fresh = this.fresh();
+-        double fall = this.fallDepth(ticks);
++        // after a teleport the vertical speed is not known: it may have come straight down
++        // (for the first few moves: the vertical speed the guard tracks starts from a guess)
++        double fall = this.freshTicks < 3 ? this.freshFall(ticks) : this.fallDepth(ticks);
+         // the vertical move comes first, so what the sideways one runs into can be as low as it fell
+-        boolean wall = this.nearWall(world, fromX, fromY - (fresh ? this.freshFall(ticks) : fall), fromZ, x, y, z);
++        boolean wall = this.nearWall(world, fromX, fromY - fall, fromZ, x, y, z);
+         // something to come down on under the start, or an edge the box touches that it can step onto
+         boolean landing = ticks > 1 || !this.groundStart || !this.groundCertain || fresh ? this.groundBelow(world, fromX, fromY, fromZ, fall) || this.edgeNear(world, fromX, fromY, fromZ, fall) : false;
+         // landing on an edge can step the client up first: a jump after it rises from that height
+@@ -549,7 +579,10 @@ public final class AthenaGuard {
+     // for AthenaGuardMovementTest, which drives evaluate() from a model of the client
+     boolean athenaKnown() { return this.known; }
+     boolean fresh() { return this.freshTicks == 0; }
++    boolean athenaRecent() { return this.freshTicks < 3; }
+     void athenaLandRise(double rise) { this.landRise = rise; }
++    void athenaAwait(double x, double y, double z) { this.carry(); this.known = false; this.awaiting = true; this.awaitX = x; this.awaitY = y; this.awaitZ = z; }
++    void athenaArrived() { this.awaiting = false; }
+     boolean athenaGroundCertain() { return this.groundCertain; }
+     void athenaSeed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) { this.seedFresh(h, dy, groundNow, maybeGround, certain, slipNow); }
+     void athenaTestEffects(int speedAmp, int jumpAmp) { this.speedAmp = speedAmp; this.jumpAmp = jumpAmp; }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index c53e2e4dfa5bfcc85c65fd9fcf385a148eeb910c..86e627992ed3fa0cfedd0b9f411814ae4b879c73 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -229,6 +229,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             this.disconnect("Invalid move packet received");
+         } else {
+             // Athena start - a client running its clock fast sends more ticks than time allows
++            this.guard.observe(packetplayinflying);
+             if (!this.guard.timerOk(packetplayinflying)) {
+                 if (this.guard.kickPending()) {
+                     this.disconnect(AthenaGuard.kickMessage);
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index 6c0b56fdcf0cfefe21d0df20526c8a2d500671bd..b1677331b21b20665e0db186eb51885936952e87 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -252,9 +252,9 @@ public class AthenaGuardMovementTest {
+             boolean fresh = this.guard.fresh();
+             double fallNow = this.guard.freshFall(ticks);
+             double fallFirst = this.guard.fallDepth(ticks);
+-            boolean wall = !probe.colliding(Math.min(this.x, nx) - 0.301, Math.min(this.y - (fresh ? fallNow : fallFirst), ny) + 0.001, Math.min(this.z, nz) - 0.301,
++            boolean wall = !probe.colliding(Math.min(this.x, nx) - 0.301, Math.min(this.y - (this.guard.athenaRecent() ? fallNow : fallFirst), ny) + 0.001, Math.min(this.z, nz) - 0.301,
+                     Math.max(this.x, nx) + 0.301, Math.max(this.y, ny) + 2.4, Math.max(this.z, nz) + 0.301).isEmpty();
+-            double fall = this.guard.fallDepth(ticks);
++            double fall = this.guard.athenaRecent() ? this.guard.freshFall(ticks) : this.guard.fallDepth(ticks);
+             double half = 0.3 - 1.0E-7;
+             double wide = 0.3 + 1.0E-7;
+             boolean landing = (ticks > 1 || !this.guard.groundStart() || !this.guard.athenaGroundCertain() || this.guard.fresh()) && (!probe.colliding(this.x - half, this.y - fall, this.z - half, this.x + half, this.y, this.z + half).isEmpty()
+@@ -328,7 +328,13 @@ public class AthenaGuardMovementTest {
+                 // only where the player fits: a box rebuilt from its centre can sit 1e-14 inside a wall it touched
+                 if (teleports && been.size() >= 8 && random.nextInt(30) == 0
+                         && new Client(0, 0, 0).colliding(to[0] - 0.3, ty, to[2] - 0.3, to[0] + 0.3, ty + 1.8, to[2] + 0.3).isEmpty()) {
+-                    s.guard.reset();
++                    s.guard.athenaAwait(to[0], ty, to[2]);
++                    // the tick already on its way when the teleport is sent: thrown away, but its motion is kept
++                    if (random.nextBoolean()) {
++                        c.tick(forward, strafe, jumpHeld, sprint && forward > 0.8F, 1.0);
++                        s.guard.observe(c.x(), c.y(), c.z());
++                    }
++                    s.guard.athenaArrived();
+                     s.x = to[0]; s.y = ty; s.z = to[2]; s.skipped = 0;
+                     c.set(to[0], ty, to[2]);
+                     c.lastX = to[0]; c.lastY = ty; c.lastZ = to[2];
+@@ -352,6 +358,7 @@ public class AthenaGuardMovementTest {
+                 if (history.size() > 10) history.removeFirst();
+                 if (sentNow) {
+                     ++packets;
++                    s.guard.observe(c.x(), c.y(), c.z());
+                     int r = s.receive(c.x(), c.y(), c.z());
+                     if (r != 0) {
+                         fail(String.join("\n", history) + "\nrun " + run + " tick " + t + ": an honest move was flagged (" + r + ") at "

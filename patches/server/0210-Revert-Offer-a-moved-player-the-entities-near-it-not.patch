@@ -1,0 +1,322 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 12:00:59 +0900
+Subject: [PATCH] Revert "Offer a moved player the entities near it, not every
+ entity in the world"
+
+This reverts commit 90d7156d180ba465d30dfe0131e92b765a9c6ad7.
+
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index ec090aa5101b74ab570eaca75f3ee215937a7bca..0d03516914051ff5076a0a9b25099907fd50e0f2 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -68,10 +68,6 @@ public abstract class Entity implements ICommandListener {
+     public Entity passenger;
+     public Entity vehicle;
+     public boolean attachedToPlayer;
+-    // Athena - this entity's tracker entry in the world it is in, or null while it is not tracked.
+-    // EntityTracker.trackedEntities is still the authority; this is the same reference reachable
+-    // without the id hash probe, for the walks that already have the entity in hand.
+-    public EntityTrackerEntry trackerEntry;
+     public World world;
+     public double lastX;
+     public double lastY;
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index b31c8715771652918e79c67efca67826ad31688d..b4925df55c9ff32e6a08e0c96e833159d98c75af 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -61,7 +61,6 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     }
+     // Athena end
+     public final java.util.Deque<Integer> removeQueue = new java.util.ArrayDeque<>(); // PandaSpigot
+-    public boolean trackerWillRescan; // Athena - set once per tick by EntityTracker.updatePlayers
+     private final ServerStatisticManager statsFile;
+     private float combinedHealth = Float.MIN_VALUE;
+     private float lastHealth = -1.0E8F;
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index ac39792d0ab0afa8d9c0a9f6001b05da3cc27ef5..693a25715b1bd8eecdeb5371652d9e57780ca2c9 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -145,13 +145,7 @@ public class EntityTracker {
+ 
+             EntityTrackerEntry entitytrackerentry = new EntityTrackerEntry(entity, i, j, flag);
+ 
+-            // Athena - players are offered directly, so their range does not widen the chunk walk
+-            if (!(entity instanceof EntityPlayer) && i > this.maxEntityTrackingDistance) {
+-                this.maxEntityTrackingDistance = i;
+-            }
+-
+             this.addEntry(entitytrackerentry); // Athena
+-            entity.trackerEntry = entitytrackerentry; // Athena
+             this.trackedEntities.addKey(entity.getId(), entitytrackerentry);
+             entitytrackerentry.scanPlayers(this.world.players);
+         } catch (Throwable throwable) {
+@@ -201,10 +195,6 @@ public class EntityTracker {
+ 
+         EntityTrackerEntry entitytrackerentry1 = (EntityTrackerEntry) this.trackedEntities.removeObject(entity.getId());
+ 
+-        if (entity.trackerEntry == entitytrackerentry1) {
+-            entity.trackerEntry = null; // Athena
+-        }
+-
+         if (entitytrackerentry1 != null) {
+             this.removeEntry(entitytrackerentry1); // Athena
+             entitytrackerentry1.sendDestroyEntityPacketToTrackedPlayers();
+@@ -212,175 +202,40 @@ public class EntityTracker {
+ 
+     }
+ 
+-    // Athena start - stop offering every entity in the world to every player that moved.
+-    //
+-    // The second half of this method used to walk every tracked entity once per player that moved
+-    // four blocks, asking each whether that player was within its tracking box. On a populated
+-    // world that is (entities) x (players moving) box tests per tick for a result that only ever
+-    // names the entities standing near the player. The walk cannot simply be narrowed, because it
+-    // was doing two different jobs at once:
+-    //
+-    //  - telling a player about an entity that came into range, and
+-    //  - taking away an entity the player walked away from.
+-    //
+-    // Only the first is a question about what is near the player; the second is a question about
+-    // what the player already has, and the entity in it is by definition out of range, so no
+-    // spatial lookup can find it. They are split here. The removal half rides along on the pass
+-    // over every entry that this method already makes - each entry offers itself to the players it
+-    // is already sending to, which costs nothing for the entries nobody is watching. The addition
+-    // half then walks the chunks around the player, which is where the entities that could newly
+-    // come into range have to be.
+-    //
+-    // What the chunk walk can miss, and why no client can tell:
+-    //  - an entity whose chunk is not loaded. updatePlayer would only have added it if
+-    //    tracker.attachedToPlayer were set, since isPlayerWatchingThisChunk is false for a chunk
+-    //    the player does not have. A player keeps the chunks within their view distance loaded,
+-    //    and no tracking range here exceeds it, so an entity close enough to be added is in a
+-    //    loaded chunk.
+-    //  - an entity whose chunkCoordX/Z still point at a chunk it has left, which is the same gap
+-    //    the per-chunk tracker update already accepts: it is in no slice for that moment, and it
+-    //    is re-evaluated as soon as it or the player moves four blocks.
+-    //
+-    // Player entries are kept out of the chunk walk's radius: they track at 512 blocks (clamped to
+-    // the view distance), which alone would have set the radius for everything. There are at most
+-    // max-players of them, so they are offered directly instead.
+     public void updatePlayers() {
+-        List<EntityHuman> players = this.world.players;
+-        boolean anyRescan = false;
+-
+-        for (int i = 0; i < players.size(); ++i) {
+-            EntityPlayer entityplayer = (EntityPlayer) players.get(i);
+-            EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) this.trackedEntities.get(entityplayer.getId());
+-            boolean rescan = entitytrackerentry != null && entitytrackerentry.willRescan();
+-
+-            entityplayer.trackerWillRescan = rescan;
+-            anyRescan |= rescan;
+-        }
++        ArrayList arraylist = null; // Athena - most ticks move no player; do not allocate for them
+ 
+-        EntityPlayer[] scratch = this.viewerScratch(players.size());
+-
+-        for (int i = 0; i < this.entryCount; ++i) {
++        for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
+             EntityTrackerEntry entitytrackerentry = this.entries[i];
+ 
+-            entitytrackerentry.track(players);
+-            // track() already offered this entry to every player, so the moved ones are done.
+-            if (anyRescan && !entitytrackerentry.playerEntitiesUpdated) {
+-                entitytrackerentry.updateMovedViewers(scratch);
+-            }
+-        }
+-
+-        if (!anyRescan) {
+-            return;
+-        }
+-
+-        for (int i = 0; i < players.size(); ++i) {
+-            EntityPlayer entityplayer = (EntityPlayer) players.get(i);
+-
+-            if (entityplayer.trackerWillRescan) {
+-                this.offerNearbyEntries(entityplayer);
+-            }
+-        }
+-
+-    }
+-
+-    private EntityPlayer[] viewerScratch(int size) {
+-        if (this.viewerScratch == null || this.viewerScratch.length < size) {
+-            this.viewerScratch = new EntityPlayer[Math.max(size, 16)];
+-        }
+-
+-        return this.viewerScratch;
+-    }
+-
+-    private EntityPlayer[] viewerScratch;
+-
+-    // The largest tracking range in use by anything that is not a player, in blocks. It only ever
+-    // grows: a range that has gone away leaves the walk scanning further than it needs to, which
+-    // costs a little and cannot make it miss anything.
+-    private int maxEntityTrackingDistance;
+-
+-    private void offerNearbyEntries(EntityPlayer entityplayer) {
+-        // Every other player, whatever the distance - see the note above.
+-        List<EntityHuman> players = this.world.players;
+-
+-        for (int i = 0; i < players.size(); ++i) {
+-            EntityPlayer other = (EntityPlayer) players.get(i);
+-
+-            if (other != entityplayer) {
+-                EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) this.trackedEntities.get(other.getId());
+-
+-                if (entitytrackerentry != null) {
+-                    entitytrackerentry.updatePlayer(entityplayer);
++            entitytrackerentry.track(this.world.players);
++            if (entitytrackerentry.playerEntitiesUpdated && entitytrackerentry.tracker instanceof EntityPlayer) {
++                if (arraylist == null) {
++                    arraylist = Lists.newArrayList();
+                 }
+-            }
+-        }
+ 
+-        int radius = (this.maxEntityTrackingDistance >> 4) + 1;
+-        int side = radius * 2 + 1;
+-
+-        // Below a certain population the walk over every entry is simply cheaper than resolving
+-        // this many chunks, so keep the old shape for the servers it suits.
+-        if (this.entryCount <= side * side * 3) {
+-            for (int i = 0; i < this.entryCount; ++i) {
+-                EntityTrackerEntry entitytrackerentry = this.entries[i];
+-
+-                if (entitytrackerentry.tracker != entityplayer) {
+-                    entitytrackerentry.updatePlayer(entityplayer);
+-                }
++                arraylist.add((EntityPlayer) entitytrackerentry.tracker);
+             }
++        }
+ 
++        if (arraylist == null) {
+             return;
+         }
+ 
+-        int px = MathHelper.floor(entityplayer.locX) >> 4;
+-        int pz = MathHelper.floor(entityplayer.locZ) >> 4;
++        for (int i = 0; i < arraylist.size(); ++i) {
++            EntityPlayer entityplayer = (EntityPlayer) arraylist.get(i);
+ 
+-        for (int cx = px - radius; cx <= px + radius; ++cx) {
+-            for (int cz = pz - radius; cz <= pz + radius; ++cz) {
+-                Chunk chunk = this.world.getChunkIfLoaded(cx, cz);
++            for (int j = 0; j < this.entryCount; ++j) { // Athena - indexed walk
++                EntityTrackerEntry entitytrackerentry1 = this.entries[j];
+ 
+-                if (chunk == null) {
+-                    continue;
+-                }
+-
+-                List<Entity>[] slices = chunk.entitySlices;
+-
+-                for (int i = 0; i < slices.length; ++i) {
+-                    List<Entity> slice = slices[i];
+-
+-                    for (int j = 0; j < slice.size(); ++j) {
+-                        Entity entity = slice.get(j);
+-
+-                        if (entity == entityplayer) {
+-                            continue;
+-                        }
+-
+-                        EntityTrackerEntry entitytrackerentry = this.entryOf(entity); // Athena
+-
+-                        if (entitytrackerentry != null) {
+-                            entitytrackerentry.updatePlayer(entityplayer);
+-                        }
+-                    }
++                if (entitytrackerentry1.tracker != entityplayer) {
++                    entitytrackerentry1.updatePlayer(entityplayer);
+                 }
+             }
+         }
+ 
+     }
+ 
+-    // The entity carries its own entry, so the common case is a field read rather than a probe of
+-    // trackedEntities. The map stays the authority: anything the field cannot answer for goes
+-    // through it, and a stale field can only belong to another world's tracker, which the identity
+-    // check rejects.
+-    private EntityTrackerEntry entryOf(Entity entity) {
+-        EntityTrackerEntry entitytrackerentry = entity.trackerEntry;
+-
+-        if (entitytrackerentry != null && entitytrackerentry.tracker == entity) {
+-            return entitytrackerentry;
+-        }
+-
+-        return (EntityTrackerEntry) this.trackedEntities.get(entity.getId());
+-    }
+-    // Athena end
+-
+     public void a(EntityPlayer entityplayer) {
+         for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
+             EntityTrackerEntry entitytrackerentry = this.entries[i];
+@@ -449,7 +304,7 @@ public class EntityTracker {
+                     continue;
+                 }
+ 
+-                EntityTrackerEntry entitytrackerentry = this.entryOf(entity); // Athena
++                EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) this.trackedEntities.get(entity.getId());
+ 
+                 if (entitytrackerentry != null) {
+                     entitytrackerentry.updatePlayer(entityplayer);
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index ec393d56937c5057d776151eb50de4a458c5d548..a2508b872e865f6f4c659e25a8ebb0fdb419d2b7 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -72,52 +72,9 @@ public class EntityTrackerEntry {
+         return this.tracker.getId();
+     }
+ 
+-    // Athena start - the test track() is about to make, asked without making it.
+-    //
+-    // When this is true for a *player's* entry, track() will offer that player to every entity in
+-    // the world, which is the same condition the tracker used to collect its "these players moved"
+-    // list from - except that this can be asked before track() has run and overwritten the state it
+-    // reads. EntityTracker needs the answer up front so that the removal half of a moved player's
+-    // update can happen in the one pass it already makes over every entry.
+-    boolean willRescan() {
+-        return !this.isMoving || this.tracker.getDistanceSq(this.lastTrackedEntityPosX, this.lastTrackedEntityPosY, this.lastTrackedEntityPosZ) > 16.0D;
+-    }
+-
+-    // Offers this entry to the players it is already sending to, but only the ones that moved far
+-    // enough this tick to be re-evaluated. This is what takes an entity away from a player who
+-    // walked out of range: the entity itself never moved, so nothing else would have noticed.
+-    //
+-    // updatePlayer removes the player from trackedPlayers, so the players to visit are collected
+-    // into the caller's scratch array first rather than iterated live.
+-    void updateMovedViewers(EntityPlayer[] scratch) {
+-        if (this.trackedPlayers.isEmpty()) {
+-            return;
+-        }
+-
+-        int n = 0;
+-        Iterator iterator = this.trackedPlayers.iterator();
+-
+-        while (iterator.hasNext() && n < scratch.length) {
+-            EntityPlayer entityplayer = (EntityPlayer) iterator.next();
+-
+-            if (entityplayer.trackerWillRescan) {
+-                scratch[n++] = entityplayer;
+-            }
+-        }
+-
+-        for (int i = 0; i < n; ++i) {
+-            EntityPlayer entityplayer = scratch[i];
+-
+-            scratch[i] = null;
+-            this.updatePlayer(entityplayer);
+-        }
+-
+-    }
+-    // Athena end
+-
+     public void track(List<EntityHuman> list) {
+         this.playerEntitiesUpdated = false;
+-        if (this.willRescan()) { // Athena - the same test, named
++        if (!this.isMoving || this.tracker.getDistanceSq(this.lastTrackedEntityPosX, this.lastTrackedEntityPosY, this.lastTrackedEntityPosZ) > 16.0D) {
+             this.lastTrackedEntityPosX = this.tracker.locX;
+             this.lastTrackedEntityPosY = this.tracker.locY;
+             this.lastTrackedEntityPosZ = this.tracker.locZ;

@@ -1,0 +1,183 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 10:53:55 +0900
+Subject: [PATCH] Inflate a compressed packet as its data arrives and check the
+ declared length
+
+
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 80a3d5a9dd34b990c3f4bc5e7cc8cba3cb65f9da..895f7d5c1487f652e19a0abff66a17c41d4fc209 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -45,10 +45,14 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                 }
+ 
+                 // Athena start - feed the inflater from the buffer it already has; see
+-                // PacketCompressor for why, including why reset() belongs in a finally. Only the
+-                // input copy goes: the inflated array is handed downstream as the packet buffer, so
+-                // it has to be allocated either way.
+-                byte[] abyte1 = new byte[i];
++                // PacketCompressor for why, including why reset() belongs in a finally.
++                //
++                // The output grows as inflated bytes arrive instead of being allocated at the size
++                // the client declares: a ten-byte frame declaring 2 MiB made the server allocate
++                // 2 MiB, every packet, whatever it inflated to (vanilla did the same). And the
++                // packet has to inflate to exactly that size; a short one was passed on padded with
++                // zeros, a long one cut off.
++                ByteBuf out = channelhandlercontext.alloc().heapBuffer(Math.min(i, 8192), i);
+                 Inflater inflater = INFLATER.get(); // Athena
+ 
+                 try {
+@@ -64,12 +68,42 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                         inflater.setInput(abyte);
+                     }
+ 
+-                    inflater.inflate(abyte1);
++                    boolean longer = false;
++
++                    while (!inflater.finished()) {
++                        if (out.writerIndex() == i) {
++                            // full: the end of the stream may still be one call away, or more data
++                            // (reading that byte can itself finish the stream, hence the flag)
++                            if (inflater.inflate(new byte[1]) > 0) {
++                                longer = true;
++                                break;
++                            }
++                            if (!inflater.finished()) {
++                                break; // neither: the input ran out
++                            }
++                            continue;
++                        }
++                        out.ensureWritable(Math.min(i - out.writerIndex(), Math.max(8192, out.writerIndex())));
++
++                        int n = inflater.inflate(out.nioBuffer(out.writerIndex(), Math.min(out.writableBytes(), i - out.writerIndex())));
++
++                        if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) {
++                            break; // the input ran out before the packet did
++                        }
++                        out.writerIndex(out.writerIndex() + n);
++                    }
++
++                    if (longer || !inflater.finished() || out.writerIndex() != i) {
++                        throw new DecoderException("Badly compressed packet - inflated " + (longer ? "to more than " : "to ") + out.writerIndex() + " bytes, declared " + i);
++                    }
++                } catch (Throwable t) {
++                    out.release();
++                    throw t instanceof DecoderException ? (DecoderException) t : new DecoderException(t);
+                 } finally {
+                     inflater.reset();
+                 }
+ 
+-                list.add(Unpooled.wrappedBuffer(abyte1));
++                list.add(out);
+                 // Athena end
+             }
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaDecompressorTest.java b/src/test/java/net/minecraft/server/AthenaDecompressorTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..38777b35956fb513bd0d3da8a1723bcb028a152a
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDecompressorTest.java
+@@ -0,0 +1,102 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.embedded.EmbeddedChannel;
++import io.netty.handler.codec.DecoderException;
++import java.util.Arrays;
++import java.util.Random;
++import java.util.zip.Deflater;
++import org.junit.Test;
++
++/**
++ * Athena - PacketDecompressor allocates as the data inflates, not at the size the client declares,
++ * and refuses a packet that does not inflate to exactly that size.
++ */
++public class AthenaDecompressorTest {
++
++    /** One frame's body as PacketDecompressor sees it: the declared size, then the zlib stream. */
++    private static ByteBuf frame(int declared, byte[] data, int cut) {
++        Deflater deflater = new Deflater();
++
++        deflater.setInput(data);
++        deflater.finish();
++
++        byte[] z = new byte[data.length + 1024];
++        int n = deflater.deflate(z);
++
++        deflater.end();
++
++        ByteBuf frame = Unpooled.buffer();
++
++        new PacketDataSerializer(frame).writeVarIntToBuffer(declared);
++        frame.writeBytes(z, 0, n - cut);
++        return frame;
++    }
++
++    private static byte[] inflate(ByteBuf frame) {
++        EmbeddedChannel channel = new EmbeddedChannel(new PacketDecompressor(256));
++
++        try {
++            channel.writeInbound(frame);
++            ByteBuf out = channel.readInbound();
++            byte[] bytes = new byte[out.readableBytes()];
++
++            out.readBytes(bytes);
++            out.release();
++            return bytes;
++        } finally {
++            channel.finishAndReleaseAll();
++        }
++    }
++
++    private static void assertRefused(String what, ByteBuf frame) {
++        try {
++            inflate(frame);
++            fail(what + " was accepted");
++        } catch (DecoderException expected) {
++            assertTrue(what + ": " + expected.getMessage(), expected.getMessage().contains("Badly compressed packet"));
++        }
++    }
++
++    @Test
++    public void packetsOfEverySizeInflateExactly() {
++        Random random = new Random(1L);
++
++        // at the growth steps and either side of them, a random (incompressible) and a repetitive one
++        for (int size : new int[] {256, 300, 8191, 8192, 8193, 16384, 16385, 65536, 100_000, 2_097_152}) {
++            byte[] noise = new byte[size];
++            byte[] text = new byte[size];
++
++            random.nextBytes(noise);
++            Arrays.fill(text, (byte) 'a');
++            assertArrayEquals("random " + size, noise, inflate(frame(size, noise, 0)));
++            assertArrayEquals("repetitive " + size, text, inflate(frame(size, text, 0)));
++        }
++    }
++
++    @Test
++    public void aPacketDeclaringMoreThanItHoldsIsRefused() {
++        // the frame the allocation was amplified by: a byte, declared as 2 MiB
++        assertRefused("1 byte declared as 2 MiB", frame(2_097_152, new byte[] {0}, 0));
++        assertRefused("300 bytes declared as 301", frame(301, new byte[300], 0));
++    }
++
++    @Test
++    public void aPacketDeclaringLessThanItHoldsIsRefused() {
++        assertRefused("301 bytes declared as 300", frame(300, new byte[301], 0));
++        assertRefused("64 KiB declared as 8 KiB", frame(8192, new byte[65536], 0));
++    }
++
++    @Test
++    public void aTruncatedStreamIsRefused() {
++        byte[] noise = new byte[10_000];
++
++        new Random(2L).nextBytes(noise);
++        assertRefused("stream cut short", frame(10_000, noise, 100));
++    }
++}

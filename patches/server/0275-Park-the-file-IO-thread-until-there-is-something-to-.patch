@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 10:50:01 +0900
+Subject: [PATCH] Park the file IO thread until there is something to write
+
+It slept 25 ms whenever its queue was empty, waking forty times a second on a
+server whose match worlds are read-only - 2.7% of a 20-player server's CPU on
+the VPS, and the same on an idle one. queueIO now unparks it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/FileIOThread.java b/src/main/java/net/minecraft/server/FileIOThread.java
+index 9f6611df2dd1ef9792f6e53e74e2ba2f3b9dee82..0822c7b9bbade4712ba28d891c9285962209f73a 100644
+--- a/src/main/java/net/minecraft/server/FileIOThread.java
++++ b/src/main/java/net/minecraft/server/FileIOThread.java
+@@ -12,11 +12,13 @@ public class FileIOThread implements Runnable {
+     private volatile long writeQueuedCounter;
+     private volatile long savedIOCounter;
+     private volatile boolean isThreadWaiting;
++    private final Thread thread; // Athena
+ 
+     private FileIOThread() {
+         Thread thread = new Thread(this, "File IO Thread");
+ 
+         thread.setPriority(1);
++        this.thread = thread; // Athena
+         thread.start();
+     }
+ 
+@@ -49,11 +51,15 @@ public class FileIOThread implements Runnable {
+         }
+ 
+         if (this.threadedIOQueue.isEmpty()) {
+-            try {
+-                Thread.sleep(25L);
+-            } catch (InterruptedException interruptedexception1) {
+-                interruptedexception1.printStackTrace();
+-            }
++            // Athena start - sleep until queueIO hands over work, not 25 ms at a time.
++            //
++            // A match world is read-only and the queue is nearly always empty, so the thread used to
++            // wake forty times a second for nothing - on the VPS 2.7% of a 20-player server's CPU,
++            // a guest's timer and scheduler round trip each time, and the same on an idle server.
++            // queueIO adds before it unparks, and an unpark that lands between the isEmpty check and
++            // the park leaves the permit set, so the park returns at once and nothing is missed.
++            java.util.concurrent.locks.LockSupport.park(this);
++            // Athena end
+         }
+ 
+     }
+@@ -62,6 +68,7 @@ public class FileIOThread implements Runnable {
+         if (!this.threadedIOQueue.contains(iasyncchunksaver)) {
+             ++this.writeQueuedCounter;
+             this.threadedIOQueue.add(iasyncchunksaver);
++            java.util.concurrent.locks.LockSupport.unpark(this.thread); // Athena
+         }
+     }
+ 

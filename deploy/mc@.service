@@ -1,0 +1,27 @@
+# Athena - one Minecraft server per instance of this unit: systemctl start mc@survival
+#
+# The heap is deliberately large enough that the JVM's resident set stays above 20% of the box's
+# 12 GB. Oracle reclaims an Always Free instance only when CPU, network AND memory are all under
+# 20% across seven days, so holding memory is the cheapest of the three conditions to fail -
+# AlwaysPreTouch makes the reservation real rather than virtual.
+[Unit]
+Description=Minecraft server (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/mc/%i
+ExecStart=/opt/jdk-25/bin/java \
+    -Xms3G -Xmx3G \
+    -XX:+AlwaysPreTouch \
+    -XX:+UseCompactObjectHeaders \
+    -jar paperclip.jar nogui
+ExecStop=/bin/sh -c 'echo stop > /proc/$MAINPID/fd/0'
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=0 143
+
+[Install]
+WantedBy=multi-user.target

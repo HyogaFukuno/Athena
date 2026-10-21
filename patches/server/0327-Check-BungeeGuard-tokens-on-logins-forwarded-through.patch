@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 10:53:56 +0900
+Subject: [PATCH] Check BungeeGuard tokens on logins forwarded through
+ PlayerHandshakeEvent too
+
+
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index 973a919c3259afa4e0ce7938d22a253200c5fc52..40af58a94a1231ee64df9fd33c2bd859d09e7783 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -83,6 +83,7 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                 // PandaSpigot start - handshake event
+                 boolean proxyLogicEnabled = org.spigotmc.SpigotConfig.bungee;
+                 boolean handledByEvent = false;
++                java.net.SocketAddress remoteAddress = this.networkManager.getSocketAddress(); // Athena - before a forwarded address replaces it
+                 // Try and handle the handshake through the event
+                 if (com.destroystokyo.paper.event.player.PlayerHandshakeEvent.getHandlerList().getRegisteredListeners().length != 0) { // Hello? Can you hear me?
+                     java.net.SocketAddress socketAddress = this.networkManager.socketAddress;
+@@ -109,7 +110,6 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                 // PandaSpigot end
+                 // Spigot Start
+                 //if (org.spigotmc.SpigotConfig.bungee) { // PandaSpigot - comment out, we check above!
+-                    java.net.SocketAddress remoteAddress = networkManager.getSocketAddress(); // Athena - before the forwarded address replaces it
+                     String[] split = packethandshakinginsetprotocol.hostname.split("\00");
+                     if ( split.length == 3 || split.length == 4 ) {
+                         // PandaSpigot start - Unix domain socket support
+@@ -129,23 +129,26 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                     {
+                         networkManager.spoofedProfile = gson.fromJson(split[3], com.mojang.authlib.properties.Property[].class);
+                     }
+-                    // Athena start - BungeeGuard: refuse a login the proxy's token does not come with
+-                    java.util.List<String> guardTokens = athena.server.AthenaConfig.get().bungeeGuardTokens;
+-                    if (!guardTokens.isEmpty()) {
+-                        com.mojang.authlib.properties.Property[] properties = AthenaBungeeGuard.check(networkManager.spoofedProfile, guardTokens);
+-                        if (properties == null) {
+-                            // The address that matters is the one the connection came from, not the one it claimed
+-                            org.apache.logging.log4j.LogManager.getLogger().warn("Refused a forwarded login from {}: no valid BungeeGuard token", remoteAddress);
+-                            chatcomponenttext = new ChatComponentText("Unable to authenticate - no data was forwarded by the proxy.");
+-                            this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
+-                            this.networkManager.close(chatcomponenttext);
+-                            return;
+-                        }
+-                        networkManager.spoofedProfile = properties;
+-                    }
+-                    // Athena end
+                 }
+                 // Spigot End
++                // Athena start - BungeeGuard: refuse a forwarded login the proxy's token does not come
++                // with, whichever path forwarded it. It was checked inside the BungeeCord path only, so
++                // a plugin handling PlayerHandshakeEvent had its UUID and properties believed with no
++                // token, configured tokens or not.
++                java.util.List<String> guardTokens = athena.server.AthenaConfig.get().bungeeGuardTokens;
++                if (!guardTokens.isEmpty() && (handledByEvent || proxyLogicEnabled)) {
++                    com.mojang.authlib.properties.Property[] properties = AthenaBungeeGuard.check(networkManager.spoofedProfile, guardTokens);
++                    if (properties == null) {
++                        // The address that matters is the one the connection came from, not the one it claimed
++                        org.apache.logging.log4j.LogManager.getLogger().warn("Refused a forwarded login from {}: no valid BungeeGuard token{}", remoteAddress, handledByEvent ? " (forwarded through PlayerHandshakeEvent)" : "");
++                        chatcomponenttext = new ChatComponentText("Unable to authenticate - no data was forwarded by the proxy.");
++                        this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
++                        this.networkManager.close(chatcomponenttext);
++                        return;
++                    }
++                    networkManager.spoofedProfile = properties;
++                }
++                // Athena end
+                 ((LoginListener) this.networkManager.getPacketListener()).hostname = packethandshakinginsetprotocol.hostname + ":" + packethandshakinginsetprotocol.port; // CraftBukkit - set hostname
+             }
+             break;

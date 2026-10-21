@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 00:50:37 +0900
+Subject: [PATCH] Pin several squares of a world's chunks
+ (Athena.addPinnedChunks)
+
+ChunkProviderServer kept one pinned square, so pinning a deathmatch arena away from the map's
+centre replaced the map itself. It keeps a list of squares now: a chunk is pinned if it is in any
+of them, and outside every one it does not exist, as before. pin replaces the list, addPin adds
+to it, and unpin ends them all.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index aeb22322241b3679c1fd16dbc6d90e5cf2f26b32..148a076e0970371491ff83525c9438c3242e2bde 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -53,6 +53,13 @@ public final class AthenaServerImpl implements AthenaServer {
+         ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(square[0], square[1], square[2], square[3]);
+     }
+ 
++    @Override
++    public void addPinnedChunks(Location center, int radius) {
++        int[] square = chunkSquare(center, radius);
++
++        ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.addPin(square[0], square[1], square[2], square[3]);
++    }
++
+     @Override
+     public CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick) {
+         int[] square = chunkSquare(center, radius);
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 3d95c87a283976b0db85e501ecf56ded51d49de2..046bb2a55fd043d7012f1445a15f61d8bc2800ee 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -58,16 +58,30 @@ public class ChunkProviderServer implements IChunkProvider {
+         // CraftBukkit end
+     }
+ 
+-    // Athena start - a pinned area: chunks inside it never unload until it is unpinned
++    // Athena start - a pinned area: chunks inside it never unload until it is unpinned.
++    // The area is one or more squares (the match map, and for example a deathmatch arena away from it);
++    // each square is four ints in pinSquares: min x, min z, max x, max z, in chunks.
+     private boolean pinned;
+-    private int pinMinX, pinMinZ, pinMaxX, pinMaxZ;
++    private int[] pinSquares = new int[0];
+ 
++    /** Makes the square the whole pinned area, replacing any squares pinned before. */
+     public void pin(int minX, int minZ, int maxX, int maxZ) {
+         this.pinned = true;
+-        this.pinMinX = minX;
+-        this.pinMinZ = minZ;
+-        this.pinMaxX = maxX;
+-        this.pinMaxZ = maxZ;
++        this.pinSquares = new int[] { minX, minZ, maxX, maxZ };
++    }
++
++    /** Adds the square to the pinned area, keeping the squares pinned before; pins it alone if nothing is pinned. */
++    public void addPin(int minX, int minZ, int maxX, int maxZ) {
++        if (!this.pinned) {
++            this.pin(minX, minZ, maxX, maxZ);
++            return;
++        }
++        int[] squares = java.util.Arrays.copyOf(this.pinSquares, this.pinSquares.length + 4);
++        squares[squares.length - 4] = minX;
++        squares[squares.length - 3] = minZ;
++        squares[squares.length - 2] = maxX;
++        squares[squares.length - 1] = maxZ;
++        this.pinSquares = squares;
+     }
+ 
+     /** Ends the pin, and queues the chunks it held that no player is using, as a chunk GC would. */
+@@ -75,9 +89,11 @@ public class ChunkProviderServer implements IChunkProvider {
+         if (!this.pinned) {
+             return;
+         }
++        int[] squares = this.pinSquares;
+         this.pinned = false;
++        this.pinSquares = new int[0];
+         for (Chunk chunk : this.chunks.values()) {
+-            if (chunk.locX >= this.pinMinX && chunk.locX <= this.pinMaxX && chunk.locZ >= this.pinMinZ && chunk.locZ <= this.pinMaxZ
++            if (inAnySquare(squares, chunk.locX, chunk.locZ)
+                     && !this.world.getPlayerChunkMap().isChunkInUse(chunk.locX, chunk.locZ)) {
+                 this.queueUnload(chunk.locX, chunk.locZ);
+             }
+@@ -90,15 +106,24 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     /**
+-     * Whether the chunk lies outside the pinned square. Such a chunk does not exist for the world: it
++     * Whether the chunk lies outside every pinned square. Such a chunk does not exist for the world: it
+      * is never loaded or generated, reads as the empty chunk (air, nothing kept), and is not sent.
+      */
+     public boolean isOutsideBounds(int x, int z) {
+-        return this.pinned && !(x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ);
++        return this.pinned && !inAnySquare(this.pinSquares, x, z);
+     }
+ 
+     public boolean isPinned(int x, int z) {
+-        return this.pinned && x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ;
++        return this.pinned && inAnySquare(this.pinSquares, x, z);
++    }
++
++    private static boolean inAnySquare(int[] squares, int x, int z) {
++        for (int i = 0; i < squares.length; i += 4) {
++            if (x >= squares[i] && x <= squares[i + 2] && z >= squares[i + 1] && z <= squares[i + 3]) {
++                return true;
++            }
++        }
++        return false;
+     }
+     // Athena end
+ 

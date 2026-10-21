@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Guard: read no world for a player the checks leave alone
+
+A flying, creative, spectating, riding or dead player's moves ran every ground, wall, edge and
+ceiling probe - eight to fourteen collision scans - only to seed the state afresh. They now only
+clear it, and the first checked move seeds it, as after a teleport or a dismount.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 3a60a37bfa32761175de8d3c1137050749ad83bf..7e3d737b9f23fe300d036937d56b4eb38daddd0c 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -323,6 +323,29 @@ public final class AthenaGuard {
+         double dy = y - fromY;
+         double dz = z - fromZ;
+         double h = Math.sqrt(dx * dx + dz * dz);
++
++        if (this.awaiting) {
++            boolean arrived = Math.abs(x - this.awaitX) < 0.01D && Math.abs(y - this.awaitY) < 0.01D && Math.abs(z - this.awaitZ) < 0.01D;
++
++            // a login sends the spawn twice (the server's and a plugin's teleport): the first answer
++            // matches the second position too, and the fall in between must not be checked from it
++            if (arrived && --this.awaitAnswers <= 0 || --this.awaitBudget <= 0) {
++                this.awaiting = false;
++                this.awaitAnswers = 0;
++            }
++            this.known = false;
++        }
++        // A player the checks leave alone (flying, creative, a spectator, in a vehicle, dead)
++        // has nothing to be checked against: the world is not read for it at all. These moves used to
++        // run every probe below only to seed the state afresh, and a seed is what the first checked
++        // move after them does anyway once known is false - exactly as after a teleport or a dismount.
++        // In a survival games match the dead watch as spectators, so late in a match these are most
++        // of the movement packets.
++        if (!movement || this.exempt()) {
++            this.known = false;
++            return true;
++        }
++
+         // The client's onGround is whether its vertical move collided going down. It moves vertically
+         // first, over where it started, then sideways - so it lands on (or is still standing on) what is
+         // under the start, even when the end is over air: stepping off an edge is a tick on the ground,
+@@ -353,18 +376,7 @@ public final class AthenaGuard {
+         boolean certain = groundStartXZ == groundEndXZ && !wall && !edge;
+         double slipNow = slipperiness(world, x, y, z);
+ 
+-        if (this.awaiting) {
+-            boolean arrived = Math.abs(x - this.awaitX) < 0.01D && Math.abs(y - this.awaitY) < 0.01D && Math.abs(z - this.awaitZ) < 0.01D;
+-
+-            // a login sends the spawn twice (the server's and a plugin's teleport): the first answer
+-            // matches the second position too, and the fall in between must not be checked from it
+-            if (arrived && --this.awaitAnswers <= 0 || --this.awaitBudget <= 0) {
+-                this.awaiting = false;
+-                this.awaitAnswers = 0;
+-            }
+-            this.known = false;
+-        }
+-        if (!movement || this.exempt() || !this.known) {
++        if (!this.known) {
+             this.seedFresh(h / ticks, dy / ticks, groundNow, maybeGround, certain, slipNow);
+             return true;
+         }

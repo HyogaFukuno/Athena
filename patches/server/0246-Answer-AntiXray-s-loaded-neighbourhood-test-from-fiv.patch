@@ -1,0 +1,131 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 11:52:54 +0900
+Subject: [PATCH] Answer AntiXray's loaded-neighbourhood test from five lookups
+ per chunk
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/spigotmc/AntiXray.java b/src/main/java/org/spigotmc/AntiXray.java
+index 61f71cfb5a7973be8346399c822e014d466fa716..387f040696fea7dd60b1f0455ce41f64a3ed86f4 100644
+--- a/src/main/java/org/spigotmc/AntiXray.java
++++ b/src/main/java/org/spigotmc/AntiXray.java
+@@ -131,6 +131,22 @@ public class AntiXray
+             int startX = chunkX << 4;
+             int startZ = chunkY << 4;
+ 
++            // Athena start - which of this chunk and its four neighbours are loaded, asked once.
++            //
++            // isLoaded(radius 1) below asked the world about the block and its six neighbours for
++            // every ore-like block in the chunk: seven chunk-map lookups each, from the Netty thread.
++            // World.isLoaded ignores y, so the answer only depends on which chunk columns the block
++            // and its neighbours fall in - this chunk, plus the neighbour across an edge the block
++            // touches. A 20-player profile had this at 55% of the Netty threads' CPU. The loaded
++            // state is read once per chunk instead of once per lookup; it could change while the
++            // loop runs either way, since this does not run on the thread that loads chunks.
++            boolean selfLoaded = world.isLoaded( startX, 0, startZ );
++            boolean westLoaded = world.isLoaded( startX - 1, 0, startZ );
++            boolean eastLoaded = world.isLoaded( startX + 16, 0, startZ );
++            boolean northLoaded = world.isLoaded( startX, 0, startZ - 1 );
++            boolean southLoaded = world.isLoaded( startX, 0, startZ + 16 );
++            // Athena end
++
+             byte replaceWithTypeId;
+             switch ( world.getWorld().getEnvironment() )
+             {
+@@ -173,7 +189,9 @@ public class AntiXray
+                                 if ( obfuscateBlocks[blockId] )
+                                 {
+                                     // The world isn't loaded, bail out
+-                                    if ( !isLoaded( world, startX + x, ( i << 4 ) + y, startZ + z, initialRadius ) ) // Athena
++                                    // Athena - isLoaded(world, x, y, z, initialRadius) for initialRadius 1, from the
++                                    // five answers above; see there
++                                    if ( !neighbourhoodLoaded( x, z, selfLoaded, westLoaded, eastLoaded, northLoaded, southLoaded ) )
+                                     {
+                                         index++;
+                                         continue;
+@@ -241,19 +259,13 @@ public class AntiXray
+         }
+     }
+ 
+-    // Athena - integer coordinates instead of BlockPosition. This recursion walked six neighbours
+-    // per level, allocating a position for each; profiling a live server attributed ~32 MB/min of
+-    // BlockPosition allocation to AntiXray alone.
+-    private static boolean isLoaded(World world, int x, int y, int z, int radius)
++    // Athena - what the per-block recursive isLoaded(world, x, y, z, 1) answered, for a block at
++    // (x, z) inside its chunk: its own column and its four neighbours' must be loaded, and those
++    // neighbours only leave the chunk on its edges. AntiXrayNeighbourhoodTest checks this against
++    // the recursion it replaced, for every position and every combination of loaded neighbours.
++    static boolean neighbourhoodLoaded(int x, int z, boolean self, boolean west, boolean east, boolean north, boolean south)
+     {
+-        return world.isLoaded( x, y, z )
+-                && ( radius == 0 ||
+-                ( isLoaded( world, x + 1, y, z, radius - 1 )
+-                && isLoaded( world, x - 1, y, z, radius - 1 )
+-                && isLoaded( world, x, y + 1, z, radius - 1 )
+-                && isLoaded( world, x, y - 1, z, radius - 1 )
+-                && isLoaded( world, x, y, z + 1, radius - 1 )
+-                && isLoaded( world, x, y, z - 1, radius - 1 ) ) );
++        return self && ( x != 0 || west ) && ( x != 15 || east ) && ( z != 0 || north ) && ( z != 15 || south );
+     }
+ 
+     // Athena - integer coordinates (see isLoaded)
+diff --git a/src/test/java/org/spigotmc/AntiXrayNeighbourhoodTest.java b/src/test/java/org/spigotmc/AntiXrayNeighbourhoodTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bec2441774b26727d5564445bbf51bfbdc4c9e77
+--- /dev/null
++++ b/src/test/java/org/spigotmc/AntiXrayNeighbourhoodTest.java
+@@ -0,0 +1,53 @@
++package org.spigotmc;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++/**
++ * Athena - AntiXray.obfuscate used to ask, for every ore-like block, whether the block and its six
++ * neighbours were in loaded chunks - a recursive walk over World.isLoaded, which ignores y. It now
++ * answers from five per-chunk lookups. This runs the old recursion against a model world, for
++ * every (x, z) in a chunk, a spread of y, and all 32 combinations of this chunk and its four
++ * neighbours being loaded, and requires the same answer.
++ */
++public class AntiXrayNeighbourhoodTest {
++
++    /** The chunk under test is (0, 0); bit 0 = self, 1 = west, 2 = east, 3 = north, 4 = south. */
++    private static boolean chunkLoaded(int mask, int chunkX, int chunkZ) {
++        if (chunkX == 0 && chunkZ == 0) return (mask & 1) != 0;
++        if (chunkX == -1 && chunkZ == 0) return (mask & 2) != 0;
++        if (chunkX == 1 && chunkZ == 0) return (mask & 4) != 0;
++        if (chunkX == 0 && chunkZ == -1) return (mask & 8) != 0;
++        if (chunkX == 0 && chunkZ == 1) return (mask & 16) != 0;
++        return true; // diagonals are never reached at radius 1
++    }
++
++    /** The recursion AntiXray used, over World.isLoaded(x, y, z) = chunk (x >> 4, z >> 4) loaded. */
++    private static boolean recursive(int mask, int x, int y, int z, int radius) {
++        return chunkLoaded(mask, x >> 4, z >> 4)
++                && (radius == 0
++                || (recursive(mask, x + 1, y, z, radius - 1)
++                && recursive(mask, x - 1, y, z, radius - 1)
++                && recursive(mask, x, y + 1, z, radius - 1)
++                && recursive(mask, x, y - 1, z, radius - 1)
++                && recursive(mask, x, y, z + 1, radius - 1)
++                && recursive(mask, x, y, z - 1, radius - 1)));
++    }
++
++    @Test
++    public void matchesTheRecursionEverywhere() {
++        for (int mask = 0; mask < 32; ++mask) {
++            for (int x = 0; x < 16; ++x) {
++                for (int z = 0; z < 16; ++z) {
++                    for (int y : new int[] {0, 1, 64, 254, 255}) {
++                        assertEquals("mask " + mask + " at " + x + "," + y + "," + z,
++                                recursive(mask, x, y, z, 1),
++                                AntiXray.neighbourhoodLoaded(x, z, (mask & 1) != 0, (mask & 2) != 0,
++                                        (mask & 4) != 0, (mask & 8) != 0, (mask & 16) != 0));
++                    }
++                }
++            }
++        }
++    }
++}

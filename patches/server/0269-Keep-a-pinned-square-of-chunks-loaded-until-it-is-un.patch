@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 10 Oct 2026 20:46:26 +0900
+Subject: [PATCH] Keep a pinned square of chunks loaded until it is unpinned
+
+ChunkProviderServer holds one pinned square per world: queueUnload ignores
+chunks inside it, and unloadChunks skips any queued before the pin.
+unpin queues the chunks it held that no player is using.
+
+VPS, 20 bots spread over Par_72 / Lobby_Games, live 900 s, 160M ParallelGC,
+pinned 300 blocks round the map centre: allocation full GCs 4 -> 1 (Par)
+and 1 -> 0 (Lobby), young GCs -24% / -73%, live CPU 0.134 -> 0.129 /
+0.175 -> 0.138 cores.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 7615de68fcf4d1a5f6d36e0eb4e973e39676a39c..422299195f74e8a204a485afcff972fd8d788c3e 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -46,6 +46,24 @@ public final class AthenaServerImpl implements AthenaServer {
+         return world instanceof CraftWorld && ((CraftWorld) world).getHandle().getDataManager() instanceof AthenaTemplateDataManager;
+     }
+ 
++    @Override
++    public void pinChunks(Location center, int radius) {
++        Validate.notNull(center, "Center may not be null");
++        Validate.notNull(center.getWorld(), "Center has no world");
++        Validate.isTrue(radius >= 0, "Radius may not be negative");
++        double x = center.getX(), z = center.getZ();
++
++        ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(
++                (int) Math.floor(x - radius) >> 4, (int) Math.floor(z - radius) >> 4,
++                (int) Math.floor(x + radius) >> 4, (int) Math.floor(z + radius) >> 4);
++    }
++
++    @Override
++    public void unpinChunks(World world) {
++        Validate.notNull(world, "World may not be null");
++        ((CraftWorld) world).getHandle().chunkProviderServer.unpin();
++    }
++
+     @Override
+     public CompletableFuture<Boolean> teleportAsync(final Entity entity, Location location) {
+         Validate.notNull(entity, "Entity may not be null");
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 8b580340cc3e968cb85e2f4a88feb387355fbaf0..566e0536fd64f9e31f2f24fbb643f22382372cba 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -58,7 +58,39 @@ public class ChunkProviderServer implements IChunkProvider {
+         // CraftBukkit end
+     }
+ 
++    // Athena start - a pinned area: chunks inside it never unload until it is unpinned
++    private boolean pinned;
++    private int pinMinX, pinMinZ, pinMaxX, pinMaxZ;
++
++    public void pin(int minX, int minZ, int maxX, int maxZ) {
++        this.pinned = true;
++        this.pinMinX = minX;
++        this.pinMinZ = minZ;
++        this.pinMaxX = maxX;
++        this.pinMaxZ = maxZ;
++    }
++
++    /** Ends the pin, and queues the chunks it held that no player is using, as a chunk GC would. */
++    public void unpin() {
++        if (!this.pinned) {
++            return;
++        }
++        this.pinned = false;
++        for (Chunk chunk : this.chunks.values()) {
++            if (chunk.locX >= this.pinMinX && chunk.locX <= this.pinMaxX && chunk.locZ >= this.pinMinZ && chunk.locZ <= this.pinMaxZ
++                    && !this.world.getPlayerChunkMap().isChunkInUse(chunk.locX, chunk.locZ)) {
++                this.queueUnload(chunk.locX, chunk.locZ);
++            }
++        }
++    }
++
++    public boolean isPinned(int x, int z) {
++        return this.pinned && x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ;
++    }
++    // Athena end
++
+     public void queueUnload(int i, int j) {
++        if (this.isPinned(i, j)) return; // Athena - pinned
+         long key = LongHash.toLong(i, j); // PandaSpigot - Only create key once
+         // PaperSpigot start - Asynchronous lighting updates
+         Chunk chunk = chunks.get(key); // PandaSpigot - Reuse key
+@@ -638,6 +670,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                 Chunk chunk = this.chunks.get(chunkcoordinates);
+                 if (chunk == null) continue;
+                 if (chunk.decorationPending) continue; // Athena - a decoration is still on its way to this chunk
++                if (this.isPinned(chunk.locX, chunk.locZ)) continue; // Athena - queued before the pin
+ 
+                 ChunkUnloadEvent event = new ChunkUnloadEvent(chunk.bukkitChunk);
+                 server.getPluginManager().callEvent(event);

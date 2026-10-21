@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 27 Sep 2026 21:50:30 +0900
+Subject: [PATCH] Share one property transition index per block instead of a
+ table per block state
+
+
+diff --git a/src/main/java/net/minecraft/server/BlockStateList.java b/src/main/java/net/minecraft/server/BlockStateList.java
+index 10c8645bbb0dcf4d89689e2ea6add0a6cf72f899..9feddae16fac8bd47cf3f3e12fb4449ebcff150e 100644
+--- a/src/main/java/net/minecraft/server/BlockStateList.java
++++ b/src/main/java/net/minecraft/server/BlockStateList.java
+@@ -3,10 +3,8 @@ package net.minecraft.server;
+ import com.google.common.base.Function;
+ import com.google.common.base.Joiner;
+ import com.google.common.base.Objects;
+-import com.google.common.collect.HashBasedTable;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+-import com.google.common.collect.ImmutableTable;
+ import com.google.common.collect.Iterables;
+ import com.google.common.collect.Lists;
+ import com.google.common.collect.Maps;
+@@ -60,8 +58,11 @@ public class BlockStateList {
+             arraylist.add(blockstatelist_blockdata);
+         }
+ 
++        // Athena - one shared transition index instead of a Guava table per state; see StateIndex
++        StateIndex index = new StateIndex(this.properties, arraylist);
++
+         for (BlockStateList.BlockData blockstatelist_blockdata1 : arraylist) {
+-            blockstatelist_blockdata1.buildPropertyValueTable(linkedhashmap);
++            blockstatelist_blockdata1.index = index;
+         }
+ 
+         this.validStates = ImmutableList.copyOf(arraylist);
+@@ -101,7 +102,9 @@ public class BlockStateList {
+ 
+         private final Block block;
+         private final ImmutableMap<IBlockState, Comparable> properties;
+-        private ImmutableTable<IBlockState, Comparable, IBlockData> propertyValueTable;
++        // Athena - replaces the per-state ImmutableTable<IBlockState, Comparable, IBlockData>
++        private StateIndex index;
++        private int ordinal;
+ 
+         private BlockData(Block block, ImmutableMap<IBlockState, Comparable> immutablemap) {
+             this.block = block;
+@@ -129,7 +132,7 @@ public class BlockStateList {
+             } else if (!iblockstate.getAllowedValues().contains(v0)) {
+                 throw new IllegalArgumentException("Cannot set property " + iblockstate + " to " + v0 + " on block " + Block.REGISTRY.getNameForObject(this.block) + ", it is not an allowed value");
+             } else {
+-                return (IBlockData) (this.properties.get(iblockstate) == v0 ? this : (IBlockData) this.propertyValueTable.get(iblockstate, v0));
++                return (IBlockData) (this.properties.get(iblockstate) == v0 ? this : this.index.with(this, iblockstate, v0)); // Athena
+             }
+         }
+ 
+@@ -150,30 +153,83 @@ public class BlockStateList {
+         public int hashCode() {
+             return this.properties.hashCode();
+         }
++    }
+ 
+-        public void buildPropertyValueTable(Map<Map<IBlockState, Comparable>, BlockStateList.BlockData> map) {
+-            if (this.propertyValueTable != null) {
+-                throw new IllegalStateException();
+-            } else {
+-                HashBasedTable hashbasedtable = HashBasedTable.create();
++    // Athena start - the "same state with one property changed" lookup, shared by a block's states.
++    //
++    // Vanilla gave every state its own ImmutableTable of property -> value -> state. That is the
++    // same information for every state of a block, rebuilt per state: 7,800 tables whose entries,
++    // maps and key sets came to ~20 MB of a 20-player server's ~100 MB live heap, before any chunk
++    // is loaded. Here a block's states sit in one array, placed by a mixed-radix number over the
++    // properties' value positions, and changing a property is one add.
++    //
++    // set() keeps vanilla's checks and answers exactly as the table did: the table had no entry
++    // for a state's own current value, so a value equal to - but not the same object as - the
++    // current one answered null there, and does here.
++    static final class StateIndex {
++
++        private final IBlockState[] properties;
++        private final Object[][] values;
++        private final int[] strides;
++        private final BlockData[] states;
++
++        StateIndex(List<IBlockState> properties, List<BlockData> states) {
++            int count = properties.size();
++
++            this.properties = properties.toArray(new IBlockState[count]);
++            this.values = new Object[count][];
++            this.strides = new int[count];
++
++            int stride = 1;
++
++            for (int i = count - 1; i >= 0; --i) {
++                this.values[i] = this.properties[i].getAllowedValues().toArray();
++                this.strides[i] = stride;
++                stride *= this.values[i].length;
++            }
+ 
+-                for (IBlockState<? extends Comparable> iblockstate : this.properties.keySet()) {
+-                    for (Comparable comparable : iblockstate.getAllowedValues()) {
+-                        if (comparable != this.properties.get(iblockstate)) {
+-                            hashbasedtable.put(iblockstate, comparable, map.get(this.getPropertiesWithValue(iblockstate, comparable)));
+-                        }
+-                    }
++            this.states = new BlockData[stride];
++            for (BlockData state : states) {
++                int ordinal = 0;
++
++                for (int i = 0; i < count; ++i) {
++                    ordinal += valueIndex(this.values[i], state.properties.get(this.properties[i])) * this.strides[i];
++                }
++                if (this.states[ordinal] != null) {
++                    throw new IllegalStateException("two states at " + ordinal + " of " + Arrays.toString(this.properties));
+                 }
++                this.states[ordinal] = state;
++                state.ordinal = ordinal;
++            }
++        }
+ 
+-                this.propertyValueTable = ImmutableTable.copyOf(hashbasedtable);
++        private static int valueIndex(Object[] values, Object value) {
++            for (int i = 0; i < values.length; ++i) {
++                if (values[i].equals(value)) {
++                    return i;
++                }
+             }
++            return -1;
+         }
+ 
+-        private Map<IBlockState, Comparable> getPropertiesWithValue(IBlockState iblockstate, Comparable comparable) {
+-            HashMap hashmap = Maps.newHashMap(this.properties);
++        /** The state like {@code from} but with {@code property} at {@code value}; both already checked valid. */
++        IBlockData with(BlockData from, IBlockState property, Object value) {
++            IBlockState[] properties = this.properties;
++
++            for (int i = 0; i < properties.length; ++i) {
++                if (properties[i] == property) {
++                    Object[] values = this.values[i];
++                    int target = valueIndex(values, value);
++                    int current = from.ordinal / this.strides[i] % values.length;
+ 
+-            hashmap.put(iblockstate, comparable);
+-            return hashmap;
++                    if (target == current) {
++                        return null; // vanilla's table held no entry for the current value
++                    }
++                    return this.states[from.ordinal + (target - current) * this.strides[i]];
++                }
++            }
++            return null; // not reached: set() checked the property belongs to this block
+         }
+     }
++    // Athena end
+ }
+diff --git a/src/test/java/net/minecraft/server/AthenaStateIndexTest.java b/src/test/java/net/minecraft/server/AthenaStateIndexTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0b4f9092b6b8ba2c884d060199847704d6b8e99
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaStateIndexTest.java
+@@ -0,0 +1,52 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashMap;
++import java.util.Map;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - IBlockData.set answers from BlockStateList.StateIndex instead of a per-state table.
++ * For every block, state, property and allowed value it must return what the table did: the
++ * state itself for its own value, otherwise the one state whose properties are this one's with
++ * that property changed.
++ */
++public class AthenaStateIndexTest extends AbstractTestingBase {
++
++    @Test
++    public void everyTransitionMatchesThePropertyMaps() {
++        int checked = 0;
++
++        for (Block block : Block.REGISTRY) {
++            Map<Map<IBlockState, Comparable>, IBlockData> byProperties = new HashMap<>();
++
++            for (IBlockData state : block.getBlockState().getValidStates()) {
++                byProperties.put(state.getProperties(), state);
++            }
++            assertEquals("states of " + block + " are distinct", block.getBlockState().getValidStates().size(), byProperties.size());
++
++            for (IBlockData state : block.getBlockState().getValidStates()) {
++                for (IBlockState property : state.getProperties().keySet()) {
++                    for (Object value : property.getAllowedValues()) {
++                        IBlockData actual = state.set(property, (Comparable) value);
++
++                        if (state.getProperties().get(property) == value) {
++                            assertSame(state, actual);
++                        } else {
++                            Map<IBlockState, Comparable> expected = new HashMap<>(state.getProperties());
++
++                            expected.put(property, (Comparable) value);
++                            assertSame(state + " with " + property.getName() + "=" + value, byProperties.get(expected), actual);
++                        }
++                        ++checked;
++                    }
++                }
++            }
++        }
++        assertTrue("checked " + checked, checked > 10000);
++    }
++}

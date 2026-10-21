@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 18 Oct 2026 21:30:09 +0900
+Subject: [PATCH] Settle weather set on a world with nobody in it at once
+
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 71adb4b1333177611a990a57df081e37efd8b93a..5192407d071faba04210cf94298a848b02662190 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3068,6 +3068,24 @@ public abstract class World implements IBlockAccess {
+         this.updateWeather();
+     }
+ 
++    // Athena start - weather set on a world with nobody in it takes effect at once.
++    //
++    // Rain fades in and out a hundredth per tick, and every tick of a fade is a game state packet
++    // to every player in the world. A match map is loaded from a template saved in the rain, turned
++    // clear by the plugin before anyone arrives, and then faded out over the first hundred ticks of
++    // the match: about a hundred packets to each player who had just been teleported in. With no
++    // player in the world nobody can see a fade, and whoever arrives is sent the weather as it is
++    // (PlayerList.updateTimeAndWeatherForPlayer), so the strengths can go straight to where the
++    // fade would have ended. CraftWorld.setStorm and setThundering call this.
++    public void athenaSettleWeatherIfEmpty() {
++        if (!this.players.isEmpty()) {
++            return;
++        }
++        this.prevRainingStrength = this.rainingStrength = this.worldData.hasStorm() ? 1.0F : 0.0F;
++        this.prevThunderingStrength = this.thunderingStrength = this.worldData.isThundering() ? 1.0F : 0.0F;
++    }
++    // Athena end
++
+     protected void calculateInitialWeather() {
+         if (this.worldData.hasStorm()) {
+             this.rainingStrength = 1.0F;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index 567188816c81509633e5bf113c5a8bab94a6d61e..3a2af5c39539fa521d9cc841f87173333610022e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -832,6 +832,7 @@ public class CraftWorld implements World {
+ 
+     public void setStorm(boolean hasStorm) {
+         world.worldData.setStorm(hasStorm);
++        world.athenaSettleWeatherIfEmpty(); // Athena - no fade nobody can see
+     }
+ 
+     public int getWeatherDuration() {
+@@ -848,6 +849,7 @@ public class CraftWorld implements World {
+ 
+     public void setThundering(boolean thundering) {
+         world.worldData.setThundering(thundering);
++        world.athenaSettleWeatherIfEmpty(); // Athena - no fade nobody can see
+     }
+ 
+     public int getThunderDuration() {

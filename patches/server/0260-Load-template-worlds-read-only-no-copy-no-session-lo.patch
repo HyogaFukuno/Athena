@@ -1,0 +1,636 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 12:02:25 +0900
+Subject: [PATCH] Load template worlds read-only: no copy, no session lock,
+ nothing saved
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4e3b524b553e2c33e2a90c777951f555ebf46e3
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -0,0 +1,87 @@
++package net.minecraft.server;
++
++import java.io.File;
++import java.io.IOException;
++import java.util.HashMap;
++import java.util.Map;
++
++// Athena - the chunk loader of a template world (see athena.api.AthenaWorlds): chunks come from
++// the template's region files, read only, and are never saved.
++//
++// It is a ChunkRegionLoader so that every path that loads a chunk - the async chunk IO threads, the
++// synchronous fallback, chunkExists deciding between loading and generating - goes through it
++// unchanged; only where the NBT comes from and whether anything is written differ. The NBT to
++// Chunk conversion is the inherited one, so a template chunk loads exactly like a saved chunk.
++final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
++
++    private static final AthenaTemplateRegion MISSING = null;
++
++    private final File directory;
++    // region coordinates -> the open region, or a stored null for a region file that is not there
++    private final Map<Long, AthenaTemplateRegion> regions = new HashMap<Long, AthenaTemplateRegion>();
++    private boolean closed;
++
++    AthenaTemplateChunkLoader(File directory) {
++        super(directory);
++        this.directory = directory;
++    }
++
++    private synchronized AthenaTemplateRegion region(int chunkX, int chunkZ) throws IOException {
++        if (this.closed) {
++            return MISSING;
++        }
++
++        int regionX = chunkX >> 5;
++        int regionZ = chunkZ >> 5;
++        Long key = Long.valueOf((long) regionX << 32 | regionZ & 0xFFFFFFFFL);
++
++        if (this.regions.containsKey(key)) {
++            return this.regions.get(key);
++        }
++
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(new File(this.directory, "region"), "r." + regionX + "." + regionZ + ".mca"));
++
++        this.regions.put(key, region);
++        return region;
++    }
++
++    @Override
++    public boolean chunkExists(World world, int i, int j) {
++        try {
++            AthenaTemplateRegion region = this.region(i, j);
++
++            return region != null && region.has(i & 31, j & 31);
++        } catch (IOException e) {
++            return false;
++        }
++    }
++
++    @Override
++    public Object[] loadChunk(World world, int i, int j) throws IOException {
++        AthenaTemplateRegion region = this.region(i, j);
++        NBTTagCompound nbttagcompound = region == null ? null : region.read(i & 31, j & 31);
++
++        return nbttagcompound == null ? null : this.a(world, i, j, nbttagcompound);
++    }
++
++    /** Nothing is saved: a template world's changes live in memory only. */
++    @Override
++    public void saveChunk(World world, Chunk chunk) {}
++
++    @Override
++    public void saveExtraData() {}
++
++    /** Closes the template's region files. Called when the world unloads. */
++    synchronized void close() {
++        this.closed = true;
++        for (AthenaTemplateRegion region : this.regions.values()) {
++            if (region != null) {
++                try {
++                    region.close();
++                } catch (IOException ignored) {
++                }
++            }
++        }
++        this.regions.clear();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java b/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae88924e6af24a6c43a9cd6b73e854c5ac08f00f
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaTemplateDataManager.java
+@@ -0,0 +1,114 @@
++package net.minecraft.server;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.InputStream;
++import java.util.UUID;
++
++// Athena - the save handler of a template world (see athena.api.AthenaWorlds).
++//
++// WorldNBTStorage, the normal one, writes into the world folder from its constructor on: it
++// creates data/ and playerdata/, writes session.lock, and writes uid.dat the first time the world's
++// UUID is asked for. This one reads level.dat from the template and writes nothing at all: no
++// session lock (several worlds may share the template), a UUID made up per load, no player data
++// (players are saved by the main world's handler in any case), no villages, maps or structure
++// data (getDataFile answers null, which PersistentCollection treats as "nothing stored").
++public final class AthenaTemplateDataManager implements IDataManager, IPlayerFileData {
++
++    private final File template;
++    private final String name;
++    private final UUID uuid = UUID.randomUUID();
++    private AthenaTemplateChunkLoader chunkLoader;
++
++    public AthenaTemplateDataManager(File template, String name) {
++        this.template = template;
++        this.name = name;
++    }
++
++    @Override
++    public WorldData getWorldData() {
++        for (String fileName : new String[] {"level.dat", "level.dat_old"}) {
++            File file = new File(this.template, fileName);
++
++            if (file.isFile()) {
++                try (InputStream in = new FileInputStream(file)) {
++                    return new WorldData(NBTCompressedStreamTools.readCompressed(in).getCompound("Data"));
++                } catch (Exception exception) {
++                    exception.printStackTrace();
++                }
++            }
++        }
++        return null;
++    }
++
++    @Override
++    public void checkSession() {}
++
++    @Override
++    public IChunkLoader createChunkLoader(WorldProvider worldprovider) {
++        File directory = this.template;
++
++        if (worldprovider instanceof WorldProviderHell) {
++            directory = new File(this.template, "DIM-1");
++        } else if (worldprovider instanceof WorldProviderTheEnd) {
++            directory = new File(this.template, "DIM1");
++        }
++        this.chunkLoader = new AthenaTemplateChunkLoader(directory);
++        return this.chunkLoader;
++    }
++
++    @Override
++    public void saveWorldData(WorldData worlddata, NBTTagCompound nbttagcompound) {}
++
++    @Override
++    public void saveWorldData(WorldData worlddata) {}
++
++    @Override
++    public IPlayerFileData getPlayerFileData() {
++        return this;
++    }
++
++    @Override
++    public void flush() {}
++
++    @Override
++    public File getDirectory() {
++        return this.template;
++    }
++
++    @Override
++    public File getDataFile(String s) {
++        return null;
++    }
++
++    @Override
++    public String getWorldDirectoryName() {
++        return this.name;
++    }
++
++    @Override
++    public UUID getUUID() {
++        return this.uuid;
++    }
++
++    // IPlayerFileData - never used for players (the main world's handler is), and never writes
++    @Override
++    public void save(EntityHuman entityhuman) {}
++
++    @Override
++    public NBTTagCompound load(EntityHuman entityhuman) {
++        return null;
++    }
++
++    @Override
++    public String[] getSeenPlayers() {
++        return new String[0];
++    }
++
++    /** Closes the template's files; the world is being unloaded. */
++    public void close() {
++        if (this.chunkLoader != null) {
++            this.chunkLoader.close();
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateRegion.java b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..798501fcf4c8a12df6063597de07b8562130b67f
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+@@ -0,0 +1,147 @@
++package net.minecraft.server;
++
++import java.io.BufferedInputStream;
++import java.io.ByteArrayInputStream;
++import java.io.Closeable;
++import java.io.DataInputStream;
++import java.io.EOFException;
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.ByteBuffer;
++import java.nio.channels.FileChannel;
++import java.nio.file.StandardOpenOption;
++import java.util.zip.GZIPInputStream;
++import java.util.zip.InflaterInputStream;
++
++// Athena - one region file of a template world, opened read only.
++//
++// RegionFile opens its file for writing and pads a short one with zeros, and RegionFileCache
++// creates a region file that is missing; either would write into a template several servers
++// share. This reads the same format - an 8 KB header of sector offsets, then per chunk a length,
++// a compression type and the compressed NBT - and never writes. Reads are positional, so the
++// chunk IO threads and the server thread can read one file at once without a lock.
++final class AthenaTemplateRegion implements Closeable {
++
++    private static final int SECTOR = 4096;
++
++    private final FileChannel channel;
++    private final int[] offsets = new int[1024];
++    private final long size;
++
++    private AthenaTemplateRegion(FileChannel channel) throws IOException {
++        this.channel = channel;
++        this.size = channel.size(); // a template does not change under us
++
++        ByteBuffer header = ByteBuffer.allocate(SECTOR);
++
++        readFully(header, 0L);
++        header.flip();
++        for (int i = 0; i < 1024 && header.remaining() >= 4; ++i) {
++            this.offsets[i] = header.getInt();
++        }
++    }
++
++    /** The region file at {@code file}, or null if there is none. */
++    static AthenaTemplateRegion open(File file) throws IOException {
++        if (!file.isFile()) {
++            return null;
++        }
++        return new AthenaTemplateRegion(FileChannel.open(file.toPath(), StandardOpenOption.READ));
++    }
++
++    /**
++     * Whether the chunk at these region-local coordinates is stored, from the offset table alone.
++     *
++     * The server asks this on its own thread for every chunk it is about to load, to choose between
++     * loading and generating; RegionFile answers it by reading the chunk's first bytes. Here it
++     * costs no IO at all. A stored chunk whose data then turns out unreadable reads as null, and
++     * the server generates the chunk instead, as it does for one that is not there.
++     */
++    boolean has(int x, int z) {
++        if ((x | z) < 0 || x >= 32 || z >= 32) {
++            return false;
++        }
++
++        int offset = this.offsets[x + z * 32];
++
++        return offset != 0 && (long) ((offset >>> 8) + (offset & 255)) * SECTOR <= this.size;
++    }
++
++    /** The chunk's NBT, or null if it is not stored. */
++    NBTTagCompound read(int x, int z) throws IOException {
++        int[] header = this.header(x, z);
++
++        if (header == null) {
++            return null;
++        }
++
++        int sector = header[0];
++        int length = header[1];
++        int type = header[2];
++        ByteBuffer data = ByteBuffer.allocate(length - 1);
++
++        readFully(data, (long) sector * SECTOR + 5L);
++
++        InputStream raw = new ByteArrayInputStream(data.array());
++        InputStream in = type == 1 ? new GZIPInputStream(raw) : new InflaterInputStream(raw);
++
++        try (DataInputStream stream = new DataInputStream(new BufferedInputStream(in))) {
++            return NBTCompressedStreamTools.read(stream);
++        }
++    }
++
++    /** {sector, length, compression type} for a stored chunk, null for one that is not. */
++    private int[] header(int x, int z) throws IOException {
++        if ((x | z) < 0 || x >= 32 || z >= 32) {
++            return null;
++        }
++
++        int offset = this.offsets[x + z * 32];
++
++        if (offset == 0) {
++            return null;
++        }
++
++        int sector = offset >>> 8;
++        int sectors = offset & 255;
++
++        if ((long) (sector + sectors) * SECTOR > this.size) {
++            return null;
++        }
++
++        ByteBuffer head = ByteBuffer.allocate(5);
++
++        readFully(head, (long) sector * SECTOR);
++        head.flip();
++
++        int length = head.getInt();
++        int type = head.get();
++
++        if (length <= 1 || length > SECTOR * sectors || (type != 1 && type != 2)) {
++            return null;
++        }
++        return new int[] {sector, length, type};
++    }
++
++    private void readFully(ByteBuffer buffer, long position) throws IOException {
++        long at = position;
++
++        while (buffer.hasRemaining()) {
++            int n = this.channel.read(buffer, at);
++
++            if (n < 0) {
++                if (position == 0L) {
++                    return; // a header shorter than a sector: the rest reads as empty
++                }
++                throw new EOFException();
++            }
++            at += n;
++        }
++    }
++
++    @Override
++    public void close() throws IOException {
++        this.channel.close();
++    }
++}
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 07d337b5eb6229992da0781f428e827b9e62752b..8f064ed13b2c449d3d3ee6dcb52bd30e40a99ec5 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -189,6 +189,19 @@ public final class CraftServer implements Server {
+         online.value = console.getPropertyManager().getBoolean("online-mode", true);
+ 
+         Bukkit.setServer(this);
++        // Athena start - the server side of athena.api.AthenaWorlds
++        athena.api.AthenaWorlds.setLoader(new athena.api.AthenaWorlds.Loader() {
++            @Override
++            public World loadTemplate(WorldCreator creator, File templateFolder) {
++                return CraftServer.this.loadTemplateWorld(creator, templateFolder);
++            }
++
++            @Override
++            public boolean isTemplate(World world) {
++                return world instanceof CraftWorld && ((CraftWorld) world).getHandle().getDataManager() instanceof AthenaTemplateDataManager;
++            }
++        });
++        // Athena end
+ 
+         // Register all the Enchantments and PotionTypes now so we can stop new registration immediately after
+         Enchantment.DAMAGE_ALL.getClass();
+@@ -929,6 +942,23 @@ public final class CraftServer implements Server {
+             });
+         }
+ 
++        int dimension = this.nextDimension(); // Athena - shared with loadTemplateWorld
++        boolean hardcore = false;
++
++        IDataManager sdm = new ServerNBTManager(getWorldContainer(), name, true);
++        WorldData worlddata = sdm.getWorldData();
++        if (worlddata == null) {
++            WorldSettings worldSettings = new WorldSettings(creator.seed(), WorldSettings.EnumGamemode.getById(getDefaultGameMode().getValue()), generateStructures, hardcore, type);
++            worldSettings.setGeneratorSettings(creator.generatorSettings());
++            worlddata = new WorldData(worldSettings, name);
++        }
++        worlddata.checkName(name); // CraftBukkit - Migration did not rewrite the level.dat; This forces 1.8 to take the last loaded world as respawn (in this case the end)
++        return this.startWorld(creator, name, sdm, worlddata, dimension, generator); // Athena
++    }
++
++    // Athena start - the part of createWorld after the save handler and the level data are known,
++    // shared with loadTemplateWorld
++    private int nextDimension() {
+         int dimension = CraftWorld.CUSTOM_DIMENSION_OFFSET + console.worlds.size();
+         boolean used = false;
+         do {
+@@ -940,22 +970,53 @@ public final class CraftServer implements Server {
+                 }
+             }
+         } while(used);
+-        boolean hardcore = false;
++        return dimension;
++    }
+ 
+-        IDataManager sdm = new ServerNBTManager(getWorldContainer(), name, true);
++    /**
++     * Athena - loads a world read straight from a template folder, writing nothing into it; see
++     * athena.api.AthenaWorlds.
++     */
++    public World loadTemplateWorld(WorldCreator creator, File template) {
++        Validate.notNull(creator, "Creator may not be null");
++        Validate.notNull(template, "Template folder may not be null");
++
++        String name = creator.name();
++
++        if (getWorld(name) != null) {
++            throw new IllegalArgumentException("A world named '" + name + "' is already loaded");
++        }
++
++        AthenaTemplateDataManager sdm = new AthenaTemplateDataManager(template.getAbsoluteFile(), name);
+         WorldData worlddata = sdm.getWorldData();
++
+         if (worlddata == null) {
+-            WorldSettings worldSettings = new WorldSettings(creator.seed(), WorldSettings.EnumGamemode.getById(getDefaultGameMode().getValue()), generateStructures, hardcore, type);
+-            worldSettings.setGeneratorSettings(creator.generatorSettings());
+-            worlddata = new WorldData(worldSettings, name);
++            throw new IllegalArgumentException("No world (level.dat) in " + template.getAbsolutePath());
+         }
+-        worlddata.checkName(name); // CraftBukkit - Migration did not rewrite the level.dat; This forces 1.8 to take the last loaded world as respawn (in this case the end)
++        worlddata.checkName(name);
++
++        ChunkGenerator generator = creator.generator();
++
++        if (generator == null) {
++            generator = getGenerator(name);
++        }
++        return this.startWorld(creator, name, sdm, worlddata, this.nextDimension(), generator);
++    }
++
++    private World startWorld(WorldCreator creator, String name, IDataManager sdm, WorldData worlddata, int dimension, ChunkGenerator generator) {
+         WorldServer internal = (WorldServer) new WorldServer(console, sdm, worlddata, dimension, console.methodProfiler, creator.environment(), generator).init();
+ 
+         if (!(worlds.containsKey(name.toLowerCase()))) {
+             return null;
+         }
+ 
++        if (sdm instanceof AthenaTemplateDataManager) {
++            // a template world is for a match: preload what the players need instead of the
++            // 625 chunks round its spawn. A WorldInitEvent handler can still turn it back on.
++            internal.keepSpawnInMemory = false;
++        }
++    // Athena end
++
+         internal.scoreboard = getScoreboardManager().getMainScoreboard().getHandle();
+ 
+         internal.tracker = new EntityTracker(internal);
+@@ -1043,6 +1104,12 @@ public final class CraftServer implements Server {
+         worlds.remove(world.getName().toLowerCase());
+         console.worlds.remove(console.worlds.indexOf(handle));
+ 
++        // Athena - a template world keeps its own read-only region files; the cache below never had them
++        if (handle.getDataManager() instanceof AthenaTemplateDataManager) {
++            ((AthenaTemplateDataManager) handle.getDataManager()).close();
++            return true;
++        }
++
+         File parentFolder = world.getWorldFolder().getAbsoluteFile();
+ 
+         // Synchronized because access to RegionFileCache.a is guarded by this lock.
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index 16e5be1fab160681b314dd0a9612af3c75e5e23d..4a228772d5941297168e5cc30b6a34a3214d900f 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -1287,7 +1287,7 @@ public class CraftWorld implements World {
+     }
+ 
+     public File getWorldFolder() {
+-        return ((WorldNBTStorage) world.getDataManager()).getDirectory();
++        return world.getDataManager().getDirectory(); // Athena - any save handler, not only WorldNBTStorage
+     }
+ 
+     public void sendPluginMessage(Plugin source, String channel, byte[] message) {
+diff --git a/src/test/java/net/minecraft/server/AthenaTemplateRegionTest.java b/src/test/java/net/minecraft/server/AthenaTemplateRegionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef1131da154d2b61aa58c787cc3ec03407858cf4
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaTemplateRegionTest.java
+@@ -0,0 +1,123 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import java.io.DataOutputStream;
++import java.io.File;
++import java.nio.file.Files;
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - a template world reads region files written by the normal save path, reads them back
++ * exactly, and never changes or creates a file in the template.
++ */
++public class AthenaTemplateRegionTest {
++
++    private static NBTTagCompound chunkNbt(int x, int z, long seed) {
++        Random random = new Random(seed);
++        NBTTagCompound level = new NBTTagCompound();
++        byte[] blocks = new byte[4096];
++
++        random.nextBytes(blocks);
++        level.setInt("xPos", x);
++        level.setInt("zPos", z);
++        level.setByteArray("Blocks", blocks);
++        level.setLong("seed", seed);
++
++        NBTTagCompound root = new NBTTagCompound();
++
++        root.set("Level", level);
++        return root;
++    }
++
++    private static File template() throws Exception {
++        File dir = Files.createTempDirectory("athena-template").toFile();
++        File regionDir = new File(dir, "region");
++
++        regionDir.mkdirs();
++
++        // written the way the server saves chunks: RegionFile, deflate stream per chunk
++        RegionFile region = new RegionFile(new File(regionDir, "r.0.0.mca"));
++
++        for (int x = 0; x < 32; x += 3) {
++            for (int z = 0; z < 32; z += 5) {
++                try (DataOutputStream out = region.getChunkDataOutputStream(x, z)) {
++                    NBTCompressedStreamTools.write(chunkNbt(x, z, x * 131L + z), (java.io.DataOutput) out);
++                }
++            }
++        }
++        region.close();
++        return dir;
++    }
++
++    @Test
++    public void readsBackWhatTheServerWrote() throws Exception {
++        File dir = template();
++        File file = new File(dir, "region/r.0.0.mca");
++        long size = file.length();
++        long modified = file.lastModified();
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(file);
++
++        assertNotNull(region);
++        for (int x = 0; x < 32; ++x) {
++            for (int z = 0; z < 32; ++z) {
++                boolean stored = x % 3 == 0 && z % 5 == 0;
++
++                assertEquals("has " + x + "," + z, stored, region.has(x, z));
++
++                NBTTagCompound nbt = region.read(x, z);
++
++                if (stored) {
++                    assertEquals(chunkNbt(x, z, x * 131L + z), nbt);
++                } else {
++                    assertNull(nbt);
++                }
++            }
++        }
++        assertFalse(region.has(-1, 0));
++        assertFalse(region.has(32, 0));
++        region.close();
++
++        assertEquals("the template file is untouched", size, file.length());
++        assertEquals("the template file is untouched", modified, file.lastModified());
++    }
++
++    @Test
++    public void aMissingRegionIsNotCreated() throws Exception {
++        File dir = template();
++        AthenaTemplateChunkLoader loader = new AthenaTemplateChunkLoader(dir);
++
++        assertTrue(loader.chunkExists(null, 0, 0));
++        assertFalse(loader.chunkExists(null, 1, 0));
++        assertFalse("region 5,5 has no file", loader.chunkExists(null, 5 * 32, 5 * 32));
++        assertNull(loader.loadChunk(null, 5 * 32 + 1, 5 * 32 + 1));
++        assertFalse("nothing was created in the template", new File(dir, "region/r.5.5.mca").exists());
++        assertEquals("only the one region file", 1, new File(dir, "region").list().length);
++
++        loader.close();
++        assertFalse("a closed loader answers nothing", loader.chunkExists(null, 0, 0));
++    }
++
++    @Test
++    public void theDataManagerWritesNothing() throws Exception {
++        File dir = template();
++        AthenaTemplateDataManager manager = new AthenaTemplateDataManager(dir, "match1");
++
++        manager.checkSession();
++        manager.saveWorldData(null);
++        manager.saveWorldData(null, null);
++        assertNull(manager.getDataFile("villages"));
++        assertNotNull(manager.getUUID());
++        assertTrue("a fresh UUID per load", !manager.getUUID().equals(new AthenaTemplateDataManager(dir, "match2").getUUID()));
++
++        String[] entries = dir.list();
++
++        java.util.Arrays.sort(entries);
++        assertEquals("[region]", java.util.Arrays.toString(entries));
++    }
++}

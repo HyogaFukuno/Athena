@@ -1,0 +1,283 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 10:50:01 +0900
+Subject: [PATCH] Stop re-testing static decorations every tick
+
+A Survival Games map holds hundreds of item frames and paintings (Lobby_Games:
+461 frames and 24 paintings inside the play area, 394 of the frames in the four
+chunks around its spawn), and every tick each of them went through the
+activation range once per player within 32 blocks, a chunk lookup or two in
+the entity loop, and the whole of the tracker update. perf on the VPS put those
+paths at about 9% of a 20-player server's CPU.
+
+- ActivationRange: a chunk with no monster or animal (counted per chunk at
+  Chunk.addEntity/removeEntityAtIndex, checked by the index audit) has only
+  misc entities to activate, and they are reached through the slice's X/Z
+  bucket index, only the buckets the misc box can reach. Always-active
+  entities are no longer stamped there; their activatedTick is never read.
+- checkIfActive looks the chunk up only for an active entity, and the inactive
+  path asks the entity's type before the chunk.
+- EntityTrackerEntry: a hanging entity with no viewer that has not moved or
+  changed only advances its counter, which is all the full update did; an item
+  frame reads its item only on the ticks that use it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 011c3bcaa219c0e4b3ab4087a7057bebbe8b2527..c7b57490f1eaf58f28c4055d3c3544f5e86fcc44 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -319,6 +319,19 @@ public final class AthenaIndexAudit {
+         Chunk chunk = (Chunk) chunks[Math.floorMod(liquidCursor++, chunks.length)];
+         ChunkSection[] sections = chunk.getSections();
+ 
++        // Athena - the activation range skips a chunk outside the misc range whose count is zero
++        int mobs = 0;
++        for (int i = 0; i < chunk.entitySlices.length; ++i) {
++            for (Entity entity : chunk.entitySlices[i]) {
++                if (entity.activationType != 3) ++mobs;
++            }
++        }
++        ++sliceMaskChecks;
++        if (mobs != chunk.activationMobCount) {
++            report("chunk " + chunk.locX + "," + chunk.locZ + " holds " + mobs
++                    + " monsters and animals but activationMobCount says " + chunk.activationMobCount);
++        }
++
+         for (int i = 0; i < sections.length; ++i) {
+             ChunkSection section = sections[i];
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index d1337dacc56410e9979e6e833913017d4541e364..72e79bf2c66bc301121bf9d49b3a26d04e88cefc 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -71,6 +71,10 @@ public class Chunk {
+     // it visits is empty - but asking an UnsafeList for an iterator searches its iterator pool
+     // either way, and a minigame profile had that search at 11% of the server thread.
+     public int nonEmptySliceMask;
++    // Athena - how many of this chunk's entities are monsters or animals (activation types 1 and 2),
++    // kept beside nonEmptySliceMask. When it is zero the activation range only has misc entities to
++    // test, and goes to them through the bucket index instead of walking every slice.
++    public int activationMobCount;
+     // Athena start - a one-block-wide X bucket index over each entity slice.
+     //
+     // A slice holds every entity in a 16x16x16 section, and the queries that dominate the server
+@@ -982,6 +986,16 @@ public class Chunk {
+ 
+     // Athena - accessors for AthenaIndexAudit only
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
++
++    // Athena start - the bucket range of a slice that holds every entity whose box can reach x in
++    // [minX, maxX] and z in [minZ, maxZ], for the activation range; the same arithmetic as the
++    // positional query in getEntities. activationBuckets is null for a slice with no index.
++    public List<Entity>[] activationBuckets(int slice) { return this.entityBuckets[slice]; }
++    public int activationBucketLoX(int slice, double minX) { return this.bucketOf(minX - this.bucketPadX[slice]); }
++    public int activationBucketHiX(double maxX) { return this.bucketOf(maxX); }
++    public int activationBucketLoZ(int slice, double minZ) { return this.bucketOfZ(minZ - this.bucketPadZ[slice]); }
++    public int activationBucketHiZ(double maxZ) { return this.bucketOfZ(maxZ); }
++    // Athena end
+     int auditBucketIndexOf(double x, double z) { return this.bucketIndexOf(x, z); }
+     int auditBucketPadX(int slice) { return this.bucketPadX[slice]; }
+     int auditBucketPadZ(int slice) { return this.bucketPadZ[slice]; }
+@@ -1020,6 +1034,7 @@ public class Chunk {
+         entity.chunkCoordZ = this.locZ;
+         this.entitySlices[k].add(entity);
+         this.nonEmptySliceMask |= 1 << k; // Athena
++        if (entity.activationType != 3) ++this.activationMobCount; // Athena
+         // Athena start - register with the bucket index, building it if the slice has grown enough
+         entity.athenaChunk = this;
+         entity.athenaBucket = -1;
+@@ -1100,6 +1115,7 @@ public class Chunk {
+         }
+ 
+         if (!this.entitySlices[i].remove(entity)) return; // PandaSpigot
++        if (entity.activationType != 3) --this.activationMobCount; // Athena
+         if (this.entitySlices[i].isEmpty()) {
+             this.nonEmptySliceMask &= ~(1 << i); // Athena
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 74287a371534ab674b637a4a73b8092ecc806c7b..f67c0a3d65f98c764e9cf17594a40df37eb6dec8 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -149,12 +149,14 @@ public class EntityTrackerEntry {
+     }
+     // Athena end
+     int trackerIndex = -1; // Athena - this entry's slot in EntityTracker's array
++    private final boolean hanging; // Athena - an item frame, a painting or a leash knot: see track
+ 
+     public EntityTrackerEntry(Entity entity, int i, int j, boolean flag) {
+         this.tracker = entity;
+         this.trackingDistanceThreshold = i;
+         this.updateFrequency = j;
+         this.sendVelocityUpdates = flag;
++        this.hanging = entity instanceof EntityHanging; // Athena
+         this.xLoc = MathHelper.floor(entity.locX * 32.0D);
+         this.yLoc = MathHelper.floor(entity.locY * 32.0D);
+         this.zLoc = MathHelper.floor(entity.locZ * 32.0D);
+@@ -173,6 +175,29 @@ public class EntityTrackerEntry {
+     }
+ 
+     public void track(List<EntityHuman> list) {
++        // Athena start - a hanging entity nobody watches, that has not moved or changed, is a counter.
++        //
++        // Maps are dressed with hundreds of item frames and paintings, and each came through the whole
++        // of this method every tick: the item frame block below reads the frame's item through its
++        // data watcher, and everything after it asks the same questions again. With no viewer every
++        // broadcast here is a no-op, and when the entity is where it was last scanned, rides nothing,
++        // has no new metadata, velocity or airborne flag, and its update interval (never, for a
++        // hanging entity) has not come round, the only thing the method changes is updateCounter.
++        // Viewers are added by EntityTracker's walk over moving players, not here, so nothing is
++        // lost; the first entity to break one of these conditions takes the full path as before.
++        if (this.hanging && this.viewerCount == 0 && this.isMoving && this.w == null) {
++            Entity entity = this.tracker;
++
++            if (entity.vehicle == null && !entity.velocityChanged && !entity.isAirBorne
++                    && this.updateCounter % this.updateFrequency != 0
++                    && !entity.getDataWatcher().hasObjectChanged()
++                    && entity.getDistanceSq(this.lastTrackedEntityPosX, this.lastTrackedEntityPosY, this.lastTrackedEntityPosZ) <= 16.0D) {
++                this.playerEntitiesUpdated = false;
++                ++this.updateCounter;
++                return;
++            }
++        }
++        // Athena end
+         this.playerEntitiesUpdated = false;
+         if (!this.isMoving || this.tracker.getDistanceSq(this.lastTrackedEntityPosX, this.lastTrackedEntityPosY, this.lastTrackedEntityPosZ) > 16.0D) {
+             this.lastTrackedEntityPosX = this.tracker.locX;
+@@ -190,9 +215,9 @@ public class EntityTrackerEntry {
+ 
+         if (this.tracker instanceof EntityItemFrame /*&& this.m % 10 == 0*/) { // CraftBukkit - Moved below, should always enter this block
+             EntityItemFrame entityitemframe = (EntityItemFrame) this.tracker;
+-            ItemStack itemstack = entityitemframe.getItem();
++            ItemStack itemstack = this.updateCounter % 10 == 0 ? entityitemframe.getItem() : null; // Athena - read only when it is used
+ 
+-            if (this.updateCounter % 10 == 0 && itemstack != null && itemstack.getItem() instanceof ItemWorldMap) { // CraftBukkit - Moved this.m % 10 logic here so item frames do not enter the other blocks
++            if (itemstack != null && itemstack.getItem() instanceof ItemWorldMap) { // CraftBukkit - Moved this.m % 10 logic here so item frames do not enter the other blocks // Athena - the % 10 is above
+                 WorldMap worldmap = Items.FILLED_MAP.getSavedMap(itemstack, this.tracker.world);
+                 Iterator iterator = this.trackedPlayers.iterator(); // CraftBukkit
+ 
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 9499220f2a4a9472667ff1c3ec371604aaf2fd60..930e746eecd9fe1ce0e4298643959d00c2ffdad0 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2312,9 +2312,10 @@ public abstract class World implements IBlockAccess {
+             entity.ticksLived++;
+             entity.inactiveTick();
+             // PaperSpigot start - Remove entities in unloaded chunks
+-            if (!this.isChunkLoaded(i, j, true) && ((entity instanceof EntityEnderPearl && this.paperSpigotConfig.removeUnloadedEnderPearls) ||
++            // Athena - the type first: the chunk lookup ran for every inactive entity, every tick
++            if (((entity instanceof EntityEnderPearl && this.paperSpigotConfig.removeUnloadedEnderPearls) ||
+                     (entity instanceof EntityFallingBlock && this.paperSpigotConfig.removeUnloadedFallingBlocks) ||
+-                    (entity instanceof EntityTNTPrimed && this.paperSpigotConfig.removeUnloadedTNTEntities))) {
++                    (entity instanceof EntityTNTPrimed && this.paperSpigotConfig.removeUnloadedTNTEntities)) && !this.isChunkLoaded(i, j, true)) {
+                 entity.inUnloadedChunk = true;
+                 entity.die();
+             }
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index 95cdc629a3d74566445d9110bff35b8cd3f28c19..bc35cebc95561bedf83d9d0cc28b6bab65c80783 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -172,6 +172,21 @@ public class ActivationRange
+      */
+     private static void activateChunkEntities(Chunk chunk)
+     {
++        // Athena start - a chunk with no monster or animal has only misc entities to activate.
++        //
++        // Every chunk within 32 blocks of every player comes through here each tick, and a map's
++        // decorations sit in a handful of them: Lobby_Games keeps 394 of its 461 item frames in the
++        // four chunks around its spawn. Every player near the centre re-tested every one of them
++        // every tick, nearly all outside the 16-block misc range and so failing. An always-active
++        // entity (a player, a projectile) needs nothing from here - its activatedTick is never read -
++        // so in such a chunk only misc entities inside the misc box matter, and the slice's bucket
++        // index finds exactly those candidates without visiting the rest.
++        if ( chunk.activationMobCount == 0 )
++        {
++            activateChunkMisc( chunk );
++            return;
++        }
++        // Athena end
+         // Athena start - only the slices that hold something, walked by index.
+         //
+         // Every chunk within range of every player comes through here each tick, and each of its
+@@ -224,6 +239,57 @@ public class ActivationRange
+         }
+     }
+ 
++    // Athena start - see activateChunkEntities
++    private static void activateChunkMisc(Chunk chunk)
++    {
++        int mask = chunk.nonEmptySliceMask;
++
++        while ( mask != 0 )
++        {
++            int k = Integer.numberOfTrailingZeros( mask );
++            mask &= mask - 1;
++            List<Entity>[] buckets = chunk.activationBuckets( k );
++
++            if ( buckets == null )
++            {
++                activateMisc( chunk.entitySlices[ k ] );
++                continue;
++            }
++
++            int hiX = chunk.activationBucketHiX( miscBBMaxX );
++            int loZ = chunk.activationBucketLoZ( k, miscBBMinZ );
++            int hiZ = chunk.activationBucketHiZ( miscBBMaxZ );
++
++            for ( int bx = chunk.activationBucketLoX( k, miscBBMinX ); bx <= hiX; ++bx )
++            {
++                for ( int bz = loZ; bz <= hiZ; ++bz )
++                {
++                    List<Entity> bucket = buckets[ bx << 2 | bz ];
++
++                    if ( bucket != null )
++                    {
++                        activateMisc( bucket );
++                    }
++                }
++            }
++        }
++    }
++
++    private static void activateMisc(List<Entity> entities)
++    {
++        for ( int index = 0, size = entities.size(); index < size; ++index )
++        {
++            Entity entity = entities.get( index );
++
++            if ( MinecraftServer.currentTick > entity.activatedTick && !entity.defaultActivationState
++                    && AxisAlignedBBHelper.intersects( miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) )
++            {
++                entity.activatedTick = MinecraftServer.currentTick;
++            }
++        }
++    }
++    // Athena end
++
+     /**
+      * If an entity is not in range, do some more checks to see if we should
+      * give it a shot.
+@@ -319,13 +385,17 @@ public class ActivationRange
+         {
+             isActive = false;
+         }
+-        int x = MathHelper.floor( entity.locX );
+-        int z = MathHelper.floor( entity.locZ );
+-        // Make sure not on edge of unloaded chunk
+-        Chunk chunk = entity.world.getChunkIfLoaded( x >> 4, z >> 4 );
+-        if ( isActive && !( chunk != null && chunk.areNeighborsLoaded( 1 ) ) )
++        // Athena - only an active entity needs its chunk: the lookup used to run for every inactive one too
++        if ( isActive )
+         {
+-            isActive = false;
++            int x = MathHelper.floor( entity.locX );
++            int z = MathHelper.floor( entity.locZ );
++            // Make sure not on edge of unloaded chunk
++            Chunk chunk = entity.world.getChunkIfLoaded( x >> 4, z >> 4 );
++            if ( !( chunk != null && chunk.areNeighborsLoaded( 1 ) ) )
++            {
++                isActive = false;
++            }
+         }
+         SpigotTimings.checkIfActiveTimer.stopTiming();
+         return isActive;

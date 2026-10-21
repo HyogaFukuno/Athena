@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 00:04:01 +0900
+Subject: [PATCH] Command block permissions: do not keep the first block sender
+ alive
+
+The PermissibleBase every CraftBlockCommandSender shares was built over the first one, holding its
+tile entity and so its world for good: an unloaded edit world stayed in memory. It is built over a
+stand-in operator that answers as a block sender does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/command/ServerCommandSender.java b/src/main/java/org/bukkit/craftbukkit/command/ServerCommandSender.java
+index 267c9bbbe7b8413f148786f47661764e3cd19a28..1a18741420e764935061ded277d39160de4a72b1 100644
+--- a/src/main/java/org/bukkit/craftbukkit/command/ServerCommandSender.java
++++ b/src/main/java/org/bukkit/craftbukkit/command/ServerCommandSender.java
+@@ -16,10 +16,28 @@ public abstract class ServerCommandSender implements CommandSender {
+     private static PermissibleBase blockPermInst;
+     private final PermissibleBase perm;
+ 
++    // Athena start - the permissions every command block shares must not hold one of them
++    // The shared instance kept the first command block sender as its operator, and through it that
++    // block's tile entity and world - a match or edit world stayed in memory after it was unloaded.
++    // Every block sender is an operator that cannot be changed, so a stand-in that says the same
++    // answers the same.
++    private static final org.bukkit.permissions.ServerOperator BLOCK_OPERATOR = new org.bukkit.permissions.ServerOperator() {
++        @Override
++        public boolean isOp() {
++            return true;
++        }
++
++        @Override
++        public void setOp(boolean value) {
++            throw new UnsupportedOperationException("Cannot change operator status of a block");
++        }
++    };
++    // Athena end
++
+     public ServerCommandSender() {
+         if (this instanceof CraftBlockCommandSender) {
+             if (blockPermInst == null) {
+-                blockPermInst = new PermissibleBase(this);
++                blockPermInst = new PermissibleBase(BLOCK_OPERATOR); // Athena - not this sender
+             }
+             this.perm = blockPermInst;
+         } else {
+diff --git a/src/test/java/org/bukkit/craftbukkit/command/BlockCommandSenderPermissionsTest.java b/src/test/java/org/bukkit/craftbukkit/command/BlockCommandSenderPermissionsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a82e007ef4f18484a7944c025876673ac223ddc2
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/command/BlockCommandSenderPermissionsTest.java
+@@ -0,0 +1,30 @@
++package org.bukkit.craftbukkit.command;
++
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.lang.reflect.Field;
++import org.bukkit.permissions.ServerOperator;
++import org.junit.Test;
++
++/**
++ * Athena - the permissions all command block senders share are built over a stand-in operator, not
++ * the first sender (which kept that block's world alive), and it answers as a block sender does.
++ */
++public class BlockCommandSenderPermissionsTest {
++
++    @Test
++    public void theSharedOperatorIsNotASenderAndAnswersAsOne() throws Exception {
++        Field field = ServerCommandSender.class.getDeclaredField("BLOCK_OPERATOR");
++        field.setAccessible(true);
++        ServerOperator operator = (ServerOperator) field.get(null);
++
++        assertTrue("holds no sender, and so no block or world", !(operator instanceof ServerCommandSender));
++        assertTrue("a command block is always an operator", operator.isOp());
++        try {
++            operator.setOp(false);
++            fail("a block's operator status cannot change");
++        } catch (UnsupportedOperationException expected) {
++        }
++    }
++}

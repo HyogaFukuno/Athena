@@ -1,0 +1,27 @@
+# Athena - one small minigame server per instance of this unit: systemctl start mc-small@arena1
+#
+# Several of these share one box. start-small.sh picks the JVM flags, patches on a new jar and keeps
+# the AOT cache current; see the comments in it. MemoryMax is a backstop so one server that runs
+# away cannot take the others down with it - with the 144M heap, the measured RSS peak for 20
+# players through a whole SurvivalGames match is ~305 MB.
+[Unit]
+Description=Minecraft minigame server (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mc
+WorkingDirectory=/opt/mc/%i
+Environment=JAVA=/opt/jdk-25/bin/java
+ExecStart=/opt/mc/start-small.sh
+# systemd stops it with SIGTERM, which CraftBukkit turns into a normal stop - worlds saved, and on a
+# training run the AOT record written. Give the save time before systemd escalates to SIGKILL.
+TimeoutStopSec=60
+MemoryMax=400M
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=0 143
+
+[Install]
+WantedBy=multi-user.target

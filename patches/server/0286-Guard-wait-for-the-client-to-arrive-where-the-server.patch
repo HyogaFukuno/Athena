@@ -1,0 +1,149 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 18:59:06 +0900
+Subject: [PATCH] Guard: wait for the client to arrive where the server sent
+ it; forgive timer debt at teleports
+
+From play on sg1: a player flagged rising 0.882 a second after login. The
+client had been falling through a chunk it did not have yet, a plugin
+teleported it back to spawn, and the guard, reset at the teleport, seeded
+from a fall packet already on its way and then checked the client's answer
+at spawn as a move. Every position the server sends now leaves moves
+unchecked until one arrives at that position (within 0.01), or after
+40 + ping/50 packets (4 for a relative teleport).
+
+Two players on one PC also flagged 250 ms ahead at the same instant during a
+match start. A teleport is when clients load worlds and the server stalls,
+so a position sent now also clears what the timer owed. A timer flag now
+logs the last twelve packet gaps and how long ago a position was sent.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index e54d8ab53db5570dfee3393bae9fbf8be02efd04..4aa7db88dbb851c24adabdda3da6c9da286219dc 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -76,6 +76,14 @@ public final class AthenaGuard {
+     // timer
+     private long lastFlyingNanos;
+     private double balanceMillis;
++    private final int[] gaps = new int[12]; // the last gaps between movement packets, ms, for the log
++    private int gapHead;
++    private long positionSentNanos;
++
++    // a position the server sent: until the client reports it, its moves are the old position's
++    private boolean awaiting;
++    private double awaitX, awaitY, awaitZ;
++    private int awaitBudget;       // packets to wait before giving up (a relative teleport, a lost answer)
+ 
+     // combat
+     private int swings;
+@@ -155,8 +163,19 @@ public final class AthenaGuard {
+      * The client answers every position the server sends with a movement packet of its own, on top
+      * of its tick's: one packet that took no time.
+      */
+-    void onPositionSent() {
+-        this.balanceMillis = Math.min(this.balanceMillis + 50.0D, 1000.0D);
++    // A teleport is also when the client loads a world and the server stalls on one: what it owed
++    // before is forgiven.
++    void onPositionSent(PacketPlayOutPosition packet) {
++        this.balanceMillis = Math.min(Math.max(this.balanceMillis, 0.0D) + 50.0D, 1000.0D);
++        this.positionSentNanos = System.nanoTime();
++        // the moves already on their way left from where the client was; the first one from here is
++        // the client's answer, at exactly this position
++        this.known = false;
++        this.awaiting = true;
++        this.awaitX = packet.athenaX();
++        this.awaitY = packet.athenaY();
++        this.awaitZ = packet.athenaZ();
++        this.awaitBudget = (packet.athenaAbsolute() ? 40 : 4) + this.player.ping / 50;
+     }
+ 
+     /** Called on the Netty thread as a movement packet arrives; the clock is the arrival time. */
+@@ -180,6 +199,8 @@ public final class AthenaGuard {
+         double elapsed = (now - this.lastFlyingNanos) / 1.0E6D;
+ 
+         this.lastFlyingNanos = now;
++        this.gaps[this.gapHead] = (int) Math.min(elapsed, 99999.0D);
++        this.gapHead = (this.gapHead + 1) % this.gaps.length;
+         this.balanceMillis += elapsed - 50.0D + elapsed * 0.003D; // 0.3% drift allowance
+         if (this.balanceMillis > 1000.0D) {
+             this.balanceMillis = 1000.0D;
+@@ -192,13 +213,28 @@ public final class AthenaGuard {
+ 
+         if (this.balanceMillis < -250.0D) {
+             this.balanceMillis += 50.0D; // this packet is not counted
+-            this.flag(0, "timer", "%.0f ms ahead of real time", -this.balanceMillis);
++            this.flag(0, "timer", "%.0f ms ahead of real time%s", -this.balanceMillis, this.timerContext());
+             return !enforce;
+         }
+ 
+         return true;
+     }
+ 
++    private String timerContext() {
++        if (!log) {
++            return "";
++        }
++        StringBuilder sb = new StringBuilder("; gaps ms:");
++
++        for (int i = 1; i <= this.gaps.length; ++i) {
++            sb.append(' ').append(this.gaps[(this.gapHead - i + this.gaps.length) % this.gaps.length]);
++        }
++        if (this.positionSentNanos != 0L) {
++            sb.append("; position sent ").append((System.nanoTime() - this.positionSentNanos) / 1000000L).append(" ms ago");
++        }
++        return sb.append("; ping ").append(this.player.ping).toString();
++    }
++
+     // ------------------------------------------------------------------ movement
+     /**
+      * Checks one movement packet against what the client could have done since the last accepted
+@@ -238,6 +274,14 @@ public final class AthenaGuard {
+         boolean certain = groundStartXZ == groundEndXZ && !wall;
+         double slipNow = slipperiness(world, x, y, z);
+ 
++        if (this.awaiting) {
++            boolean arrived = Math.abs(x - this.awaitX) < 0.01D && Math.abs(y - this.awaitY) < 0.01D && Math.abs(z - this.awaitZ) < 0.01D;
++
++            if (arrived || --this.awaitBudget <= 0) {
++                this.awaiting = false;
++            }
++            this.known = false;
++        }
+         if (!movement || this.exempt() || !this.known) {
+             this.seedFresh(h / ticks, dy / ticks, groundNow, maybeGround, certain, slipNow);
+             return true;
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutPosition.java b/src/main/java/net/minecraft/server/PacketPlayOutPosition.java
+index 904ec37d5978265457fa763b0011d31138a621c6..fa2cb50cef303a417b14f0140782da1cb465d1fc 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutPosition.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutPosition.java
+@@ -45,6 +45,15 @@ public class PacketPlayOutPosition implements Packet<PacketListenerPlayOut> {
+         packetdataserializer.writeByte(PacketPlayOutPosition.EnumPlayerTeleportFlags.a(this.f));
+     }
+ 
++    // Athena start - for AthenaGuard, which waits for the client to arrive here
++    public double athenaX() { return this.x; }
++    public double athenaY() { return this.y; }
++    public double athenaZ() { return this.z; }
++    public boolean athenaAbsolute() {
++        return this.f == null || !(this.f.contains(EnumPlayerTeleportFlags.X) || this.f.contains(EnumPlayerTeleportFlags.Y) || this.f.contains(EnumPlayerTeleportFlags.Z));
++    }
++    // Athena end
++
+     public void processPacket(PacketListenerPlayOut packetlistenerplayout) {
+         packetlistenerplayout.handlePlayerPosLook(this);
+     }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 90f6cc60f01d3c3b3e25f9bf05b963e7709298df..8811c15584848e2381db6b1b4c0d68f005902091 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -992,7 +992,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+             this.guard.onVelocitySent(explosion.athenaPushX(), explosion.athenaPushY(), explosion.athenaPushZ());
+         } else if (packet instanceof PacketPlayOutPosition) {
+-            this.guard.onPositionSent();
++            this.guard.onPositionSent((PacketPlayOutPosition) packet);
+         }
+         // Athena end
+         if (packet instanceof PacketPlayOutChat) {

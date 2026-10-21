@@ -1,0 +1,171 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 28 Sep 2026 11:50:21 +0900
+Subject: [PATCH] Share the id array of single-state sections loaded from disk
+ until written
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 1ed69c842ff20fb782deffce808e073ad517b84a..39a9813f3a25b8a8d0c0c01977577cf464dbcaf7 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -347,7 +347,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+                 // CraftBukkit end
+             }
+ 
+-            chunksection.setData(achar);
++            chunksection.setDataSharingUniform(achar); // Athena - shared if one state
+             chunksection.setBlocklightArray(NibbleArray.light(nbttagcompound1.getByteArray("BlockLight"))); // Athena - shared if uniform
+             if (flag) {
+                 chunksection.setSkylightArray(NibbleArray.light(nbttagcompound1.getByteArray("SkyLight"))); // Athena - shared if uniform
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 18075d0bd1365ac3e0cd07cc08f22d29a12c8511..67c18d3b71cbcbd4cbd30b70e6182ab0eac7c67a 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -129,7 +129,18 @@ public class ChunkSection {
+             // Athena end
+         }
+ 
+-        this.blockIds[j << 8 | k << 4 | i] = (char) Block.getStateId(iblockdata); // Athena - read the id off the state
++        // Athena start - read the id off the state; copy a shared uniform array before changing it
++        char newId = (char) Block.getStateId(iblockdata);
++        int idIndex = j << 8 | k << 4 | i;
++
++        if (this.idsShared && this.blockIds[idIndex] != newId) {
++            this.blockIds = this.blockIds.clone();
++            this.idsShared = false;
++        }
++        if (!this.idsShared) {
++            this.blockIds[idIndex] = newId;
++        }
++        // Athena end
+         ++this.modCount; // Athena
+         // Athena start - keep the ticking bitmap and the owning chunk's section mask in step
+         int index = j << 8 | k << 4 | i;
+@@ -295,15 +306,51 @@ public class ChunkSection {
+     }
+     // Athena end
+ 
++    /** Athena - read only: the array may be shared with other sections; see setDataSharingUniform. */
+     public char[] getIdArray() {
+         return this.blockIds;
+     }
+ 
+     public void setData(char[] achar) {
+         this.blockIds = achar;
++        this.idsShared = false; // Athena
+         ++this.modCount; // Athena
+     }
+ 
++    // Athena start - sections made of a single block state share one array until written.
++    //
++    // A loaded section holds its blocks in a char[4096], 8 KB, whatever is in it. Maps saved by
++    // older versions store sections that are nothing but air - one production map loaded 30,000
++    // of them, 245 MB of zeros around a 20-player arena - and natural terrain has solid stone
++    // sections too. A section loaded with a single state points at one shared array for that
++    // state and copies it on the first setType that changes a block. Every reader sees the same
++    // ids. getIdArray() callers only read, except CustomChunkGenerator, which writes into
++    // sections it has just constructed, and those always own their array.
++    private static final java.util.concurrent.ConcurrentHashMap<Character, char[]> UNIFORM_IDS = new java.util.concurrent.ConcurrentHashMap<>();
++    private boolean idsShared;
++
++    /** As setData, but shares the array if every id in it is the same. For freshly loaded data. */
++    void setDataSharingUniform(char[] achar) {
++        char first = achar.length == 4096 ? achar[0] : 1;
++        int n = 1;
++
++        while (n < achar.length && achar[n] == first) {
++            ++n;
++        }
++        if (achar.length == 4096 && n == 4096) {
++            this.setData(UNIFORM_IDS.computeIfAbsent(first, id -> {
++                char[] ids = new char[4096];
++
++                java.util.Arrays.fill(ids, id);
++                return ids;
++            }));
++            this.idsShared = true;
++        } else {
++            this.setData(achar);
++        }
++    }
++    // Athena end
++
+     public NibbleArray getEmittedLightArray() {
+         return this.emittedLight;
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java b/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b3b3dc8aa6bc17172c8a81d63bb2940f09476da
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSharedSectionIdsTest.java
+@@ -0,0 +1,69 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++
++import java.util.Arrays;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - sections loaded with a single block state share one id array until setType changes
++ * a block. A write through one section must never show through another.
++ */
++public class AthenaSharedSectionIdsTest extends AbstractTestingBase {
++
++    private static ChunkSection loaded(char id) {
++        ChunkSection section = new ChunkSection(0, true);
++        char[] ids = new char[4096];
++
++        Arrays.fill(ids, id);
++        section.setDataSharingUniform(ids);
++        section.recalcBlockCounts();
++        return section;
++    }
++
++    @Test
++    public void uniformSectionsShareUntilChanged() {
++        char stone = (char) Block.getStateId(Blocks.STONE.getBlockData());
++        ChunkSection a = loaded((char) 0);
++        ChunkSection b = loaded((char) 0);
++        ChunkSection c = loaded(stone);
++        ChunkSection d = loaded(stone);
++
++        assertSame(a.getIdArray(), b.getIdArray());
++        assertSame(c.getIdArray(), d.getIdArray());
++        assertTrue(a.isEmpty());
++        assertEquals(Blocks.STONE, c.getType(3, 4, 5).getBlock());
++
++        int mod = a.modCount;
++
++        a.setType(1, 2, 3, Blocks.AIR.getBlockData()); // same value: stays shared
++        assertSame(a.getIdArray(), b.getIdArray());
++        assertTrue(a.modCount != mod);
++
++        a.setType(1, 2, 3, Blocks.GLASS.getBlockData());
++        assertNotSame(a.getIdArray(), b.getIdArray());
++        assertEquals(Blocks.GLASS, a.getType(1, 2, 3).getBlock());
++        assertEquals("the other section is untouched", Blocks.AIR, b.getType(1, 2, 3).getBlock());
++        assertTrue(b.isEmpty());
++        assertTrue(!a.isEmpty());
++
++        c.setType(0, 0, 0, Blocks.AIR.getBlockData());
++        assertEquals(Blocks.AIR, c.getType(0, 0, 0).getBlock());
++        assertEquals(Blocks.STONE, d.getType(0, 0, 0).getBlock());
++        assertEquals(Blocks.STONE, loaded(stone).getType(0, 0, 0).getBlock());
++    }
++
++    @Test
++    public void mixedDataIsKeptAsGiven() {
++        ChunkSection section = new ChunkSection(0, true);
++        char[] ids = new char[4096];
++
++        ids[4095] = (char) Block.getStateId(Blocks.STONE.getBlockData());
++        section.setDataSharingUniform(ids);
++        assertSame(ids, section.getIdArray());
++    }
++}

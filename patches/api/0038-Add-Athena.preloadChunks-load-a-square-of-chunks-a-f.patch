@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 11 Oct 2026 10:23:40 +0900
+Subject: [PATCH] Add Athena.preloadChunks: load a square of chunks a few per
+ tick
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 53fed073fa936e57d87e193e389e334d614d837c..ec0ddadcae8e62e379d60f0d8e14789b4d1a01ad 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -135,6 +135,29 @@ public final class Athena {
+         getServer().unpinChunks(world);
+     }
+ 
++    /**
++     * Loads the chunks of {@code center}'s world that overlap the square of {@code radius} blocks
++     * around {@code center}, nearest the centre first, read off the server thread with at most
++     * {@code perTick} new requests a tick, starting on the next tick. Chunks already loaded, and
++     * chunks the world's storage does not hold (which would have to be generated), are skipped.
++     *
++     * <p>Meant for the minutes before a match: with the play area {@link #pinChunks pinned} and
++     * preloaded while players wait, the match itself reads no chunk and the heap holds the map
++     * from the start. Without a pin, chunks no player is near unload again as usual.
++     *
++     * @param center the middle of the square, and the world
++     * @param radius half the square's side, in blocks
++     * @param perTick chunk requests per tick; what each costs the server thread (entities, neighbours,
++     *        ChunkLoadEvent) arrives as the reads finish, so this also bounds that work per tick
++     * @return completes on the server thread with the number of chunks loaded, once every request has
++     *         been answered, or early if the world unloads
++     * @throws IllegalArgumentException if {@code center} has no world, {@code radius} is negative or
++     *         {@code perTick} is below 1
++     */
++    public static CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick) {
++        return getServer().preloadChunks(center, radius, perTick);
++    }
++
+     // ---- teleports ----
+ 
+     /**
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 7ac88717d3fe16b69e96cbcba6e1d4be95945364..493d059b0b62e522dcf2d216052e8c828ef0a4bf 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -28,6 +28,8 @@ public interface AthenaServer {
+ 
+     void unpinChunks(World world);
+ 
++    CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick);
++
+     CompletableFuture<Boolean> teleportAsync(Entity entity, Location location);
+ 
+     CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick);

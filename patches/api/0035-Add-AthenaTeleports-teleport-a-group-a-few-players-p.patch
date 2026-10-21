@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 13:40:32 +0900
+Subject: [PATCH] Add AthenaTeleports: teleport a group a few players per tick
+
+
+diff --git a/src/main/java/athena/api/AthenaTeleports.java b/src/main/java/athena/api/AthenaTeleports.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7094b7e58f215761e95365fcbb33750485ee845
+--- /dev/null
++++ b/src/main/java/athena/api/AthenaTeleports.java
+@@ -0,0 +1,74 @@
++package athena.api;
++
++import java.util.Collection;
++import java.util.concurrent.CompletableFuture;
++import java.util.function.Function;
++import org.bukkit.Location;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - teleport many players without stopping the server.
++ *
++ * <p>Moving a player into another world costs the server the most in the ticks right after: the
++ * first chunk packets for everything around the player, and every entity nearby shown to them.
++ * Twenty players moved in one tick put all of that into the same few ticks, and a 1-core server
++ * stood still for 160-210 ms. Moving a few players per tick spreads the same work thinly enough
++ * that the ticks stay near 50 ms.
++ *
++ * <p>All methods must be called on the server thread.
++ */
++public final class AthenaTeleports {
++
++    private static Teleporter teleporter;
++
++    private AthenaTeleports() {}
++
++    /**
++     * Teleports {@code players}, {@code perTick} of them per tick in the order given, starting on
++     * the next tick.
++     *
++     * <p>{@code destination} is asked for each player's location at the moment that player's
++     * turn comes, so it may depend on state that changes meanwhile. A player who is offline by
++     * then, or whose destination is null, is skipped; a teleport that a plugin cancels counts as
++     * not done.
++     *
++     * @param players the players, in the order they should go
++     * @param destination where each player goes
++     * @param perTick players moved per tick; 4 or 5 keeps a 20-player match start smooth on a
++     *        small server
++     * @return completes on the server thread once every player's turn has come, with the number
++     *         actually teleported
++     * @throws IllegalArgumentException if {@code perTick} is below 1
++     */
++    public static CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players,
++                                                               Function<? super Player, ? extends Location> destination,
++                                                               int perTick) {
++        if (perTick < 1) {
++            throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
++        }
++        return teleporter().teleportGradually(players, destination, perTick);
++    }
++
++    private static Teleporter teleporter() {
++        if (teleporter == null) {
++            throw new IllegalStateException("AthenaTeleports is only available on an Athena server");
++        }
++        return teleporter;
++    }
++
++    /** The server's side of this API. Set once by the server; not for plugins. */
++    public interface Teleporter {
++
++        CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players,
++                                                     Function<? super Player, ? extends Location> destination,
++                                                     int perTick);
++    }
++
++    /** Called once by the server at startup; not for plugins. */
++    public static void setTeleporter(Teleporter serverTeleporter) {
++        if (teleporter != null) {
++            throw new IllegalStateException("the teleporter is already set");
++        }
++        teleporter = serverTeleporter;
++    }
++}

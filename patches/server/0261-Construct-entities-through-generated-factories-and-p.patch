@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 12:02:25 +0900
+Subject: [PATCH] Construct entities through generated factories and pack chunk
+ ids without a copy
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index b7c80111c00cf127ba17886674f9318511f56c33..18226927c8d06153efd49d238610ad03c5ba3967 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -382,9 +382,23 @@ public class ChunkSection {
+     }
+ 
+     private char[] unpackedIds() {
++        return this.unpackInto(new char[4096]);
++    }
++
++    // Athena - packets read a packed section's ids only to copy them on; unpack into a scratch
++    // array per thread instead of allocating 8 KB per section per packet
++    private static final ThreadLocal<char[]> ID_SCRATCH = ThreadLocal.withInitial(() -> new char[4096]);
++
++    /** Appends this section's 4096 ids to {@code buffer}, without allocating for a packed section. */
++    void putIds(java.nio.CharBuffer buffer) {
++        char[] ids = this.blockIds;
++
++        buffer.put(ids != null ? ids : this.unpackInto(ID_SCRATCH.get()));
++    }
++
++    private char[] unpackInto(char[] ids) {
+         char[] palette = this.palette;
+         byte[] packed = this.packedIds;
+-        char[] ids = new char[4096];
+ 
+         for (int k = 0; k < 4096; k += 2) {
+             int b = packed[k >> 1];
+diff --git a/src/main/java/net/minecraft/server/EntityTypes.java b/src/main/java/net/minecraft/server/EntityTypes.java
+index 2b9cec1414a7bd86536200045c7f235d7864daf4..ecb3d526b0fa3cf2f4731976f377e93439834792 100644
+--- a/src/main/java/net/minecraft/server/EntityTypes.java
++++ b/src/main/java/net/minecraft/server/EntityTypes.java
+@@ -30,17 +30,50 @@ public class EntityTypes {
+     // A ConcurrentHashMap because entity construction is not strictly a server-thread affair, and
+     // because a Constructor is immutable once obtained - two threads racing to fill the same key
+     // only waste one lookup.
+-    private static final java.util.concurrent.ConcurrentMap<Class<?>, Constructor<? extends Entity>> worldConstructors = new java.util.concurrent.ConcurrentHashMap<Class<?>, Constructor<? extends Entity>>();
++    //
++    // Athena - and call it through a generated factory rather than Constructor.newInstance, which
++    // still runs an access check and a reflective call per entity: a map loaded for a match brings
++    // in hundreds of entities in one tick. Only for the server's own classes; a class a plugin
++    // registered lives in another class loader, which a factory generated here might not see, and
++    // keeps the reflective call.
++    private static final java.util.concurrent.ConcurrentMap<Class<?>, java.util.function.Function<World, ? extends Entity>> worldConstructors = new java.util.concurrent.ConcurrentHashMap<Class<?>, java.util.function.Function<World, ? extends Entity>>();
+ 
+     public static Entity newInstance(Class<? extends Entity> oclass, World world) throws Exception {
+-        Constructor<? extends Entity> constructor = EntityTypes.worldConstructors.get(oclass);
++        java.util.function.Function<World, ? extends Entity> factory = EntityTypes.worldConstructors.get(oclass);
+ 
+-        if (constructor == null) {
+-            constructor = oclass.getConstructor(World.class);
+-            EntityTypes.worldConstructors.put(oclass, constructor);
++        if (factory == null) {
++            factory = worldFactory(oclass);
++            EntityTypes.worldConstructors.put(oclass, factory);
+         }
+ 
+-        return constructor.newInstance(world);
++        return factory.apply(world);
++    }
++
++    @SuppressWarnings("unchecked")
++    private static java.util.function.Function<World, ? extends Entity> worldFactory(Class<? extends Entity> oclass) throws Exception {
++        final Constructor<? extends Entity> constructor = oclass.getConstructor(World.class);
++
++        if (oclass.getClassLoader() == EntityTypes.class.getClassLoader()) {
++            try {
++                java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.lookup();
++                java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(lookup, "apply",
++                        java.lang.invoke.MethodType.methodType(java.util.function.Function.class),
++                        java.lang.invoke.MethodType.methodType(Object.class, Object.class),
++                        lookup.unreflectConstructor(constructor),
++                        java.lang.invoke.MethodType.methodType(oclass, World.class));
++
++                return (java.util.function.Function<World, ? extends Entity>) site.getTarget().invoke();
++            } catch (Throwable ignored) {
++                // fall through to the reflective call
++            }
++        }
++        return w -> {
++            try {
++                return constructor.newInstance(w);
++            } catch (ReflectiveOperationException e) {
++                throw new RuntimeException(e);
++            }
++        };
+     }
+     // Athena end
+ 
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index 288a25b7181884edd98c8642c9769069efc2e27e..5cb2618437d129ab3e7a91b899a9b22bf3eb4649 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -111,7 +111,7 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+ 
+         while (iterator.hasNext()) {
+             chunksection1 = (ChunkSection) iterator.next();
+-            charbuffer.put(chunksection1.getIdArray());
++            chunksection1.putIds(charbuffer); // Athena - no copy of a packed section's ids
+         }
+ 
+         j = charbuffer.position() * 2;

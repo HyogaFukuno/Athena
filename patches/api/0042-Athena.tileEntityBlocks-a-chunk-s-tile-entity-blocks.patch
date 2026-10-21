@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 19 Oct 2026 02:42:43 +0900
+Subject: [PATCH] Athena.tileEntityBlocks: a chunk's tile entity blocks without
+ BlockStates
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index e3d07a01ec2b6eb811dab97f8b919f5aa7aced11..8775dfc2e1b38a9a2ea4137ee16a8a2002a52216 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -5,6 +5,8 @@ import java.util.Collection;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.function.Function;
++import org.bukkit.Chunk;
++import org.bukkit.block.Block;
+ import org.bukkit.Location;
+ import org.bukkit.World;
+ import org.bukkit.WorldCreator;
+@@ -195,6 +197,23 @@ public final class Athena {
+         return getServer().preloadChunks(center, radius, perTick);
+     }
+ 
++    // ---- chunks' contents ----
++
++    /**
++     * The blocks in {@code chunk} that have a tile entity (chests, signs, furnaces, skulls, ...),
++     * without building a {@link org.bukkit.block.BlockState} for each as
++     * {@link Chunk#getTileEntities()} does. A Block is only a position; read its type with
++     * {@link Block#getType()} and take its state only for the few that need one.
++     *
++     * <p>Finding a map's chests on {@code ChunkLoadEvent} with {@code getTileEntities()} built a
++     * full state - for a chest, a copy of its inventory - for every tile entity of every chunk.
++     *
++     * @return a new list, in no particular order; empty if the chunk has none
++     */
++    public static List<Block> tileEntityBlocks(Chunk chunk) {
++        return getServer().tileEntityBlocks(chunk);
++    }
++
+     // ---- teleports ----
+ 
+     /**
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 0b6e7fd29cc01abe3b20abb4abd621d047793ea7..3218efbe5c3dd1e0cfff6d061f1ddab6eda3647c 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -5,9 +5,11 @@ import java.util.Collection;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.function.Function;
++import org.bukkit.Chunk;
+ import org.bukkit.Location;
+ import org.bukkit.World;
+ import org.bukkit.WorldCreator;
++import org.bukkit.block.Block;
+ import org.bukkit.entity.Entity;
+ import org.bukkit.entity.Player;
+ 
+@@ -32,6 +34,8 @@ public interface AthenaServer {
+ 
+     CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick);
+ 
++    List<Block> tileEntityBlocks(Chunk chunk);
++
+     CompletableFuture<Boolean> teleportAsync(Entity entity, Location location);
+ 
+     CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick);

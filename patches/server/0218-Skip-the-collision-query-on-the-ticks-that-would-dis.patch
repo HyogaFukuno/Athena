@@ -1,0 +1,239 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 31 Aug 2026 10:41:53 +0900
+Subject: [PATCH] Skip the collision query on the ticks that would discard all
+ of it
+
+CraftBukkit handles mob-versus-mob collisions every other tick, but the skip is a
+continue inside the loop: the entity query that built the list ran anyway. That query is
+the most expensive thing on the server thread under an entity-heavy load - a profile at
+0211 put collideWithNearbyEntities -> getEntitiesInAABBexcluding at 14.13% of it - and on
+half of the ticks of every non-player mob, every member of the list it returns is thrown
+away.
+
+The only members that can do anything on such a tick are the ones that are not living, so
+Chunk gains a per-slice count of those, maintained at the same two sites as itemCounts and
+collisionBoxCounts, and World.hasNonLivingEntities walks exactly the chunk and slice
+ranges the query walks. When it says none are in reach, the loop would have run to the end
+doing nothing, and the whole call returns instead.
+
+An EntityEnderDragon counts as non-living for this even though it is an EntityLiving:
+getEntitiesWithinAABBForEntity follows getParts() of anything whose box intersects and
+puts the parts in the result on their own, and those are not living.
+
+canBeCollidedWith() also moves ahead of the query, which it was asked after - the list is
+discarded when it answers false. It is !this.dead here and pure in every override.
+
+numCollisions is left at zero on the skipped path, which is where the loop would have left
+it; the one corner where that differs from vanilla is spelled out at the call site.
+
+Verified with debugVerifyAthenaIndexes against the slice itself, including a run of 1,500
+boats so the new count was exercised away from zero: 1,014,702 bucketed entity checks and
+6,922,359 more with golems, no mismatch.
+
+Measured +2.99% TPS, 6/6 pairwise wins, at 30,000 golems with four bots.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index d687b771fdc56d4e891057e9382c1670d805d23e..97f4870280302398ffceb8dce5191ce7958fc8de 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -174,6 +174,7 @@ public final class AthenaIndexAudit {
+                 int monsters = 0;
+                 int humans = 0;
+                 int boxes = 0;
++                int nonLiving = 0; // Athena
+ 
+                 for (int idx = 0; idx < flat.size(); ++idx) {
+                     Entity entity = flat.get(idx);
+@@ -190,6 +191,10 @@ public final class AthenaIndexAudit {
+                         ++boxes;
+                     }
+ 
++                    if (!(entity instanceof EntityLiving) || entity.getParts() != null) {
++                        ++nonLiving;
++                    }
++
+                     // The claim World.getCubes now skips its entity query on: an entity that
+                     // answers a collision bounding box has to admit to it up front.
+                     if (entity.getCollisionBoundingBox() != null && !entity.hasCollisionBoundingBox()) {
+@@ -214,6 +219,12 @@ public final class AthenaIndexAudit {
+                             + humans + " humans but its count says " + chunk.auditPlayerCount(slice));
+                 }
+ 
++                if (nonLiving != chunk.auditNonLivingCount(slice)) {
++                    report("slice " + slice + " of chunk " + chunk.locX + "," + chunk.locZ + " holds "
++                            + nonLiving + " entities that are not living (or carry parts) but its count says "
++                            + chunk.auditNonLivingCount(slice));
++                }
++
+                 java.util.List<Entity>[] buckets = chunk.auditBuckets(slice);
+ 
+                 if (buckets == null) {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 3d67d0a90ff8879a33bd011c6da83fffc49998e8..029979452082e6a64a378af660b8a35cf3f10e67 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -82,6 +82,11 @@ public class Chunk {
+     private final int[] playerCounts = new int[16];
+     // Athena - and one for the entity half of World.getCubes; see Entity.hasCollisionBoundingBox
+     private final int[] collisionBoxCounts = new int[16];
++    // Athena - and one for EntityLiving.collideWithNearbyEntities, which discards every living
++    // collision on half of its ticks and so only needs to run its query on those ticks if something
++    // that is not living is nearby. An EntityEnderDragon counts here even though it is living: its
++    // parts are not, and getEntitiesWithinAABBForEntity puts them in the result on their own.
++    private final int[] nonLivingCounts = new int[16];
+     private boolean done;
+     private boolean lit;
+     private boolean p; public boolean hasTicked() { return this.p; } // PandaSpigot - OBFHELPER
+@@ -902,6 +907,24 @@ public class Chunk {
+         return false;
+     }
+ 
++    /**
++     * Athena - whether any slice this box reaches holds an entity that could put something other
++     * than an EntityLiving into getEntitiesWithinAABBForEntity's result. The slice range is the one
++     * that query uses, so a "no" here means every entity it would have returned is living.
++     */
++    public boolean hasNonLivingEntities(double minY, double maxY) {
++        int i = MathHelper.clamp(MathHelper.floor((minY - 2.0D) / 16.0D), 0, this.entitySlices.length - 1);
++        int j = MathHelper.clamp(MathHelper.floor((maxY + 2.0D) / 16.0D), 0, this.entitySlices.length - 1);
++
++        for (int k = i; k <= j; ++k) {
++            if (this.nonLivingCounts[k] > 0) {
++                return true;
++            }
++        }
++
++        return false;
++    }
++
+     // Athena - accessors for AthenaIndexAudit only
+     List<Entity>[] auditBuckets(int slice) { return this.entityBuckets[slice]; }
+     int auditBucketIndexOf(double x, double z) { return this.bucketIndexOf(x, z); }
+@@ -910,6 +933,7 @@ public class Chunk {
+     int auditMonsterCount(int slice) { return this.monsterCounts[slice]; }
+     int auditPlayerCount(int slice) { return this.playerCounts[slice]; }
+     int auditCollisionBoxCount(int slice) { return this.collisionBoxCounts[slice]; }
++    int auditNonLivingCount(int slice) { return this.nonLivingCounts[slice]; }
+ 
+     public void addEntity(Entity entity) {
+         this.hasEntities = true;
+@@ -969,6 +993,10 @@ public class Chunk {
+         if (entity.hasCollisionBoundingBox()) {
+             collisionBoxCounts[k]++;
+         }
++
++        if (!(entity instanceof EntityLiving) || entity.getParts() != null) {
++            nonLivingCounts[k]++;
++        }
+         // Athena end
+         // Spigot start - increment creature type count
+         // Keep this synced up with World.a(Class)
+@@ -1045,6 +1073,10 @@ public class Chunk {
+         if (entity.hasCollisionBoundingBox()) {
+             collisionBoxCounts[i]--;
+         }
++
++        if (!(entity instanceof EntityLiving) || entity.getParts() != null) {
++            nonLivingCounts[i]--;
++        }
+         // Athena end
+         // Spigot start - decrement creature type count
+         // Keep this synced up with World.a(Class)
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 614500318be0192100ca411e4185925a219223f1..ee1db1fcb04a5b53d2864f68536b80ed68f1e24b 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -1713,9 +1713,50 @@ public abstract class EntityLiving extends Entity {
+     // Athena end
+ 
+     protected void collideWithNearbyEntities() {
+-        List list = this.world.getEntitiesInAABBexcluding((Entity) this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), NOT_SPECTATING_AND_PUSHABLE); // Athena - see above
++        // Athena start - two ways this call ends up throwing its own query away.
++        //
++        // The first is canBeCollidedWith(): it was asked after the query, and the list is discarded
++        // when it answers false. It is !this.dead here and pure everywhere it is overridden, so
++        // asking first is the same answer for less work.
++        //
++        // The second is the every-other-tick rule below. On a tick where this entity is not a
++        // player, every EntityLiving in the list is skipped by the loop, so the only members that
++        // can do anything are the ones that are not living - and the chunk keeps a count of those.
++        // When it says none are in reach, the loop would have run to the end doing nothing.
++        //
++        // What that loop would still have done is leave numCollisions at zero, so this does too.
++        // numCollisions is read nowhere outside this method - it is Spigot's max-entity-collisions
++        // throttle, other entities add to it while they push this one, and the block below always
++        // ends by clearing it.
++        //
++        // Vanilla leaves the counter alone when the list comes back empty, so the two differ in one
++        // corner: this entity is reachable by something that pushes it but that it would not have
++        // listed itself, because the predicate rejects that other entity while accepting this one.
++        // Reachability alone is symmetric - the 0.2 expansion is applied to the searcher's own box
++        // and the test is a plain intersection, so each is in the other's range - but the predicate
++        // is not. All that costs is that such an entity's throttle starts the next tick from zero
++        // instead of carrying one tick of other entities' pushes into it.
++        if (!this.canBeCollidedWith()) {
++            return;
++        }
++
++        double minX = Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D);
++        double minY = Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D);
++        double minZ = Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D);
++        double maxX = Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D);
++        double maxY = Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D);
++        double maxZ = Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D);
++
++        if (this.ticksLived % 2 == 0 && !(this instanceof EntityPlayer)
++                && !this.world.hasNonLivingEntities(minX, minY, minZ, maxX, maxY, maxZ)) {
++            this.numCollisions = 0;
++            return;
++        }
++
++        List list = this.world.getEntitiesInAABBexcluding((Entity) this, minX, minY, minZ, maxX, maxY, maxZ, NOT_SPECTATING_AND_PUSHABLE);
+ 
+-        if (this.canBeCollidedWith() && !list.isEmpty()) { // Spigot: Add this.ad() condition
++        if (!list.isEmpty()) { // Athena - canBeCollidedWith() asked above
++        // Athena end
+             numCollisions -= world.spigotConfig.maxCollisionsPerEntity; // Spigot
+             for (int i = 0; i < list.size(); ++i) {
+                 if (numCollisions > world.spigotConfig.maxCollisionsPerEntity) { break; } // Spigot
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 15f45eb73bea9b5a550247b0183541517182c65f..64082b5550412078c5a2c8fae2c02722c65758e4 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3390,6 +3390,35 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     // Athena - scalar overload
++    // Athena start - whether that query could return anything that is not an EntityLiving.
++    //
++    // EntityLiving.collideWithNearbyEntities discards every living collision on half of its ticks,
++    // but it builds the list first, and that query is the single most expensive thing on the server
++    // thread under an entity-heavy load. On those ticks the whole call is wasted unless something
++    // non-living is in reach, and the chunk already keeps a per-slice count that answers it.
++    //
++    // The chunk and slice ranges are exactly the ones the query walks, so a "no" here is a promise
++    // about that query's result and not an approximation of it.
++    public boolean hasNonLivingEntities(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        int i = MathHelper.floor((minX - 2.0D) / 16.0D);
++        int j = MathHelper.floor((maxX + 2.0D) / 16.0D);
++        int k = MathHelper.floor((minZ - 2.0D) / 16.0D);
++        int l = MathHelper.floor((maxZ + 2.0D) / 16.0D);
++
++        for (int i1 = i; i1 <= j; ++i1) {
++            for (int j1 = k; j1 <= l; ++j1) {
++                Chunk chunk = this.getChunkIfLoaded(i1, j1);
++
++                if (chunk != null && chunk.hasNonLivingEntities(minY, maxY)) {
++                    return true;
++                }
++            }
++        }
++
++        return false;
++    }
++    // Athena end
++
+     public List<Entity> getEntitiesInAABBexcluding(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Predicate<? super Entity> predicate) {
+         ArrayList arraylist = Lists.newArrayList();
+         int i = MathHelper.floor((minX - 2.0D) / 16.0D);

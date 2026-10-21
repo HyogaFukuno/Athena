@@ -1,0 +1,72 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 21 Oct 2026 13:38:01 +0900
+Subject: [PATCH] AthenaGuard logs only by default: enforce is off until turned
+ on
+
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+index 50f5e6106431dbd2a020aeaaad713ab3330b10df..1aca172cad7f427b00eb8134e710729539c636df 100644
+--- a/src/main/java/athena/server/AthenaConfig.java
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -247,13 +247,14 @@ public class AthenaConfig {
+         "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
+         "that could not land are dropped, and fall damage and critical hits follow the ground the\n" +
+         "server sees. 1.8 and 1.7.10 clients are both checked by their own physics.\n" +
+-        "  enforce: false only logs what would have been blocked (to look for false positives)")
++        "  enforce: false only logs what would have been blocked (to look for false positives). It is\n" +
++        "  the default: turn enforce on once the log shows no false positives on real play")
+     public GuardConfig guard = new GuardConfig();
+ 
+     @ConfigSerializable
+     public static class GuardConfig {
+         public boolean enabled = true;
+-        public boolean enforce = true;
++        public boolean enforce = false; // Athena - log only until the operator has looked at the log
+         @Comment("Speed, fly, step, jump height, and the ground used for fall damage and critical hits")
+         public boolean movement = true;
+         @Comment("Movement packets sent faster than real time")
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 53d9509817794d40b08d8e6509804b93ba118ad4..57f7d00bba4a8f10d97de3343b879ca2c6052e19 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -24,7 +24,7 @@ public final class AthenaGuard {
+     // Refreshed by athena.server.AthenaConfig.init, like AthenaIndexAudit's switch.
+     static volatile boolean enabled = true;
+     /** false: detect and log only, change nothing (to look for false positives first). */
+-    static volatile boolean enforce = true;
++    static volatile boolean enforce = false; // the config's default; AthenaConfig sets it at startup
+     static volatile boolean movement = true;
+     static volatile boolean timer = true;
+     static volatile boolean combat = true;
+diff --git a/src/test/java/athena/server/AthenaConfigTest.java b/src/test/java/athena/server/AthenaConfigTest.java
+index 9a649d896881b5eb64a24152ed4e7fc0fda6259a..76d8719ebbac9b1bc1a2e910eb4f50458a9d53ea 100644
+--- a/src/test/java/athena/server/AthenaConfigTest.java
++++ b/src/test/java/athena/server/AthenaConfigTest.java
+@@ -70,7 +70,7 @@ public class AthenaConfigTest {
+                 "  - secret-one",
+                 "guard:",
+                 "  enabled: true",
+-                "  enforce: false",
++                "  enforce: true",
+                 "  kickViolations: 9",
+                 "worlds:",
+                 "  default:",
+@@ -92,7 +92,7 @@ public class AthenaConfigTest {
+         assertEquals(7, config.chunkUnloadMillisPerTick);
+         assertEquals(10, config.chunkLoadFinishMillisPerTick); // not set before: the default
+         assertEquals(Arrays.asList("secret-one"), config.bungeeGuardTokens);
+-        assertFalse(config.guard.enforce);
++        assertTrue("a written enforce survives the move, over the default", config.guard.enforce);
+         assertEquals(9, config.guard.kickViolations);
+         assertEquals(2, AthenaConfig.getWorldConfig("world").chunkUnloadMargin);
+         assertTrue(AthenaConfig.getWorldConfig("world").cacheChunkPackets);
+@@ -134,7 +134,7 @@ public class AthenaConfigTest {
+         AthenaConfig config = AthenaConfig.get();
+         assertFalse(config.ioUring);
+         assertEquals(6, config.networkCompressionLevel);
+-        assertTrue(config.guard.enforce);
++        assertFalse("the guard only logs until it is turned on", config.guard.enforce);
+         assertEquals(0, AthenaConfig.getWorldConfig("world").chunkUnloadMargin);
+         assertTrue(this.athena.isFile());
+         assertFalse(this.panda.exists());

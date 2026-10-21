@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 13:40:32 +0900
+Subject: [PATCH] Add /temptp <name> <filepath> for trying template worlds by
+ hand
+
+
+diff --git a/src/main/java/athena/server/TempTpCommand.java b/src/main/java/athena/server/TempTpCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea3454a71e6d25848683ea237b6fc522d87bef56
+--- /dev/null
++++ b/src/main/java/athena/server/TempTpCommand.java
+@@ -0,0 +1,140 @@
++package athena.server;
++
++import athena.api.AthenaWorlds;
++import java.io.File;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.bukkit.Bukkit;
++import org.bukkit.ChatColor;
++import org.bukkit.Location;
++import org.bukkit.World;
++import org.bukkit.block.Block;
++import org.bukkit.block.BlockFace;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++import org.bukkit.event.player.PlayerTeleportEvent;
++
++/**
++ * Athena - {@code /temptp <name> <filepath>}: tries AthenaWorlds.loadTemplate by hand.
++ *
++ * Loads the world folder at {@code filepath} as a template world called {@code name} (or reuses
++ * it if a template world by that name is loaded already), preloads the chunks within view distance
++ * of its spawn without blocking the server, then teleports the player there and says how long each
++ * step took. Operators only; players only, since it teleports whoever runs it.
++ */
++public final class TempTpCommand extends Command {
++
++    public TempTpCommand(String name) {
++        super(name);
++        this.description = "Loads a template world with AthenaWorlds.loadTemplate and teleports you to its spawn";
++        this.usageMessage = "/temptp <name> <filepath>";
++        this.setPermission("athena.command.temptp");
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String currentAlias, String[] args) {
++        if (!(sender instanceof Player)) {
++            sender.sendMessage(ChatColor.RED + "Only a player can use /temptp: it teleports whoever runs it.");
++            return true;
++        }
++        if (!sender.isOp()) {
++            sender.sendMessage(ChatColor.RED + "You must be an operator to use /temptp.");
++            return true;
++        }
++        if (args.length < 2) {
++            sender.sendMessage(ChatColor.RED + "Usage: " + this.usageMessage);
++            return true;
++        }
++
++        final Player player = (Player) sender;
++        String name = args[0];
++        StringBuilder path = new StringBuilder(args[1]);
++
++        for (int i = 2; i < args.length; ++i) {
++            path.append(' ').append(args[i]); // a path with spaces arrives split
++        }
++
++        File folder = new File(path.toString());
++        World world = Bukkit.getWorld(name);
++
++        if (world == null) {
++            long start = System.nanoTime();
++
++            try {
++                world = AthenaWorlds.loadTemplate(name, folder);
++            } catch (IllegalArgumentException e) {
++                // not e.getMessage(): chat turns a file name like level.dat into a link
++                sender.sendMessage(ChatColor.RED + "There is no world folder at " + folder.getAbsolutePath() + ".");
++                return true;
++            }
++            if (world == null) {
++                sender.sendMessage(ChatColor.RED + "Loading '" + name + "' from " + folder.getPath() + " failed; see the console.");
++                return true;
++            }
++            sender.sendMessage(ChatColor.GRAY + "[Athena] Loaded template world '" + name + "' from " + folder.getAbsolutePath()
++                    + " in " + ms(start) + " ms.");
++        } else if (!AthenaWorlds.isTemplate(world)) {
++            sender.sendMessage(ChatColor.RED + "A world named '" + name + "' is already loaded, and it is not a template world.");
++            return true;
++        } else {
++            sender.sendMessage(ChatColor.GRAY + "[Athena] Template world '" + name + "' is already loaded.");
++        }
++
++        final World target = world;
++        final Location spawn = target.getSpawnLocation();
++        final int radius = Bukkit.getViewDistance();
++        final int centreX = spawn.getBlockX() >> 4;
++        final int centreZ = spawn.getBlockZ() >> 4;
++        final int total = (2 * radius + 1) * (2 * radius + 1);
++        final AtomicInteger left = new AtomicInteger(total);
++        final long preloadStart = System.nanoTime();
++
++        sender.sendMessage(ChatColor.GRAY + "[Athena] Preloading " + total + " chunks around the spawn...");
++        for (int dx = -radius; dx <= radius; ++dx) {
++            for (int dz = -radius; dz <= radius; ++dz) {
++                target.getChunkAtAsync(centreX + dx, centreZ + dz, chunk -> {
++                    if (left.decrementAndGet() == 0) {
++                        arrive(player, target, total, preloadStart);
++                    }
++                });
++            }
++        }
++        return true;
++    }
++
++    private static void arrive(Player player, World world, int chunks, long preloadStart) {
++        if (!player.isOnline()) {
++            return;
++        }
++
++        long preloadMs = ms(preloadStart);
++        Location to = safeSpawn(world);
++
++        if (player.teleport(to, PlayerTeleportEvent.TeleportCause.COMMAND)) {
++            player.sendMessage(ChatColor.GRAY + "[Athena] Preloaded " + chunks + " chunks in " + preloadMs + " ms; teleported to "
++                    + world.getName() + " " + to.getBlockX() + ", " + to.getBlockY() + ", " + to.getBlockZ() + ".");
++        } else {
++            player.sendMessage(ChatColor.RED + "The teleport to '" + world.getName() + "' was cancelled.");
++        }
++    }
++
++    /** The world's spawn, centred on its block, lifted to the surface if it is inside blocks. */
++    private static Location safeSpawn(World world) {
++        Location spawn = world.getSpawnLocation().clone();
++
++        spawn.setX(spawn.getBlockX() + 0.5D);
++        spawn.setZ(spawn.getBlockZ() + 0.5D);
++
++        Block feet = spawn.getBlock();
++        Block head = feet.getRelative(BlockFace.UP);
++
++        if (feet.getType().isSolid() || head.getType().isSolid()) {
++            spawn.setY(world.getHighestBlockYAt(spawn));
++        }
++        return spawn;
++    }
++
++    private static long ms(long since) {
++        return (System.nanoTime() - since) / 1_000_000L;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index ab41814d1517b4eead1e9f6882abbe235c41eda4..2bc28256eff60aec1f5e10693aff01c050ac2543 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -216,6 +216,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             org.github.paperspigot.PaperSpigotConfig.init((File) options.valueOf("paper-settings"));
+             org.github.paperspigot.PaperSpigotConfig.registerCommands();
+             // PaperSpigot end
++            this.server.getCommandMap().register("temptp", "Athena", new athena.server.TempTpCommand("temptp")); // Athena
+ 
+             DedicatedServer.LOGGER.info("Generating keypair");
+             this.a(MinecraftEncryption.generateKeyPair());

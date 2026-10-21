@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 2 Sep 2026 10:30:46 +0900
+Subject: [PATCH] Walk the goal selector's own lists by index
+
+UnsafeList.iterator() does not hand back an iterator, it searches a pool of
+them for one not in use and resets it; hasNext() stores a field on every call
+and next() re-checks modCount. Patch 0223 took canUse off that path, but the
+three loops in onUpdateTasks stayed on it, and the goalTick loop runs every
+tick rather than every third - two selectors for every mob.
+
+A profile at 0233 put onUpdateTasks at 19.69% of the server thread, of which
+7.94% is the pathfinding it exists to schedule and 8.65% is loop machinery:
+6.31% self plus 2.34% in iterator(), next() and hasNext(), essentially all of
+that reached from here.
+
+The removal loop walks forwards and steps back over the hole rather than
+walking backwards - PathfinderGoalSelectorTest compares the sequence of calls
+against a reference implementation, and reversing the order diverges from it.
+That test caught the first attempt.
+
+What indexing gives up is the ConcurrentModificationException an iterator
+would raise if a goal mutated the list being walked; re-reading size() each
+time walks a self-removal correctly instead of throwing. Chunk's entity slice
+scan already makes that trade.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+index 00ac5543c51503b868de0ce4fb657aae22ddab67..9ec24f83ecf3b092a0b99357e43d37ed066db16f 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+@@ -48,14 +48,26 @@ public class PathfinderGoalSelector {
+ 
+     public void onUpdateTasks() {
+         this.theProfiler.startSection("goalSetup");
+-        Iterator iterator;
+-        PathfinderGoalSelector.PathfinderGoalSelectorItem pathfindergoalselector_pathfindergoalselectoritem;
++        PathfinderGoalSelector.PathfinderGoalSelectorItem pathfindergoalselector_pathfindergoalselectoritem; // Athena - the Iterator local went with the loops
+ 
++        // Athena - all three loops below walk by index.
++        //
++        // UnsafeList.iterator() does not hand back an iterator, it searches a pool of them for one
++        // not in use and resets it; hasNext() stores a field on every call and next() re-checks
++        // modCount. Patch 0223 took canUse off that path, but these three loops stayed on it, and
++        // the goalTick loop runs every tick rather than every third - two selectors for every mob.
++        // A profile of the saturating bench put iterator(), next() and hasNext() together at 2.34%
++        // of the server thread, essentially all of it reached from this method.
++        //
++        // What indexing gives up is the ConcurrentModificationException an iterator would raise if
++        // a goal mutated the list being walked. Re-reading size() each time means a goal that
++        // removed itself is walked correctly and one that appended is picked up, rather than
++        // throwing - the same trade Chunk.scanSliceForEntity already makes.
+         if (this.tickCount++ % this.tickRate == 0) {
+-            iterator = this.taskEntries.iterator();
++            List<PathfinderGoalSelector.PathfinderGoalSelectorItem> entries = this.taskEntries;
+ 
+-            while (iterator.hasNext()) {
+-                pathfindergoalselector_pathfindergoalselectoritem = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
++            for (int i = 0; i < entries.size(); ++i) {
++                pathfindergoalselector_pathfindergoalselectoritem = entries.get(i);
+                 boolean flag = pathfindergoalselector_pathfindergoalselectoritem.executing; // Athena - flag instead of a scan
+ 
+                 if (flag) {
+@@ -75,13 +87,17 @@ public class PathfinderGoalSelector {
+                 }
+             }
+         } else {
+-            iterator = this.executingTaskEntries.iterator();
+-
+-            while (iterator.hasNext()) {
+-                pathfindergoalselector_pathfindergoalselectoritem = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
++            List<PathfinderGoalSelector.PathfinderGoalSelectorItem> running = this.executingTaskEntries;
++
++            // Athena - forwards, stepping back over the hole a removal leaves, so the entries are
++            // visited in the order the iterator visited them. PathfinderGoalSelectorTest compares
++            // the sequence of calls against a reference implementation, and walking this list
++            // backwards changes it.
++            for (int i = 0; i < running.size(); ++i) {
++                pathfindergoalselector_pathfindergoalselectoritem = running.get(i);
+                 if (!this.canContinue(pathfindergoalselector_pathfindergoalselectoritem)) {
+                     pathfindergoalselector_pathfindergoalselectoritem.action.resetTask();
+-                    iterator.remove();
++                    running.remove(i--);
+                     pathfindergoalselector_pathfindergoalselectoritem.executing = false; // Athena
+                 }
+             }
+@@ -89,11 +105,11 @@ public class PathfinderGoalSelector {
+ 
+         this.theProfiler.endSection();
+         this.theProfiler.startSection("goalTick");
+-        iterator = this.executingTaskEntries.iterator();
+ 
+-        while (iterator.hasNext()) {
+-            pathfindergoalselector_pathfindergoalselectoritem = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
+-            pathfindergoalselector_pathfindergoalselectoritem.action.updateTask();
++        List<PathfinderGoalSelector.PathfinderGoalSelectorItem> ticking = this.executingTaskEntries; // Athena
++
++        for (int i = 0; i < ticking.size(); ++i) { // Athena - indexed; this loop runs every tick
++            ticking.get(i).action.updateTask();
+         }
+ 
+         this.theProfiler.endSection();

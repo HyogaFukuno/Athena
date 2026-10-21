@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 05:59:45 +0900
+Subject: [PATCH] Pack a saved chunk section on the IO thread
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8f4924f954e5e42708986c566cd2754059d490ee
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+@@ -0,0 +1,144 @@
++package net.minecraft.server;
++
++import java.io.DataOutput;
++import java.io.IOException;
++import java.util.Arrays;
++
++// Athena start - defer a chunk section's block packing off the server thread.
++//
++// Saving a chunk turns each of its sections into three byte arrays: the low eight bits of every
++// block id, the four data bits of every block, and - only if some id needs it - the four high bits.
++// That is a 4096-step loop with three array writes per step, plus a 4KB and two 2KB allocations,
++// and it ran on the server thread inside ChunkRegionLoader.saveChunk. Only the file write and the
++// deflate were ever asynchronous.
++//
++// The work does not need the world, only the section's own id array, so the server thread now takes
++// a copy of that array - one memcpy - and the packing happens the first time the arrays are asked
++// for, which is on the File IO thread as it serialises the tag. The copy is what makes this safe:
++// the section keeps mutating after the save is queued, and the snapshot is the state at save time,
++// which is the state the old code read.
++//
++// The one thing the packing cannot decide late is whether an "Add" tag belongs in the compound at
++// all, so the snapshot pass ORs the ids together as it goes; a zero high nibble across the whole
++// section means no id needs more than eight bits and the tag is left out, exactly as before.
++final class AthenaDeferredSectionData {
++
++    static final int BLOCKS = 0;
++    static final int DATA = 1;
++    static final int ADD = 2;
++
++    private final char[] ids;
++    private final boolean needsAdd;
++    private byte[] blocks;
++    private byte[] data;
++    private byte[] add;
++
++    private AthenaDeferredSectionData(char[] ids, boolean needsAdd) {
++        this.ids = ids;
++        this.needsAdd = needsAdd;
++    }
++
++    // Snapshots a section and hangs its three tags on the compound. Returns nothing the caller has
++    // to keep; the tags hold the snapshot.
++    static void attach(NBTTagCompound nbttagcompound, char[] live) {
++        char[] ids = new char[live.length];
++
++        System.arraycopy(live, 0, ids, 0, live.length);
++
++        char acc = 0;
++
++        for (int i = 0; i < ids.length; ++i) {
++            acc |= ids[i];
++        }
++
++        AthenaDeferredSectionData deferred = new AthenaDeferredSectionData(ids, (acc >> 12) != 0);
++
++        nbttagcompound.set("Blocks", new AthenaDeferredSectionData.Tag(deferred, BLOCKS));
++        nbttagcompound.set("Data", new AthenaDeferredSectionData.Tag(deferred, DATA));
++        if (deferred.needsAdd) {
++            nbttagcompound.set("Add", new AthenaDeferredSectionData.Tag(deferred, ADD));
++        }
++    }
++
++    private synchronized void pack() {
++        if (this.blocks != null) {
++            return;
++        }
++
++        byte[] blocks = new byte[this.ids.length];
++        NibbleArray data = new NibbleArray();
++        NibbleArray add = ChunkRegionLoader.packSectionIds(this.ids, blocks, data);
++
++        this.data = data.getData();
++        this.add = add == null ? new byte[this.data.length] : add.getData();
++        this.blocks = blocks; // published last: it is what pack() tests to decide it has run
++    }
++
++    byte[] get(int which) {
++        if (this.blocks == null) {
++            this.pack();
++        }
++
++        switch (which) {
++        case DATA:
++            return this.data;
++
++        case ADD:
++            return this.add;
++
++        default:
++            return this.blocks;
++        }
++    }
++
++    // An NBTTagByteArray whose bytes are not there yet. Every method of the superclass that reads
++    // its private array is overridden, so nothing can observe the difference.
++    static final class Tag extends NBTTagByteArray {
++
++        private final AthenaDeferredSectionData owner;
++        private final int which;
++
++        Tag(AthenaDeferredSectionData owner, int which) {
++            super(null);
++            this.owner = owner;
++            this.which = which;
++        }
++
++        @Override
++        void write(DataOutput dataoutput) throws IOException {
++            byte[] abyte = this.owner.get(this.which);
++
++            dataoutput.writeInt(abyte.length);
++            dataoutput.write(abyte);
++        }
++
++        @Override
++        public byte[] getByteArray() {
++            return this.owner.get(this.which);
++        }
++
++        @Override
++        public String toString() {
++            return "[" + this.owner.get(this.which).length + " bytes]";
++        }
++
++        @Override
++        public NBTBase clone() {
++            byte[] abyte = this.owner.get(this.which);
++
++            return new NBTTagByteArray(Arrays.copyOf(abyte, abyte.length));
++        }
++
++        @Override
++        public boolean equals(Object object) {
++            return object instanceof NBTBase && ((NBTBase) object).getTypeId() == this.getTypeId()
++                    && Arrays.equals(this.getByteArray(), ((NBTTagByteArray) object).getByteArray());
++        }
++
++        @Override
++        public int hashCode() {
++            return this.getTypeId() ^ Arrays.hashCode(this.getByteArray());
++        }
++    }
++}
++// Athena end
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index d0385147e82caedabbb8fc46e1665cef973380a7..31ecab233c3817c2a230a12fd8733610bf4f3a7e 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -222,15 +222,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             if (chunksection != null) {
+                 nbttagcompound1 = new NBTTagCompound();
+                 nbttagcompound1.setByte("Y", (byte) (chunksection.getYPosition() >> 4 & 255));
+-                byte[] abyte = new byte[chunksection.getIdArray().length];
+-                NibbleArray nibblearray = new NibbleArray();
+-                NibbleArray nibblearray1 = packSectionIds(chunksection.getIdArray(), abyte, nibblearray); // Athena - pack two blocks at a time
+-
+-                nbttagcompound1.setByteArray("Blocks", abyte);
+-                nbttagcompound1.setByteArray("Data", nibblearray.getData());
+-                if (nibblearray1 != null) {
+-                    nbttagcompound1.setByteArray("Add", nibblearray1.getData());
+-                }
++                AthenaDeferredSectionData.attach(nbttagcompound1, chunksection.getIdArray()); // Athena - snapshot now, pack on the IO thread
+ 
+                 nbttagcompound1.setByteArray("BlockLight", chunksection.getEmittedLightArray().getData());
+                 if (flag) {

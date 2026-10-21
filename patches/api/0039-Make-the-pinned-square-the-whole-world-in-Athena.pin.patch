@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 11 Oct 2026 21:59:32 +0900
+Subject: [PATCH] Make the pinned square the whole world in Athena.pinChunks'
+ contract
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index ec0ddadcae8e62e379d60f0d8e14789b4d1a01ad..bc07357e89b50104cc468960f0a605b54a0fcb1a 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -106,18 +106,27 @@ public final class Athena {
+     // ---- pinned chunks ----
+ 
+     /**
+-     * Keeps every chunk of {@code center}'s world that overlaps the square of {@code radius}
+-     * blocks around {@code center} loaded, once loaded, until {@link #unpinChunks} or the world
+-     * unloads. It loads nothing itself: chunks load as players reach them, or as a plugin
+-     * preloads them, and then stay. Outside the square chunks load and unload as usual. Pinning
+-     * again replaces the world's previous square.
++     * Makes the square of {@code radius} blocks around {@code center} the whole of {@code center}'s
++     * world, until {@link #unpinChunks} or the world unloads.
++     * <ul>
++     *   <li>Inside, every chunk stays loaded once loaded. It loads nothing itself: chunks load as
++     *       players come near, or as a plugin {@link #preloadChunks preloads} them, and then stay.</li>
++     *   <li>Outside, chunks do not exist: they are never read or generated, never sent to a player
++     *       (who sees nothing there, only sky), and read as air with nothing kept in them, so an
++     *       entity that gets there finds no ground.</li>
++     * </ul>
++     * Make the square the area players may see, not just the area they may walk: a player sees
++     * the server's view distance (8 chunks, 128 blocks) around them. If the map visibly ends too
++     * soon, the radius is too small.
++     *
++     * <p>Pin before players enter the world: a chunk already in a player's view when the square is
++     * set or changed keeps what it had. Pinning again replaces the world's previous square.
+      *
+      * <p>Meant for a match map: a chunk is read once per match instead of again each time players
+      * come back to it, its changes stay (on a template world an unloaded chunk loses them), and
+      * the server stops filling its heap with chunks it has dropped. On a 20-player match that
+      * removed every full collection the heap filling up had caused (four in 15 minutes, 130-170 ms
+-     * each). Size the square to the map's play area: every chunk inside it that is ever loaded
+-     * stays in memory.
++     * each). Every chunk inside the square that is ever loaded stays in memory.
+      *
+      * @param center the middle of the square, and the world
+      * @param radius half the square's side, in blocks

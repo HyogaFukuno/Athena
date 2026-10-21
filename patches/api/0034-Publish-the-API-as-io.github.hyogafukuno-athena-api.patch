@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 30 Sep 2026 12:42:30 +0900
+Subject: [PATCH] Publish the API as io.github.hyogafukuno:athena-api
+
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 2402e717705a5bd7dfa177ff6dd83fb2ab2a3a56..44b5e9d1571c85999850703feb954c287925555b 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -10,6 +10,10 @@ java {
+ 
+ val adventureVersion = "4.24.0" // PandaSpigot - Adventure
+ 
++// Athena - published as Athena's own artifact, so it never stands in for upstream PandaSpigot's
++// com.hpfxd.pandaspigot:pandaspigot-api in a local repository
++base.archivesName.set("athena-api")
++
+ dependencies {
+     api("commons-lang:commons-lang:2.6")
+     api("org.avaje:ebean:2.8.1")
+@@ -90,6 +94,8 @@ tasks {
+ publishing {
+     publications {
+         create<MavenPublication>("mavenJava") {
++            groupId = "io.github.hyogafukuno" // Athena
++            artifactId = "athena-api" // Athena
+             from(components["java"])
+             versionMapping {
+                 usage("java-api") {
+@@ -98,13 +104,19 @@ publishing {
+             }
+ 
+             pom {
+-                url.set("https://github.com/hpfxd/PandaSpigot")
+-                description.set(project.description)
+-                name.set(project.name)
++                url.set("https://github.com/HyogaFukuno/Athena") // Athena
++                description.set("Athena API - PandaSpigot's API with Athena's additions (athena.api)") // Athena
++                name.set("athena-api") // Athena
+                 // if this is a CI build, set version as the run id
+                 System.getenv("GITHUB_RUN_NUMBER").let { if (it != null) version = it }
+ 
+                 developers {
++                    // Athena start
++                    developer {
++                        id.set("HyogaFukuno")
++                        name.set("HyogaFukuno")
++                    }
++                    // Athena end
+                     developer {
+                         id.set("hpfxd")
+                         name.set("Nate")
+@@ -112,10 +124,10 @@ publishing {
+                     }
+                 }
+ 
+-                scm {
+-                    connection.set("scm:git:git://github.com/hpfxd/PandaSpigot.git")
+-                    developerConnection.set("scm:git:git://github.com/hpfxd/PandaSpigot.git")
+-                    url.set("https://github.com/hpfxd/PandaSpigot")
++                scm { // Athena
++                    connection.set("scm:git:git://github.com/HyogaFukuno/Athena.git")
++                    developerConnection.set("scm:git:git://github.com/HyogaFukuno/Athena.git")
++                    url.set("https://github.com/HyogaFukuno/Athena")
+                 }
+ 
+                 licenses {
+@@ -128,19 +140,6 @@ publishing {
+         }
+     }
+ 
+-    (System.getenv("REPO_USERNAME") ?: findProperty("repository.hpfxd.username")).let { repoUsername ->
+-        if (repoUsername == null) return@let // don't declare repository if username not declared
+-
+-        repositories {
+-            maven {
+-                name = "hpfxd-repo"
+-                url = uri("https://repo.hpfxd.com/releases/")
+-
+-                credentials {
+-                    username = repoUsername as String
+-                    password = System.getenv("REPO_PASSWORD") ?: findProperty("repository.hpfxd.password") as String
+-                }
+-            }
+-        }
+-    }
++    // Athena - no remote repository: upstream's (repo.hpfxd.com) is not Athena's to publish to.
++    // publishToMavenLocal installs io.github.hyogafukuno:athena-api for local plugin builds.
+ }

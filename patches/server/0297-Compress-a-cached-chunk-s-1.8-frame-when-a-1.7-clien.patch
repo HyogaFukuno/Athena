@@ -1,0 +1,93 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 00:04:01 +0900
+Subject: [PATCH] Compress a cached chunk's 1.8 frame when a 1.7 client is sent
+ it
+
+A chunk only 1.7 clients had been sent kept its uncompressed data (~60 KB) for as long as it stayed
+loaded, since only the 1.8 path compressed it and dropped the data. One 1.7 player pinned 950
+chunks' worth, 60 MB, and ran a 144M server out of memory.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index ee0c0072c0ecd6f39dbda055650b2f17dbc80707..fcaa487feef1979c67bbf011aa0201cc17eb5219 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -169,6 +169,27 @@ final class AthenaChunkPacketCache {
+      * It is made from the uncompressed data while that is held, and from the 1.8 frame after.
+      */
+     byte[] legacy17(int packetId) {
++        MinecraftServer server = MinecraftServer.getServer();
++
++        return this.legacy17(packetId, server == null ? -1 : server.aK());
++    }
++
++    /**
++     * As {@link #legacy17(int)}, then compresses the 1.8 frame too under the server's compression
++     * threshold, if it has none yet. Without that, a chunk only 1.7 clients had been sent kept its
++     * uncompressed data - ~60 KB, where the frame is a few - for as long as the chunk stayed loaded:
++     * a 1.7 player on a 144M server pinned 950 chunks' worth, 60 MB, and ran it out of memory.
++     */
++    byte[] legacy17(int packetId, int threshold) {
++        byte[] result = this.legacy17Packet(packetId);
++
++        if (this.map != null && threshold >= 0) {
++            this.frame(packetId, threshold);
++        }
++        return result;
++    }
++
++    private byte[] legacy17Packet(int packetId) {
+         byte[] result = this.legacy17;
+ 
+         if (result != null) {
+diff --git a/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+index cc4a0de1a4227a779cdf5c14e2b7c747d39c57ff..2b13399acc59ed8e861107f1b24c1dcf2690d18b 100644
+--- a/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
++++ b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+@@ -129,4 +129,44 @@ public class AthenaChunkPacketCacheTest extends AbstractTestingBase {
+         assertEquals("sent uncompressed, as PacketCompressor does below its threshold", 0, frame[0]);
+         assertEquals("the data is kept for the next send", map, cache.map());
+     }
++
++    /** One full section and biomes: data a 1.7 translation can read. */
++    private static PacketPlayOutMapChunk.ChunkMap oneSection(long seed) {
++        Random random = new Random(seed);
++        byte[] data = new byte[8192 + 4096 + 256];
++
++        for (int i = 0; i < 4096; ++i) {
++            int state = random.nextInt(4) == 0 ? (1 + random.nextInt(150)) << 4 : 0;
++
++            data[i * 2] = (byte) state;
++            data[i * 2 + 1] = (byte) (state >> 8);
++        }
++        PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
++        map.data = data;
++        map.dataSize = 1;
++        return map;
++    }
++
++    @Test
++    public void aChunkSentOnlyTo17ClientsDropsItsUncompressedData() throws Exception {
++        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(3, -7, oneSection(4L));
++        byte[] legacy = new AthenaChunkPacketCache(3, -7, oneSection(4L)).legacy17(0x21, -1);
++
++        assertArrayEquals("the same 1.7 packet", legacy, cache.legacy17(0x21, THRESHOLD));
++        assertNull("the uncompressed data is dropped once the frame is made", cache.map());
++
++        // and a 1.8 client sent the chunk afterwards still gets exactly the ordinary bytes
++        assertArrayEquals(written(pipeline(), uncached(oneSection(4L))), written(pipeline(), new PacketPlayOutMapChunk(cache)));
++        assertArrayEquals("the 1.7 packet is unchanged", legacy, cache.legacy17(0x21, THRESHOLD));
++    }
++
++    @Test
++    public void withCompressionOffA17SendKeepsTheData() {
++        PacketPlayOutMapChunk.ChunkMap map = oneSection(5L);
++        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(1, 2, map);
++
++        cache.legacy17(0x21, -1);
++        assertEquals("kept for 1.8 clients, which are sent it uncompressed", map, cache.map());
++    }
+ }

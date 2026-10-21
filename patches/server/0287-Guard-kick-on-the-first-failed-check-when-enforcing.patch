@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 19:29:04 +0900
+Subject: [PATCH] Guard: kick on the first failed check when enforcing
+
+A failed check still sets the move back or drops the hit, and when the new
+guard.kick is on (the default) the player is then disconnected with
+guard.kickMessage, through PlayerConnection.disconnect and so PlayerKickEvent.
+The kick waits for the handler to drop the packet, so nothing runs on the
+player after it is gone. Two hits in one tick never kick: fast clicking does
+that, and vanilla ignores the second anyway. The log says kicked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index f70dc95609f55c49ee5e4c37497ef27adbdcabea..fdb2a7d2691004e97e0d252a126cbff01e321b22 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -67,7 +67,7 @@ public class PandaSpigotConfig {
+             // Athena - publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
+             net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
+             // Athena - and the guard's switches
+-            net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log);
++            net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log, config.guard.kick, config.guard.kickMessage);
+             
+             // call after save
+             initWorlds(worldsNode);
+@@ -169,6 +169,10 @@ public class PandaSpigotConfig {
+         public boolean combat = true;
+         @Comment("Vanilla is 3.0, measured from the eye to the nearest point of the target's box")
+         public double maxReach = 3.0D;
++        @Comment("When enforcing, also kick the player the first time a check fails (the move is still set\n" +
++            "back and the hit still dropped). Two hits in one tick never kick: fast clicking does that")
++        public boolean kick = true;
++        public String kickMessage = "不正な動作を検出したため切断しました";
+         @Comment("Log what is blocked (or would be, when not enforcing), at most once per check per\n" +
+             "player every two seconds")
+         public boolean log = true;
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 4aa7db88dbb851c24adabdda3da6c9da286219dc..157b95558ce012f8ee1f906cb67b9001a970494a 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -30,6 +30,8 @@ public final class AthenaGuard {
+     static volatile boolean combat = true;
+     static volatile double maxReach = 3.0D;
+     static volatile boolean log = true;
++    static volatile boolean kick = true;
++    static volatile String kickMessage = "不正な動作を検出したため切断しました";
+ 
+     // ------------------------------------------------------------------ constants (1.8 client physics)
+     private static final double GRAVITY = 0.08D;
+@@ -89,6 +91,9 @@ public final class AthenaGuard {
+     private int swings;
+     private int lastAttackTick = Integer.MIN_VALUE;
+ 
++    // a check failed while enforcing with kick on: PlayerConnection disconnects once the packet is dropped
++    private boolean kickPending;
++
+     // logging, at most one line per check per player every few seconds
+     private final long[] lastLog = new long[8];
+ 
+@@ -101,7 +106,9 @@ public final class AthenaGuard {
+         this.legacy17 = legacy17;
+     }
+ 
+-    public static void configure(boolean enabled, boolean enforce, boolean movement, boolean timer, boolean combat, double maxReach, boolean log) {
++    public static void configure(boolean enabled, boolean enforce, boolean movement, boolean timer, boolean combat, double maxReach, boolean log, boolean kick, String kickMessage) {
++        AthenaGuard.kick = kick;
++        AthenaGuard.kickMessage = kickMessage;
+         AthenaGuard.log = log;
+         AthenaGuard.enabled = enabled;
+         AthenaGuard.enforce = enforce;
+@@ -705,13 +712,22 @@ public final class AthenaGuard {
+         return sb.toString();
+     }
+ 
++    /** Whether the player is to be disconnected for a check that failed; asked where a failed check returns. */
++    boolean kickPending() {
++        return this.kickPending;
++    }
++
+     private void flag(int check, String name, String format, Object... args) {
+         long now = System.currentTimeMillis();
++        boolean kicking = enforce && kick && !this.kickPending;
+ 
+-        if (log && now - this.lastLog[check] >= 2000L) {
++        if (kicking) {
++            this.kickPending = true;
++        }
++        if (log && (kicking || now - this.lastLog[check] >= 2000L)) {
+             this.lastLog[check] = now;
+             String detail = String.format(java.util.Locale.ROOT, format, args) + (check == 1 || check == 2 ? this.context() : "");
+-            LOGGER.info("{} {} [{}]: {}", this.player != null ? this.player.getName() : "-", name, enforce ? "blocked" : "detected", detail);
++            LOGGER.info("{} {} [{}]: {}", this.player != null ? this.player.getName() : "-", name, kicking ? "kicked" : enforce ? "blocked" : "detected", detail);
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 8811c15584848e2381db6b1b4c0d68f005902091..1009ac69bceb7dafc5e5271d4dc29ce8c5daeb81 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -230,6 +230,10 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         } else {
+             // Athena start - a client running its clock fast sends more ticks than time allows
+             if (!this.guard.timerOk(packetplayinflying)) {
++                if (this.guard.kickPending()) {
++                    this.disconnect(AthenaGuard.kickMessage);
++                    return;
++                }
+                 if (this.checkMovement) {
+                     this.setPlayerLocation(this.o, this.p, this.q, this.player.yaw, this.player.pitch);
+                 }
+@@ -441,10 +445,18 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     // Athena start - what the client could have done since the last accepted move
+                     boolean athenaGroundBefore = this.guard.groundStart();
+                     if (!this.guard.moveOk(worldserver, packetplayinflying.isMoving(), this.o, this.p, this.q, d7, d8, d9)) {
++                        if (this.guard.kickPending()) {
++                            this.disconnect(AthenaGuard.kickMessage);
++                            return;
++                        }
+                         this.setPlayerLocation(this.o, this.p, this.q, f2, f3);
+                         return;
+                     }
+                     boolean athenaGround = this.guard.groundFor(packetplayinflying.isOnGround()); // the ground the server sees, when enforcing
++                    if (this.guard.kickPending()) { // claimed ground in the middle of a fall
++                        this.disconnect(AthenaGuard.kickMessage);
++                        return;
++                    }
+                     // Athena end
+ 
+                     float f4 = 0.0625F;
+@@ -1495,7 +1507,10 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return;
+                     }
+ 
+-                    if (!this.guard.attackOk(entity)) return; // Athena - a hit the client could not have made
++                    if (!this.guard.attackOk(entity)) { // Athena - a hit the client could not have made
++                        if (this.guard.kickPending()) this.disconnect(AthenaGuard.kickMessage);
++                        return;
++                    }
+                     this.player.attack(entity);
+ 
+                     // CraftBukkit start

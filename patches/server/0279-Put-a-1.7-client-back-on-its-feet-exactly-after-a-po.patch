@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 17:58:03 +0900
+Subject: [PATCH] Put a 1.7 client back on its feet exactly after a position
+ correction
+
+1.7 measures S08's Y from the eye, and takes its feet back out as
+y - (double) 1.62F. The encoder added the double 1.62, which left the client
+4.8e-9 below the position the server set: inside the block under it. 1.7's
+collision tests are strict, so that block stopped holding the player up and
+became a wall instead; the client sank, the server saw it inside a block and
+corrected it again, and so on until the player jumped. A single correction at
+a slab edge (where 1.7 and 1.8 step-up disagree) was enough to start it.
+Add the float, as a 1.7 server did; the test now checks the client's own
+arithmetic exactly instead of within 1e-9.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+index bc16120d626df1b4edfe0aa0e20478345797b5c1..6919b4d04532d3296e7d5ae17297741f478fda09 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+@@ -26,6 +26,8 @@ import org.bukkit.craftbukkit.util.CraftChatMessage;
+ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+ 
+     private static final Logger LOGGER = LogManager.getLogger();
++    /** A 1.7 player's yOffset, which S08 positions are measured from. A float, as 1.7 declares it. */
++    static final float EYE_HEIGHT_17 = 1.62F;
+     private static final FastThreadLocal<Deflater> DEFLATER = new FastThreadLocal<Deflater>() {
+         @Override
+         protected Deflater initialValue() {
+@@ -223,7 +225,11 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                 if ((flags & 0x10) != 0) pitch += s.pitch;
+                 p = packet(ctx, id, out);
+                 p.writeDouble(x);
+-                p.writeDouble(y + 1.62D);
++                // Athena - the eye height as 1.7 holds it: a float. The client takes its feet back out as
++                // y - (double) 1.62F; adding the double 1.62 instead left it 4.8e-9 below where it was
++                // put, inside the block under it - which a 1.7 client then treats as a wall and falls
++                // into, so every correction was answered by another one until the player jumped.
++                p.writeDouble(y + (double) EYE_HEIGHT_17);
+                 p.writeDouble(z);
+                 p.writeFloat(yaw);
+                 p.writeFloat(pitch);
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+index 62dec99560a739865f9885578e32d674010255f9..f292805778077741e5f0e41778a2db2ced223222 100644
+--- a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+@@ -410,6 +410,27 @@ public class AthenaLegacy17Test extends AbstractTestingBase {
+         return p;
+     }
+ 
++    @Test
++    public void teleportsPutA17ClientExactlyWhereTheServerDid() {
++        // Each height comes back exactly as 1.7 computes it (y - its float yOffset); a few billionths
++        // below is inside the block underneath, which 1.7's collision treats as a wall.
++        for (double feet : new double[] { 24.0, 24.5, 84.5, 64.0, 0.0, 255.9375, 23.999999999, 17.25 }) {
++            PacketDataSerializer teleport = packet(0x08);
++
++            teleport.writeDouble(0.5);
++            teleport.writeDouble(feet);
++            teleport.writeDouble(0.5);
++            teleport.writeFloat(0F);
++            teleport.writeFloat(0F);
++            teleport.writeByte(0);
++            PacketDataSerializer sent = sent(this.out(), teleport).get(0);
++
++            assertEquals(0x08, sent.readVarIntFromBuffer());
++            sent.readDouble();
++            assertEquals("feet at " + feet, feet, sent.readDouble() - (double) 1.62F, 0);
++        }
++    }
++
+     @Test
+     public void relativeTeleportsAreMadeAbsoluteAtEyeHeight() {
+         PacketDataSerializer move = packet(0x04);
+@@ -440,7 +461,7 @@ public class AthenaLegacy17Test extends AbstractTestingBase {
+ 
+         assertEquals(0x08, sent.readVarIntFromBuffer());
+         assertEquals(11.5, sent.readDouble(), 1e-9);
+-        assertEquals(64 + 1.62, sent.readDouble(), 1e-9);
++        assertEquals("1.7 takes its feet back out exactly", 64.0, sent.readDouble() - (double) 1.62F, 0);
+         assertEquals(100, sent.readDouble(), 0);
+         assertEquals(90F, sent.readFloat(), 0);
+         assertEquals(0F, sent.readFloat(), 0);

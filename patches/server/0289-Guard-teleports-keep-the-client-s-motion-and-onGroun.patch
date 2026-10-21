@@ -1,0 +1,369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 19:54:03 +0900
+Subject: [PATCH] Guard: teleports keep the client's motion and onGround; drop
+ the world reference
+
+From enforcing on sg1: players held on match pedestals were set back again
+and again. A position the server sends leaves the client's motion and its
+onGround as they were, so after a teleport:
+- the first move is seeded as on the ground, with an ordinary block's grip,
+  and the motion carried from before (horizontal and vertical);
+- a move dropped by CraftBukkit's justTeleported check resets the guard;
+- the first checked move may rise on the vertical speed it carried, and may
+  end floating against a wall met on the way down.
+
+A box rebuilt from its centre (a teleport, a setback) can overlap a block it
+touches by 1e-15 and stand on its edge or bump its head on it. The ground,
+landing and ceiling probes now accept a block the box only touches when its
+top is at the feet (not a wall that goes on above) or its bottom at the head;
+a multi-tick landing may step up onto such an edge before jumping. The
+ground probe's tolerance is 1e-5 instead of 0.001, which counted a client
+0.0008 over a block as standing on it.
+
+AthenaGuardMovementTest gains a run that teleports the client back to where
+it was a few ticks before, sometimes 0.01 above it; 18 seeds x 3000 runs of
+both honest tests are clean.
+
+The guard also held the World of the last move it checked, for its log line:
+a player standing still kept an unloaded match world alive. sg1 ran out of
+its 144 MB heap loading the eighth match world in seventeen minutes with an
+idle player on; the reference is now dropped after each check.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 7e02278708b6aa7a1caa8edfd1c8d6abdd892237..b7d9d30997be2631a65faa574f7ebd9710500fab 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -48,7 +48,7 @@ public final class AthenaGuard {
+     private final boolean legacy17; // a 1.7.10 client: for the log
+     // what the server saw around the move being checked, for the log
+     private double ctxX, ctxY, ctxZ;
+-    private World ctxWorld;
++    private World ctxWorld; // set only during moveOk
+     private int ctxFlags;
+     // the last moves checked, newest first at histHead - 1: h, dy, ticks, ground at the start
+     private final double[] histH = new double[6], histDy = new double[6];
+@@ -67,6 +67,8 @@ public final class AthenaGuard {
+     private double lastDy;          // vertical distance of the last client tick
+     private int ticksSincePos;      // client ticks since the last packet with a position
+     private int freshTicks;         // ticks since the state was seeded, while still unsure of the client's onGround
++    private double landRise;        // for this move: how far over the start the client could have landed
++    private double carriedH, carriedVy, carriedDown; // motion as of a teleport: the client keeps it, the position it moved by is lost
+     private double grantH, grantV;  // knockback the server sent, and until when it may show up
+     private long grantUntil;
+     private int grantMoves;         // and for at least this many of the client's ticks: a client that stalls applies it late
+@@ -144,10 +146,20 @@ public final class AthenaGuard {
+ 
+     /** Positions are not the client's to decide from here on: a teleport, a respawn, a dismount. */
+     void reset() {
++        this.carry();
+         this.known = false;
+         this.ticksSincePos = 0;
+     }
+ 
++    /** A position the server sets leaves the client's motion alone: keep the last known bound of it. */
++    private void carry() {
++        if (this.known) {
++            this.carriedH = Math.min(Math.max(this.carriedH, this.lastH), 1.5D);
++            this.carriedVy = Math.max(this.carriedVy, this.lastDy);
++            this.carriedDown = Math.max(this.carriedDown, -this.lastDy);
++        }
++    }
++
+     private boolean exempt() {
+         return !enabled || this.player.abilities.canFly || this.player.abilities.isFlying || this.player.isSpectator()
+                 || this.player.playerInteractManager.isCreative() || this.player.noclip || this.player.vehicle != null
+@@ -177,6 +189,7 @@ public final class AthenaGuard {
+         this.positionSentNanos = System.nanoTime();
+         // the moves already on their way left from where the client was; the first one from here is
+         // the client's answer, at exactly this position
++        this.carry();
+         this.known = false;
+         this.awaiting = true;
+         this.awaitX = packet.athenaX();
+@@ -274,11 +287,21 @@ public final class AthenaGuard {
+         // where it is not: a jump turned back into a sideways move ends in the air at ground height, and
+         // a landing turned into a step can end floating, still on the ground (and free to jump). Both
+         // need a wall, and the second a real landing under the start within the fall of these ticks.
+-        boolean wall = this.nearWall(world, fromX, fromY, fromZ, x, y, z);
++        // Right after a teleport the client's onGround is the one it had before, so it may step up from
++        // the air: against a wall it meets on the way down this tick, and end floating where it began.
++        boolean fresh = this.fresh();
+         double fall = this.fallDepth(ticks);
+-        boolean landing = ticks > 1 || !this.groundStart ? this.groundBelow(world, fromX, fromY, fromZ, fall) : false;
+-        boolean maybeGround = groundNow || wall && landing && dy <= 0.0D; // floating ground ends a fall, never a rise
+-        boolean certain = groundStartXZ == groundEndXZ && !wall;
++        // the vertical move comes first, so what the sideways one runs into can be as low as it fell
++        boolean wall = this.nearWall(world, fromX, fromY - (fresh ? this.freshFall(ticks) : fall), fromZ, x, y, z);
++        // something to come down on under the start, or an edge the box touches that it can step onto
++        boolean landing = ticks > 1 || !this.groundStart || !this.groundCertain || fresh ? this.groundBelow(world, fromX, fromY, fromZ, fall) || this.edgeNear(world, fromX, fromY, fromZ, fall) : false;
++        // landing on an edge can step the client up first: a jump after it rises from that height
++        this.landRise = landing && ticks > 1 && dy > 0.0D ? this.landRise(world, fromX, fromY, fromZ, fall) : 0.0D;
++        // A client whose box was rebuilt from its centre - by a teleport or a setback to where it touched
++        // a block - can overlap that block by 1e-15 and stand on its edge; the narrowed probes miss it.
++        boolean edge = !groundNow && (groundAtWide(world, this.player, fromX, y, fromZ) || groundAtWide(world, this.player, x, y, z));
++        boolean maybeGround = groundNow || edge || wall && (landing || fresh) && dy <= 1.0E-7D; // floating ground ends a fall, never a rise
++        boolean certain = groundStartXZ == groundEndXZ && !wall && !edge;
+         double slipNow = slipperiness(world, x, y, z);
+ 
+         if (this.awaiting) {
+@@ -306,7 +329,11 @@ public final class AthenaGuard {
+         this.ctxFlags = (groundNow ? 1 : 0) | (wall ? 2 : 0) | (inLiquid ? 4 : 0) | (climbing ? 8 : 0) | (granted ? 16 : 0);
+         boolean groundBefore = this.groundStart;
+ 
+-        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp) != 0 && enforce) {
++        int result = this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp);
++        // only for the log line of this move: holding the World would keep an unloaded match world, chunks
++        // and all, alive for as long as the player stands still somewhere else
++        this.ctxWorld = null;
++        if (result != 0 && enforce) {
+             this.known = false;
+             return false;
+         }
+@@ -387,13 +414,25 @@ public final class AthenaGuard {
+             if (fromGround) {
+                 // the ticks not reported before it moved under 0.03 blocks, or came down; all of the
+                 // rise is the last tick's
+-                if (Math.abs(dy - jump) < 1.0E-4D || dy <= jump && (ceiling || landed)) {
++                if (Math.abs(dy - jump) < 1.0E-4D || dy <= jump + (landed ? this.landRise : 0.0D) && (ceiling || landed)) {
+                     maxUp = dy; // a jump: whole, cut short by a ceiling, or after a landing that took some back
+                 } else if (dy <= STEP + 1.0E-4D && groundNow) {
+                     maxUp = dy; // stepped up onto something
+                 } else {
+                     maxUp = slimeUp;
+                 }
++                if (this.freshTicks == 0 && this.lastDy > 0.0D) {
++                    // the first move after a teleport, which can come in the middle of a jump: the client
++                    // still rises on what it had
++                    double vy = this.lastDy;
++                    double rise = 0.0D;
++
++                    for (int i = 0; i < ticks; ++i) {
++                        vy = (vy - GRAVITY) * DRAG;
++                        rise += Math.max(vy, 0.0D);
++                    }
++                    maxUp = Math.max(maxUp, rise);
++                }
+             } else {
+                 double vy = Math.abs(this.lastDy) < 0.005D ? 0.0D : this.lastDy;
+ 
+@@ -443,6 +482,7 @@ public final class AthenaGuard {
+             this.grantH = this.grantV = 0.0D;
+         }
+ 
++        this.carriedH = this.carriedVy = this.carriedDown = 0.0D; // a checked move: the bounds carry the motion from here
+         // several ticks: the net distance can be less than the last tick's when the direction turned, so
+         // keep the bound
+         this.seed(ticks == 1 ? h : v, lastVy, groundNow, maybeGround, certain, slipNow);
+@@ -451,7 +491,7 @@ public final class AthenaGuard {
+ 
+     private void seedFresh(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
+         this.freshTicks = 0;
+-        this.seed(h, dy, groundNow, maybeGround, certain, slipNow);
++        this.seed(Math.max(h, this.carriedH), Math.max(dy, this.carriedVy), groundNow, maybeGround, certain, slipNow);
+         // A position the server sent leaves the client's onGround as it was before: a player standing
+         // when teleported - even into the air, even 0.01 over a slab - takes its next tick with the
+         // ground's acceleration, and may jump. Assume the ground, at the grip of an ordinary block.
+@@ -477,6 +517,18 @@ public final class AthenaGuard {
+         this.groundSeen = groundNow;
+     }
+ 
++    /** After a teleport: how far the client could have fallen, on whatever vertical speed it kept. */
++    double freshFall(int ticks) {
++        double vy = -Math.max(this.carriedDown, 0.0D);
++        double depth = 0.0D;
++
++        for (int i = 0; i < ticks; ++i) {
++            vy = (vy - GRAVITY) * DRAG;
++            depth -= vy;
++        }
++        return Math.max(depth, this.fallDepth(ticks)) + 0.001D;
++    }
++
+     /** How far the client could have fallen in these ticks, from its last vertical speed. */
+     double fallDepth(int ticks) {
+         double vy = Math.abs(this.lastDy) < 0.005D ? 0.0D : this.lastDy;
+@@ -491,6 +543,9 @@ public final class AthenaGuard {
+ 
+     // for AthenaGuardMovementTest, which drives evaluate() from a model of the client
+     boolean athenaKnown() { return this.known; }
++    boolean fresh() { return this.freshTicks == 0; }
++    void athenaLandRise(double rise) { this.landRise = rise; }
++    boolean athenaGroundCertain() { return this.groundCertain; }
+     void athenaSeed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) { this.seedFresh(h, dy, groundNow, maybeGround, certain, slipNow); }
+     void athenaTestEffects(int speedAmp, int jumpAmp) { this.speedAmp = speedAmp; this.jumpAmp = jumpAmp; }
+ 
+@@ -523,7 +578,15 @@ public final class AthenaGuard {
+     private static final double HALF = 0.3D - 1.0E-7D;
+ 
+     static boolean groundAt(World world, Entity player, double x, double y, double z) {
+-        return world.hasCubes(player, x - HALF, y - 0.001D, z - HALF, x + HALF, y, z + HALF);
++        return world.hasCubes(player, x - HALF, y - 1.0E-5D, z - HALF, x + HALF, y, z + HALF);
++    }
++
++    private static final double WIDE = 0.3D + 1.0E-7D;
++
++    /** A block edge the feet touch, top at the feet: not a wall beside them, which goes on above. */
++    static boolean groundAtWide(World world, Entity player, double x, double y, double z) {
++        return world.hasCubes(player, x - WIDE, y - 1.0E-5D, z - WIDE, x + WIDE, y, z + WIDE)
++                && !world.hasCubes(player, x - WIDE, y + 1.0E-4D, z - WIDE, x + WIDE, y + 0.01D, z + WIDE);
+     }
+ 
+     /** Whether something under the feet at (x, y, z) is within depth below them. */
+@@ -531,6 +594,26 @@ public final class AthenaGuard {
+         return world.hasCubes(this.player, x - HALF, y - depth, z - HALF, x + HALF, y, z + HALF);
+     }
+ 
++    /** The highest top within a step over the feet, under or touching the start: what a landing could step onto. */
++    private double landRise(World world, double x, double y, double z, double depth) {
++        java.util.List<AxisAlignedBB> cubes = world.getCubes(this.player, new AxisAlignedBB(x - WIDE, y - depth, z - WIDE, x + WIDE, y + STEP, z + WIDE));
++        double top = y;
++
++        for (int i = 0; i < cubes.size(); ++i) {
++            double maxY = cubes.get(i).maxY;
++
++            if (maxY <= y + STEP + 1.0E-7D && maxY > top) {
++                top = maxY;
++            }
++        }
++        return top - y;
++    }
++
++    /** A block the box only touches, from its fall below to a step above: what a box rebuilt from its centre may stand on. */
++    private boolean edgeNear(World world, double x, double y, double z, double depth) {
++        return world.hasCubes(this.player, x - WIDE, y - depth, z - WIDE, x + WIDE, y + STEP, z + WIDE);
++    }
++
+     /**
+      * Anything the move could have run into sideways - beside the boxes it swept from start to end,
+      * above the lower feet - or over the head within a jump: what a step-up needs to start.
+@@ -541,7 +624,10 @@ public final class AthenaGuard {
+     }
+ 
+     private boolean ceilingAt(World world, double x, double y, double z) {
+-        return world.hasCubes(this.player, x - HALF, y + 1.8D, z - HALF, x + HALF, y + 1.801D, z + HALF);
++        return world.hasCubes(this.player, x - HALF, y + 1.8D, z - HALF, x + HALF, y + 1.801D, z + HALF)
++                // or one the box only touches (rebuilt from its centre) - over the head, not a wall beside it
++                || world.hasCubes(this.player, x - WIDE, y + 1.8D, z - WIDE, x + WIDE, y + 1.801D, z + WIDE)
++                && !world.hasCubes(this.player, x - WIDE, y + 1.79D, z - WIDE, x + WIDE, y + 1.799D, z + WIDE);
+     }
+ 
+     private static boolean liquidAt(World world, double x, double y, double z) {
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 1009ac69bceb7dafc5e5271d4dc29ce8c5daeb81..c53e2e4dfa5bfcc85c65fd9fcf385a148eeb910c 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -331,6 +331,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         This can happen due to a plugin teleporting the player instead of using .setTo() */
+                         if (!from.equals(this.getPlayer().getLocation()) && this.justTeleported) {
+                             this.justTeleported = false;
++                            this.guard.reset(); // Athena - this move is dropped; the next starts where the plugin put the player
+                             return;
+                         }
+                     }
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index 1db6cba5fce5b306d638d4e047947c2586177075..6c0b56fdcf0cfefe21d0df20526c8a2d500671bd 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -210,12 +210,22 @@ public class AthenaGuardMovementTest {
+     // ------------------------------------------------------------------ the server's view of the same world
+     private boolean groundAt(double x, double y, double z) {
+         double half = 0.3 - 1.0E-7;
+-        return !new Client(0, 0, 0).colliding(x - half, y - 0.001, z - half, x + half, y, z + half).isEmpty();
++        return !new Client(0, 0, 0).colliding(x - half, y - 1.0E-5, z - half, x + half, y, z + half).isEmpty();
++    }
++
++    private boolean groundAtWide(double x, double y, double z) {
++        double half = 0.3 + 1.0E-7;
++        return !new Client(0, 0, 0).colliding(x - half, y - 1.0E-5, z - half, x + half, y, z + half).isEmpty()
++                && new Client(0, 0, 0).colliding(x - half, y + 1.0E-4, z - half, x + half, y + 0.01, z + half).isEmpty();
+     }
+ 
+     private boolean ceilingAt(double x, double y, double z) {
+         double half = 0.3 - 1.0E-7;
+-        return !new Client(0, 0, 0).colliding(x - half, y + 1.8, z - half, x + half, y + 1.801, z + half).isEmpty();
++        double wide = 0.3 + 1.0E-7;
++        Client p = new Client(0, 0, 0);
++        return !p.colliding(x - half, y + 1.8, z - half, x + half, y + 1.801, z + half).isEmpty()
++                || !p.colliding(x - wide, y + 1.8, z - wide, x + wide, y + 1.801, z + wide).isEmpty()
++                && p.colliding(x - wide, y + 1.79, z - wide, x + wide, y + 1.799, z + wide).isEmpty();
+     }
+ 
+     private final class Server {
+@@ -239,13 +249,26 @@ public class AthenaGuardMovementTest {
+             boolean groundA = groundAt(this.x, ny, this.z), groundB = groundAt(nx, ny, nz);
+             boolean groundNow = groundA || groundB;
+             Client probe = new Client(0, 0, 0);
+-            boolean wall = !probe.colliding(Math.min(this.x, nx) - 0.301, Math.min(this.y, ny) + 0.001, Math.min(this.z, nz) - 0.301,
++            boolean fresh = this.guard.fresh();
++            double fallNow = this.guard.freshFall(ticks);
++            double fallFirst = this.guard.fallDepth(ticks);
++            boolean wall = !probe.colliding(Math.min(this.x, nx) - 0.301, Math.min(this.y - (fresh ? fallNow : fallFirst), ny) + 0.001, Math.min(this.z, nz) - 0.301,
+                     Math.max(this.x, nx) + 0.301, Math.max(this.y, ny) + 2.4, Math.max(this.z, nz) + 0.301).isEmpty();
+             double fall = this.guard.fallDepth(ticks);
+             double half = 0.3 - 1.0E-7;
+-            boolean landing = (ticks > 1 || !this.guard.groundStart()) && !probe.colliding(this.x - half, this.y - fall, this.z - half, this.x + half, this.y, this.z + half).isEmpty();
+-            boolean maybeGround = groundNow || wall && landing && dy <= 0;
+-            boolean certain = groundA == groundB && !wall;
++            double wide = 0.3 + 1.0E-7;
++            boolean landing = (ticks > 1 || !this.guard.groundStart() || !this.guard.athenaGroundCertain() || this.guard.fresh()) && (!probe.colliding(this.x - half, this.y - fall, this.z - half, this.x + half, this.y, this.z + half).isEmpty()
++                    || !probe.colliding(this.x - wide, this.y - fall, this.z - wide, this.x + wide, this.y + 0.6000000238418579, this.z + wide).isEmpty());
++            boolean edge = !groundNow && (groundAtWide(this.x, ny, this.z) || groundAtWide(nx, ny, nz));
++            double rise = 0;
++            if (landing && ticks > 1 && dy > 0) {
++                for (double[] b : probe.colliding(this.x - wide, this.y - fall, this.z - wide, this.x + wide, this.y + 0.6000000238418579, this.z + wide)) {
++                    if (b[4] <= this.y + 0.6000000238418579 + 1.0E-7) rise = Math.max(rise, b[4] - this.y);
++                }
++            }
++            this.guard.athenaLandRise(rise);
++            boolean maybeGround = groundNow || edge || wall && (landing || fresh) && dy <= 1.0E-7;
++            boolean certain = groundA == groundB && !wall && !edge;
+             double slip = slipperiness(nx, ny);
+             int r;
+             if (!this.guard.athenaKnown()) {
+@@ -269,6 +292,19 @@ public class AthenaGuardMovementTest {
+     // ------------------------------------------------------------------ honest clients
+     @Test
+     public void honestClientsAreNeverFlagged() {
++        this.honestRuns(false);
++    }
++
++    /**
++     * The server sets the client back to where it stood a few ticks before (a plugin holding a player on a
++     * pedestal), sometimes 0.01 over it; the client keeps its motion and its onGround, as vanilla does.
++     */
++    @Test
++    public void honestClientsAreNeverFlaggedAcrossTeleports() {
++        this.honestRuns(true);
++    }
++
++    private void honestRuns(boolean teleports) {
+         Random random = new Random(Long.getLong("athena.guardSeed", 20261012L));
+         int packets = 0;
+ 
+@@ -285,7 +321,23 @@ public class AthenaGuardMovementTest {
+             float forward = 1, strafe = 0;
+ 
+             java.util.ArrayDeque<String> history = new java.util.ArrayDeque<String>();
++            java.util.ArrayDeque<double[]> been = new java.util.ArrayDeque<double[]>();
+             for (int t = 0; t < 400; ++t) {
++                double[] to = been.peekFirst();
++                double ty = to == null ? 0 : to[1] + (random.nextBoolean() ? 0.01 : 0.0);
++                // only where the player fits: a box rebuilt from its centre can sit 1e-14 inside a wall it touched
++                if (teleports && been.size() >= 8 && random.nextInt(30) == 0
++                        && new Client(0, 0, 0).colliding(to[0] - 0.3, ty, to[2] - 0.3, to[0] + 0.3, ty + 1.8, to[2] + 0.3).isEmpty()) {
++                    s.guard.reset();
++                    s.x = to[0]; s.y = ty; s.z = to[2]; s.skipped = 0;
++                    c.set(to[0], ty, to[2]);
++                    c.lastX = to[0]; c.lastY = ty; c.lastZ = to[2];
++                    history.add("t=" + t + " teleported to " + to[0] + "," + ty + "," + to[2]);
++                    s.receive(c.x(), c.y(), c.z()); // the client's answer, where it was sent
++                    been.clear();
++                }
++                been.addLast(new double[] { c.x(), c.y(), c.z() });
++                if (been.size() > 8) been.removeFirst();
+                 if (random.nextInt(20) == 0) sprint = !sprint;
+                 if (random.nextInt(8) == 0) jumpHeld = random.nextInt(3) > 0;
+                 if (random.nextInt(15) == 0) strafe = random.nextInt(3) - 1;

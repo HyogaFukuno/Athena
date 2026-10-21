@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:13:28 +0900
+Subject: [PATCH] Write the log from a logging thread
+
+The file and the console were written from the thread that logged, so a burst of warnings or a
+console pipe that stalled (tee, tmux) held up the tick. An Async appender queues the events; it
+blocks only when its queue is full, and LogManager.shutdown drains it at stop.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/resources/log4j2.xml b/src/main/resources/log4j2.xml
+index a3fcd87111eb9165461a6d1258a1597d2f1340bf..86568895a1ba659620550de483bddeababa9e339 100644
+--- a/src/main/resources/log4j2.xml
++++ b/src/main/resources/log4j2.xml
+@@ -11,15 +11,22 @@
+                 <OnStartupTriggeringPolicy />
+             </Policies>
+         </RollingRandomAccessFile>
++        <!-- Athena - the server thread hands log events to a queue and goes on; one logging thread
++             writes the file and the console. Both were written from the thread that logged, so a
++             burst of warnings, or a console pipe that stalled (tee, tmux), stopped the tick until
++             the write returned. The queue blocks only when full, so nothing is dropped. The
++             thread name in the file pattern is captured when the event is made, as before. -->
++        <Async name="Async" bufferSize="2048">
++            <AppenderRef ref="File"/>
++            <AppenderRef ref="TerminalConsole" level="info"/>
++        </Async>
+     </Appenders>
+     <Loggers>
+         <Root level="info">
+             <filters>
+                 <MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL" />
+             </filters>
+-            <AppenderRef ref="File"/>
+-            <AppenderRef ref="TerminalConsole" level="info"/>
++            <AppenderRef ref="Async"/>
+         </Root>
+     </Loggers>
+ </Configuration>
+-

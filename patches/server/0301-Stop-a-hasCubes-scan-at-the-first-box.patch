@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Stop a hasCubes scan at the first box
+
+hasCubes gathered every box in the volume, and the entities' around it, to ask whether there was
+one. It stops at the first now. Falling blocks, TNT and ender pearls still scan the whole range:
+they read inUnloadedChunk, which the scan sets for every unloaded chunk in it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 930e746eecd9fe1ce0e4298643959d00c2ffdad0..71adb4b1333177611a990a57df081e37efd8b93a 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1477,6 +1477,21 @@ public abstract class World implements IBlockAccess {
+     // Athena start - scalar collision gathering. Boxes are appended to the caller's sink as six
+     // doubles each, so scanning a swept volume allocates nothing at all.
+     public void getCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, CollisionBoxSink sink) {
++        this.collectCubes(entity, minX, minY, minZ, maxX, maxY, maxZ, sink, false);
++    }
++
++    // Athena - firstOnly: the caller only asks whether there is any box (hasCubes), so the scan
++    // stops at the first one instead of gathering every box in the volume and then the entities
++    // around it. Players ask this a dozen times a move (the movement checks, AthenaGuard's ground,
++    // wall and ceiling probes), and the answer is usually the first solid block under the feet.
++    //
++    // The scan has two side effects on the entity. The border flag is written once per chunk, the
++    // same value each time, before that chunk can add a box - stopping after a box changes nothing.
++    // inUnloadedChunk is written for every unloaded chunk in the range, including ones after the
++    // first box; only falling blocks, TNT and ender pearls ever read it, so they scan to the end.
++    private void collectCubes(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, CollisionBoxSink sink, boolean firstOnly) {
++        int entry = sink.mark();
++        boolean stopAtFirst = firstOnly && !(entity instanceof EntityFallingBlock || entity instanceof EntityTNTPrimed || entity instanceof EntityEnderPearl);
+         int i = MathHelper.floor(minX);
+         int j = MathHelper.floor(maxX + 1.0D);
+         int k = MathHelper.floor(minY);
+@@ -1624,6 +1639,7 @@ public abstract class World implements IBlockAccess {
+                                     b.addCollisionBoxes(this, blockposition, block, minX, minY, minZ, maxX, maxY, maxZ, sink, entity);
+                                 }
+                                 // PaperSpigot end
++                                if (stopAtFirst && !sink.isEmpty(entry)) return; // Athena - the question is answered
+                             }
+                         }
+                     }
+@@ -1662,6 +1678,7 @@ public abstract class World implements IBlockAccess {
+                 if (axisalignedbb1 != null) {
+                     sink.addIfIntersects(axisalignedbb1.minX, axisalignedbb1.minY, axisalignedbb1.minZ, axisalignedbb1.maxX, axisalignedbb1.maxY, axisalignedbb1.maxZ, minX, minY, minZ, maxX, maxY, maxZ);
+                 }
++                if (stopAtFirst && !sink.isEmpty(entry)) return; // Athena
+             }
+         }
+     }
+@@ -1693,7 +1710,7 @@ public abstract class World implements IBlockAccess {
+         int mark = sink.mark();
+ 
+         try {
+-            this.getCubes(entity, minX, minY, minZ, maxX, maxY, maxZ, sink);
++            this.collectCubes(entity, minX, minY, minZ, maxX, maxY, maxZ, sink, true); // Athena - stop at the first box
+             return !sink.isEmpty(mark);
+         } finally {
+             sink.reset(mark);

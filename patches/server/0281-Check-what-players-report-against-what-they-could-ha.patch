@@ -1,0 +1,1255 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 19:32:20 +0900
+Subject: [PATCH] Check what players report against what they could have done
+
+Server-authoritative checks (AthenaGuard), one instance per connection:
+
+- movement: per client tick, horizontal distance is bounded by the 1.8 client's
+  own physics (last distance x friction + sprinting acceleration, the 0.2
+  sprint-jump push on a jump), vertical rise by a jump (0.42 + Jump Boost), a
+  ceiling, a step (0.6), or gravity in the air. Knockback the server sends,
+  potions, liquids, ladders and slime are allowed for. A move outside the bound
+  is set back to the last accepted position.
+- ground: fall damage, critical hits and the jump statistic follow the ground
+  the server sees under the player, not the client's onGround flag.
+- timer: movement packets are counted against their arrival time; a client
+  more than 250 ms ahead of real time has the extra moves set back.
+- combat: an attack is dropped without the arm swing that precedes it, beyond
+  one a tick, beyond 3.0 blocks (plus the hitbox border and the attacker's own
+  last move) from every position the target held in the attacker's ping plus
+  interpolation, or more than 60 degrees off the line of sight.
+
+The bounds are tested against a model of the 1.8 client (onLivingUpdate,
+moveEntityWithHeading, moveFlying, jump and moveEntity with its two-way
+step-up) walking a world of floor, staggered slabs, ice, a low ceiling and
+walls: 7.2 million honest ticks across six seeds raise nothing, and 1.3x speed,
+flight, a 1-block step and a packet-criticals hop are caught. What the model
+found and the bounds now allow: the client's onGround means collided going
+down (so stepping off an edge is a ground tick, and a spawned client with zero
+vertical motion is airborne on the floor), the vertical move happens over the
+start before the sideways one, the step-up can cancel a jump (keeping its push)
+or leave a landing floating on the ground, packets skip ticks under 0.03
+blocks, and a box rebuilt from its centre overlaps the wall it touches.
+
+pandaspigot.yml guard: enabled, enforce (false only logs), movement, timer,
+combat, maxReach, log.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 9fee4e0ff090140ddfe48aa64b92c9ef78541b4c..f70dc95609f55c49ee5e4c37497ef27adbdcabea 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -66,6 +66,8 @@ public class PandaSpigotConfig {
+ 
+             // Athena - publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
+             net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
++            // Athena - and the guard's switches
++            net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log);
+             
+             // call after save
+             initWorlds(worldsNode);
+@@ -146,4 +148,30 @@ public class PandaSpigotConfig {
+         "leave it off outside of testing.")
+     public boolean debugVerifyAthenaIndexes = false;
+     // Athena end
++
++    // Athena start - server-authoritative movement and combat checks; see net.minecraft.server.AthenaGuard
++    @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
++        "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
++        "that could not land are dropped, and fall damage and critical hits follow the ground the\n" +
++        "server sees. 1.8 and 1.7.10 clients are both checked by their own physics.\n" +
++        "  enforce: false only logs what would have been blocked (to look for false positives)")
++    public GuardConfig guard = new GuardConfig();
++
++    @ConfigSerializable
++    public static class GuardConfig {
++        public boolean enabled = true;
++        public boolean enforce = true;
++        @Comment("Speed, fly, step, jump height, and the ground used for fall damage and critical hits")
++        public boolean movement = true;
++        @Comment("Movement packets sent faster than real time")
++        public boolean timer = true;
++        @Comment("Reach, hits off to the side, hits without an arm swing, more than one hit a tick")
++        public boolean combat = true;
++        @Comment("Vanilla is 3.0, measured from the eye to the nearest point of the target's box")
++        public double maxReach = 3.0D;
++        @Comment("Log what is blocked (or would be, when not enforcing), at most once per check per\n" +
++            "player every two seconds")
++        public boolean log = true;
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f781ddcbddbe88d48f0328ed3a56da6045c5cacc
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -0,0 +1,581 @@
++package net.minecraft.server;
++
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena - server-authoritative movement and combat checks.
++//
++// The client reports where it is and whom it hit; the server decides whether that could have
++// happened, and where it could not, the server's answer stands: the move is set back to the last
++// position the server accepted, the hit is dropped, and fall damage and critical hits follow the
++// ground the server sees under the player rather than the flag the client sends.
++//
++// Every bound below is an upper bound on what an unmodified 1.8 (or 1.7.10) client can do, taken
++// from the client's own physics: a legitimate client always lands inside it, so a legitimate
++// player never sees any of this. What the bounds leave out on purpose - lower bounds on speed,
++// falling faster than gravity - gives a cheat nothing.
++//
++// One instance per PlayerConnection; everything runs on the server thread.
++public final class AthenaGuard {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena/Guard");
++
++    // ------------------------------------------------------------------ configuration
++    // Refreshed by PandaSpigotConfig.init, like AthenaIndexAudit's switch.
++    static volatile boolean enabled = true;
++    /** false: detect and log only, change nothing (to look for false positives first). */
++    static volatile boolean enforce = true;
++    static volatile boolean movement = true;
++    static volatile boolean timer = true;
++    static volatile boolean combat = true;
++    static volatile double maxReach = 3.0D;
++    static volatile boolean log = true;
++
++    // ------------------------------------------------------------------ constants (1.8 client physics)
++    private static final double GRAVITY = 0.08D;
++    private static final double DRAG = 0.9800000190734863D;       // 0.98F
++    private static final double JUMP = 0.41999998688697815D;      // 0.42F
++    private static final double STEP = 0.6000000238418579D;       // 0.6F; 1.7 steps 0.5, which is less
++    private static final double AIR_ACCEL = 0.026D;               // jumpMovementFactor while sprinting
++    private static final double SPRINT_JUMP = 0.2D;
++    private static final double BASE_SPEED = 0.10000000149011612D;
++    private static final double EPS_H = 0.005D;
++    private static final double EPS_V = 0.01D;
++
++    private final EntityPlayer player;
++
++    // movement state, as of the last accepted move
++    private boolean known;          // false after a teleport, a vehicle, flight: the next move only seeds the state
++    private boolean groundStart;    // on the ground at the start of the tick the next move begins with
++    private boolean groundCertain;  // and the client agrees: see moveOk
++    private boolean groundSeen;     // what is under the feet, and nothing else: fall damage and critical hits
++    private double motionFriction;  // what the last tick's motion was multiplied by: friction at its start
++    private double accelFriction;   // slipperiness x 0.91 under the feet at the start of the next tick
++    private double lastH;           // horizontal distance of the last client tick
++    private double lastDy;          // vertical distance of the last client tick
++    private int ticksSincePos;      // client ticks since the last packet with a position
++    private int freshTicks;         // ticks since the state was seeded, while still unsure of the client's onGround
++    private double grantH, grantV;  // knockback the server sent, and until when it may show up
++    private long grantUntil;
++    private int speedAmp = -1, jumpAmp = -1;
++    private long effectsGraceUntil; // keep a potion's allowance a little after it ends: the client lags
++
++    // timer
++    private long lastFlyingNanos;
++    private double balanceMillis;
++
++    // combat
++    private int swings;
++    private int lastAttackTick = Integer.MIN_VALUE;
++
++    // logging, at most one line per check per player every few seconds
++    private final long[] lastLog = new long[8];
++
++    AthenaGuard(EntityPlayer player) {
++        this.player = player;
++    }
++
++    public static void configure(boolean enabled, boolean enforce, boolean movement, boolean timer, boolean combat, double maxReach, boolean log) {
++        AthenaGuard.log = log;
++        AthenaGuard.enabled = enabled;
++        AthenaGuard.enforce = enforce;
++        AthenaGuard.movement = movement;
++        AthenaGuard.timer = timer;
++        AthenaGuard.combat = combat;
++        AthenaGuard.maxReach = maxReach;
++    }
++
++    /** Whether the server's own reading of the ground replaces the client's onGround flag. */
++    static boolean authoritative() {
++        return enabled && enforce && movement;
++    }
++
++    boolean groundStart() {
++        return this.groundStart;
++    }
++
++    /**
++     * The ground for this move, as of the last moveOk: the server's when enforcing and the player is
++     * checked, the client's flag otherwise. A client that claims ground the server does not see is
++     * how NoFall and packet criticals work; when only logging, that is reported here.
++     */
++    boolean groundFor(boolean clientGround) {
++        if (!enabled || !movement || this.exempt() || !this.known) {
++            return clientGround;
++        }
++        if (clientGround && !this.groundSeen && this.player.fallDistance > 3.0F) {
++            this.flag(6, "nofall", "claims ground %.1f blocks into a fall", this.player.fallDistance);
++        }
++        return enforce ? this.groundSeen : clientGround;
++    }
++
++    /** Positions are not the client's to decide from here on: a teleport, a respawn, a dismount. */
++    void reset() {
++        this.known = false;
++        this.ticksSincePos = 0;
++    }
++
++    private boolean exempt() {
++        return !enabled || this.player.abilities.canFly || this.player.abilities.isFlying || this.player.isSpectator()
++                || this.player.playerInteractManager.isCreative() || this.player.noclip || this.player.vehicle != null
++                || this.player.dead || this.player.isSleeping();
++    }
++
++    // ------------------------------------------------------------------ knockback the server sent
++    void onVelocitySent(double x, double y, double z) {
++        double h = Math.sqrt(x * x + z * z);
++
++        this.grantH = Math.max(this.grantH, h);
++        this.grantV = Math.max(this.grantV, y);
++        this.grantUntil = MinecraftServer.currentTick + 10 + this.player.ping / 50;
++    }
++
++    // ------------------------------------------------------------------ timer
++    /** Called on the Netty thread as a movement packet arrives; the clock is the arrival time. */
++    static void stamp(PacketPlayInFlying packet) {
++        packet.athenaReceivedNanos = System.nanoTime();
++    }
++
++    /**
++     * Each movement packet is one client tick, 50 ms. A client that sends them faster than time
++     * passes is running its clock fast. A late burst after a stall is paid for by the time the stall
++     * banked; the bank is capped, and a slow leak forgives clock drift.
++     */
++    boolean timerOk(PacketPlayInFlying packet) {
++        long now = packet.athenaReceivedNanos != 0L ? packet.athenaReceivedNanos : System.nanoTime();
++
++        if (this.lastFlyingNanos == 0L) {
++            this.lastFlyingNanos = now;
++            return true;
++        }
++
++        double elapsed = (now - this.lastFlyingNanos) / 1.0E6D;
++
++        this.lastFlyingNanos = now;
++        this.balanceMillis += elapsed - 50.0D + elapsed * 0.003D; // 0.3% drift allowance
++        if (this.balanceMillis > 1000.0D) {
++            this.balanceMillis = 1000.0D;
++        }
++
++        if (!timer || this.exempt()) {
++            this.balanceMillis = Math.max(this.balanceMillis, 0.0D);
++            return true;
++        }
++
++        if (this.balanceMillis < -250.0D) {
++            this.balanceMillis += 50.0D; // this packet is not counted
++            this.flag(0, "timer", "%.0f ms ahead of real time", -this.balanceMillis);
++            return !enforce;
++        }
++
++        return true;
++    }
++
++    // ------------------------------------------------------------------ movement
++    /**
++     * Checks one movement packet against what the client could have done since the last accepted
++     * one. (fromX, fromY, fromZ) is the last accepted position, (x, y, z) the reported one.
++     * Returns false when the move must be set back.
++     */
++    boolean moveOk(World world, boolean hasPos, double fromX, double fromY, double fromZ, double x, double y, double z) {
++        if (!hasPos) {
++            ++this.ticksSincePos;
++            return true;
++        }
++
++        int ticks = this.ticksSincePos + 1;
++        this.ticksSincePos = 0;
++
++        double dx = x - fromX;
++        double dy = y - fromY;
++        double dz = z - fromZ;
++        double h = Math.sqrt(dx * dx + dz * dz);
++        // The client's onGround is whether its vertical move collided going down. It moves vertically
++        // first, over where it started, then sideways - so it lands on (or is still standing on) what is
++        // under the start, even when the end is over air: stepping off an edge is a tick on the ground,
++        // brushing a corner while falling is a landing. A step-up decides it at the end instead.
++        boolean groundStartXZ = groundAt(world, this.player, fromX, y, fromZ);
++        boolean groundEndXZ = groundAt(world, this.player, x, y, z);
++        boolean groundNow = groundStartXZ || groundEndXZ;
++        // Against something beside or over the player the step-up can leave the client on the ground
++        // where it is not: a jump turned back into a sideways move ends in the air at ground height, and
++        // a landing turned into a step can end floating, still on the ground (and free to jump). Both
++        // need a wall, and the second a real landing under the start within the fall of these ticks.
++        boolean wall = this.nearWall(world, fromX, fromY, fromZ, x, y, z);
++        double fall = this.fallDepth(ticks);
++        boolean landing = ticks > 1 || !this.groundStart ? this.groundBelow(world, fromX, fromY, fromZ, fall) : false;
++        boolean maybeGround = groundNow || wall && landing && dy <= 0.0D; // floating ground ends a fall, never a rise
++        boolean certain = groundStartXZ == groundEndXZ && !wall;
++        double slipNow = slipperiness(world, x, y, z);
++
++        if (!movement || this.exempt() || !this.known) {
++            this.seedFresh(h / ticks, dy / ticks, groundNow, maybeGround, certain, slipNow);
++            return true;
++        }
++
++        this.refreshEffects();
++        boolean granted = MinecraftServer.currentTick <= this.grantUntil;
++        boolean inLiquid = this.player.isInWater() || this.player.isInLava() || liquidAt(world, x, y, z);
++        boolean climbing = this.player.isOnLadder();
++        // a jump cut short by a ceiling: the client moves up before it moves sideways, so the ceiling
++        // that stopped it is over where it started (or, after sideways, over where it ended)
++        boolean ceiling = dy > 0.0D && this.groundStart && (ceilingAt(world, fromX, y, fromZ) || ceilingAt(world, x, y, z));
++        double slimeUp = dy > 0.0D ? this.slimeBounce(world, fromX, fromY, fromZ) : 0.0D;
++
++        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp) != 0 && enforce) {
++            this.known = false;
++            return false;
++        }
++        return true;
++    }
++
++    /**
++     * The bounds themselves, given what the world looks like around the move; no world access here,
++     * so the arithmetic can be tested against a model of the client. Returns 0 when the move is one a
++     * client could make, 1 for too fast, 2 for rising where it could not, and updates the state for
++     * the next move unless it fails while enforcing.
++     */
++    int evaluate(int ticks, double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, boolean landed,
++                 double slipNow, boolean granted, boolean inLiquid, boolean climbing, boolean ceiling, double slimeUp) {
++        // landed: the packet covers ticks the client did not report, and it could have come down on
++        // something in them - and jumped again from it on the last
++        boolean fromGround = this.groundStart || landed;
++        double speedMul = 1.0D + 0.2D * (this.speedAmp + 1);
++        double jump = JUMP + 0.1D * (this.jumpAmp + 1);
++        int result = 0;
++
++        // horizontal, per client tick: |d(t+1)| <= |d(t)| x f(t) + a(t+1), where f(t) is the friction at
++        // the start of tick t (vanilla multiplies the motion by it after the move) and a(t+1) the
++        // acceleration at the start of the next: on the ground the sprinting walk speed scaled by
++        // 0.16277136 / f^3, in the air 0.026. The jump that starts a tick adds 0.2 more.
++        // a jump from where the client was last reported: it is the packet's last tick (a client that
++        // jumps sends a position, but the ticks before it may not have been sent)
++        // sprints - including one the step-up turned back into a sideways move, which keeps the push but
++        // not the height, against something beside or over the player (certain is false then)
++        boolean jumped = fromGround && (dy > 0.0D || !certain);
++        double v = this.lastH;
++        double maxH = 0.0D;
++        // The client's onGround is "collided while moving down this tick", not "touching the ground":
++        // with its vertical motion exactly 0 - a new entity after a respawn, a client set back - it is
++        // in the air for a tick while standing on the floor, and keeps the air's friction. In steady
++        // play gravity makes the motion -0.0784 every tick on the ground and the two agree; just after
++        // seeding, assume the air's.
++        double fMotion = this.freshTicks < 3 ? Math.max(this.motionFriction, 0.91D) : this.motionFriction;
++        boolean ground = this.groundStart;
++        double fAccel = this.accelFriction;
++
++        for (int i = 0; i < ticks; ++i) {
++            double a = ground ? Math.max(BASE_SPEED * 1.3D * speedMul * 0.16277136D / (fAccel * fAccel * fAccel), AIR_ACCEL) : AIR_ACCEL;
++
++            v = v * fMotion + a + (i == ticks - 1 && jumped ? SPRINT_JUMP : 0.0D);
++            maxH += v;
++            // the ticks the client did not report moved under 0.03 blocks each, on ground or in air:
++            // take the larger of each
++            fMotion = Math.max(ground ? fAccel : 0.91D, 0.91D);
++            ground = true;
++            fAccel = 0.546D;
++        }
++
++        if (granted) {
++            // knockback replaces the motion (an explosion adds to it); the push itself, the walk on
++            // top of it, and what was already there
++            maxH = Math.max(maxH, (this.lastH + this.grantH + BASE_SPEED * 1.3D * speedMul + SPRINT_JUMP) * ticks);
++        }
++        if (inLiquid) {
++            maxH = Math.max(maxH, 0.35D * ticks); // swimming is slower than this; the edge boost is not
++        }
++
++        if (h > maxH + EPS_H) {
++            this.flag(1, "speed", "moved %.3f, at most %.3f (ticks %d, last %.3f, friction %.3f/%.3f, ground %b)", h, maxH, ticks, this.lastH, this.motionFriction, this.accelFriction, this.groundStart);
++            result = 1;
++        }
++
++        // vertical: up from the ground is a jump, a step or a ceiling; in the air it is gravity
++        if (result == 0 && dy > 0.0D && !inLiquid && !climbing && !granted) {
++            double maxUp;
++
++            if (fromGround) {
++                // the ticks not reported before it moved under 0.03 blocks, or came down; all of the
++                // rise is the last tick's
++                if (Math.abs(dy - jump) < 1.0E-4D || dy <= jump && (ceiling || landed)) {
++                    maxUp = dy; // a jump: whole, cut short by a ceiling, or after a landing that took some back
++                } else if (dy <= STEP + 1.0E-4D && groundNow) {
++                    maxUp = dy; // stepped up onto something
++                } else {
++                    maxUp = slimeUp;
++                }
++            } else {
++                double vy = Math.abs(this.lastDy) < 0.005D ? 0.0D : this.lastDy;
++
++                maxUp = 0.0D;
++                for (int i = 0; i < ticks; ++i) {
++                    vy = (vy - GRAVITY) * DRAG;
++                    maxUp += vy;
++                }
++                if (groundNow) {
++                    maxUp = Math.max(maxUp, STEP); // stepped up while landing
++                }
++                maxUp = Math.max(maxUp, slimeUp);
++            }
++
++            if (dy > maxUp + EPS_V) {
++                this.flag(2, "fly", "rose %.3f, at most %.3f (ground %b, last %.3f, ticks %d)", dy, maxUp, this.groundStart, this.lastDy, ticks);
++                result = 2;
++            }
++        }
++
++        if (result != 0 && enforce) {
++            return result;
++        }
++
++        // the vertical speed of the last tick, for the next packet's gravity bound: exact for a one-tick
++        // packet, an upper bound otherwise
++        double lastVy;
++        if (landed && dy > 0.0D) {
++            lastVy = Math.max(dy, jump); // came down, then jumped: the jump's speed, not the net
++        } else if (ticks == 1 || fromGround && dy > 0.0D) {
++            lastVy = dy; // one tick, or a rise from the ground that is all the last tick's
++        } else if (groundNow) {
++            lastVy = 0.0D;
++        } else {
++            double vy = Math.abs(this.lastDy) < 0.005D ? 0.0D : this.lastDy;
++
++            for (int i = 0; i < ticks; ++i) {
++                vy = (vy - GRAVITY) * DRAG;
++            }
++            lastVy = Math.max(vy, dy / ticks);
++        }
++
++        if (granted) {
++            this.grantH *= 0.91D;
++            this.grantV = Math.max(this.grantV - GRAVITY, 0.0D);
++        } else {
++            this.grantH = this.grantV = 0.0D;
++        }
++
++        // several ticks: the net distance can be less than the last tick's when the direction turned, so
++        // keep the bound
++        this.seed(ticks == 1 ? h : v, lastVy, groundNow, maybeGround, certain, slipNow);
++        return result;
++    }
++
++    private void seedFresh(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
++        this.freshTicks = 0;
++        this.seed(h, dy, groundNow, maybeGround, certain, slipNow);
++    }
++
++    private void seed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
++        if (this.known && this.freshTicks < 3) {
++            ++this.freshTicks;
++        }
++        this.known = true;
++        this.lastH = h;
++        this.lastDy = dy;
++        // the last tick's motion was multiplied by the friction at its start (the air's, the larger,
++        // when the client may have been in the air), the next tick accelerates by the ground at its own
++        // start (the ground's, the larger, when it may have been on the ground)
++        this.motionFriction = this.groundStart && this.groundCertain && this.accelFriction > 0.0D ? this.accelFriction : 0.91D;
++        this.accelFriction = maybeGround ? slipNow * 0.91D : 0.91D;
++        this.groundStart = maybeGround;
++        this.groundCertain = certain;
++        this.groundSeen = groundNow;
++    }
++
++    /** How far the client could have fallen in these ticks, from its last vertical speed. */
++    double fallDepth(int ticks) {
++        double vy = Math.abs(this.lastDy) < 0.005D ? 0.0D : this.lastDy;
++        double depth = 0.0D;
++
++        for (int i = 0; i < ticks; ++i) {
++            vy = (vy - GRAVITY) * DRAG;
++            depth -= vy;
++        }
++        return Math.max(depth, 0.0D) + 0.001D;
++    }
++
++    // for AthenaGuardMovementTest, which drives evaluate() from a model of the client
++    boolean athenaKnown() { return this.known; }
++    void athenaSeed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) { this.seedFresh(h, dy, groundNow, maybeGround, certain, slipNow); }
++    void athenaTestEffects(int speedAmp, int jumpAmp) { this.speedAmp = speedAmp; this.jumpAmp = jumpAmp; }
++
++    private void refreshEffects() {
++        MobEffect speed = this.player.getEffect(MobEffectList.FASTER_MOVEMENT);
++        MobEffect jumpBoost = this.player.getEffect(MobEffectList.JUMP);
++        long tick = MinecraftServer.currentTick;
++        int s = speed != null ? speed.getAmplifier() : -1;
++        int j = jumpBoost != null ? jumpBoost.getAmplifier() : -1;
++
++        if (s >= this.speedAmp && j >= this.jumpAmp) {
++            this.speedAmp = s;
++            this.jumpAmp = j;
++            this.effectsGraceUntil = tick + 20 + this.player.ping / 50;
++        } else if (tick > this.effectsGraceUntil) {
++            this.speedAmp = s;
++            this.jumpAmp = j;
++        }
++    }
++
++    // ------------------------------------------------------------------ the world, as the server sees it
++    /** Whether something under these feet holds the player up. */
++    // The client's box is clipped exactly to the faces it touches, but rebuilt here from its centre
++    // (x +- 0.3) it can overlap a wall it only touches by a rounding error - enough to count the wall
++    // as ground under a player sliding down it. The probes are narrowed by far more than that error.
++    private static final double HALF = 0.3D - 1.0E-7D;
++
++    static boolean groundAt(World world, Entity player, double x, double y, double z) {
++        return world.hasCubes(player, x - HALF, y - 0.001D, z - HALF, x + HALF, y, z + HALF);
++    }
++
++    /** Whether something under the feet at (x, y, z) is within depth below them. */
++    private boolean groundBelow(World world, double x, double y, double z, double depth) {
++        return world.hasCubes(this.player, x - HALF, y - depth, z - HALF, x + HALF, y, z + HALF);
++    }
++
++    /**
++     * Anything the move could have run into sideways - beside the boxes it swept from start to end,
++     * above the lower feet - or over the head within a jump: what a step-up needs to start.
++     */
++    private boolean nearWall(World world, double fromX, double fromY, double fromZ, double x, double y, double z) {
++        return world.hasCubes(this.player, Math.min(fromX, x) - 0.301D, Math.min(fromY, y) + 0.001D, Math.min(fromZ, z) - 0.301D,
++                Math.max(fromX, x) + 0.301D, Math.max(fromY, y) + 2.4D, Math.max(fromZ, z) + 0.301D);
++    }
++
++    private boolean ceilingAt(World world, double x, double y, double z) {
++        return world.hasCubes(this.player, x - HALF, y + 1.8D, z - HALF, x + HALF, y + 1.801D, z + HALF);
++    }
++
++    private static boolean liquidAt(World world, double x, double y, double z) {
++        return world.containsLiquid(x - 0.3D, y - 0.4D, z - 0.3D, x + 0.3D, y + 1.8D, z + 0.3D);
++    }
++
++    private static double slipperiness(World world, double x, double y, double z) {
++        Block block = world.getType(new BlockPosition(MathHelper.floor(x), MathHelper.floor(y) - 1, MathHelper.floor(z))).getBlock();
++
++        return block.frictionFactor;
++    }
++
++    /** A slime block under the feet sends a falling player back up as fast as it came down. */
++    private double slimeBounce(World world, double x, double y, double z) {
++        Block block = world.getType(new BlockPosition(MathHelper.floor(x), MathHelper.floor(y - 0.2D), MathHelper.floor(z))).getBlock();
++
++        return block == Blocks.SLIME ? Math.max(-this.lastDy, 0.0D) + GRAVITY : 0.0D;
++    }
++
++    // ------------------------------------------------------------------ combat
++    void onSwing() {
++        if (this.swings < 8) {
++            ++this.swings;
++        }
++    }
++
++    /**
++     * Whether this attack is one the client could have made. An attack drops when it comes without
++     * the arm swing a client always sends first, when it is the second this tick (a second hit inside
++     * the target's invulnerability does nothing in vanilla anyway), when the target was out of reach
++     * wherever it stood in the time the attacker could have seen it, or when it was well off to the
++     * side of where the attacker was looking.
++     */
++    boolean attackOk(Entity target) {
++        if (!enabled || !combat || this.player.playerInteractManager.isCreative() || this.player.isSpectator()) {
++            return true;
++        }
++
++        int tick = MinecraftServer.currentTick;
++
++        if (this.swings <= 0) {
++            this.flag(3, "noswing", "attacked %s without swinging", target.getName());
++            if (enforce) {
++                return false;
++            }
++        } else {
++            --this.swings;
++        }
++
++        if (this.lastAttackTick == tick) {
++            return !enforce; // no log: harmless and common with fast clicking
++        }
++        this.lastAttackTick = tick;
++
++        double eyeX = this.player.locX;
++        double eyeY = this.player.locY + (double) this.player.getHeadHeight();
++        double eyeZ = this.player.locZ;
++        // the attack was made a tick before the move that follows it, so the eye may be off by that move
++        double slack = Math.min(this.lastH, 1.0D) + 0.03D;
++        double reach = maxReach + 0.1D + slack;
++        int lookback = Math.min(20, 4 + (this.player.ping + 49) / 50);
++        double best = Double.MAX_VALUE;
++        double bestMinX = 0, bestMinY = 0, bestMinZ = 0, bestMaxX = 0, bestMaxY = 0, bestMaxZ = 0;
++
++        for (int back = 0; back <= lookback; ++back) {
++            double[] box = target instanceof EntityPlayer ? ((EntityPlayer) target).athenaBoxAt(tick - back) : null;
++
++            if (box == null) {
++                if (back > 0) {
++                    break;
++                }
++                box = new double[] { target.boundingBoxMinX, target.boundingBoxMinY, target.boundingBoxMinZ, target.boundingBoxMaxX, target.boundingBoxMaxY, target.boundingBoxMaxZ };
++            }
++
++            double d = distanceToBox(eyeX, eyeY, eyeZ, box[0] - 0.1D, box[1] - 0.1D, box[2] - 0.1D, box[3] + 0.1D, box[4] + 0.1D, box[5] + 0.1D);
++
++            if (d < best) {
++                best = d;
++                bestMinX = box[0]; bestMinY = box[1]; bestMinZ = box[2]; bestMaxX = box[3]; bestMaxY = box[4]; bestMaxZ = box[5];
++            }
++        }
++
++        if (best > reach) {
++            this.flag(4, "reach", "hit %s at %.2f, at most %.2f (ping %d)", target.getName(), best, reach, this.player.ping);
++            if (enforce) {
++                return false;
++            }
++        }
++
++        // direction: the angle from the line of sight to the nearest target position, less the angle
++        // the box itself covers, must not be large. Generous: it only has to catch a hit on something
++        // beside or behind the attacker.
++        double cx = (bestMinX + bestMaxX) / 2.0D - eyeX;
++        double cy = (bestMinY + bestMaxY) / 2.0D - eyeY;
++        double cz = (bestMinZ + bestMaxZ) / 2.0D - eyeZ;
++        double len = Math.sqrt(cx * cx + cy * cy + cz * cz);
++
++        if (len > 0.5D) {
++            float yaw = this.player.yaw * 0.017453292F;
++            float pitch = this.player.pitch * 0.017453292F;
++            double lx = -Math.sin(yaw) * Math.cos(pitch);
++            double ly = -Math.sin(pitch);
++            double lz = Math.cos(yaw) * Math.cos(pitch);
++            double cos = (lx * cx + ly * cy + lz * cz) / len;
++            double angle = Math.toDegrees(Math.acos(Math.max(-1.0D, Math.min(1.0D, cos))));
++            double halfDiag = Math.sqrt((bestMaxX - bestMinX) * (bestMaxX - bestMinX) + (bestMaxY - bestMinY) * (bestMaxY - bestMinY) + (bestMaxZ - bestMinZ) * (bestMaxZ - bestMinZ)) / 2.0D + 0.1D;
++            double cover = Math.toDegrees(Math.atan(halfDiag / len));
++
++            if (angle - cover > 60.0D) {
++                this.flag(5, "aim", "hit %s %.0f degrees off the line of sight", target.getName(), angle - cover);
++                if (enforce) {
++                    return false;
++                }
++            }
++        }
++
++        return true;
++    }
++
++    private static double distanceToBox(double x, double y, double z, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        double dx = x < minX ? minX - x : (x > maxX ? x - maxX : 0.0D);
++        double dy = y < minY ? minY - y : (y > maxY ? y - maxY : 0.0D);
++        double dz = z < minZ ? minZ - z : (z > maxZ ? z - maxZ : 0.0D);
++
++        return Math.sqrt(dx * dx + dy * dy + dz * dz);
++    }
++
++    // ------------------------------------------------------------------ reporting
++    private void flag(int check, String name, String format, Object... args) {
++        long now = System.currentTimeMillis();
++
++        if (log && now - this.lastLog[check] >= 2000L) {
++            this.lastLog[check] = now;
++            LOGGER.info("{} {} [{}]: {}", this.player != null ? this.player.getName() : "-", name, enforce ? "blocked" : "detected", String.format(java.util.Locale.ROOT, format, args));
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 94aa7d28becc13a909ff7e408f22e6bee0b8c1c5..02f5f64304dca5eb0fbe89b1e3c4b1cc9b2e431a 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -257,7 +257,41 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         this.playerConnection.sendPacket(new PacketPlayOutCombatEvent(this.getCombatTracker(), PacketPlayOutCombatEvent.EnumCombatEventType.END_COMBAT));
+     }
+ 
++    // Athena start - where this player's box was on each of the last 20 ticks, for AthenaGuard's
++    // reach check: an attacker hits the target where it saw it, which is where the server had it
++    // up to the attacker's ping and the client's interpolation ago.
++    private final double[] athenaBoxes = new double[20 * 6];
++    private final int[] athenaBoxTicks = new int[20];
++
++    { java.util.Arrays.fill(this.athenaBoxTicks, Integer.MIN_VALUE); }
++
++    private void athenaRecordBox() {
++        int tick = MinecraftServer.currentTick;
++        int slot = Math.floorMod(tick, 20);
++        int i = slot * 6;
++
++        this.athenaBoxTicks[slot] = tick;
++        this.athenaBoxes[i] = this.boundingBoxMinX;
++        this.athenaBoxes[i + 1] = this.boundingBoxMinY;
++        this.athenaBoxes[i + 2] = this.boundingBoxMinZ;
++        this.athenaBoxes[i + 3] = this.boundingBoxMaxX;
++        this.athenaBoxes[i + 4] = this.boundingBoxMaxY;
++        this.athenaBoxes[i + 5] = this.boundingBoxMaxZ;
++    }
++
++    /** The box as of the end of that tick, or null when it is not in the last 20. */
++    double[] athenaBoxAt(int tick) {
++        int slot = Math.floorMod(tick, 20);
++
++        if (this.athenaBoxTicks[slot] != tick) {
++            return null;
++        }
++        return java.util.Arrays.copyOfRange(this.athenaBoxes, slot * 6, slot * 6 + 6);
++    }
++    // Athena end
++
+     public void onUpdate() {
++        this.athenaRecordBox(); // Athena
+         // CraftBukkit start
+         if (this.joining) {
+             this.joining = false;
+diff --git a/src/main/java/net/minecraft/server/PacketPlayInFlying.java b/src/main/java/net/minecraft/server/PacketPlayInFlying.java
+index b42cda32eaf423ec47b638f2de7987e9d43f13d5..edfd2c219db812eae32309d6004153fb7e5b5891 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayInFlying.java
++++ b/src/main/java/net/minecraft/server/PacketPlayInFlying.java
+@@ -13,6 +13,7 @@ public class PacketPlayInFlying implements Packet<PacketListenerPlayIn> {
+     protected boolean onGround;
+     protected boolean hasPos;
+     protected boolean hasLook;
++    public long athenaReceivedNanos; // Athena - when it arrived, for AthenaGuard's timer check
+ 
+     public PacketPlayInFlying() {}
+ 
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutEntityVelocity.java b/src/main/java/net/minecraft/server/PacketPlayOutEntityVelocity.java
+index f2f2685ba08fe24e165e66e7c0c63abd05d2ae16..b545d190133a4afefbc53c50a316526af1a2c4bc 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutEntityVelocity.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutEntityVelocity.java
+@@ -68,4 +68,11 @@ public class PacketPlayOutEntityVelocity implements Packet<PacketListenerPlayOut
+     public void processPacket(PacketListenerPlayOut packetlistenerplayout) {
+         packetlistenerplayout.handleEntityVelocity(this);
+     }
++
++    // Athena start - for AthenaGuard
++    public int athenaEntityId() { return this.entityID; }
++    public double athenaMotionX() { return this.motionX / 8000.0D; }
++    public double athenaMotionY() { return this.motionY / 8000.0D; }
++    public double athenaMotionZ() { return this.motionZ / 8000.0D; }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutExplosion.java b/src/main/java/net/minecraft/server/PacketPlayOutExplosion.java
+index 1d85b4ac7bd26c567126870ab90fb649e40108e0..bcd492662b54defedcb7459aa26b45028c7c5b84 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutExplosion.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutExplosion.java
+@@ -87,4 +87,10 @@ public class PacketPlayOutExplosion implements Packet<PacketListenerPlayOut> {
+     public void processPacket(PacketListenerPlayOut packetlistenerplayout) {
+         packetlistenerplayout.handleExplosion(this);
+     }
++
++    // Athena start - the push given to the player it is sent to, for AthenaGuard
++    public double athenaPushX() { return this.f; }
++    public double athenaPushY() { return this.g; }
++    public double athenaPushZ() { return this.h; }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 21431944c25b6990244e5d27a278f0e940191a1a..b6db8352e574b65ad06e00041facff6d3820462e 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -100,6 +100,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     private boolean processedDisconnect; // CraftBukkit - added
+ 
+     private final boolean legacy17; // Athena - a 1.7.10 client, translated by AthenaLegacy17
++    final AthenaGuard guard; // Athena - server-authoritative movement and combat checks
+ 
+     public PlayerConnection(MinecraftServer minecraftserver, NetworkManager networkmanager, EntityPlayer entityplayer) {
+         this.minecraftServer = minecraftserver;
+@@ -108,6 +109,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         this.player = entityplayer;
+         entityplayer.playerConnection = this;
+         this.legacy17 = AthenaLegacy17.isLegacy(networkmanager); // Athena
++        this.guard = new AthenaGuard(entityplayer); // Athena
+ 
+         // CraftBukkit start - add fields and methods
+         this.server = minecraftserver.server;
+@@ -221,10 +223,19 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processPlayer(PacketPlayInFlying packetplayinflying) {
++        if (packetplayinflying.athenaReceivedNanos == 0L) AthenaGuard.stamp(packetplayinflying); // Athena - the first call is on the Netty thread, as it arrives
+         if (PlayerConnectionUtils.postToMainThread(packetplayinflying, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.b(packetplayinflying)) {
+             this.disconnect("Invalid move packet received");
+         } else {
++            // Athena start - a client running its clock fast sends more ticks than time allows
++            if (!this.guard.timerOk(packetplayinflying)) {
++                if (this.checkMovement) {
++                    this.setPlayerLocation(this.o, this.p, this.q, this.player.yaw, this.player.pitch);
++                }
++                return;
++            }
++            // Athena end
+             WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+ 
+             this.h = true;
+@@ -427,10 +438,19 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return;
+                     }
+ 
++                    // Athena start - what the client could have done since the last accepted move
++                    boolean athenaGroundBefore = this.guard.groundStart();
++                    if (!this.guard.moveOk(worldserver, packetplayinflying.isMoving(), this.o, this.p, this.q, d7, d8, d9)) {
++                        this.setPlayerLocation(this.o, this.p, this.q, f2, f3);
++                        return;
++                    }
++                    boolean athenaGround = this.guard.groundFor(packetplayinflying.isOnGround()); // the ground the server sees, when enforcing
++                    // Athena end
++
+                     float f4 = 0.0625F;
+                     boolean flag =! worldserver.hasCubes(this.player, Math.min(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.min(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.min(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4), Math.max(this.player.boundingBoxMinX + (double) f4, this.player.boundingBoxMaxX - (double) f4), Math.max(this.player.boundingBoxMinY + (double) f4, this.player.boundingBoxMaxY - (double) f4), Math.max(this.player.boundingBoxMinZ + (double) f4, this.player.boundingBoxMaxZ - (double) f4));
+ 
+-                    if (this.player.onGround && !packetplayinflying.isOnGround() && d12 > 0.0D) {
++                    if ((AthenaGuard.authoritative() ? athenaGroundBefore && !athenaGround : this.player.onGround && !packetplayinflying.isOnGround()) && d12 > 0.0D) { // Athena - the server's ground
+                         this.player.jump();
+                     }
+ 
+@@ -446,7 +466,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     } else
+                     // Athena end
+                     this.player.move(d11, d12, d13);
+-                    this.player.onGround = packetplayinflying.isOnGround();
++                    this.player.onGround = athenaGround; // Athena - the server's ground (the client's when not enforcing)
+                     double d16 = d12;
+ 
+                     d11 = d7 - this.player.locX;
+@@ -498,9 +518,9 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         this.floatingTickCount = 0;
+                     }
+ 
+-                    this.player.onGround = packetplayinflying.isOnGround();
++                    this.player.onGround = athenaGround; // Athena - the server's ground (the client's when not enforcing)
+                     this.minecraftServer.getPlayerList().serverUpdateMountedMovingPlayer(this.player);
+-                    this.player.handleFalling(this.player.locY - d10, packetplayinflying.isOnGround());
++                    this.player.handleFalling(this.player.locY - d10, athenaGround); // Athena - fall damage lands where the server sees ground
+                 } else if (this.networkTickCount - this.f > 20) {
+                     this.setPlayerLocation(this.o, this.p, this.q, this.player.yaw, this.player.pitch);
+                 }
+@@ -582,6 +602,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         this.justTeleported = true;
+         // CraftBukkit end
+         this.checkMovement = false;
++        this.guard.reset(); // Athena - a position the server chose, not one to check
+         this.o = d0;
+         this.p = d1;
+         this.q = d2;
+@@ -959,6 +980,19 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     // Athena end
+ 
+     public void sendPacket(final Packet packet) {
++        // Athena start - knockback the server sends this player may show up in its next moves
++        if (packet instanceof PacketPlayOutEntityVelocity) {
++            PacketPlayOutEntityVelocity velocity = (PacketPlayOutEntityVelocity) packet;
++
++            if (velocity.athenaEntityId() == this.player.getId()) {
++                this.guard.onVelocitySent(velocity.athenaMotionX(), velocity.athenaMotionY(), velocity.athenaMotionZ());
++            }
++        } else if (packet instanceof PacketPlayOutExplosion) {
++            PacketPlayOutExplosion explosion = (PacketPlayOutExplosion) packet;
++
++            this.guard.onVelocitySent(explosion.athenaPushX(), explosion.athenaPushY(), explosion.athenaPushZ());
++        }
++        // Athena end
+         if (packet instanceof PacketPlayOutChat) {
+             PacketPlayOutChat packetplayoutchat = (PacketPlayOutChat) packet;
+             EntityHuman.EnumChatVisibility entityhuman_enumchatvisibility = this.player.getChatFlags();
+@@ -1278,6 +1312,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     public void handleAnimation(PacketPlayInArmAnimation packetplayinarmanimation) {
+         if (this.player.dead) return; // CraftBukkit
+         if (PlayerConnectionUtils.postToMainThread(packetplayinarmanimation, this, this.player.getServerForPlayer())) return; // Athena - no exception
++        this.guard.onSwing(); // Athena
+         this.player.resetIdleTimer();
+         // CraftBukkit start - Raytrace to look for 'rogue armswings'
+         float f1 = this.player.pitch;
+@@ -1458,6 +1493,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return;
+                     }
+ 
++                    if (!this.guard.attackOk(entity)) return; // Athena - a hit the client could not have made
+                     this.player.attack(entity);
+ 
+                     // CraftBukkit start
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1db6cba5fce5b306d638d4e047947c2586177075
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -0,0 +1,364 @@
++package net.minecraft.server;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++/**
++ * AthenaGuard's movement bounds against a model of the 1.8 client: EntityLivingBase.onLivingUpdate,
++ * moveEntityWithHeading, moveFlying and jump, and Entity.moveEntity with its two-way step-up, written
++ * out from the client's code, on a small world of boxes. A client moved this way is what every
++ * honest player is, so the guard must never flag it; a client moved any faster or higher must be.
++ */
++public class AthenaGuardMovementTest {
++
++    // the world: boxes, and where the ice is
++    private final List<double[]> boxes = new ArrayList<double[]>();
++
++    private boolean savedEnforce;
++
++    @Before
++    public void world() {
++        this.savedEnforce = AthenaGuard.enforce;
++        AthenaGuard.enforce = true;
++        AthenaGuard.movement = true;
++        AthenaGuard.enabled = true;
++        this.boxes.add(new double[] { -1000, -1, -1000, 1000, 0, 1000 });          // floor
++        for (int x = 5; x < 15; ++x) {                                             // a staggered edge of slabs
++            for (int z = -20 + (x - 5); z < 20; ++z) {
++                this.boxes.add(new double[] { x, 0, z, x + 1, 0.5, z + 1 });
++            }
++        }
++        this.boxes.add(new double[] { 20, 2.0, -1000, 30, 3.0, 1000 });            // a ceiling two blocks up
++        this.boxes.add(new double[] { 40, 0, -1000, 41, 1.0, 1000 });              // a wall one block high
++        this.boxes.add(new double[] { 50, 0, -1000, 52, 1.5, 1000 });              // a fence-high ledge
++        this.boxes.add(new double[] { 60, 0, -1000, 61, 3.0, 1000 });              // a wall to jump into
++        this.boxes.add(new double[] { 70, 0, -1000, 80, 4.0, 1000 });              // a platform to fall from
++    }
++
++    @After
++    public void restore() {
++        AthenaGuard.enforce = this.savedEnforce;
++    }
++
++    private boolean ice(double x) {
++        return x >= -40 && x < -10;
++    }
++
++    private double slipperiness(double x, double minY) {
++        return ice(x) ? 0.98D : 0.6D;
++    }
++
++    // ------------------------------------------------------------------ the client
++    private final class Client {
++        double minX, minY, minZ, maxX, maxY, maxZ;
++        double motX, motY, motZ;
++        boolean onGround = true;
++        int jumpTicks;
++        float yaw;
++        double lastX, lastY, lastZ;
++        int positionTicks;
++        int speedAmp = -1;
++
++        Client(double x, double y, double z) {
++            this.set(x, y, z);
++            this.lastX = x; this.lastY = y; this.lastZ = z;
++        }
++
++        void set(double x, double y, double z) {
++            this.minX = x - 0.3; this.minY = y; this.minZ = z - 0.3;
++            this.maxX = x + 0.3; this.maxY = y + 1.8; this.maxZ = z + 0.3;
++        }
++
++        double x() { return (this.minX + this.maxX) / 2; }
++        double y() { return this.minY; }
++        double z() { return (this.minZ + this.maxZ) / 2; }
++
++        /** One client tick; returns whether a position packet goes out this tick. */
++        boolean tick(float forward, float strafe, boolean jumping, boolean sprinting, double cheatSpeed) {
++            if (this.jumpTicks > 0) --this.jumpTicks;
++            if (Math.abs(this.motX) < 0.005D) this.motX = 0;
++            if (Math.abs(this.motY) < 0.005D) this.motY = 0;
++            if (Math.abs(this.motZ) < 0.005D) this.motZ = 0;
++            if (jumping) {
++                if (this.onGround && this.jumpTicks == 0) {
++                    this.motY = 0.41999998688697815D;
++                    if (sprinting) {
++                        float f = this.yaw * 0.017453292F;
++                        this.motX -= MathHelper.sin(f) * 0.2F;
++                        this.motZ += MathHelper.cos(f) * 0.2F;
++                    }
++                    this.jumpTicks = 10;
++                }
++            } else {
++                this.jumpTicks = 0;
++            }
++            strafe *= 0.98F;
++            forward *= 0.98F;
++
++            double speed = 0.10000000149011612D * (sprinting ? 1.3D : 1.0D) * (1.0D + 0.2D * (this.speedAmp + 1));
++            float f4 = 0.91F;
++            if (this.onGround) f4 = (float) slipperiness(this.x(), this.minY) * 0.91F;
++            float f = 0.16277136F / (f4 * f4 * f4);
++            float f5 = this.onGround ? (float) speed * f : (sprinting ? 0.026F : 0.02F);
++            this.moveFlying(strafe, forward, f5);
++            f4 = 0.91F;
++            if (this.onGround) f4 = (float) slipperiness(this.x(), this.minY) * 0.91F;
++
++            this.moveEntity(this.motX * cheatSpeed, this.motY, this.motZ * cheatSpeed);
++            this.motY -= 0.08D;
++            this.motY *= 0.9800000190734863D;
++            this.motX *= f4;
++            this.motZ *= f4;
++
++            double dx = this.x() - this.lastX, dy = this.y() - this.lastY, dz = this.z() - this.lastZ;
++            ++this.positionTicks;
++            if (dx * dx + dy * dy + dz * dz > 9.0E-4D || this.positionTicks >= 20) {
++                this.lastX = this.x(); this.lastY = this.y(); this.lastZ = this.z();
++                this.positionTicks = 0;
++                return true;
++            }
++            return false;
++        }
++
++        void moveFlying(float strafe, float forward, float friction) {
++            float f = strafe * strafe + forward * forward;
++            if (f >= 1.0E-4F) {
++                f = MathHelper.sqrt(f);
++                if (f < 1.0F) f = 1.0F;
++                f = friction / f;
++                strafe *= f;
++                forward *= f;
++                float f1 = MathHelper.sin(this.yaw * 3.1415927F / 180.0F);
++                float f2 = MathHelper.cos(this.yaw * 3.1415927F / 180.0F);
++                this.motX += strafe * f2 - forward * f1;
++                this.motZ += forward * f2 + strafe * f1;
++            }
++        }
++
++        List<double[]> colliding(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++            List<double[]> out = new ArrayList<double[]>();
++            for (double[] b : boxes) {
++                if (b[3] > minX && b[0] < maxX && b[4] > minY && b[1] < maxY && b[5] > minZ && b[2] < maxZ) out.add(b);
++            }
++            return out;
++        }
++
++        void moveEntity(double d0, double d1, double d2) {
++            double d6 = d0, d7 = d1, d8 = d2;
++            List<double[]> list = this.colliding(this.minX + Math.min(d0, 0), this.minY + Math.min(d1, 0), this.minZ + Math.min(d2, 0),
++                    this.maxX + Math.max(d0, 0), this.maxY + Math.max(d1, 0), this.maxZ + Math.max(d2, 0));
++            double[] pre = { this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ };
++            for (double[] b : list) d1 = AxisAlignedBBHelper.calcYOffset(b[0], b[1], b[2], b[3], b[4], b[5], this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ, d1);
++            this.minY += d1; this.maxY += d1;
++            boolean flag1 = this.onGround || d7 != d1 && d7 < 0.0D;
++            for (double[] b : list) d0 = AxisAlignedBBHelper.calcXOffset(b[0], b[1], b[2], b[3], b[4], b[5], this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ, d0);
++            this.minX += d0; this.maxX += d0;
++            for (double[] b : list) d2 = AxisAlignedBBHelper.calcZOffset(b[0], b[1], b[2], b[3], b[4], b[5], this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ, d2);
++            this.minZ += d2; this.maxZ += d2;
++
++            if (flag1 && (d6 != d0 || d8 != d2)) {
++                double d10 = d0, d11 = d1, d12 = d2;
++                double[] post = { this.minX, this.minY, this.minZ, this.maxX, this.maxY, this.maxZ };
++                double step = 0.6000000238418579D;
++                List<double[]> l2 = this.colliding(pre[0] + Math.min(d6, 0), pre[1], pre[2] + Math.min(d8, 0), pre[3] + Math.max(d6, 0), pre[4] + step, pre[5] + Math.max(d8, 0));
++                double[] a = pre.clone();
++                double sMinX = a[0] + Math.min(d6, 0), sMaxX = a[3] + Math.max(d6, 0), sMinZ = a[2] + Math.min(d8, 0), sMaxZ = a[5] + Math.max(d8, 0);
++                double d13 = step;
++                for (double[] b : l2) d13 = AxisAlignedBBHelper.calcYOffset(b[0], b[1], b[2], b[3], b[4], b[5], sMinX, a[1], sMinZ, sMaxX, a[4], sMaxZ, d13);
++                a[1] += d13; a[4] += d13;
++                double d14 = d6;
++                for (double[] b : l2) d14 = AxisAlignedBBHelper.calcXOffset(b[0], b[1], b[2], b[3], b[4], b[5], a[0], a[1], a[2], a[3], a[4], a[5], d14);
++                a[0] += d14; a[3] += d14;
++                double d15 = d8;
++                for (double[] b : l2) d15 = AxisAlignedBBHelper.calcZOffset(b[0], b[1], b[2], b[3], b[4], b[5], a[0], a[1], a[2], a[3], a[4], a[5], d15);
++                a[2] += d15; a[5] += d15;
++                double[] c = pre.clone();
++                double d16 = step;
++                for (double[] b : l2) d16 = AxisAlignedBBHelper.calcYOffset(b[0], b[1], b[2], b[3], b[4], b[5], c[0], c[1], c[2], c[3], c[4], c[5], d16);
++                c[1] += d16; c[4] += d16;
++                double d17 = d6;
++                for (double[] b : l2) d17 = AxisAlignedBBHelper.calcXOffset(b[0], b[1], b[2], b[3], b[4], b[5], c[0], c[1], c[2], c[3], c[4], c[5], d17);
++                c[0] += d17; c[3] += d17;
++                double d18 = d8;
++                for (double[] b : l2) d18 = AxisAlignedBBHelper.calcZOffset(b[0], b[1], b[2], b[3], b[4], b[5], c[0], c[1], c[2], c[3], c[4], c[5], d18);
++                c[2] += d18; c[5] += d18;
++                double[] chosen;
++                if (d14 * d14 + d15 * d15 > d17 * d17 + d18 * d18) { d0 = d14; d2 = d15; d1 = -d13; chosen = a; }
++                else { d0 = d17; d2 = d18; d1 = -d16; chosen = c; }
++                for (double[] b : l2) d1 = AxisAlignedBBHelper.calcYOffset(b[0], b[1], b[2], b[3], b[4], b[5], chosen[0], chosen[1], chosen[2], chosen[3], chosen[4], chosen[5], d1);
++                chosen[1] += d1; chosen[4] += d1;
++                if (d10 * d10 + d12 * d12 >= d0 * d0 + d2 * d2) { d0 = d10; d1 = d11; d2 = d12; chosen = post; }
++                this.minX = chosen[0]; this.minY = chosen[1]; this.minZ = chosen[2]; this.maxX = chosen[3]; this.maxY = chosen[4]; this.maxZ = chosen[5];
++            }
++
++            this.onGround = d7 != d1 && d7 < 0.0D;
++            if (d6 != d0) this.motX = 0;
++            if (d8 != d2) this.motZ = 0;
++            if (d7 != d1) this.motY = 0;
++        }
++    }
++
++    // ------------------------------------------------------------------ the server's view of the same world
++    private boolean groundAt(double x, double y, double z) {
++        double half = 0.3 - 1.0E-7;
++        return !new Client(0, 0, 0).colliding(x - half, y - 0.001, z - half, x + half, y, z + half).isEmpty();
++    }
++
++    private boolean ceilingAt(double x, double y, double z) {
++        double half = 0.3 - 1.0E-7;
++        return !new Client(0, 0, 0).colliding(x - half, y + 1.8, z - half, x + half, y + 1.801, z + half).isEmpty();
++    }
++
++    private final class Server {
++        final AthenaGuard guard = new AthenaGuard(null);
++        double x, y, z;
++        int skipped;
++        int flagged;
++        String firstFlag;
++
++        Server(double x, double y, double z, int speedAmp) {
++            this.x = x; this.y = y; this.z = z;
++            this.guard.athenaTestEffects(speedAmp, -1);
++            this.receive(x, y, z); // seeds
++        }
++
++        /** A packet with a position; returns the guard's verdict. */
++        int receive(double nx, double ny, double nz) {
++            int ticks = this.skipped + 1;
++            this.skipped = 0;
++            double dx = nx - this.x, dy = ny - this.y, dz = nz - this.z;
++            boolean groundA = groundAt(this.x, ny, this.z), groundB = groundAt(nx, ny, nz);
++            boolean groundNow = groundA || groundB;
++            Client probe = new Client(0, 0, 0);
++            boolean wall = !probe.colliding(Math.min(this.x, nx) - 0.301, Math.min(this.y, ny) + 0.001, Math.min(this.z, nz) - 0.301,
++                    Math.max(this.x, nx) + 0.301, Math.max(this.y, ny) + 2.4, Math.max(this.z, nz) + 0.301).isEmpty();
++            double fall = this.guard.fallDepth(ticks);
++            double half = 0.3 - 1.0E-7;
++            boolean landing = (ticks > 1 || !this.guard.groundStart()) && !probe.colliding(this.x - half, this.y - fall, this.z - half, this.x + half, this.y, this.z + half).isEmpty();
++            boolean maybeGround = groundNow || wall && landing && dy <= 0;
++            boolean certain = groundA == groundB && !wall;
++            double slip = slipperiness(nx, ny);
++            int r;
++            if (!this.guard.athenaKnown()) {
++                this.guard.athenaSeed(Math.sqrt(dx * dx + dz * dz) / ticks, dy / ticks, groundNow, maybeGround, certain, slip);
++                r = 0;
++            } else {
++                boolean ceiling = dy > 0 && this.guard.groundStart() && (ceilingAt(this.x, ny, this.z) || ceilingAt(nx, ny, nz));
++                r = this.guard.evaluate(ticks, Math.sqrt(dx * dx + dz * dz), dy, groundNow, maybeGround, certain, ticks > 1 && landing, slip, false, false, false, ceiling, 0.0);
++            }
++            if (r == 0) {
++                this.x = nx; this.y = ny; this.z = nz;
++            }
++            return r;
++        }
++
++        void noPosition() {
++            ++this.skipped;
++        }
++    }
++
++    // ------------------------------------------------------------------ honest clients
++    @Test
++    public void honestClientsAreNeverFlagged() {
++        Random random = new Random(Long.getLong("athena.guardSeed", 20261012L));
++        int packets = 0;
++
++        for (int run = 0, runs = Integer.getInteger("athena.guardRuns", 400); run < runs; ++run) {
++            double startX = new double[] { 0, 3, 17, -20, 35, 45, 55, 65, 75 }[run % 9];
++            double startY = startX >= 70 && startX < 80 ? 4.0 : 0.0;
++            int speedAmp = run % 3 - 1; // none, Speed I, Speed II
++            Client c = new Client(startX + random.nextDouble(), startY, random.nextDouble() * 10);
++            c.speedAmp = speedAmp;
++            Server s = new Server(c.x(), c.y(), c.z(), speedAmp);
++            c.yaw = random.nextFloat() * 360;
++            boolean sprint = random.nextBoolean();
++            boolean jumpHeld = false;
++            float forward = 1, strafe = 0;
++
++            java.util.ArrayDeque<String> history = new java.util.ArrayDeque<String>();
++            for (int t = 0; t < 400; ++t) {
++                if (random.nextInt(20) == 0) sprint = !sprint;
++                if (random.nextInt(8) == 0) jumpHeld = random.nextInt(3) > 0;
++                if (random.nextInt(15) == 0) strafe = random.nextInt(3) - 1;
++                if (random.nextInt(25) == 0) forward = random.nextInt(4) == 0 ? 0 : 1;
++                if (random.nextInt(4) == 0) c.yaw += (random.nextFloat() - 0.5F) * 60;
++                boolean sprinting = sprint && forward > 0.8F;
++
++                double by = c.y(), bx = c.x(), bz = c.z(); boolean bg = c.onGround;
++                boolean sentNow = c.tick(forward, strafe, jumpHeld, sprinting, 1.0);
++                history.add(String.format(java.util.Locale.ROOT, "t=%d x=%.4f y=%.5f z=%.4f dh=%.4f dy=%.5f groundBefore=%b groundAfter=%b sent=%b jump=%b sprint=%b serverGround=%b",
++                        t, c.x(), c.y(), c.z(), Math.hypot(c.x() - bx, c.z() - bz), c.y() - by, bg, c.onGround, sentNow, jumpHeld, sprinting, s.guard.groundStart()));
++                if (history.size() > 10) history.removeFirst();
++                if (sentNow) {
++                    ++packets;
++                    int r = s.receive(c.x(), c.y(), c.z());
++                    if (r != 0) {
++                        fail(String.join("\n", history) + "\nrun " + run + " tick " + t + ": an honest move was flagged (" + r + ") at "
++                                + c.x() + "," + c.y() + "," + c.z() + " speed " + speedAmp + " sprint " + sprinting + " jump " + jumpHeld);
++                    }
++                } else {
++                    s.noPosition();
++                }
++            }
++        }
++        assertTrue(packets > 100000);
++    }
++
++    // ------------------------------------------------------------------ cheats
++    private int flagsFor(double cheatSpeed, boolean fly, double startX, int ticks) {
++        Random random = new Random(7L);
++        Client c = new Client(startX, 0, 0);
++        Server s = new Server(c.x(), c.y(), c.z(), -1);
++        int flags = 0;
++
++        for (int t = 0; t < ticks; ++t) {
++            boolean sent = c.tick(1, 0, random.nextInt(3) == 0, true, cheatSpeed);
++            if (fly && t > 5) {
++                c.motY = 0.1; // keeps climbing
++            }
++            if (sent) {
++                if (s.receive(c.x(), c.y(), c.z()) != 0) {
++                    ++flags;
++                    // set back, as the server would
++                    c.set(s.x, s.y, s.z);
++                    c.lastX = s.x; c.lastY = s.y; c.lastZ = s.z;
++                }
++            } else {
++                s.noPosition();
++            }
++        }
++        return flags;
++    }
++
++    @Test
++    public void speedIsCaught() {
++        assertTrue(this.flagsFor(1.3, false, -100, 200) > 10);
++    }
++
++    @Test
++    public void flyIsCaught() {
++        assertTrue(this.flagsFor(1.0, true, -100, 200) > 10);
++    }
++
++    @Test
++    public void stepAndMiniHopsAreCaught() {
++        Server s = new Server(0.5, 0, 0.5, -1);
++        // a 1-block step onto nothing
++        assertEquals(2, s.receive(0.6, 1.0, 0.5));
++        Server t = new Server(0.5, 0, 0.5, -1);
++        // the hop a packet criticals cheat makes: up a little from the ground, not a jump
++        assertEquals(2, t.receive(0.5, 0.11, 0.5));
++        Server u = new Server(0.5, 0, 0.5, -1);
++        // a real jump is fine
++        assertEquals(0, u.receive(0.5, 0.41999998688697815, 0.5));
++    }
++}

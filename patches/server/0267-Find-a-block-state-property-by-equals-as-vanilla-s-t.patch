@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 8 Oct 2026 00:34:06 +0900
+Subject: [PATCH] Find a block state property by equals, as vanilla's table did
+
+BlockPiston sets the moving block's facing with BlockPiston.FACING, which equals
+BlockPistonMoving.FACING but is another object. StateIndex.with looked properties up
+by identity, answered null, and a piston pushed by a lever crashed the server tick.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/BlockStateList.java b/src/main/java/net/minecraft/server/BlockStateList.java
+index 9feddae16fac8bd47cf3f3e12fb4449ebcff150e..b90b28281fe1d5de011f0d39f76d14ccc19b2c69 100644
+--- a/src/main/java/net/minecraft/server/BlockStateList.java
++++ b/src/main/java/net/minecraft/server/BlockStateList.java
+@@ -214,21 +214,41 @@ public class BlockStateList {
+ 
+         /** The state like {@code from} but with {@code property} at {@code value}; both already checked valid. */
+         IBlockData with(BlockData from, IBlockState property, Object value) {
++            int i = this.propertyIndex(property);
++
++            if (i < 0) {
++                return null; // not reached: set() checked the property belongs to this block
++            }
++            Object[] values = this.values[i];
++            int target = valueIndex(values, value);
++            int current = from.ordinal / this.strides[i] % values.length;
++
++            if (target == current) {
++                return null; // vanilla's table held no entry for the current value
++            }
++            return this.states[from.ordinal + (target - current) * this.strides[i]];
++        }
++
++        /**
++         * Where a property sits, found as vanilla's table found it: by equals. A property equal to
++         * one of the block's is not always the same object - BlockPiston sets the moving block's
++         * facing with its own FACING, which only equals BlockPistonMoving's - so the identity pass
++         * is only the fast path.
++         */
++        private int propertyIndex(IBlockState property) {
+             IBlockState[] properties = this.properties;
+ 
+             for (int i = 0; i < properties.length; ++i) {
+                 if (properties[i] == property) {
+-                    Object[] values = this.values[i];
+-                    int target = valueIndex(values, value);
+-                    int current = from.ordinal / this.strides[i] % values.length;
+-
+-                    if (target == current) {
+-                        return null; // vanilla's table held no entry for the current value
+-                    }
+-                    return this.states[from.ordinal + (target - current) * this.strides[i]];
++                    return i;
++                }
++            }
++            for (int i = 0; i < properties.length; ++i) {
++                if (properties[i].equals(property)) {
++                    return i;
+                 }
+             }
+-            return null; // not reached: set() checked the property belongs to this block
++            return -1;
+         }
+     }
+     // Athena end
+diff --git a/src/test/java/net/minecraft/server/AthenaStateIndexTest.java b/src/test/java/net/minecraft/server/AthenaStateIndexTest.java
+index a0b4f9092b6b8ba2c884d060199847704d6b8e99..ce57439201c5eb736bd0bb25e73a4b6ee4076023 100644
+--- a/src/test/java/net/minecraft/server/AthenaStateIndexTest.java
++++ b/src/test/java/net/minecraft/server/AthenaStateIndexTest.java
+@@ -49,4 +49,17 @@ public class AthenaStateIndexTest extends AbstractTestingBase {
+         }
+         assertTrue("checked " + checked, checked > 10000);
+     }
++
++    @Test
++    public void aPropertyThatOnlyEqualsTheBlocksOwnStillSetsIt() {
++        // BlockPiston sets the moving block's facing with BlockPiston.FACING, a different object that
++        // equals BlockPistonMoving.FACING; a lookup by identity answered null and crashed the tick
++        org.junit.Assert.assertNotSame(BlockPiston.FACING, BlockPistonMoving.FACING);
++        for (EnumDirection direction : EnumDirection.values()) {
++            IBlockData moving = Blocks.PISTON_EXTENSION.getBlockData().set(BlockPiston.FACING, direction);
++
++            org.junit.Assert.assertNotNull(direction.toString(), moving);
++            org.junit.Assert.assertEquals(direction, moving.get(BlockPistonMoving.FACING));
++        }
++    }
+ }

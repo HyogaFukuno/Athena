@@ -1,0 +1,235 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:13:28 +0900
+Subject: [PATCH] Hand packets to the event loop through one queue per
+ connection
+
+Every packet the server thread sent was a task of its own on the event loop, each with a wake-up
+of the loop (eventfd writes were 1.1% of a 20-player server on the VPS). Packets, flushes and
+closes now go onto a per-connection queue with one drain task posted when it becomes non-empty.
+Order and flush points are exactly as before: a write's listeners run on its flush and some
+change the pipeline (set-compression adds the compressor).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index d69fe183176e13be4b6fbd4871debf3ad9eb4825..c28e26f3d3e61ea08e3acf0e19a96b4bf5b829ef 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -111,9 +111,7 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.channel.flush();
+         } else {
+-            this.channel.eventLoop().execute(() -> {
+-                this.channel.flush();
+-            });
++            this.athenaHandOff(NetworkManager.ATHENA_FLUSH); // Athena - in order with the packets before it
+         }
+     }
+     // PandaSpigot end
+@@ -296,79 +294,130 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         }
+ 
+         if (this.channel.eventLoop().inEventLoop()) {
+-            if (enumprotocol != enumprotocol1) {
+-                this.setConnectionState(enumprotocol);
++            this.athenaWriteInLoop(packet, agenericfuturelistener, flush, enumprotocol, enumprotocol1);
++        } else {
++            // Athena - onto this connection's hand-off queue rather than one event loop task per
++            // packet; see athenaHandOff. The common packet goes in as itself.
++            if (agenericfuturelistener == null && enumprotocol == enumprotocol1) {
++                this.athenaHandOff(packet);
++            } else {
++                this.athenaHandOff(new AthenaPendingWrite(packet, agenericfuturelistener, enumprotocol, enumprotocol1));
+             }
+-
+-            // PandaSpigot start
+-            EntityPlayer player = getPlayer();
+-            if (!isConnected()) {
+-                packet.onPacketDispatchFinish(player, null);
+-                return;
++            if (flush) {
++                this.athenaHandOff(NetworkManager.ATHENA_FLUSH);
+             }
+-            try {
+-            // PandaSpigot end
+-            ChannelFuture channelfuture = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet); // PandaSpigot - Add flush parameter
++        }
+ 
+-            if (agenericfuturelistener != null) {
+-                channelfuture.addListeners(agenericfuturelistener);
+-            }
++    }
+ 
+-            // PandaSpigot start
+-            if (packet.hasFinishListener()) {
+-                channelfuture.addListener((ChannelFutureListener) channelFuture -> packet.onPacketDispatchFinish(player, channelFuture));
+-            }
+-            // PandaSpigot end
++    // Athena start - what the event loop does to write a packet; it was written out twice, once for
++    // a write on the loop and once in the task a write from another thread posted to it
++    private void athenaWriteInLoop(final Packet packet, final GenericFutureListener<? extends Future<? super Void>>[] agenericfuturelistener, boolean flush, EnumProtocol enumprotocol, EnumProtocol enumprotocol1) {
++        if (enumprotocol != enumprotocol1) {
++            this.setConnectionState(enumprotocol);
++        }
+ 
+-            channelfuture.addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+-            // PandaSpigot start
+-            } catch (Exception e) {
+-                logger.error("NetworkException: {}", player, e);
+-                close(new ChatMessage("disconnect.genericReason", "Internal Exception: " + e.getMessage()));
+-                packet.onPacketDispatchFinish(player, null);
+-            }
+-            // PandaSpigot end
+-        } else {
+-            this.channel.eventLoop().execute(new Runnable() {
+-                public void run() {
+-                    if (enumprotocol != enumprotocol1) {
+-                        NetworkManager.this.setConnectionState(enumprotocol);
+-                    }
++        // PandaSpigot start
++        EntityPlayer player = getPlayer();
++        if (!isConnected()) {
++            packet.onPacketDispatchFinish(player, null);
++            return;
++        }
++        try {
++        // PandaSpigot end
++        ChannelFuture channelfuture = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet); // PandaSpigot - Add flush parameter
+ 
+-                    // PandaSpigot start
+-                    EntityPlayer player = getPlayer();
+-                    if (!isConnected()) {
+-                        packet.onPacketDispatchFinish(player, null);
+-                        return;
+-                    }
+-                    try {
+-                    // PandaSpigot end
+-                    ChannelFuture channelfuture = flush ? NetworkManager.this.channel.writeAndFlush(packet) : NetworkManager.this.channel.write(packet); // PandaSpigot - Add flush parameter
++        if (agenericfuturelistener != null) {
++            channelfuture.addListeners(agenericfuturelistener);
++        }
+ 
+-                    if (agenericfuturelistener != null) {
+-                        channelfuture.addListeners(agenericfuturelistener);
+-                    }
++        // PandaSpigot start
++        if (packet.hasFinishListener()) {
++            channelfuture.addListener((ChannelFutureListener) channelFuture -> packet.onPacketDispatchFinish(player, channelFuture));
++        }
++        // PandaSpigot end
+ 
+-                    // PandaSpigot start
+-                    if (packet.hasFinishListener()) {
+-                        channelfuture.addListener((ChannelFutureListener) channelFuture -> packet.onPacketDispatchFinish(player, channelFuture));
+-                    }
+-                    // PandaSpigot end
+-
+-                    channelfuture.addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
+-                    // PandaSpigot start
+-                    } catch (Exception e) {
+-                        logger.error("NetworkException: {}", player, e);
+-                        close(new ChatMessage("disconnect.genericReason", "Internal Exception: " + e.getMessage()));
+-                        packet.onPacketDispatchFinish(player, null);
+-                    }
+-                    // PandaSpigot end
+-                }
+-            });
++        channelfuture.addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
++        // PandaSpigot start
++        } catch (Exception e) {
++            logger.error("NetworkException: {}", player, e);
++            close(new ChatMessage("disconnect.genericReason", "Internal Exception: " + e.getMessage()));
++            packet.onPacketDispatchFinish(player, null);
++        }
++        // PandaSpigot end
++    }
++    // Athena end
++
++    // Athena start - one hand-off queue per connection between the server thread and the event loop.
++    //
++    // Every packet the server thread sent was its own task on the event loop: an object for the
++    // task, an offer onto Netty's shared task queue and a wake-up of the loop (an eventfd write -
++    // 1.1% of a 20-player server's CPU on the VPS, all of it on the server thread). The server
++    // thread now appends to this connection's queue and posts one drain task when the queue goes
++    // from empty to non-empty; the drain writes everything queued, flushing exactly where the
++    // server thread asked for a flush. Nothing waits: the first packet of a batch is posted at
++    // once, as before.
++    //
++    // Order is what it was, flushes included. Flushes and closes from other threads go through the
++    // same queue, so a kick message is still written and flushed before the channel closes behind
++    // it. A drain that finds the queue empty clears the flag and looks once more, so an entry added
++    // in between is never stranded.
++    private static final Object ATHENA_FLUSH = new Object();
++    private final Queue<Object> athenaHandOff = io.netty.util.internal.PlatformDependent.newMpscQueue();
++    private final java.util.concurrent.atomic.AtomicBoolean athenaDrainPosted = new java.util.concurrent.atomic.AtomicBoolean();
++    private final Runnable athenaDrain = this::athenaDrainHandOff;
++
++    private static final class AthenaPendingWrite {
++        final Packet packet;
++        final GenericFutureListener<? extends Future<? super Void>>[] listeners;
++        final EnumProtocol protocol;
++        final EnumProtocol channelProtocol;
++
++        AthenaPendingWrite(Packet packet, GenericFutureListener<? extends Future<? super Void>>[] listeners, EnumProtocol protocol, EnumProtocol channelProtocol) {
++            this.packet = packet;
++            this.listeners = listeners;
++            this.protocol = protocol;
++            this.channelProtocol = channelProtocol;
+         }
++    }
+ 
++    private void athenaHandOff(Object entry) {
++        this.athenaHandOff.offer(entry);
++        if (this.athenaDrainPosted.compareAndSet(false, true)) {
++            this.channel.eventLoop().execute(this.athenaDrain);
++        }
+     }
+ 
++    private void athenaDrainHandOff() {
++        for (;;) {
++            Object entry;
++
++            while ((entry = this.athenaHandOff.poll()) != null) {
++                if (entry == ATHENA_FLUSH) {
++                    // Exactly where it was asked for, not once at the end of the batch: a write's
++                    // listeners run when it is flushed, and some change the pipeline for the packets
++                    // after it - the login's set-compression adds the compressor that way, and a
++                    // packet written before that flush would go out uncompressed.
++                    this.channel.flush();
++                } else if (entry instanceof Packet) {
++                    this.athenaWriteInLoop((Packet) entry, null, false, null, null);
++                } else if (entry instanceof AthenaPendingWrite) {
++                    AthenaPendingWrite write = (AthenaPendingWrite) entry;
++
++                    this.athenaWriteInLoop(write.packet, write.listeners, false, write.protocol, write.channelProtocol);
++                } else {
++                    ((Runnable) entry).run(); // a close
++                }
++            }
++
++            this.athenaDrainPosted.set(false);
++            if (this.athenaHandOff.isEmpty() || !this.athenaDrainPosted.compareAndSet(false, true)) {
++                break;
++            }
++        }
++    }
++    // Athena end
++
+     // PandaSpigot start - rewrite this to be safer if ran off main thread
+     private boolean sendPacketQueue() { return this.m(); } // OBFHELPER // void -> boolean
+     private boolean m() { // void -> boolean
+@@ -454,7 +503,12 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         clearPacketQueue(); // PandaSpigot
+         // Spigot End
+         if (this.channel.isOpen()) {
+-            this.channel.close(); // We can't wait as this may be called from an event loop.
++            // Athena - behind whatever this thread has handed off; see athenaHandOff
++            if (this.channel.eventLoop().inEventLoop()) {
++                this.channel.close(); // We can't wait as this may be called from an event loop.
++            } else {
++                this.athenaHandOff((Runnable) this.channel::close);
++            }
+             this.terminationReason = ichatbasecomponent;
+         }
+ 

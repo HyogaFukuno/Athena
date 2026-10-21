@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 14 Oct 2026 00:32:21 +0900
+Subject: [PATCH] Clear CraftingManager.lastCraftView once the craft it is for
+ is done
+
+sg1 ran out of its 144 MB heap twice loading the eighth match world of a
+session. The heap dump at the second showed three WorldServers: the lobby,
+the one being loaded, and a match world unloaded minutes before, held by
+
+  CraftingManager.instance (static)
+    .lastCraftView -> CraftInventoryView .container
+    -> ContainerWorkbench .worldObj -> WorldServer
+
+CraftBukkit sets the static lastCraftView before every craft, for the
+PrepareItemCraftEvent the craft fires, and never clears it: the last crafting
+table used keeps its world, chunks and all, alive until someone crafts again.
+The containers now clear it as soon as the craft returns.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ContainerPlayer.java b/src/main/java/net/minecraft/server/ContainerPlayer.java
+index 5793a0eb2aaccf2ccfddf2f8da3ed487d44c529d..77f48340138c43b60fe49c2f3420de6c3af6d7ac 100644
+--- a/src/main/java/net/minecraft/server/ContainerPlayer.java
++++ b/src/main/java/net/minecraft/server/ContainerPlayer.java
+@@ -65,7 +65,15 @@ public class ContainerPlayer extends Container {
+         // this.resultInventory.setItem(0, CraftingManager.getInstance().craft(this.craftInventory, this.h.world));
+         // CraftBukkit start (Note: the following line would cause an error if called during construction)
+         CraftingManager.getInstance().lastCraftView = getBukkitView();
+-        ItemStack craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.thePlayer.world);
++        ItemStack craftResult;
++        try {
++            craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.thePlayer.world);
++        } finally {
++            // Athena - the view is only for the PrepareItemCraftEvent this call fires. Left in the static
++            // CraftingManager it keeps the container, and through it the world of the last crafting
++            // table used: an unloaded match world, chunks and all, until someone crafts again.
++            CraftingManager.getInstance().lastCraftView = null;
++        }
+         this.resultInventory.setItem(0, craftResult);
+         if (super.listeners.size() < 1) {
+             return;
+diff --git a/src/main/java/net/minecraft/server/ContainerWorkbench.java b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+index 05dc6ea4f1a99ef180c8f049bde693392f550027..c96f0ad936b75e884a7a4d446fc391c33204902c 100644
+--- a/src/main/java/net/minecraft/server/ContainerWorkbench.java
++++ b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+@@ -54,7 +54,15 @@ public class ContainerWorkbench extends Container {
+         // this.resultInventory.setItem(0, CraftingManager.getInstance().craft(this.craftInventory, this.g));
+         // CraftBukkit start
+         CraftingManager.getInstance().lastCraftView = getBukkitView();
+-        ItemStack craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.worldObj);
++        ItemStack craftResult;
++        try {
++            craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.worldObj);
++        } finally {
++            // Athena - the view is only for the PrepareItemCraftEvent this call fires. Left in the static
++            // CraftingManager it keeps the container, and through it the world of the last crafting
++            // table used: an unloaded match world, chunks and all, until someone crafts again.
++            CraftingManager.getInstance().lastCraftView = null;
++        }
+         this.resultInventory.setItem(0, craftResult);
+         if (super.listeners.size() < 1) {
+             return;

@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Unload a client's chunk with an empty packet; chunk events
+ only when heard
+
+The unload packet carried the chunk's 256 biome bytes, which a client never reads once it sees
+the empty mask: 270 bytes, so every unload was extracted on the server thread and deflated on a
+Netty thread. It has no data now - 13 bytes, uncompressed. A 1.7 client inflates before it looks
+at the mask, so it gets 256 zero bytes deflated once. The chunk send loop looks a chunk up once,
+the player chunk load and unload events are built only when something listens, and the 1.7
+encoder keeps its deflate buffer per thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+index 6919b4d04532d3296e7d5ae17297741f478fda09..249d16dd335c27522de9547b0e90868a52265856 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+@@ -1117,6 +1117,21 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+         int chunkZ = in.readInt();
+         boolean groundUp = in.readBoolean();
+         int mask = in.readUnsignedShort();
++
++        if (groundUp && mask == 0) {
++            // an unload: 1.7 inflates the data before it looks at the mask, so it needs a stream that
++            // inflates to the 256 biome bytes it expects, and then never reads them
++            PacketDataSerializer p = packet(ctx, id, out);
++
++            p.writeInt(chunkX);
++            p.writeInt(chunkZ);
++            p.writeBoolean(true);
++            p.writeShort(0);
++            p.writeShort(0);
++            p.writeInt(UNLOAD_BIOMES.length);
++            p.writeBytes(UNLOAD_BIOMES);
++            return;
++        }
+         int size = in.readVarIntFromBuffer();
+         int sections = Integer.bitCount(mask);
+         boolean sky = size == sections * (8192 + 2048 + 2048) + (groundUp ? 256 : 0);
+@@ -1225,9 +1240,32 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+         p.setInt(lengthAt, p.writerIndex() - start);
+     }
+ 
++    /** 256 zero biome bytes, deflated once: the body of every 1.7 chunk unload. */
++    private static final byte[] UNLOAD_BIOMES;
++
++    static {
++        Deflater deflater = new Deflater(4);
++        byte[] out = new byte[512];
++
++        deflater.setInput(new byte[256]);
++        deflater.finish();
++        int n = deflater.deflate(out);
++
++        deflater.end();
++        UNLOAD_BIOMES = java.util.Arrays.copyOf(out, n);
++    }
++
++    // Athena - the deflate output buffer, one per event loop like the deflater, not 8 KB per packet
++    private static final FastThreadLocal<byte[]> DEFLATE_BUFFER = new FastThreadLocal<byte[]>() {
++        @Override
++        protected byte[] initialValue() {
++            return new byte[8192];
++        }
++    };
++
+     private static void deflate(PacketDataSerializer p, byte[] data, int length) {
+         Deflater deflater = DEFLATER.get();
+-        byte[] chunk = new byte[8192];
++        byte[] chunk = DEFLATE_BUFFER.get();
+ 
+         deflater.reset();
+         deflater.setInput(data, 0, length);
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 02f5f64304dca5eb0fbe89b1e3c4b1cc9b2e431a..537788512f66d624b73a889036333c9e0accf3f8 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -346,13 +346,14 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+                 ChunkCoordIntPair chunkcoordintpair = (ChunkCoordIntPair) iterator1.next();
+ 
+                 if (chunkcoordintpair != null) {
+-                    if (this.world.isLoaded(new BlockPosition(chunkcoordintpair.x << 4, 0, chunkcoordintpair.z << 4))) {
+-                        chunk = this.world.getChunkAt(chunkcoordintpair.x, chunkcoordintpair.z);
++                    chunk = this.world.getChunkIfLoaded(chunkcoordintpair.x, chunkcoordintpair.z); // Athena - one lookup, no position
++                    if (chunk != null) {
+                         if (chunk.isReady()) {
+                             arraylist.add(chunk);
+                             arraylist1.addAll(chunk.tileEntities.values()); // CraftBukkit - Get tile entities directly from the chunk instead of the world
+                             iterator1.remove();
+                             this.queuedChunkRemove(chunkcoordintpair); // Athena - keep the queue index in sync
++                            if (io.papermc.paper.event.packet.PlayerChunkLoadEvent.getHandlerList().getRegisteredListeners().length != 0) // Athena - no event object nobody listens for
+                             new io.papermc.paper.event.packet.PlayerChunkLoadEvent(chunk.bukkitChunk, this.getBukkitEntity()).callEvent(); // PandaSpigot
+                         }
+                     }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index 5cb2618437d129ab3e7a91b899a9b22bf3eb4649..b070923f34c12ad21703736b8cdaf2717a97fb67 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -34,6 +34,30 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+     }
+     // Athena end
+ 
++    // Athena start - the packet that tells a client to forget a chunk.
++    //
++    // A full chunk with no sections is how 1.8 unloads one, and the client stops reading the moment
++    // it sees the empty mask: the 256 biome bytes the packet carried were never looked at. They made
++    // it 270 bytes, over the 256-byte compression threshold, so every unload - one per chunk per
++    // border a player crosses, as many as the chunk sends - was extracted on the server thread and
++    // deflated on a Netty thread. With no data it is 13 bytes and goes out uncompressed.
++    private static final PacketPlayOutMapChunk.ChunkMap UNLOAD_DATA = new PacketPlayOutMapChunk.ChunkMap();
++
++    static {
++        UNLOAD_DATA.data = new byte[0];
++    }
++
++    static PacketPlayOutMapChunk unload(int chunkX, int chunkZ) {
++        PacketPlayOutMapChunk packet = new PacketPlayOutMapChunk();
++
++        packet.chunkX = chunkX;
++        packet.chunkZ = chunkZ;
++        packet.d = true;
++        packet.extractedData = UNLOAD_DATA;
++        return packet;
++    }
++    // Athena end
++
+     public PacketPlayOutMapChunk(Chunk chunk, boolean flag, int i) {
+         this.chunkX = chunk.locX;
+         this.chunkZ = chunk.locZ;
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 1fff038a93a7291614fc8ad36dcda08f942446e4..45a53d35fa1f4db63bc767737e129c5faff23ed1 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -637,7 +637,7 @@ public class PlayerChunkMap {
+                 Chunk chunk = PlayerChunkMap.this.world.getChunkAt(this.location.x, this.location.z);
+ 
+                 if (chunk.isReady()) {
+-                    entityplayer.playerConnection.sendPacket(new PacketPlayOutMapChunk(chunk, true, 0));
++                    entityplayer.playerConnection.sendPacket(PacketPlayOutMapChunk.unload(this.location.x, this.location.z)); // Athena - no biomes; see unload
+                 }
+ 
+                 this.players.remove(entityplayer); // CraftBukkit
+@@ -645,7 +645,7 @@ public class PlayerChunkMap {
+                 entityplayer.chunkCoordIntPairQueue.remove(this.location);
+                 entityplayer.queuedChunkRemove(this.location); // Athena - keep the queue index in sync
+                 org.bukkit.Chunk bukkitChunk = chunk.bukkitChunk;
+-                if (bukkitChunk != null) {
++                if (bukkitChunk != null && io.papermc.paper.event.packet.PlayerChunkUnloadEvent.getHandlerList().getRegisteredListeners().length != 0) { // Athena - no event object nobody listens for
+                     new io.papermc.paper.event.packet.PlayerChunkUnloadEvent(bukkitChunk, entityplayer.getBukkitEntity()).callEvent(); // PandaSpigot
+                 }
+                 if (this.playersWatchingChunk.isEmpty()) {
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+index f292805778077741e5f0e41778a2db2ced223222..af30a7b4fb88abbf3b30aaf0b16edcc4db837a9e 100644
+--- a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+@@ -128,6 +128,35 @@ public class AthenaLegacy17Test extends AbstractTestingBase {
+         assertEquals(7, data17[data17.length - 1]);
+     }
+ 
++    @Test
++    public void aChunkUnloadIsAnEmptyFullChunkUnderTheCompressionThreshold() throws Exception {
++        PacketDataSerializer p = packet(0x21);
++
++        PacketPlayOutMapChunk.unload(3, -4).writePacketData(p);
++        assertTrue("goes out uncompressed", p.readableBytes() < 256);
++
++        PacketDataSerializer copy = new PacketDataSerializer(p.copy());
++        copy.readVarIntFromBuffer();
++        PacketPlayOutMapChunk read = new PacketPlayOutMapChunk();
++        read.readPacketData(copy);
++        assertFalse(copy.isReadable());
++
++        // a 1.7 client inflates 256 biome bytes before it sees the empty mask and unloads
++        PacketDataSerializer sent = sent(this.out(), p).get(0);
++
++        assertEquals(0x21, sent.readVarIntFromBuffer());
++        assertEquals(3, sent.readInt());
++        assertEquals(-4, sent.readInt());
++        assertTrue(sent.readBoolean());
++        assertEquals(0, sent.readUnsignedShort());
++        assertEquals(0, sent.readUnsignedShort());
++        byte[] compressed = new byte[sent.readInt()];
++
++        sent.readBytes(compressed);
++        assertFalse(sent.isReadable());
++        assertEquals(256, inflate(compressed, 256).length);
++    }
++
+     @Test
+     public void theCachedChunkIsTheSameAsATranslatedOne() {
+         byte[] data = new byte[8192 + 4096 + 256];

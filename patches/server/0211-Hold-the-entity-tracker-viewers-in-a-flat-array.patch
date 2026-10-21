@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 21:41:20 +0900
+Subject: [PATCH] Hold the entity tracker viewers in a flat array
+
+
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index a2508b872e865f6f4c659e25a8ebb0fdb419d2b7..74287a371534ab674b637a4a73b8092ecc806c7b 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -43,11 +43,111 @@ public class EntityTrackerEntry {
+     // PaperSpigot start
+     // Replace trackedPlayers Set with a Map. The value is true until the player receives
+     // their first update (which is forced to have absolute coordinates), false afterward.
+-    // Athena - identity keys, no boxed Boolean, and a table that iterates as an array. The map is
+-    // read once per tracked player per broadcast and walked whole on every metadata send.
+-    public java.util.Map<EntityPlayer, Boolean> trackedPlayerMap = new it.unimi.dsi.fastutil.objects.Reference2ObjectOpenHashMap<EntityPlayer, Boolean>();
+-    public Set<EntityPlayer> trackedPlayers = trackedPlayerMap.keySet();
+     // PaperSpigot end
++    // Athena start - hold the viewers in a flat array instead of a hash map.
++    //
++    // This collection is walked for *every packet* an entity sends: broadcast() is how a movement,
++    // a metadata change, an equipment change or an effect reaches the players watching, so on a
++    // populated world it is one of the most frequently traversed structures in the server. It is
++    // also tiny - a viewer list is at most max-players long, and usually a handful - which is
++    // exactly the size where a hash table loses. A probe has to hash the key, index a table, and
++    // follow it to the entry; a linear scan over four references is one cache line and no
++    // indirection at all, and iterating the array in order gives the prefetcher something to work
++    // with where a bucket walk gives it nothing.
++    //
++    // viewerFresh runs parallel to viewers and carries what the map's value used to: true until
++    // that player has had its first update, which is forced to be an absolute teleport because the
++    // position it got in the spawn packet is not something we can be sure of.
++    //
++    // Removal swaps in the last element rather than compacting, so the order viewers appear in is
++    // not stable. Nothing depends on it: every use either sends the same packet to all of them or
++    // asks whether one particular player is present.
++    private EntityPlayer[] viewers = new EntityPlayer[4];
++    private boolean[] viewerFresh = new boolean[4];
++    private int viewerCount;
++    public final Set<EntityPlayer> trackedPlayers = new ViewerSet(); // the read-mostly view plugins and CraftBukkit use
++
++    private int viewerIndex(EntityPlayer entityplayer) {
++        EntityPlayer[] viewers = this.viewers;
++
++        for (int i = 0; i < this.viewerCount; ++i) {
++            if (viewers[i] == entityplayer) {
++                return i;
++            }
++        }
++
++        return -1;
++    }
++
++    private void addViewer(EntityPlayer entityplayer) {
++        if (this.viewerCount == this.viewers.length) {
++            this.viewers = java.util.Arrays.copyOf(this.viewers, this.viewerCount << 1);
++            this.viewerFresh = java.util.Arrays.copyOf(this.viewerFresh, this.viewerCount << 1);
++        }
++
++        this.viewers[this.viewerCount] = entityplayer;
++        this.viewerFresh[this.viewerCount] = true;
++        ++this.viewerCount;
++    }
++
++    private boolean removeViewer(EntityPlayer entityplayer) {
++        int i = this.viewerIndex(entityplayer);
++
++        if (i < 0) {
++            return false;
++        }
++
++        int last = --this.viewerCount;
++
++        this.viewers[i] = this.viewers[last];
++        this.viewerFresh[i] = this.viewerFresh[last];
++        this.viewers[last] = null;
++        return true;
++    }
++
++    private final class ViewerSet extends java.util.AbstractSet<EntityPlayer> {
++
++        public int size() {
++            return EntityTrackerEntry.this.viewerCount;
++        }
++
++        public boolean contains(Object object) {
++            return object instanceof EntityPlayer && EntityTrackerEntry.this.viewerIndex((EntityPlayer) object) >= 0;
++        }
++
++        public boolean remove(Object object) {
++            return object instanceof EntityPlayer && EntityTrackerEntry.this.removeViewer((EntityPlayer) object);
++        }
++
++        public Iterator<EntityPlayer> iterator() {
++            return new Iterator<EntityPlayer>() {
++                private int next;
++
++                public boolean hasNext() {
++                    return this.next < EntityTrackerEntry.this.viewerCount;
++                }
++
++                public EntityPlayer next() {
++                    if (!this.hasNext()) {
++                        throw new java.util.NoSuchElementException();
++                    }
++
++                    return EntityTrackerEntry.this.viewers[this.next++];
++                }
++
++                public void remove() {
++                    if (this.next <= 0) {
++                        throw new IllegalStateException();
++                    }
++
++                    // The swap puts an unvisited element where the removed one was, so step back
++                    // onto it rather than past it.
++                    EntityTrackerEntry.this.removeViewer(EntityTrackerEntry.this.viewers[--this.next]);
++                }
++            };
++        }
++    }
++    // Athena end
+     int trackerIndex = -1; // Athena - this entry's slot in EntityTracker's array
+ 
+     public EntityTrackerEntry(Entity entity, int i, int j, boolean flag) {
+@@ -189,15 +289,17 @@ public class EntityTrackerEntry {
+                     } else {
+                         PacketPlayOutEntityTeleport teleportPacket = null;
+ 
+-                        for (java.util.Map.Entry<EntityPlayer, Boolean> viewer : trackedPlayerMap.entrySet()) {
+-                            if (viewer.getValue()) {
+-                                viewer.setValue(false);
++                        for (int v = 0; v < this.viewerCount; ++v) { // Athena - indexed walk
++                            EntityPlayer viewer = this.viewers[v];
++
++                            if (this.viewerFresh[v]) {
++                                this.viewerFresh[v] = false;
+                                 if (teleportPacket == null) {
+                                     teleportPacket = new PacketPlayOutEntityTeleport(this.tracker.getId(), i, j, k, (byte) l, (byte) i1, this.tracker.onGround);
+                                 }
+-                                viewer.getKey().playerConnection.sendPacket(teleportPacket);
++                                viewer.playerConnection.sendPacket(teleportPacket);
+                             } else {
+-                                viewer.getKey().playerConnection.sendPacket((Packet) object);
++                                viewer.playerConnection.sendPacket((Packet) object);
+                             }
+                         }
+                     }
+@@ -300,12 +402,8 @@ public class EntityTrackerEntry {
+     }
+ 
+     public void broadcast(Packet packet) {
+-        Iterator iterator = this.trackedPlayers.iterator();
+-
+-        while (iterator.hasNext()) {
+-            EntityPlayer entityplayer = (EntityPlayer) iterator.next();
+-
+-            entityplayer.playerConnection.sendPacket(packet);
++        for (int i = 0; i < this.viewerCount; ++i) { // Athena - indexed walk
++            this.viewers[i].playerConnection.sendPacket(packet);
+         }
+ 
+     }
+@@ -319,20 +417,15 @@ public class EntityTrackerEntry {
+     }
+ 
+     public void sendDestroyEntityPacketToTrackedPlayers() {
+-        Iterator iterator = this.trackedPlayers.iterator();
+-
+-        while (iterator.hasNext()) {
+-            EntityPlayer entityplayer = (EntityPlayer) iterator.next();
+-
+-            entityplayer.removeEntity(this.tracker);
++        for (int i = 0; i < this.viewerCount; ++i) { // Athena - indexed walk
++            this.viewers[i].removeEntity(this.tracker);
+         }
+ 
+     }
+ 
+     public void removeFromTrackedPlayers(EntityPlayer entityplayer) {
+-        if (this.trackedPlayers.contains(entityplayer)) {
++        if (this.removeViewer(entityplayer)) { // Athena - one scan, not a probe then a probe
+             entityplayer.removeEntity(this.tracker);
+-            this.trackedPlayers.remove(entityplayer);
+         }
+ 
+     }
+@@ -341,7 +434,7 @@ public class EntityTrackerEntry {
+         org.spigotmc.AsyncCatcher.catchOp( "player tracker update"); // Spigot
+         if (entityplayer != this.tracker) {
+             if (this.c(entityplayer)) {
+-                if (!this.trackedPlayers.contains(entityplayer) && (this.isPlayerWatchingThisChunk(entityplayer) || this.tracker.attachedToPlayer)) {
++                if (this.viewerIndex(entityplayer) < 0 && (this.isPlayerWatchingThisChunk(entityplayer) || this.tracker.attachedToPlayer)) { // Athena
+                     // CraftBukkit start - respect vanish API
+                     if (this.tracker instanceof EntityPlayer) {
+                         Player player = ((EntityPlayer) this.tracker).getBukkitEntity();
+@@ -352,7 +445,7 @@ public class EntityTrackerEntry {
+ 
+                     entityplayer.removeQueue.remove(Integer.valueOf(this.tracker.getId()));
+                     // CraftBukkit end
+-                    this.trackedPlayerMap.put(entityplayer, true); // PaperBukkit
++                    this.addViewer(entityplayer); // PaperBukkit // Athena
+                     Packet packet = this.createSpawnPacket();
+ 
+                     entityplayer.playerConnection.sendPacket(packet);
+@@ -430,8 +523,7 @@ public class EntityTrackerEntry {
+                         }
+                     }
+                 }
+-            } else if (this.trackedPlayers.contains(entityplayer)) {
+-                this.trackedPlayers.remove(entityplayer);
++            } else if (this.removeViewer(entityplayer)) { // Athena
+                 entityplayer.removeEntity(this.tracker);
+             }
+ 
+@@ -570,8 +662,7 @@ public class EntityTrackerEntry {
+ 
+     public void clear(EntityPlayer entityplayer) {
+         org.spigotmc.AsyncCatcher.catchOp( "player tracker clear"); // Spigot
+-        if (this.trackedPlayers.contains(entityplayer)) {
+-            this.trackedPlayers.remove(entityplayer);
++        if (this.removeViewer(entityplayer)) { // Athena
+             entityplayer.removeEntity(this.tracker);
+         }
+ 
