@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Network compression level in pandaspigot.yml
+ (networkCompressionLevel)
+
+The level packets other than cached chunks are deflated at. Default 6, as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index c9d78e8a433c081c54f1b51d4450bfccbfaebbdf..25cca9676972899bd68bea7ec73d4d5193acc926 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -66,6 +66,8 @@ public class PandaSpigotConfig {
+ 
+             // Athena - publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
+             net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
++            // Athena - the network deflate level, read by each Netty thread's deflater as it is made
++            net.minecraft.server.PacketCompressor.setLevel(config.networkCompressionLevel);
+             // Athena - and the guard's switches
+             net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log, config.guard.kick, config.guard.kickMessage, config.guard.kickViolations, config.guard.kickWindowSeconds);
+             
+@@ -149,6 +151,15 @@ public class PandaSpigotConfig {
+     public boolean debugVerifyAthenaIndexes = false;
+     // Athena end
+ 
++    // Athena start - network compression level
++    @Comment("The zlib level (1-9) packets over the network compression threshold are compressed\n" +
++        "at. Chunks are compressed once and cached (see cacheChunkPackets) and always use the\n" +
++        "default level; this is everything else - entity metadata, inventories, tab list and\n" +
++        "scoreboard packets. 1 is the fastest and sends the most bytes. Takes effect on restart.\n" +
++        "Default: 6")
++    public int networkCompressionLevel = 6;
++    // Athena end
++
+     // Athena start - server-authoritative movement and combat checks; see net.minecraft.server.AthenaGuard
+     @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
+         "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 7f968302f54354715b6528fdd3e66989f0009540..6011f2c62e44c31ca817e5cbb57a7fd45ef0aee5 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -17,9 +17,15 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+     private static final io.netty.util.concurrent.FastThreadLocal<Deflater> DEFLATER = new io.netty.util.concurrent.FastThreadLocal<Deflater>() {
+         @Override
+         protected Deflater initialValue() {
+-            return new Deflater();
++            return new Deflater(level); // Athena - pandaspigot.yml networkCompressionLevel
+         }
+     };
++    // Athena - the level each event loop's deflater is made with; set from the config before Netty starts
++    private static volatile int level = Deflater.DEFAULT_COMPRESSION;
++
++    public static void setLevel(int configured) {
++        level = configured >= 1 && configured <= 9 ? configured : Deflater.DEFAULT_COMPRESSION;
++    }
+     private static final io.netty.util.concurrent.FastThreadLocal<byte[]> BUFFER = new io.netty.util.concurrent.FastThreadLocal<byte[]>() {
+         @Override
+         protected byte[] initialValue() {

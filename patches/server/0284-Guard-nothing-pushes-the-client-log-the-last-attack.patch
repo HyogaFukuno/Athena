@@ -1,0 +1,167 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 01:29:43 +0900
+Subject: [PATCH] Guard: nothing pushes the client; log the last attack
+
+The push allowance was wrong: EntityLivingBase.onLivingUpdate runs
+collideWithNearbyEntities only when !world.isRemote, in 1.8 as in 1.7, and
+the server never sends a player its own push. Players do not push each other
+on the client, so the 0.0708 per overlapping entity was only a gap for a
+speed cheat standing next to someone. Removed.
+
+Both speed flags seen so far came from the attacking player; a failed move
+check now also says how many ticks ago it last attacked.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 21917a232ad74863e9479daff5e1b2b9f617316d..9282ff2ce397342272552133013b55d7ab6bb3f0 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -40,7 +40,6 @@ public final class AthenaGuard {
+     private static final double SPRINT_JUMP = 0.2D;
+     private static final double BASE_SPEED = 0.10000000149011612D;
+     private static final double EPS_H = 0.005D;
+-    private static final double PUSH = 0.0708D; // 0.05 * sqrt(2)
+     private static final double EPS_V = 0.01D;
+ 
+     private final EntityPlayer player;
+@@ -48,7 +47,7 @@ public final class AthenaGuard {
+     // what the server saw around the move being checked, for the log
+     private double ctxX, ctxY, ctxZ;
+     private World ctxWorld;
+-    private int ctxFlags, ctxPushers;
++    private int ctxFlags;
+     // the last moves checked, newest first at histHead - 1: h, dy, ticks, ground at the start
+     private final double[] histH = new double[6], histDy = new double[6];
+     private final int[] histTicks = new int[6];
+@@ -243,14 +242,12 @@ public final class AthenaGuard {
+         // that stopped it is over where it started (or, after sideways, over where it ended)
+         boolean ceiling = dy > 0.0D && this.groundStart && (ceilingAt(world, fromX, y, fromZ) || ceilingAt(world, x, y, z));
+         double slimeUp = dy > 0.0D ? this.slimeBounce(world, fromX, fromY, fromZ) : 0.0D;
+-        int pushers = this.pushers(world, fromX, fromY, fromZ);
+         // kept as values; turned into text only if a check fails
+         this.ctxX = x; this.ctxY = y; this.ctxZ = z; this.ctxWorld = world;
+         this.ctxFlags = (groundNow ? 1 : 0) | (wall ? 2 : 0) | (inLiquid ? 4 : 0) | (climbing ? 8 : 0) | (granted ? 16 : 0);
+-        this.ctxPushers = pushers;
+         boolean groundBefore = this.groundStart;
+ 
+-        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp, pushers) != 0 && enforce) {
++        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp) != 0 && enforce) {
+             this.known = false;
+             return false;
+         }
+@@ -268,7 +265,7 @@ public final class AthenaGuard {
+      * the next move unless it fails while enforcing.
+      */
+     int evaluate(int ticks, double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, boolean landed,
+-                 double slipNow, boolean granted, boolean inLiquid, boolean climbing, boolean ceiling, double slimeUp, int pushers) {
++                 double slipNow, boolean granted, boolean inLiquid, boolean climbing, boolean ceiling, double slimeUp) {
+         // landed: the packet covers ticks the client did not report, and it could have come down on
+         // something in them - and jumped again from it on the last
+         boolean fromGround = this.groundStart || landed;
+@@ -316,9 +313,8 @@ public final class AthenaGuard {
+         if (inLiquid) {
+             maxH = Math.max(maxH, 0.35D * ticks); // swimming is slower than this; the edge boost is not
+         }
+-        // a player the client overlaps pushes it sideways (EntityLivingBase.collideWithNearbyEntities):
+-        // at most 0.05 on each axis per pusher per tick, added to the motion the next move carries
+-        maxH += pushers * PUSH * ticks;
++        // nothing pushes the client: in 1.8 (and 1.7) living entities push each other on the server
++        // only (EntityLivingBase.onLivingUpdate), and the server never sends a player its own push
+ 
+         if (h > maxH + EPS_H) {
+             this.flag(1, "speed", "moved %.3f, at most %.3f (ticks %d, last %.3f, friction %.3f/%.3f, ground %b)", h, maxH, ticks, this.lastH, this.motionFriction, this.accelFriction, this.groundStart);
+@@ -465,54 +461,6 @@ public final class AthenaGuard {
+         return world.hasCubes(player, x - HALF, y - 0.001D, z - HALF, x + HALF, y, z + HALF);
+     }
+ 
+-    /**
+-     * Entities overlapping the box the client pushes against (its own, grown by 0.2), who push it back.
+-     * The client sees them where they were: another player a network trip and an interpolation behind
+-     * where it says it is now, so any of its positions over that time counts; anything else is
+-     * interpolated too, and gets a little room.
+-     */
+-    private int pushers(World world, double x, double y, double z) {
+-        int lookback = Math.min(20, 4 + (this.player.ping + 49) / 50);
+-        double reach = 0.5D + lookback * 0.4D; // how far another player can be from where it was then
+-        java.util.List<Entity> near = world.getEntities(this.player, x - reach, y - 2.0D, z - reach, x + reach, y + 3.8D, z + reach);
+-        double minX = x - 0.5D, minY = y, minZ = z - 0.5D, maxX = x + 0.5D, maxY = y + 1.8D, maxZ = z + 0.5D;
+-        int tick = MinecraftServer.currentTick;
+-        int count = 0;
+-
+-        for (int i = 0; i < near.size(); ++i) {
+-            Entity entity = near.get(i);
+-
+-            if (!entity.canBePushed() || entity instanceof EntityPlayer && ((EntityPlayer) entity).isSpectator()) {
+-                continue;
+-            }
+-            boolean touches = false;
+-
+-            if (entity instanceof EntityPlayer) {
+-                EntityPlayer other = (EntityPlayer) entity;
+-
+-                for (int back = 0; back <= lookback && !touches; ++back) {
+-                    double[] box = other.athenaBoxAt(tick - back);
+-
+-                    if (box == null) {
+-                        if (back > 0) {
+-                            break;
+-                        }
+-                        box = new double[] { entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ };
+-                    }
+-                    touches = box[0] < maxX && box[3] > minX && box[1] < maxY && box[4] > minY && box[2] < maxZ && box[5] > minZ;
+-                }
+-            } else {
+-                touches = entity.boundingBoxMinX < maxX + 0.3D && entity.boundingBoxMaxX > minX - 0.3D
+-                        && entity.boundingBoxMinY < maxY + 0.3D && entity.boundingBoxMaxY > minY - 0.3D
+-                        && entity.boundingBoxMinZ < maxZ + 0.3D && entity.boundingBoxMaxZ > minZ - 0.3D;
+-            }
+-            if (touches && ++count >= 8) {
+-                break;
+-            }
+-        }
+-        return count;
+-    }
+-
+     /** Whether something under the feet at (x, y, z) is within depth below them. */
+     private boolean groundBelow(World world, double x, double y, double z, double depth) {
+         return world.hasCubes(this.player, x - HALF, y - depth, z - HALF, x + HALF, y, z + HALF);
+@@ -661,12 +609,12 @@ public final class AthenaGuard {
+         if (this.player == null || this.ctxWorld == null) {
+             return "";
+         }
+-        return String.format(java.util.Locale.ROOT, " at %.2f,%.2f,%.2f in %s; %s, %s, fly %b/%b, walk %.3f, %s%s%s%s%s%s",
++        return String.format(java.util.Locale.ROOT, " at %.2f,%.2f,%.2f in %s; %s, %s, fly %b/%b, walk %.3f, %s%s%s%s%s",
+                 this.ctxX, this.ctxY, this.ctxZ, this.ctxWorld.getWorld().getName(), this.legacy17 ? "1.7" : "1.8",
+                 this.player.playerInteractManager.getGameMode(), this.player.abilities.canFly, this.player.abilities.isFlying,
+                 this.player.abilities.walkSpeed, (this.ctxFlags & 1) != 0 ? "ground" : "air", (this.ctxFlags & 2) != 0 ? ", wall" : "",
+                 (this.ctxFlags & 4) != 0 ? ", liquid" : "", (this.ctxFlags & 8) != 0 ? ", climbing" : "",
+-                (this.ctxFlags & 16) != 0 ? ", knockback" : "", this.ctxPushers > 0 ? ", pushed by " + this.ctxPushers : "")
++                (this.ctxFlags & 16) != 0 ? ", knockback" : "")
+                 + this.recent();
+     }
+ 
+@@ -698,6 +646,9 @@ public final class AthenaGuard {
+         if (this.grantSentTick != Long.MIN_VALUE) {
+             sb.append(String.format(java.util.Locale.ROOT, "; knockback sent %d ticks ago", MinecraftServer.currentTick - this.grantSentTick));
+         }
++        if (this.lastAttackTick != Integer.MIN_VALUE) {
++            sb.append("; attacked ").append(MinecraftServer.currentTick - this.lastAttackTick).append(" ticks ago");
++        }
+         sb.append("; ping ").append(this.player.ping);
+         return sb.toString();
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index 026555289dbfb445a95d26b4c3d84cdbc8f0aecd..1db6cba5fce5b306d638d4e047947c2586177075 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -253,7 +253,7 @@ public class AthenaGuardMovementTest {
+                 r = 0;
+             } else {
+                 boolean ceiling = dy > 0 && this.guard.groundStart() && (ceilingAt(this.x, ny, this.z) || ceilingAt(nx, ny, nz));
+-                r = this.guard.evaluate(ticks, Math.sqrt(dx * dx + dz * dz), dy, groundNow, maybeGround, certain, ticks > 1 && landing, slip, false, false, false, ceiling, 0.0, 0);
++                r = this.guard.evaluate(ticks, Math.sqrt(dx * dx + dz * dz), dy, groundNow, maybeGround, certain, ticks > 1 && landing, slip, false, false, false, ceiling, 0.0);
+             }
+             if (r == 0) {
+                 this.x = nx; this.y = ny; this.z = nz;

@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 19:32:32 +0900
+Subject: [PATCH] Guard: after a teleport, the client may still be on the
+ ground
+
+From play on sg1 with enforcing on: a 1.7 player held on a match pedestal
+was set back for moving 0.127 where 0.026 was allowed. The plugin returns a
+frozen player to its pedestal at y 84.51, 0.01 over a slab, and the client
+keeps the onGround it had before the teleport: its next tick accelerates
+like the ground (0.127 sprinting) while the server saw only air under it.
+A seed after a teleport, respawn or exemption now assumes the ground, with
+the grip of an ordinary block (the strongest acceleration): a standing
+client teleported anywhere can do that for a tick, and may jump.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 157b95558ce012f8ee1f906cb67b9001a970494a..7e02278708b6aa7a1caa8edfd1c8d6abdd892237 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -452,6 +452,12 @@ public final class AthenaGuard {
+     private void seedFresh(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
+         this.freshTicks = 0;
+         this.seed(h, dy, groundNow, maybeGround, certain, slipNow);
++        // A position the server sent leaves the client's onGround as it was before: a player standing
++        // when teleported - even into the air, even 0.01 over a slab - takes its next tick with the
++        // ground's acceleration, and may jump. Assume the ground, at the grip of an ordinary block.
++        this.groundStart = true;
++        this.groundCertain = false;
++        this.accelFriction = 0.546D;
+     }
+ 
+     private void seed(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {

@@ -1,0 +1,948 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 19 Oct 2026 08:26:43 +0900
+Subject: [PATCH] Move Athena's settings from pandaspigot.yml to athena.yml
+
+Every setting Athena added - debugVerifyAthenaIndexes, ioUring, bungeeGuardTokens,
+networkCompressionLevel, the two chunk budgets and guard, and per world cacheChunkPackets,
+chunkUnloadMargin, asyncChunkShaping and asyncChunkDecoration - now lives in athena.yml
+(--athena-settings), laid out like pandaspigot.yml with worlds.default and per-world sections.
+pandaspigot.yml keeps only PandaSpigot's own settings.
+
+athena.yml is read before pandaspigot.yml, on startup and on /reload. The first start with it moves
+the keys a server already has in pandaspigot.yml into athena.yml with their values and removes them
+there, and logs what it moved; once athena.yml exists, Athena keys found in pandaspigot.yml are
+ignored, removed and logged. Checked by booting a copy of a production-style pandaspigot.yml:
+guard.enforce/log false and chunkUnloadMargin 2 carried over, nothing left behind. Tests 5521/5521.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..50f5e6106431dbd2a020aeaaad713ab3330b10df
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -0,0 +1,276 @@
++package athena.server;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++import java.io.File;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import net.minecraft.server.World;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.ConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++/**
++ * Athena - athena.yml: every setting Athena added, kept apart from pandaspigot.yml so that PandaSpigot's
++ * file stays PandaSpigot's. Laid out the same way - global settings at the top, per-world ones under
++ * worlds.default and sections named after worlds - and read on startup and on /reload, before
++ * pandaspigot.yml.
++ *
++ * <p>Servers set up before athena.yml existed have these keys in pandaspigot.yml. The first start
++ * with this version moves them: their values become athena.yml's and they are taken out of
++ * pandaspigot.yml, so nothing configured is lost and nothing is set in two places. Once athena.yml
++ * exists, Athena keys found in pandaspigot.yml are ignored, logged and removed.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class AthenaConfig {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena");
++
++    /** The global keys athena.yml took over from pandaspigot.yml. */
++    private static final String[] MOVED_GLOBAL_KEYS = {
++        "debugVerifyAthenaIndexes", "ioUring", "bungeeGuardTokens", "networkCompressionLevel",
++        "chunkLoadFinishMillisPerTick", "chunkUnloadMillisPerTick", "guard"
++    };
++    /** And the per-world ones, under worlds.<name>. */
++    private static final String[] MOVED_WORLD_KEYS = {
++        "cacheChunkPackets", "chunkUnloadMargin", "asyncChunkShaping", "asyncChunkDecoration"
++    };
++
++    private static AthenaConfig config = new AthenaConfig();
++    private static AthenaWorldConfig defaultWorldConfig = new AthenaWorldConfig();
++    private static final Map<String, AthenaWorldConfig> worldConfigs = new HashMap<String, AthenaWorldConfig>();
++
++    private static EOYamlConfigurationLoader loader(File file, String header) {
++        return EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header(header)
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++    }
++
++    /**
++     * Loads athena.yml, moving Athena's keys out of pandaspigot.yml first, and applies the settings
++     * that live in static fields elsewhere. Called on startup and every reload, before
++     * PandaSpigotConfig.init.
++     */
++    public static void init(File file, File pandaSpigotFile) {
++        try {
++            boolean fresh = !file.exists();
++            EOYamlConfigurationLoader loader = loader(file,
++                    "This is the configuration file for Athena: the settings Athena adds to PandaSpigot.\n" +
++                    "PandaSpigot's own settings stay in pandaspigot.yml.");
++            CommentedConfigurationNode root = loader.load();
++
++            if (migrate(root, fresh, pandaSpigotFile) && fresh) {
++                // write the moved values in the file's own order, not in the order they were found,
++                // so that the next start does not rearrange the file
++                CommentedConfigurationNode ordered = loader.createNode();
++                ordered.set(root.get(AthenaConfig.class));
++                ordered.node("worlds").from(root.node("worlds"));
++                root = ordered;
++            }
++
++            config = root.get(AthenaConfig.class);
++
++            CommentedConfigurationNode worldsNode = root.node("worlds")
++                    .comment("Settings which can be configured per world. \"default\" gives the values for\n" +
++                            "every world without a section of its own; to set a world apart, add a section\n" +
++                            "with the world's name.");
++            ConfigurationNode defaultWorldNode = worldsNode.node("default");
++            defaultWorldConfig = defaultWorldNode.get(AthenaWorldConfig.class);
++            defaultWorldNode.set(defaultWorldConfig); // populate the defaults in the file
++
++            root.set(config);
++            loader.save(root);
++
++            worldConfigs.clear();
++            for (Map.Entry<Object, ? extends ConfigurationNode> entry : worldsNode.childrenMap().entrySet()) {
++                if (!"default".equals(entry.getKey())) {
++                    worldConfigs.put(entry.getKey().toString(), entry.getValue().get(AthenaWorldConfig.class));
++                }
++            }
++
++            apply(config);
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    /**
++     * Moves Athena's keys out of pandaspigot.yml: into athena.yml if it is being created now, nowhere
++     * (with a warning) if it already existed. Returns whether any were found.
++     */
++    private static boolean migrate(CommentedConfigurationNode root, boolean fresh, File pandaSpigotFile) throws Exception {
++        if (pandaSpigotFile == null || !pandaSpigotFile.isFile()) {
++            return false;
++        }
++
++        EOYamlConfigurationLoader pandaLoader = loader(pandaSpigotFile,
++                "This is the configuration file for PandaSpigot.\n" +
++                "Use caution when modifying settings, as some may impact gameplay in non-obvious ways.");
++        CommentedConfigurationNode panda = pandaLoader.load();
++        List<String> found = new ArrayList<String>();
++
++        for (String key : MOVED_GLOBAL_KEYS) {
++            move(panda, root, fresh, found, key);
++        }
++        for (Map.Entry<Object, ? extends CommentedConfigurationNode> world : panda.node("worlds").childrenMap().entrySet()) {
++            for (String key : MOVED_WORLD_KEYS) {
++                move(panda, root, fresh, found, "worlds", world.getKey(), key);
++            }
++        }
++
++        if (found.isEmpty()) {
++            return false;
++        }
++        pandaLoader.save(panda);
++        if (fresh) {
++            LOGGER.info("Moved Athena's settings from {} to athena.yml: {}", pandaSpigotFile.getName(), found);
++        } else {
++            LOGGER.warn("Ignored and removed Athena settings found in {} - they are read from athena.yml: {}", pandaSpigotFile.getName(), found);
++        }
++        return true;
++    }
++
++    private static void move(CommentedConfigurationNode from, CommentedConfigurationNode to, boolean copy, List<String> found, Object... path) {
++        CommentedConfigurationNode node = from.node(path);
++
++        if (node.virtual()) {
++            return;
++        }
++        if (copy) {
++            to.node(path).from(node);
++        }
++        node.parent().removeChild(path[path.length - 1]);
++
++        StringBuilder name = new StringBuilder();
++        for (Object part : path) {
++            name.append(name.length() == 0 ? "" : ".").append(part);
++        }
++        found.add(name.toString());
++    }
++
++    /** The settings that other classes keep in static fields. */
++    private static void apply(AthenaConfig config) {
++        // publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
++        net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
++        // the network deflate level, read by each Netty thread's deflater as it is made
++        net.minecraft.server.PacketCompressor.setLevel(config.networkCompressionLevel);
++        // how long a tick may spend finishing chunk loads, and unloading (saving) chunks
++        org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.setFinishBudgetMillis(config.chunkLoadFinishMillisPerTick);
++        net.minecraft.server.ChunkProviderServer.setUnloadBudgetMillis(config.chunkUnloadMillisPerTick);
++        // the guard's switches
++        GuardConfig guard = config.guard;
++        net.minecraft.server.AthenaGuard.configure(guard.enabled, guard.enforce, guard.movement, guard.timer, guard.combat, guard.maxReach, guard.log, guard.kick, guard.kickMessage, guard.kickViolations, guard.kickWindowSeconds);
++    }
++
++    public static AthenaConfig get() {
++        return config;
++    }
++
++    public static AthenaWorldConfig getWorldConfig(String worldName) {
++        AthenaWorldConfig world = worldConfigs.get(worldName);
++
++        return world != null ? world : defaultWorldConfig;
++    }
++
++    public static AthenaWorldConfig getWorldConfig(World world) {
++        return getWorldConfig(world.worldData.getName());
++    }
++
++    //------------------------------------------------------------------------
++    @Comment("DEBUG ONLY. Verifies, every tick, that the derived lookup structures Athena added\n" +
++        "still agree with the collections they mirror:\n" +
++        "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk, and the\n" +
++        "    two sites that adjust it, which is where a real divergence was found\n" +
++        "  - Chunk's X/Z bucket index vs the entity slice it is derived from, and the per-slice\n" +
++        "    IMonster and EntityHuman counts a target query skips slices on\n" +
++        "Any disagreement is logged as a warning with a stack trace. This costs real time, so\n" +
++        "leave it off outside of testing.")
++    public boolean debugVerifyAthenaIndexes = false;
++
++    @Comment("Use Linux io_uring for player connections instead of epoll: reads and writes go to the\n" +
++        "kernel in batches rather than one system call each. Needs Linux 5.9 or newer, and a\n" +
++        "container may block it (Docker's default seccomp profile does); when it is not available\n" +
++        "the server says why and uses epoll. Takes effect on restart.\n" +
++        "Default: false")
++    public boolean ioUring = false;
++
++    @Comment("Tokens a proxy must send to log players in, when bungeecord is on in spigot.yml.\n" +
++        "IP forwarding lets whoever reaches this server's port claim any player's UUID, an operator's\n" +
++        "included. With a token listed here, a login that does not carry one of them is refused, so\n" +
++        "only the proxy can log players in even if the port is reachable. Velocity sends the contents\n" +
++        "of its forwarding.secret file when player-info-forwarding-mode = \"BUNGEEGUARD\"; the\n" +
++        "BungeeGuard plugin does the same for BungeeCord. Keep this file private. Empty: no check.\n" +
++        "Write one token per line, as a block list - a one-line [\"...\"] list is read as a single\n" +
++        "token, brackets and all, and then no login gets in:\n" +
++        "  bungeeGuardTokens:\n" +
++        "    - the-contents-of-forwarding.secret\n" +
++        "Takes effect on restart.\n" +
++        "Default: []")
++    public List<String> bungeeGuardTokens = new ArrayList<String>();
++
++    @Comment("The zlib level (1-9) packets over the network compression threshold are compressed\n" +
++        "at. Chunks are compressed once and cached (see cacheChunkPackets) and always use the\n" +
++        "default level; this is everything else - entity metadata, inventories, tab list and\n" +
++        "scoreboard packets. 1 is the fastest and sends the most bytes. Takes effect on restart.\n" +
++        "Default: 6")
++    public int networkCompressionLevel = 6;
++
++    @Comment("How many milliseconds one tick may spend finishing chunks read from disk (their entities,\n" +
++        "ChunkLoadEvent, neighbours); the rest wait for the next ticks. Many players arriving in a\n" +
++        "world at once request hundreds of chunks together, and finishing them all in one tick froze\n" +
++        "the server for up to a second. 0 finishes everything in the tick it was read, as vanilla.\n" +
++        "Default: 10")
++    public int chunkLoadFinishMillisPerTick = 10;
++
++    @Comment("How many milliseconds one tick may spend unloading chunks (an ordinary world saves each\n" +
++        "one as it goes); the rest stay queued for the next ticks. Everyone leaving a world at once\n" +
++        "queued its whole view and made ~140 ms ticks. 0 keeps only vanilla's 100 chunks a tick.\n" +
++        "Default: 10")
++    public int chunkUnloadMillisPerTick = 10;
++
++    @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
++        "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
++        "that could not land are dropped, and fall damage and critical hits follow the ground the\n" +
++        "server sees. 1.8 and 1.7.10 clients are both checked by their own physics.\n" +
++        "  enforce: false only logs what would have been blocked (to look for false positives)")
++    public GuardConfig guard = new GuardConfig();
++
++    @ConfigSerializable
++    public static class GuardConfig {
++        public boolean enabled = true;
++        public boolean enforce = true;
++        @Comment("Speed, fly, step, jump height, and the ground used for fall damage and critical hits")
++        public boolean movement = true;
++        @Comment("Movement packets sent faster than real time")
++        public boolean timer = true;
++        @Comment("Reach, hits off to the side, hits without an arm swing, more than one hit a tick")
++        public boolean combat = true;
++        @Comment("Vanilla is 3.0, measured from the eye to the nearest point of the target's box")
++        public double maxReach = 3.0D;
++        @Comment("When enforcing, also kick a player whose checks fail kickViolations times within\n" +
++            "kickWindowSeconds (each failed move is still set back, each failed hit still dropped). Two hits\n" +
++            "in one tick never count: fast clicking does that")
++        public boolean kick = true;
++        public int kickViolations = 5;
++        public int kickWindowSeconds = 30;
++        public String kickMessage = "不正な動作を検出したため切断しました";
++        @Comment("Log what is blocked (or would be, when not enforcing), at most once per check per\n" +
++            "player every two seconds")
++        public boolean log = true;
++    }
++}
+diff --git a/src/main/java/athena/server/AthenaWorldConfig.java b/src/main/java/athena/server/AthenaWorldConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..13309cc24ea2b2c6c801067135efd5fbdffec0ff
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaWorldConfig.java
+@@ -0,0 +1,62 @@
++package athena.server;
++
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++
++/**
++ * Athena - the per-world settings in athena.yml (worlds.default, or a section named after the world).
++ * Read once, when the world loads.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class AthenaWorldConfig {
++
++    @Comment("When enabled, each chunk's packet is compressed once and the compressed bytes are\n" +
++            "sent to every player that needs the chunk, until a block or light change in it\n" +
++            "makes a new one. On a small map players cross chunk borders constantly and 1.8\n" +
++            "resends a row of chunks each time: a 20-player arena compressed the same few\n" +
++            "hundred chunks 70,000 times in three minutes, and that compression was most of\n" +
++            "the CPU the server used. Chunks are then sent one per packet instead of in bulk\n" +
++            "packets; the chunk data is the same.\n" +
++            "Not used while anti-xray is on - it rewrites a chunk depending on its neighbours -\n" +
++            "or when network compression is off, where there is nothing to cache.\n" +
++            "Default: true")
++    public boolean cacheChunkPackets = true;
++
++    @Comment("How many chunks past the view distance a player keeps a chunk before it is unloaded\n" +
++            "from the client. 1.8 unloads a chunk as soon as it leaves the view square and sends it\n" +
++            "again when it comes back, so walking to and fro across a chunk border resends a whole\n" +
++            "row each time. With a margin, chunks are still sent at the view distance but only\n" +
++            "forgotten that much further out. The client draws by its own render distance; it just\n" +
++            "holds a few more chunks, which the server keeps up to date. 0 is vanilla.\n" +
++            "Default: 0")
++    public int chunkUnloadMargin = 0;
++
++    @Comment("When enabled, the first half of generating a brand new chunk - noise, biomes,\n" +
++            "surface blocks, caves and ravines - runs on a worker thread instead of the\n" +
++            "server thread. It is a pure function of the seed and the chunk coordinates, so\n" +
++            "the terrain it produces is identical either way; structures, lighting, the\n" +
++            "chunk map, events and population all still happen on the server thread in the\n" +
++            "same order as before.\n" +
++            "Only ordinary generated worlds use it. A world with a plugin chunk generator\n" +
++            "always generates on the server thread.\n" +
++            "Default: true")
++    public boolean asyncChunkShaping = true;
++
++    @Comment("When enabled, the decoration pass of populating a chunk - ores, trees, plants -\n" +
++            "runs on a worker thread instead of the server thread. It is about three quarters\n" +
++            "of what populating a chunk costs and touches no entities or tile entities, so it\n" +
++            "is the part that can be lifted out. Structures, lakes, dungeons, the animals a new\n" +
++            "chunk starts with, ice and snow, plugin block populators and ChunkPopulateEvent all\n" +
++            "still run on the server thread, in the same order as before; the blocks the\n" +
++            "decoration chose are replayed there too, so lighting and client updates are\n" +
++            "unchanged.\n" +
++            "Decoration runs on a single thread for the whole server, so its ordering is exactly\n" +
++            "as serial as it has always been.\n" +
++            "The blocks are put into the chunk sections in bulk and the chunk is relit and sent\n" +
++            "once, rather than one setTypeAndData per block: a replayed write reaches loaded\n" +
++            "neighbours that an inline one does not, and propagating skylight into them for every\n" +
++            "block was more expensive than the decoration it replaced.\n" +
++            "Default: true")
++    public boolean asyncChunkDecoration = true;
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 30d13005923e53bbd8ed30df8986f1b8f7c4f475..898f06bc1e7c92a930f663cd73d965d867ebc2a5 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -13,9 +13,7 @@ import org.spongepowered.configurate.objectmapping.meta.Comment;
+ import org.spongepowered.configurate.util.MapFactories;
+ import org.spongepowered.configurate.util.NamingSchemes;
+ import java.io.File;
+-import java.util.ArrayList;
+ import java.util.HashMap;
+-import java.util.List;
+ import java.util.Map;
+ 
+ 
+@@ -66,17 +64,6 @@ public class PandaSpigotConfig {
+             root.set(config); // update backing node
+             loader.save(root);
+ 
+-            // Athena - publish the audit gate as a plain static; see AthenaIndexAudit.enabled()
+-            net.minecraft.server.AthenaIndexAudit.setEnabled(config.debugVerifyAthenaIndexes);
+-            // Athena - the network deflate level, read by each Netty thread's deflater as it is made
+-            net.minecraft.server.PacketCompressor.setLevel(config.networkCompressionLevel);
+-            // Athena - how long a tick may spend finishing chunk loads
+-            org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.setFinishBudgetMillis(config.chunkLoadFinishMillisPerTick);
+-            // Athena - and unloading (saving) them
+-            net.minecraft.server.ChunkProviderServer.setUnloadBudgetMillis(config.chunkUnloadMillisPerTick);
+-            // Athena - and the guard's switches
+-            net.minecraft.server.AthenaGuard.configure(config.guard.enabled, config.guard.enforce, config.guard.movement, config.guard.timer, config.guard.combat, config.guard.maxReach, config.guard.log, config.guard.kick, config.guard.kickMessage, config.guard.kickViolations, config.guard.kickWindowSeconds);
+-            
+             // call after save
+             initWorlds(worldsNode);
+         } catch (Exception e) {
+@@ -145,97 +132,5 @@ public class PandaSpigotConfig {
+     @Comment("Protect spawn from explosions")
+     public boolean betterSpawnProtection = true;
+ 
+-    // Athena start - index consistency audit
+-    @Comment("DEBUG ONLY. Verifies, every tick, that the derived lookup structures Athena added\n" +
+-        "still agree with the collections they mirror:\n" +
+-        "  - ChunkProviderServer.creatureCensus vs a fresh sum over every loaded chunk, and the\n" +
+-        "    two sites that adjust it, which is where a real divergence was found\n" +
+-        "  - Chunk's X/Z bucket index vs the entity slice it is derived from, and the per-slice\n" +
+-        "    IMonster and EntityHuman counts a target query skips slices on\n" +
+-        "Any disagreement is logged as a warning with a stack trace. This costs real time, so\n" +
+-        "leave it off outside of testing.")
+-    public boolean debugVerifyAthenaIndexes = false;
+-    // Athena end
+-
+-    // Athena start - io_uring
+-    @Comment("Use Linux io_uring for player connections instead of epoll: reads and writes go to the\n" +
+-        "kernel in batches rather than one system call each. Needs Linux 5.9 or newer, and a\n" +
+-        "container may block it (Docker's default seccomp profile does); when it is not available\n" +
+-        "the server says why and uses epoll. Takes effect on restart.\n" +
+-        "Default: false")
+-    public boolean ioUring = false;
+-    // Athena end
+-
+-    // Athena start - BungeeGuard tokens; see net.minecraft.server.AthenaBungeeGuard
+-    @Comment("Tokens a proxy must send to log players in, when bungeecord is on in spigot.yml.\n" +
+-        "IP forwarding lets whoever reaches this server's port claim any player's UUID, an operator's\n" +
+-        "included. With a token listed here, a login that does not carry one of them is refused, so\n" +
+-        "only the proxy can log players in even if the port is reachable. Velocity sends the contents\n" +
+-        "of its forwarding.secret file when player-info-forwarding-mode = \"BUNGEEGUARD\"; the\n" +
+-        "BungeeGuard plugin does the same for BungeeCord. Keep this file private. Empty: no check.\n" +
+-        "Write one token per line, as a block list - a one-line [\"...\"] list is read as a single\n" +
+-        "token, brackets and all, and then no login gets in:\n" +
+-        "  bungeeGuardTokens:\n" +
+-        "    - the-contents-of-forwarding.secret\n" +
+-        "Takes effect on restart.\n" +
+-        "Default: []")
+-    public List<String> bungeeGuardTokens = new ArrayList<>();
+-    // Athena end
+-
+-    // Athena start - network compression level
+-    @Comment("The zlib level (1-9) packets over the network compression threshold are compressed\n" +
+-        "at. Chunks are compressed once and cached (see cacheChunkPackets) and always use the\n" +
+-        "default level; this is everything else - entity metadata, inventories, tab list and\n" +
+-        "scoreboard packets. 1 is the fastest and sends the most bytes. Takes effect on restart.\n" +
+-        "Default: 6")
+-    public int networkCompressionLevel = 6;
+-    // Athena end
+-
+-    // Athena start - spread finished chunk loads over ticks
+-    @Comment("How many milliseconds one tick may spend finishing chunks read from disk (their entities,\n" +
+-        "ChunkLoadEvent, neighbours); the rest wait for the next ticks. Many players arriving in a\n" +
+-        "world at once request hundreds of chunks together, and finishing them all in one tick froze\n" +
+-        "the server for up to a second. 0 finishes everything in the tick it was read, as vanilla.\n" +
+-        "Default: 10")
+-    public int chunkLoadFinishMillisPerTick = 10;
+-
+-    @Comment("How many milliseconds one tick may spend unloading chunks (an ordinary world saves each\n" +
+-        "one as it goes); the rest stay queued for the next ticks. Everyone leaving a world at once\n" +
+-        "queued its whole view and made ~140 ms ticks. 0 keeps only vanilla's 100 chunks a tick.\n" +
+-        "Default: 10")
+-    public int chunkUnloadMillisPerTick = 10;
+-    // Athena end
+-
+-    // Athena start - server-authoritative movement and combat checks; see net.minecraft.server.AthenaGuard
+-    @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
+-        "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
+-        "that could not land are dropped, and fall damage and critical hits follow the ground the\n" +
+-        "server sees. 1.8 and 1.7.10 clients are both checked by their own physics.\n" +
+-        "  enforce: false only logs what would have been blocked (to look for false positives)")
+-    public GuardConfig guard = new GuardConfig();
+-
+-    @ConfigSerializable
+-    public static class GuardConfig {
+-        public boolean enabled = true;
+-        public boolean enforce = true;
+-        @Comment("Speed, fly, step, jump height, and the ground used for fall damage and critical hits")
+-        public boolean movement = true;
+-        @Comment("Movement packets sent faster than real time")
+-        public boolean timer = true;
+-        @Comment("Reach, hits off to the side, hits without an arm swing, more than one hit a tick")
+-        public boolean combat = true;
+-        @Comment("Vanilla is 3.0, measured from the eye to the nearest point of the target's box")
+-        public double maxReach = 3.0D;
+-        @Comment("When enforcing, also kick a player whose checks fail kickViolations times within\n" +
+-            "kickWindowSeconds (each failed move is still set back, each failed hit still dropped). Two hits\n" +
+-            "in one tick never count: fast clicking does that")
+-        public boolean kick = true;
+-        public int kickViolations = 5;
+-        public int kickWindowSeconds = 30;
+-        public String kickMessage = "不正な動作を検出したため切断しました";
+-        @Comment("Log what is blocked (or would be, when not enforcing), at most once per check per\n" +
+-            "player every two seconds")
+-        public boolean log = true;
+-    }
+-    // Athena end
++    // Athena - the settings Athena added live in athena.yml; see athena.server.AthenaConfig
+ }
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index b381ef55fc2ab265e4ad1140a113d7f38117d830..7f5a76641ef367882f8955d037b41f5d7a4c04fe 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -72,57 +72,5 @@ public class PandaSpigotWorldConfig {
+         "Default: false")
+     public boolean useSpigotChunkTickingSelection = false;
+ 
+-    // Athena start
+-    @Comment("When enabled, each chunk's packet is compressed once and the compressed bytes are\n" +
+-            "sent to every player that needs the chunk, until a block or light change in it\n" +
+-            "makes a new one. On a small map players cross chunk borders constantly and 1.8\n" +
+-            "resends a row of chunks each time: a 20-player arena compressed the same few\n" +
+-            "hundred chunks 70,000 times in three minutes, and that compression was most of\n" +
+-            "the CPU the server used. Chunks are then sent one per packet instead of in bulk\n" +
+-            "packets; the chunk data is the same.\n" +
+-            "Not used while anti-xray is on - it rewrites a chunk depending on its neighbours -\n" +
+-            "or when network compression is off, where there is nothing to cache.\n" +
+-            "Default: true")
+-    public boolean cacheChunkPackets = true;
+-
+-    // Athena start
+-    @Comment("How many chunks past the view distance a player keeps a chunk before it is unloaded\n" +
+-            "from the client. 1.8 unloads a chunk as soon as it leaves the view square and sends it\n" +
+-            "again when it comes back, so walking to and fro across a chunk border resends a whole\n" +
+-            "row each time. With a margin, chunks are still sent at the view distance but only\n" +
+-            "forgotten that much further out. The client draws by its own render distance; it just\n" +
+-            "holds a few more chunks, which the server keeps up to date. 0 is vanilla. Read when\n" +
+-            "the world loads.\n" +
+-            "Default: 0")
+-    public int chunkUnloadMargin = 0;
+-    // Athena end
+-
+-    @Comment("When enabled, the first half of generating a brand new chunk - noise, biomes,\n" +
+-            "surface blocks, caves and ravines - runs on a worker thread instead of the\n" +
+-            "server thread. It is a pure function of the seed and the chunk coordinates, so\n" +
+-            "the terrain it produces is identical either way; structures, lighting, the\n" +
+-            "chunk map, events and population all still happen on the server thread in the\n" +
+-            "same order as before.\n" +
+-            "Only ordinary generated worlds use it. A world with a plugin chunk generator\n" +
+-            "always generates on the server thread.\n" +
+-            "Default: true")
+-    public boolean asyncChunkShaping = true;
+-
+-    @Comment("When enabled, the decoration pass of populating a chunk - ores, trees, plants -\n" +
+-            "runs on a worker thread instead of the server thread. It is about three quarters\n" +
+-            "of what populating a chunk costs and touches no entities or tile entities, so it\n" +
+-            "is the part that can be lifted out. Structures, lakes, dungeons, the animals a new\n" +
+-            "chunk starts with, ice and snow, plugin block populators and ChunkPopulateEvent all\n" +
+-            "still run on the server thread, in the same order as before; the blocks the\n" +
+-            "decoration chose are replayed there too, so lighting and client updates are\n" +
+-            "unchanged.\n" +
+-            "Decoration runs on a single thread for the whole server, so its ordering is exactly\n" +
+-            "as serial as it has always been.\n" +
+-            "The blocks are put into the chunk sections in bulk and the chunk is relit and sent\n" +
+-            "once, rather than one setTypeAndData per block: a replayed write reaches loaded\n" +
+-            "neighbours that an inline one does not, and propagating skylight into them for every\n" +
+-            "block was more expensive than the decoration it replaced.\n" +
+-            "Default: true")
+-    public boolean asyncChunkDecoration = true;
+-    // Athena end
++    // Athena - the per-world settings Athena added live in athena.yml; see athena.server.AthenaWorldConfig
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaBungeeGuard.java b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+index 1fe14fec7a6264b3c0c6b09c3be05adabe130b49..2085cb4e1c594b45c28bc421fa0a560386fcdcd4 100644
+--- a/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+@@ -16,7 +16,7 @@ import java.util.List;
+ //
+ // Velocity's player-info-forwarding-mode = "BUNGEEGUARD" (and the BungeeGuard plugin for
+ // BungeeCord) adds one more profile property, "bungeeguard-token", whose value is a secret the proxy
+-// and the server share. When pandaspigot.yml lists tokens, a login must carry exactly one such
++// and the server share. When athena.yml lists tokens, a login must carry exactly one such
+ // property and its value must be one of them, or the connection is refused. The token is then taken
+ // out of the profile: the properties go on to every player in the tab list, so a token left in would
+ // be handed to everyone online.
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 7e3d737b9f23fe300d036937d56b4eb38daddd0c..53d9509817794d40b08d8e6509804b93ba118ad4 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -21,7 +21,7 @@ public final class AthenaGuard {
+     private static final Logger LOGGER = LogManager.getLogger("Athena/Guard");
+ 
+     // ------------------------------------------------------------------ configuration
+-    // Refreshed by PandaSpigotConfig.init, like AthenaIndexAudit's switch.
++    // Refreshed by athena.server.AthenaConfig.init, like AthenaIndexAudit's switch.
+     static volatile boolean enabled = true;
+     /** false: detect and log only, change nothing (to look for false positives first). */
+     static volatile boolean enforce = true;
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index 4620f5e568765aae62918802386d49687fdb8de8..71b15f2fc050fa0996aa73bc43bfffcf1ab8adcd 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -9,7 +9,7 @@ import org.apache.logging.log4j.Logger;
+ // Three of the fork's optimizations replace a scan with a structure kept in sync by hand, and a
+ // heap dump cannot check any of them - the structure is only interesting while it is being
+ // mutated. This audit rebuilds each one from the data it mirrors, every tick, and shouts if they
+-// ever disagree. It is off unless pandaspigot.yml sets debugVerifyAthenaIndexes.
++// ever disagree. It is off unless athena.yml sets debugVerifyAthenaIndexes.
+ //
+ //   ChunkProviderServer.creatureCensus   mirrors the sum of Chunk.entityCount over loaded chunks
+ //   Chunk.entityBuckets                  mirrors the entity slice it is derived from, plus the
+@@ -63,7 +63,7 @@ public final class AthenaIndexAudit {
+ 
+     private AthenaIndexAudit() {}
+ 
+-    // Athena - a plain static, refreshed by PandaSpigotConfig.init on startup and on reload.
++    // Athena - a plain static, refreshed by athena.server.AthenaConfig.init on startup and on reload.
+     //
+     // This used to read PandaSpigotConfig.get() and then a field on it: two loads and a null check,
+     // none of which the JIT can fold away, on paths that run millions of times a tick. A live
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 6fd52acd15f3d71bf5c3c9a0f196eeeb246465f3..b9b2fad9478f4480f78845fa280d7ce6aef033d2 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -307,7 +307,7 @@ public class ChunkProviderServer implements IChunkProvider {
+         if (this.asyncShaping == null) {
+             this.shapingGenerator = this.resolveShapingGenerator();
+ 
+-            boolean enabled = this.world.pandaSpigotConfig.asyncChunkShaping
++            boolean enabled = this.world.athenaConfig.asyncChunkShaping
+                     && this.shapingGenerator != null
+                     && this.world.generator == null // a plugin generator keeps generating on the server thread
+                     && this.world.getWorldChunkManager().getClass() == WorldChunkManager.class;
+@@ -321,7 +321,7 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+             this.asyncShaping = enabled;
+             ChunkProviderServer.logger.info("[Athena] " + this.world.getWorld().getName() + ": chunk shaping is " + (enabled ? "off the server thread" : "on the server thread")
+-                    + " (config=" + this.world.pandaSpigotConfig.asyncChunkShaping
++                    + " (config=" + this.world.athenaConfig.asyncChunkShaping
+                     + ", generator=" + (this.shapingGenerator == null ? this.chunkProvider.getClass().getSimpleName() : this.shapingGenerator.getClass().getSimpleName())
+                     + ", pluginGenerator=" + (this.world.generator != null)
+                     + ", biomeSource=" + this.world.getWorldChunkManager().getClass().getSimpleName() + ")");
+@@ -711,7 +711,7 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+     private boolean asyncDecorationEnabled() {
+         if (this.asyncDecoration == null) {
+-            this.asyncDecoration = this.world.pandaSpigotConfig.asyncChunkDecoration
++            this.asyncDecoration = this.world.athenaConfig.asyncChunkDecoration
+                     && this.asyncShapingEnabled(); // same generator and same world requirements
+         }
+ 
+@@ -771,7 +771,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     // chunk. When everyone leaves a world at once - a lobby emptied by a match start, players passing
+     // through the default world on their way in - its whole view square is queued together and the
+     // fixed cap of 100 a tick made ~140 ms ticks. The cap stays; this stops earlier when the time is
+-    // spent. Set from pandaspigot.yml (chunkUnloadMillisPerTick); 0 is the cap alone.
++    // spent. Set from athena.yml (chunkUnloadMillisPerTick); 0 is the cap alone.
+     private static volatile long athenaUnloadBudgetNanos = 10_000_000L;
+ 
+     public static void setUnloadBudgetMillis(int millis) {
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index 2bc28256eff60aec1f5e10693aff01c050ac2543..92954f7e831230b18b319fc495f2c1114fa775fd 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -210,6 +210,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             }
+             bindAddress = new java.net.InetSocketAddress(inetaddress, this.R());
+             }
++            athena.server.AthenaConfig.init((File) options.valueOf("athena-settings"), (File) options.valueOf("pandaspigot-settings")); // Athena - first: it moves its keys out of pandaspigot.yml
+             com.hpfxd.pandaspigot.config.PandaSpigotConfig.init((File) options.valueOf("pandaspigot-settings"));
+             // PandaSpigot end
+             // PaperSpigot start
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 537788512f66d624b73a889036333c9e0accf3f8..10a9170e08406671695d655853c31764092e3183 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -65,7 +65,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+      * does not compress, where there is nothing to cache.
+      */
+     private boolean useChunkPacketCache() {
+-        return this.world.pandaSpigotConfig.cacheChunkPackets && !this.world.spigotConfig.antiXray
++        return this.world.athenaConfig.cacheChunkPackets && !this.world.spigotConfig.antiXray
+                 && this.server.aK() >= 0;
+     }
+     // Athena end
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index ce45d3599a472f5e791fac0c283d02c09c631ef5..973a919c3259afa4e0ce7938d22a253200c5fc52 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -130,7 +130,7 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                         networkManager.spoofedProfile = gson.fromJson(split[3], com.mojang.authlib.properties.Property[].class);
+                     }
+                     // Athena start - BungeeGuard: refuse a login the proxy's token does not come with
+-                    java.util.List<String> guardTokens = com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().bungeeGuardTokens;
++                    java.util.List<String> guardTokens = athena.server.AthenaConfig.get().bungeeGuardTokens;
+                     if (!guardTokens.isEmpty()) {
+                         com.mojang.authlib.properties.Property[] properties = AthenaBungeeGuard.check(networkManager.spoofedProfile, guardTokens);
+                         if (properties == null) {
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 2ca86d994b760ec0f4042732b3b3bccaab663a1c..f8b5068274e4efb3e8dba5ff4d1211290e031315 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -17,7 +17,7 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+     private static final io.netty.util.concurrent.FastThreadLocal<Deflater> DEFLATER = new io.netty.util.concurrent.FastThreadLocal<Deflater>() {
+         @Override
+         protected Deflater initialValue() {
+-            return new Deflater(level); // Athena - pandaspigot.yml networkCompressionLevel
++            return new Deflater(level); // Athena - athena.yml networkCompressionLevel
+         }
+     };
+     // Athena - the level each event loop's deflater is made with; set from the config before Netty starts
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index e293b065ae703a78f4523781cbfb712dfb8f971a..41c28dca3b185c7a07b7f327cf62aa6788f0de79 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -183,7 +183,7 @@ public class PlayerChunkMap {
+ 
+     public PlayerChunkMap(WorldServer worldserver, int viewDistance /* Spigot */) {
+         this.world = worldserver;
+-        this.athenaUnloadMargin = Math.max(0, Math.min(worldserver.pandaSpigotConfig.chunkUnloadMargin, 8)); // Athena - before any player is added
++        this.athenaUnloadMargin = Math.max(0, Math.min(worldserver.athenaConfig.chunkUnloadMargin, 8)); // Athena - before any player is added
+         this.setPlayerViewRadius(viewDistance); // Spigot
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ServerConnection.java b/src/main/java/net/minecraft/server/ServerConnection.java
+index 99eb7d2562be19c25344cf5bc3efef70b2c7b3e9..abda8d7cea02e79a283f79ba4f6ecc19f56d6c49 100644
+--- a/src/main/java/net/minecraft/server/ServerConnection.java
++++ b/src/main/java/net/minecraft/server/ServerConnection.java
+@@ -69,7 +69,7 @@ public class ServerConnection {
+     // Athena start - io_uring: one ring per event loop, reads and writes submitted to the kernel in
+     // batches instead of an epoll_wait and a read or write syscall each. On the VPS, kernel entry
+     // and exit and the per-syscall security hooks were most of Netty's time. Opt in with
+-    // pandaspigot.yml ioUring; without kernel support it falls back to epoll and says why.
++    // athena.yml ioUring; without kernel support it falls back to epoll and says why.
+     public static final LazyInitVar<io.netty.incubator.channel.uring.IOUringEventLoopGroup> SERVER_IO_URING_EVENTLOOP = new LazyInitVar() {
+         protected io.netty.incubator.channel.uring.IOUringEventLoopGroup load() {
+             return new io.netty.incubator.channel.uring.IOUringEventLoopGroup(0, nettyThreads("Netty io_uring Server IO #%d"));
+@@ -81,7 +81,7 @@ public class ServerConnection {
+     };
+ 
+     private static boolean athenaIoUring() {
+-        if (!com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().ioUring) {
++        if (!athena.server.AthenaConfig.get().ioUring) {
+             return false;
+         }
+         try {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 5192407d071faba04210cf94298a848b02662190..816cc67e2e95dbba5b1015965b4476e386fafba6 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -169,6 +169,7 @@ public abstract class World implements IBlockAccess {
+     public final org.github.paperspigot.PaperSpigotWorldConfig paperSpigotConfig; // PaperSpigot
+ 
+     public com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig pandaSpigotConfig; // PandaSpigot
++    public athena.server.AthenaWorldConfig athenaConfig; // Athena - athena.yml
+     // Athena start - while a chunk decorates off the server thread, that thread's world calls are
+     // answered from a sandbox instead of the live world. The check is a field load and a compare
+     // against the current thread, which is false for the server thread on every call.
+@@ -210,6 +211,7 @@ public abstract class World implements IBlockAccess {
+         this.spigotConfig = new org.spigotmc.SpigotWorldConfig( worlddata.getName() ); // Spigot
+         this.paperSpigotConfig = new org.github.paperspigot.PaperSpigotWorldConfig( worlddata.getName() ); // PaperSpigot
+         this.pandaSpigotConfig = com.hpfxd.pandaspigot.config.PandaSpigotConfig.getWorldConfig(worlddata.getName()); // PandaSpigot
++        this.athenaConfig = athena.server.AthenaConfig.getWorldConfig(worlddata.getName()); // Athena
+         this.generator = gen;
+         this.world = new CraftWorld((WorldServer) this, gen, env);
+         this.ticksPerAnimalSpawns = this.getServer().getTicksPerAnimalSpawns(); // CraftBukkit
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 3669c93709daaf082340d6bee568da3f070d3add..b99aacb1bf71e9d0ebe1526357be1c9f68c1d9ac 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -750,6 +750,7 @@ public final class CraftServer implements Server {
+ 
+         org.spigotmc.SpigotConfig.init((File) console.options.valueOf("spigot-settings")); // Spigot
+         org.github.paperspigot.PaperSpigotConfig.init((File) console.options.valueOf("paper-settings")); // PaperSpigot
++        athena.server.AthenaConfig.init((File) console.options.valueOf("athena-settings"), (File) console.options.valueOf("pandaspigot-settings")); // Athena
+         com.hpfxd.pandaspigot.config.PandaSpigotConfig.init((File) console.options.valueOf("pandaspigot-settings")); // PandaSpigot
+         for (WorldServer world : console.worlds) {
+             world.worldData.setDifficulty(difficulty);
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index 3c98ce842ec78f8e8908f199074f24d05ab2de05..ff7fd163d6cd96ed0064a46d574d3d8450cfdf04 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -141,6 +141,13 @@ public class Main {
+                         .defaultsTo(new File("pandaspigot.yml"))
+                         .describedAs("Yml file");
+ 
++                // Athena - the settings Athena adds
++                acceptsAll(asList("athena-settings"), "File for Athena settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("athena.yml"))
++                        .describedAs("Yml file");
++
+                 acceptsAll(asList("add-plugin", "add-extra-plugin-jar"), "Specify paths to extra plugin jars to be loaded in addition to those in the plugins folder. This argument can be specified multiple times, once for each extra plugin jar path.")
+                     .withRequiredArg()
+                     .ofType(File.class)
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+index c541c93aca19b222ca2c32d55ddcd0c81ef78014..72f4c2b5d0fabd5bc794d45f9a291527d614c5e6 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+@@ -32,7 +32,7 @@ public class ChunkIOExecutor {
+     }
+ 
+     // Athena - how long one tick may spend finishing chunk loads; 0 finishes all of them. Set from
+-    // pandaspigot.yml (chunkLoadFinishMillisPerTick) before the worlds load
++    // athena.yml (chunkLoadFinishMillisPerTick) before the worlds load
+     private static volatile long finishBudgetNanos = 10_000_000L;
+ 
+     public static void setFinishBudgetMillis(int millis) {
+diff --git a/src/test/java/athena/server/AthenaConfigTest.java b/src/test/java/athena/server/AthenaConfigTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a649d896881b5eb64a24152ed4e7fc0fda6259a
+--- /dev/null
++++ b/src/test/java/athena/server/AthenaConfigTest.java
+@@ -0,0 +1,142 @@
++package athena.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.io.File;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.util.Arrays;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++/**
++ * Athena - athena.yml takes Athena's settings over from pandaspigot.yml: the first start moves them
++ * with their values, later ones ignore and remove any that reappear, and PandaSpigot reads what is
++ * left as before.
++ */
++public class AthenaConfigTest {
++
++    private File dir;
++    private File athena;
++    private File panda;
++
++    @Before
++    public void setUp() throws Exception {
++        this.dir = Files.createTempDirectory("athena-config").toFile();
++        this.athena = new File(this.dir, "athena.yml");
++        this.panda = new File(this.dir, "pandaspigot.yml");
++    }
++
++    @After
++    public void tearDown() throws Exception {
++        // put the statics the settings feed (the guard's switches, budgets, ...) back to their defaults
++        File fresh = new File(this.dir, "fresh.yml");
++        AthenaConfig.init(fresh, null);
++        for (File file : this.dir.listFiles()) {
++            file.delete();
++        }
++        this.dir.delete();
++    }
++
++    private void write(File file, String... lines) throws Exception {
++        Files.write(file.toPath(), Arrays.asList(lines), StandardCharsets.UTF_8);
++    }
++
++    private String read(File file) throws Exception {
++        return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
++    }
++
++    private static String withoutComments(String yml) {
++        StringBuilder out = new StringBuilder();
++
++        for (String line : yml.split("\n")) {
++            if (!line.trim().startsWith("#")) {
++                out.append(line).append('\n');
++            }
++        }
++        return out.toString();
++    }
++
++    private void writeOldPandaSpigotYml() throws Exception {
++        write(this.panda,
++                "maxBookPageSize: 1234",
++                "ioUring: true",
++                "networkCompressionLevel: 3",
++                "chunkUnloadMillisPerTick: 7",
++                "bungeeGuardTokens:",
++                "  - secret-one",
++                "guard:",
++                "  enabled: true",
++                "  enforce: false",
++                "  kickViolations: 9",
++                "worlds:",
++                "  default:",
++                "    randomArrowDamage: false",
++                "    chunkUnloadMargin: 2",
++                "  lobby:",
++                "    cacheChunkPackets: false");
++    }
++
++    @Test
++    public void theFirstStartMovesTheSettingsWithTheirValues() throws Exception {
++        writeOldPandaSpigotYml();
++
++        AthenaConfig.init(this.athena, this.panda);
++
++        AthenaConfig config = AthenaConfig.get();
++        assertTrue(config.ioUring);
++        assertEquals(3, config.networkCompressionLevel);
++        assertEquals(7, config.chunkUnloadMillisPerTick);
++        assertEquals(10, config.chunkLoadFinishMillisPerTick); // not set before: the default
++        assertEquals(Arrays.asList("secret-one"), config.bungeeGuardTokens);
++        assertFalse(config.guard.enforce);
++        assertEquals(9, config.guard.kickViolations);
++        assertEquals(2, AthenaConfig.getWorldConfig("world").chunkUnloadMargin);
++        assertTrue(AthenaConfig.getWorldConfig("world").cacheChunkPackets);
++        assertFalse(AthenaConfig.getWorldConfig("lobby").cacheChunkPackets);
++
++        String athenaYml = read(this.athena);
++        assertTrue(athenaYml, athenaYml.contains("secret-one"));
++        assertTrue(athenaYml, athenaYml.contains("chunkUnloadMargin: 2"));
++
++        // pandaspigot.yml keeps PandaSpigot's own settings and loses Athena's
++        String pandaYml = read(this.panda);
++        assertTrue(pandaYml, pandaYml.contains("maxBookPageSize: 1234"));
++        assertTrue(pandaYml, pandaYml.contains("randomArrowDamage: false"));
++        for (String key : new String[] {"ioUring", "networkCompressionLevel", "chunkUnloadMillisPerTick", "bungeeGuardTokens", "secret-one", "guard", "chunkUnloadMargin", "cacheChunkPackets"}) {
++            assertFalse(key + " left in pandaspigot.yml:\n" + pandaYml, pandaYml.contains(key));
++        }
++    }
++
++    @Test
++    public void laterStartsKeepAthenaYmlAndDropWhatReappearsInPandaSpigotYml() throws Exception {
++        writeOldPandaSpigotYml();
++        AthenaConfig.init(this.athena, this.panda);
++
++        // someone copies an old pandaspigot.yml back in
++        writeOldPandaSpigotYml();
++        String before = read(this.athena);
++        AthenaConfig.init(this.athena, this.panda);
++
++        // the YAML library re-indents comments when it rewrites a file (pandaspigot.yml too): compare the settings
++        assertEquals("athena.yml is the one that counts", withoutComments(before), withoutComments(read(this.athena)));
++        assertTrue(AthenaConfig.get().ioUring);
++        assertFalse(read(this.panda).contains("ioUring"));
++    }
++
++    @Test
++    public void aServerWithoutPandaSpigotSettingsGetsTheDefaults() throws Exception {
++        AthenaConfig.init(this.athena, this.panda);
++
++        AthenaConfig config = AthenaConfig.get();
++        assertFalse(config.ioUring);
++        assertEquals(6, config.networkCompressionLevel);
++        assertTrue(config.guard.enforce);
++        assertEquals(0, AthenaConfig.getWorldConfig("world").chunkUnloadMargin);
++        assertTrue(this.athena.isFile());
++        assertFalse(this.panda.exists());
++    }
++}

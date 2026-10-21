@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 03:19:38 +0900
+Subject: [PATCH] Compress a cached chunk frame on one thread
+
+Two Netty threads sending the same uncompressed chunk both deflated it. The frame is now built
+under the cache's lock, as its 1.7 packet already was.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index fcaa487feef1979c67bbf011aa0201cc17eb5219..ee2e2efbc1c9f186865716226da12e31459288a9 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -103,6 +103,21 @@ final class AthenaChunkPacketCache {
+     byte[] frame(int packetId, int threshold) {
+         byte[] result = this.frame;
+ 
++        if (result != null) {
++            return result;
++        }
++        // One thread compresses, the others wait for its frame: players who join or are teleported
++        // together are sent the same chunks at the same moment, and with several Netty threads each
++        // of them deflated every one of those chunks - ~1 ms each - only for all but one result to
++        // be thrown away. legacy17Packet guards its packet the same way.
++        synchronized (this) {
++            return this.compressFrame(packetId, threshold);
++        }
++    }
++
++    private byte[] compressFrame(int packetId, int threshold) {
++        byte[] result = this.frame;
++
+         if (result != null) {
+             return result;
+         }
+@@ -110,7 +125,7 @@ final class AthenaChunkPacketCache {
+         PacketPlayOutMapChunk.ChunkMap data = this.map;
+ 
+         if (data == null) {
+-            return this.frame; // another thread compressed it between our two reads
++            return this.frame; // frame is set before map is cleared
+         }
+ 
+         ByteBuf raw = Unpooled.buffer(data.data.length + 32);

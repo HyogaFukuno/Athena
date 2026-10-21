@@ -1,0 +1,299 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 15 Oct 2026 23:23:46 +0900
+Subject: [PATCH] Write Adventure text into packets as JSON, once per broadcast
+
+Chat, title and tab list packets turned each Adventure Component into JSON, parsed it back into
+a 1.8 component and wrote it out as JSON again, once per receiver. The serializer's JSON goes out
+as it is now, and the last component serialized is remembered by identity, so a broadcast builds
+its JSON once. The client reads the same component (AthenaAdventureJsonTest).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/adventure/PandaAdventure.java b/src/main/java/com/hpfxd/pandaspigot/adventure/PandaAdventure.java
+index e29cb67c2dd3f0bf803bfd89951f06c10b0816f6..31d4d32cb883d14bd378587ab8f17ddf6c89d442 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/adventure/PandaAdventure.java
++++ b/src/main/java/com/hpfxd/pandaspigot/adventure/PandaAdventure.java
+@@ -49,6 +49,42 @@ public final class PandaAdventure {
+         return array;
+     }
+ 
++    // Athena start - write Adventure text straight into packets as JSON
++    // The chat, title and tab list packets turned each Component into JSON, parsed that JSON back
++    // into a 1.8 component, and turned it into JSON again to write it - once per receiver. The
++    // client only ever sees the JSON, and SERIALIZER already writes the oldest format with 1.8
++    // hover events, so its output goes out as it is.
++    //
++    // A broadcast hands every receiver the same Component instance, so the last one serialized is
++    // remembered and the receivers after the first reuse its JSON. Components are immutable, and
++    // identity is the check: equals walks the whole tree, which is what this is avoiding. The pair
++    // is one immutable object swapped through a volatile, since packets are written on several
++    // Netty threads at once; two threads may both serialize the same component, to the same JSON.
++    private static final String EMPTY_JSON = "{\"text\":\"\"}";
++
++    private record LastJson(Component component, String json) {}
++
++    private static volatile LastJson lastJson;
++
++    /** The JSON a packet carries for this component: what {@link #asVanilla} would have been written as. */
++    public static String asJson(Component component) {
++        if (component == null) {
++            return EMPTY_JSON;
++        }
++
++        LastJson last = lastJson;
++
++        if (last != null && last.component() == component) {
++            return last.json();
++        }
++
++        String json = SERIALIZER.serialize(component);
++
++        lastJson = new LastJson(component, json);
++        return json;
++    }
++    // Athena end
++
+     public static IChatBaseComponent asVanilla(Component component) {
+         return component == null ? new ChatComponentText("") : IChatBaseComponent.ChatSerializer.jsonToComponent(SERIALIZER.serialize(component));
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutChat.java b/src/main/java/net/minecraft/server/PacketPlayOutChat.java
+index 5983f90b964ceea87ab102f4532f697a17b813e4..d05c039ff07188d11aa328cc81a64dacd1aa9d59 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutChat.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutChat.java
+@@ -30,7 +30,7 @@ public class PacketPlayOutChat implements Packet<PacketListenerPlayOut> {
+         // Spigot start
+         // PandaSpigot start - Adventure
+         if (adventure$message != null) {
+-            packetdataserializer.writeChatComponent(com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(adventure$message));
++            packetdataserializer.writeString(com.hpfxd.pandaspigot.adventure.PandaAdventure.asJson(adventure$message)); // Athena - the JSON as it is, not parsed and rewritten
+         } else if (components != null) {
+         // PandaSpigot end
+             packetdataserializer.writeString(net.md_5.bungee.chat.ComponentSerializer.toString(components));
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutPlayerListHeaderFooter.java b/src/main/java/net/minecraft/server/PacketPlayOutPlayerListHeaderFooter.java
+index 7b2a424a37520d6de974f60ca72831f449936ea4..64aad0ed2d5da915c2242f325422be663bc67065 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutPlayerListHeaderFooter.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutPlayerListHeaderFooter.java
+@@ -26,7 +26,7 @@ public class PacketPlayOutPlayerListHeaderFooter implements Packet<PacketListene
+         // Paper start
+         // PandaSpigot start - Adventure
+         if (this.adventure$header != null) {
+-            packetdataserializer.writeChatComponent(com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(adventure$header));
++            packetdataserializer.writeString(com.hpfxd.pandaspigot.adventure.PandaAdventure.asJson(adventure$header)); // Athena - the JSON as it is, not parsed and rewritten
+         } else if (this.header != null) {
+         // PandaSpigot end
+             packetdataserializer.writeString(net.md_5.bungee.chat.ComponentSerializer.toString(this.header));
+@@ -36,7 +36,7 @@ public class PacketPlayOutPlayerListHeaderFooter implements Packet<PacketListene
+ 
+         // PandaSpigot start - Adventure
+         if (this.adventure$footer != null) {
+-            packetdataserializer.writeChatComponent(com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(adventure$footer));
++            packetdataserializer.writeString(com.hpfxd.pandaspigot.adventure.PandaAdventure.asJson(adventure$footer)); // Athena - the JSON as it is, not parsed and rewritten
+         } else if (this.footer != null) {
+         // PandaSpigot end
+             packetdataserializer.writeString(net.md_5.bungee.chat.ComponentSerializer.toString(this.footer));
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutTitle.java b/src/main/java/net/minecraft/server/PacketPlayOutTitle.java
+index ec8df340f526429e4d4ce349481407dd2aa1e202..ed2adaaa88db3d80901ea9f3e7a29eea99637262 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutTitle.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutTitle.java
+@@ -62,7 +62,7 @@ public class PacketPlayOutTitle implements Packet<PacketListenerPlayOut> {
+             // Paper start
+             // PandaSpigot start - Adventure
+             if (this.adventure$text != null) {
+-                packetdataserializer.writeChatComponent(com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(adventure$text));
++                packetdataserializer.writeString(com.hpfxd.pandaspigot.adventure.PandaAdventure.asJson(adventure$text)); // Athena - the JSON as it is, not parsed and rewritten
+             } else if (this.components != null) {
+             // PandaSpigot end
+                 packetdataserializer.writeString(net.md_5.bungee.chat.ComponentSerializer.toString(components));
+diff --git a/src/test/java/net/minecraft/server/AthenaAdventureJsonTest.java b/src/test/java/net/minecraft/server/AthenaAdventureJsonTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..91f5f8f238826b2156f9fd41ab84d121cb000572
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaAdventureJsonTest.java
+@@ -0,0 +1,186 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertSame;
++
++import com.hpfxd.pandaspigot.adventure.PandaAdventure;
++import io.netty.buffer.Unpooled;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.UUID;
++import net.kyori.adventure.key.Key;
++import net.kyori.adventure.text.Component;
++import net.kyori.adventure.text.event.ClickEvent;
++import net.kyori.adventure.text.event.HoverEvent;
++import net.kyori.adventure.text.format.NamedTextColor;
++import net.kyori.adventure.text.format.TextColor;
++import net.kyori.adventure.text.format.TextDecoration;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - Adventure text goes into packets as the serializer's JSON, no longer parsed into a 1.8
++ * component and written again. What the client builds from the packet must not change.
++ */
++public class AthenaAdventureJsonTest extends AbstractTestingBase {
++
++    private static List<Component> samples() {
++        List<Component> list = new ArrayList<>();
++
++        list.add(Component.empty());
++        list.add(Component.text("plain"));
++        list.add(Component.text("red bold", NamedTextColor.RED, TextDecoration.BOLD));
++        list.add(Component.text("all decorations", NamedTextColor.GOLD)
++            .decorate(TextDecoration.ITALIC, TextDecoration.UNDERLINED, TextDecoration.STRIKETHROUGH, TextDecoration.OBFUSCATED));
++        list.add(Component.text("explicitly not bold").decoration(TextDecoration.BOLD, false));
++        list.add(Component.text("hex colour, down-sampled", TextColor.color(0x12AB34)));
++        list.add(Component.text("escapes: < > = ' \" \\ & §a あ \n second line \t tab"));
++        list.add(Component.text()
++            .content("parent ")
++            .color(NamedTextColor.GREEN)
++            .decorate(TextDecoration.BOLD)
++            .append(Component.text("inherits "))
++            .append(Component.text("overrides", NamedTextColor.BLUE).decoration(TextDecoration.BOLD, false))
++            .append(Component.text().content("deep ").append(Component.text("deeper", NamedTextColor.AQUA)))
++            .build());
++        list.add(Component.text("hover").hoverEvent(HoverEvent.showText(
++            Component.text("tip ", NamedTextColor.YELLOW).append(Component.text("nested", NamedTextColor.GRAY)))));
++        list.add(Component.text("item").hoverEvent(HoverEvent.showItem(Key.key("minecraft:diamond_sword"), 1)));
++        list.add(Component.text("entity").hoverEvent(HoverEvent.showEntity(Key.key("minecraft:zombie"),
++            UUID.fromString("071c00a4-1f91-4963-8b4d-54777e3cb92d"), Component.text("Bob"))));
++        list.add(Component.text("run").clickEvent(ClickEvent.runCommand("/sg vote 1")));
++        list.add(Component.text("suggest").clickEvent(ClickEvent.suggestCommand("/msg ")));
++        list.add(Component.text("url").clickEvent(ClickEvent.openUrl("https://example.com/a?b=c&d=e")));
++        list.add(Component.text("insert").insertion("inserted text"));
++        list.add(Component.translatable("chat.type.text", Component.text("Kurono", NamedTextColor.AQUA), Component.text("hello")));
++        list.add(Component.translatable("death.attack.player", NamedTextColor.RED,
++            Component.text("A"), Component.translatable("item.swordDiamond.name")));
++        list.add(Component.translatable("commands.generic.notFound"));
++        list.add(Component.score("Kurono", "kills"));
++        list.add(Component.selector("@a[r=10]"));
++        list.add(Component.text("§cSection-sign legacy text §lstays as text"));
++        return list;
++    }
++
++    /** What a 1.8 client reads from the JSON in the packet. */
++    private static IChatBaseComponent clientReads(String json) {
++        return IChatBaseComponent.ChatSerializer.jsonToComponent(json);
++    }
++
++    @Test
++    public void theClientReadsTheSameComponentAsBefore() {
++        for (Component component : samples()) {
++            String before = IChatBaseComponent.ChatSerializer.componentToJson(PandaAdventure.asVanilla(component));
++            String after = PandaAdventure.asJson(component);
++
++            assertEquals(after, clientReads(before), clientReads(after));
++        }
++    }
++
++    @Test
++    public void nullIsAnEmptyText() {
++        assertEquals(clientReads(IChatBaseComponent.ChatSerializer.componentToJson(PandaAdventure.asVanilla((Component) null))),
++            clientReads(PandaAdventure.asJson(null)));
++    }
++
++    @Test
++    public void packetsCarryTheSameComponents() throws Exception {
++        for (Component component : samples()) {
++            // chat
++            PacketPlayOutChat chat = new PacketPlayOutChat(null, (byte) 1);
++            chat.adventure$message = component;
++            PacketDataSerializer chatOut = new PacketDataSerializer(Unpooled.buffer());
++            chat.writePacketData(chatOut);
++            assertEquals(PandaAdventure.asVanilla(component), chatOut.readChatComponent());
++            assertEquals(1, chatOut.readByte());
++            assertEquals(0, chatOut.readableBytes());
++
++            // tab list header and footer
++            PacketPlayOutPlayerListHeaderFooter tab = new PacketPlayOutPlayerListHeaderFooter();
++            tab.adventure$header = component;
++            tab.adventure$footer = Component.text("footer");
++            PacketDataSerializer tabOut = new PacketDataSerializer(Unpooled.buffer());
++            tab.writePacketData(tabOut);
++            assertEquals(PandaAdventure.asVanilla(component), tabOut.readChatComponent());
++            assertEquals(PandaAdventure.asVanilla(Component.text("footer")), tabOut.readChatComponent());
++            assertEquals(0, tabOut.readableBytes());
++
++            // title
++            PacketPlayOutTitle title = new PacketPlayOutTitle(PacketPlayOutTitle.EnumTitleAction.TITLE, (IChatBaseComponent) null);
++            title.adventure$text = component;
++            PacketDataSerializer titleOut = new PacketDataSerializer(Unpooled.buffer());
++            title.writePacketData(titleOut);
++            assertEquals(PacketPlayOutTitle.EnumTitleAction.TITLE, titleOut.readEnumValue(PacketPlayOutTitle.EnumTitleAction.class));
++            assertEquals(PandaAdventure.asVanilla(component), titleOut.readChatComponent());
++            assertEquals(0, titleOut.readableBytes());
++        }
++    }
++
++    @Test
++    public void aBroadcastSerializesOnce() {
++        Component message = Component.text("to everyone", NamedTextColor.GOLD);
++        String first = PandaAdventure.asJson(message);
++
++        // the same instance again: the same string, not rebuilt
++        assertSame(first, PandaAdventure.asJson(message));
++
++        // an equal but different instance is serialized afresh, to the same JSON
++        Component equal = Component.text("to everyone", NamedTextColor.GOLD);
++        String again = PandaAdventure.asJson(equal);
++        assertNotSame(first, again);
++        assertEquals(first, again);
++
++        // and a different message replaces the remembered one
++        Component other = Component.text("someone else");
++        assertEquals(PandaAdventure.SERIALIZER.serialize(other), PandaAdventure.asJson(other));
++        assertEquals(PandaAdventure.SERIALIZER.serialize(message), PandaAdventure.asJson(message));
++    }
++
++    /** Timing, not a check: ATHENA_BENCH=1 ./gradlew :PandaSpigot-Server:test --tests '*AthenaAdventureJsonTest*' -i */
++    @Test
++    public void bench() throws Exception {
++        if (System.getenv("ATHENA_BENCH") == null) {
++            return;
++        }
++        Component message = Component.text()
++            .append(Component.text("[SG] ", NamedTextColor.GOLD, TextDecoration.BOLD))
++            .append(Component.text("Kurono", NamedTextColor.AQUA).hoverEvent(HoverEvent.showText(Component.text("Kills: 3"))))
++            .append(Component.text(" was slain by ", NamedTextColor.GRAY))
++            .append(Component.text("TenDonMan", NamedTextColor.RED).clickEvent(ClickEvent.suggestCommand("/msg TenDonMan ")))
++            .append(Component.text(" (12 players left)", NamedTextColor.YELLOW))
++            .build();
++        int receivers = 24;
++
++        for (int round = 0; round < 5; round++) {
++            long old = time(message, receivers, true);
++            long now = time(message, receivers, false);
++            System.out.printf("round %d: 1 message to %d players: before %.2f us, after %.2f us%n",
++                round, receivers, old / 1000.0, now / 1000.0);
++        }
++    }
++
++    private static long sink;
++
++    private static long time(Component shared, int receivers, boolean old) throws Exception {
++        int messages = 20_000;
++        PacketDataSerializer out = new PacketDataSerializer(Unpooled.buffer(1 << 16));
++        long start = System.nanoTime();
++
++        for (int m = 0; m < messages; m++) {
++            // a fresh message each time, sent to every receiver, as a broadcast does
++            Component message = shared.append(Component.text(m & 7));
++
++            for (int r = 0; r < receivers; r++) {
++                out.clear();
++                if (old) {
++                    out.writeChatComponent(PandaAdventure.asVanilla(message));
++                } else {
++                    out.writeString(PandaAdventure.asJson(message));
++                }
++                sink += out.writerIndex();
++            }
++        }
++        return (System.nanoTime() - start) / messages;
++    }
++}

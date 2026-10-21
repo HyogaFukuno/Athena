@@ -1,0 +1,1397 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:13:28 +0900
+Subject: [PATCH] Read a template world's block ids and light from a mapped
+ section store
+
+A pinned match map held its sections' ids and light on the heap: 25 to 48 MB, about 85% of what a
+loaded map costs, which sized the heap for the largest map and cut that map's square to fit.
+AthenaSectionStore writes them once per template, into athena-sections-<fingerprint>.bin next to
+the region files, and maps the file read only. A section reads its ids and light in place; the
+first write to either copies that part onto the heap. Mortal_Skies at radius 300: the map's live
+heap 47-56 MB -> 14-15 MB. The page cache holds the file once for every server on the box.
+
+The store is built in the background the first time a template loads, or ahead of time with
+java -cp <patched jar> net.minecraft.server.v1_8_R3.AthenaSectionStore <maps>. The ids go through
+ChunkRegionLoader.athenaSectionIds, the conversion a load from NBT uses, and the index audit
+compares the two at load (0 mismatches over Mortal_Skies, Par_72).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index c7b57490f1eaf58f28c4055d3c3544f5e86fcc44..dd440b85eb5d3de48c1fccdb8b6ad3b9b0082265 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -47,6 +47,7 @@ public final class AthenaIndexAudit {
+     private static long instanceChunkChecks; // Athena
+     private static long sliceMaskChecks; // Athena
+     private static long chunkPacketChecks; // Athena
++    private static long storedSectionChecks; // Athena
+     private static long liquidChecks;
+     private static long liquidChecksNonEmpty;
+ 
+@@ -414,6 +415,26 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    /**
++     * Athena - a template section read from its mapped store (AthenaSectionStore) must hold what a
++     * load from the chunk's NBT would have given it: every id and every light nibble.
++     */
++    public static void auditStoredSection(int chunkX, int chunkZ, int sectionY, ChunkSection section, NBTTagCompound nbt, boolean sky) {
++        ++storedSectionChecks;
++        char[] expected = ChunkRegionLoader.athenaSectionIds(nbt);
++        char[] actual = section.getIdArray();
++
++        if (!java.util.Arrays.equals(expected, actual)) {
++            report("stored section " + chunkX + "," + sectionY + "," + chunkZ + " has other block ids than its NBT");
++        }
++        if (!java.util.Arrays.equals(nbt.getByteArray("BlockLight"), section.getEmittedLightArray().getData())) {
++            report("stored section " + chunkX + "," + sectionY + "," + chunkZ + " has other block light than its NBT");
++        }
++        if (sky && !java.util.Arrays.equals(nbt.getByteArray("SkyLight"), section.getSkyLightArray().getData())) {
++            report("stored section " + chunkX + "," + sectionY + "," + chunkZ + " has other sky light than its NBT");
++        }
++    }
++
+     /** Athena - PlayerChunkMap.instanceChunks mirrors each instance's tombstone flag and loaded chunk. */
+     public static void auditPlayerInstanceChunks(PlayerChunkMap map) {
+         ++instanceChunkChecks;
+@@ -469,7 +490,7 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, sliceMask={}, chunkPacketCache={}, verticalOffset={} | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, sliceMask={}, chunkPacketCache={}, verticalOffset={}, storedSections={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
+@@ -478,6 +499,7 @@ public final class AthenaIndexAudit {
+                 sliceMaskChecks,
+                 chunkPacketChecks,
+                 offsetChecks,
++                storedSectionChecks,
+                 mismatches);
+ 
+         if (censusChecksNonEmpty == 0 && bucketChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e7b9ebc10bfd7d9e411ae433dd71dd01ca00b99d
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -0,0 +1,685 @@
++package net.minecraft.server;
++
++import java.io.File;
++import java.io.IOException;
++import java.lang.foreign.Arena;
++import java.lang.foreign.MemorySegment;
++import java.lang.foreign.ValueLayout;
++import java.lang.ref.WeakReference;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.channels.FileChannel;
++import java.nio.file.Files;
++import java.nio.file.StandardCopyOption;
++import java.nio.file.StandardOpenOption;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena - a template world's block ids and light, read straight from a file mapped into memory.
++//
++// A match map is read only, and almost all of it stays as the template has it for the whole match.
++// Loading it the ordinary way put every section's ids and light on the Java heap - 25 to 48 MB for
++// the pinned square of a production map, about 85% of what a loaded map costs - so the heap had to
++// be sized for the largest map, and the largest map's square had to be cut to fit the heap.
++//
++// This keeps them in a file next to the template's region files instead, built once from those
++// files and mapped read only. A section loaded from it holds slices of the mapping and no arrays of
++// its own; the first write to its ids or to one of its light arrays copies that part onto the heap
++// (see ChunkSection and NibbleArray), so a match still changes its own copy and nothing else. The
++// mapped pages belong to the page cache: every server on the box that loads the same template reads
++// the same physical memory, the garbage collector never scans or copies them, and pages nobody
++// touches are never read in.
++//
++// The ids in the file are converted by ChunkRegionLoader.athenaSectionIds, the same conversion a
++// load from NBT uses, so a section reads the same through either path; the index audit compares
++// the two at load. The file records the size and modification time of every region file it was
++// built from and is rebuilt when they change.
++//
++// File layout, little-endian:
++//   header   MAGIC (8), version (4), chunk count (4), source fingerprint (8), key table offset (8)
++//   blobs    2048-byte packed ids (with a 16-char palette in front), 8192-byte raw ids, 2048-byte
++//            light arrays, each 64-byte aligned and stored once however many sections share it
++//   keys     chunk count longs, chunk x << 32 | z, ascending
++//   entries  per chunk, 16 sections x 3 longs: ids, block light, sky light (see the KIND_ codes)
++final class AthenaSectionStore {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena/SectionStore");
++
++    static final String FILE_PREFIX = "athena-sections-";
++    static final String FILE_SUFFIX = ".bin";
++    private static final long MAGIC = 0x3130434553485441L; // "ATHSEC01"
++    private static final int VERSION = 1;
++    private static final int HEADER = 32;
++
++    // an entry's kind is its top byte, its value the low 48 bits
++    static final int KIND_ABSENT = 0;     // no such section, or no sky light stored for it
++    static final int KIND_UNIFORM = 1;    // ids: one state everywhere, the state id in the value
++    static final int KIND_PACKED = 2;     // ids: <= 16 states; palette size in bits 48-55 is kept in the blob
++    static final int KIND_RAW = 3;        // ids: a char per block
++    static final int KIND_ZERO = 4;       // light: every nibble 0
++    static final int KIND_FULL = 5;       // light: every nibble 15
++    static final int KIND_LIGHT = 6;      // light: a 2048-byte array
++
++    static final ValueLayout.OfChar CHAR_LE = ValueLayout.JAVA_CHAR_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
++    private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
++
++    // one mapping per file per process: consecutive matches on a map share it while it is in use
++    private static final Map<String, WeakReference<AthenaSectionStore>> OPEN = new ConcurrentHashMap<String, WeakReference<AthenaSectionStore>>();
++    private static final Map<String, Boolean> BUILDING = new ConcurrentHashMap<String, Boolean>();
++    private static final ExecutorService BUILDER = Executors.newSingleThreadExecutor(runnable -> {
++        Thread thread = new Thread(runnable, "Athena Section Store Builder");
++
++        thread.setDaemon(true);
++        thread.setPriority(Thread.MIN_PRIORITY);
++        return thread;
++    });
++
++    private final MemorySegment mapping;
++    private final long[] keys;
++    private final long entries;
++
++    private AthenaSectionStore(MemorySegment mapping, long[] keys, long entries) {
++        this.mapping = mapping;
++        this.keys = keys;
++        this.entries = entries;
++    }
++
++    /**
++     * The store for this template directory (the one holding region/), or null if there is none
++     * that matches its region files yet - in which case one is built in the background, for the
++     * next time the template is loaded.
++     */
++    static AthenaSectionStore open(File directory) {
++        long fingerprint;
++
++        try {
++            fingerprint = fingerprint(directory);
++        } catch (IOException e) {
++            return null;
++        }
++
++        File file = file(directory, fingerprint);
++        String path = file.getAbsolutePath();
++
++        WeakReference<AthenaSectionStore> reference = OPEN.get(path);
++        AthenaSectionStore store = reference != null ? reference.get() : null;
++
++        if (store != null && store.fingerprint() == fingerprint) {
++            return store;
++        }
++
++        store = file.isFile() ? map(file, fingerprint) : null;
++        if (store != null) {
++            OPEN.put(path, new WeakReference<AthenaSectionStore>(store));
++            return store;
++        }
++
++        if (BUILDING.putIfAbsent(path, Boolean.TRUE) == null) {
++            BUILDER.execute(() -> {
++                try {
++                    long started = System.nanoTime();
++                    int chunks = build(directory, file, fingerprint);
++
++                    LOGGER.info("Built {} for {} chunks of {} in {} ms", file.getName(), chunks, directory.getName(), (System.nanoTime() - started) / 1000000L);
++                    removeLeftovers(directory, file);
++                } catch (Throwable t) {
++                    LOGGER.warn("Could not build {} for {}: the template keeps loading onto the heap", file.getName(), directory, t);
++                } finally {
++                    BUILDING.remove(path);
++                }
++            });
++        }
++        return null;
++    }
++
++    /** Waits for any store being built; for tests. */
++    static void awaitBuilds() throws InterruptedException {
++        while (!BUILDING.isEmpty()) {
++            Thread.sleep(10L);
++        }
++    }
++
++    /**
++     * The store for a template as of this fingerprint. The name carries the fingerprint so that a
++     * store is only ever replaced by a new file, never rewritten in place: a mapped file that is
++     * truncated or overwritten under a running server faults its reads. Keep it that way when
++     * copying maps around - rsync (which renames) is fine, cp or scp over a live file is not.
++     */
++    static File file(File directory, long fingerprint) {
++        return new File(directory, String.format("%s%016x%s", FILE_PREFIX, fingerprint, FILE_SUFFIX));
++    }
++
++    /**
++     * Stores built for older contents of the template, and temporary files of builds whose process
++     * is gone. Unlinking a store a running server still has mapped is harmless: the mapping keeps
++     * the old file's pages until it is let go.
++     */
++    private static void removeLeftovers(File directory, File current) {
++        File[] files = directory.listFiles((dir, name) -> name.startsWith(FILE_PREFIX));
++
++        if (files == null) {
++            return;
++        }
++        for (File file : files) {
++            String name = file.getName();
++            int tmp = name.lastIndexOf(".tmp");
++
++            if (tmp >= 0) {
++                try {
++                    long pid = Long.parseLong(name.substring(tmp + 4));
++
++                    if (ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
++                        continue; // another server is building it right now
++                    }
++                } catch (NumberFormatException ignored) {
++                    // not one of ours: leave it alone
++                    continue;
++                }
++                file.delete();
++            } else if (name.endsWith(FILE_SUFFIX) && !file.equals(current)) {
++                file.delete();
++            }
++        }
++    }
++
++    private long fingerprint() {
++        return this.mapping.get(LONG_LE, 16L);
++    }
++
++    private static AthenaSectionStore map(File file, long fingerprint) {
++        try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
++            long size = channel.size();
++
++            if (size < HEADER) {
++                return null;
++            }
++            // an automatic arena: the mapping lives exactly as long as some section still holds a
++            // slice of it, so a world that unloads lets it go with no close to forget
++            MemorySegment mapping = channel.map(FileChannel.MapMode.READ_ONLY, 0L, size, Arena.ofAuto());
++
++            if (mapping.get(LONG_LE, 0L) != MAGIC || mapping.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN), 8L) != VERSION
++                    || mapping.get(LONG_LE, 16L) != fingerprint) {
++                return null;
++            }
++
++            int count = mapping.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN), 12L);
++            long keysAt = mapping.get(LONG_LE, 24L);
++
++            if (count < 0 || keysAt < HEADER || keysAt + (long) count * 8L * (1L + 48L) > size) {
++                return null;
++            }
++
++            long[] keys = new long[count];
++
++            for (int i = 0; i < count; ++i) {
++                keys[i] = mapping.get(LONG_LE, keysAt + (long) i * 8L);
++            }
++            return new AthenaSectionStore(mapping, keys, keysAt + (long) count * 8L);
++        } catch (IOException | RuntimeException e) {
++            LOGGER.warn("Could not map {}", file, e);
++            return null;
++        }
++    }
++
++    static long key(int chunkX, int chunkZ) {
++        return (long) chunkX << 32 | chunkZ & 0xFFFFFFFFL;
++    }
++
++    /**
++     * Fills a freshly constructed section from the store: its ids and light, as a load from NBT
++     * would have set them. False if the store has nothing for it (or no sky light where the world
++     * has sky); the caller then loads the section from NBT as before.
++     */
++    boolean apply(int chunkX, int chunkZ, int sectionY, ChunkSection section, boolean sky) {
++        int index = Arrays.binarySearch(this.keys, key(chunkX, chunkZ));
++
++        if (index < 0 || sectionY < 0 || sectionY >= 16) {
++            return false;
++        }
++
++        long at = this.entries + ((long) index * 16L + sectionY) * 24L;
++        long ids = this.mapping.get(LONG_LE, at);
++        long blockLight = this.mapping.get(LONG_LE, at + 8L);
++        long skyLight = this.mapping.get(LONG_LE, at + 16L);
++
++        if (kind(ids) == KIND_ABSENT || kind(blockLight) == KIND_ABSENT || sky && kind(skyLight) == KIND_ABSENT) {
++            return false;
++        }
++
++        switch (kind(ids)) {
++            case KIND_UNIFORM:
++                section.athenaSetUniformIds((char) value(ids));
++                break;
++            case KIND_PACKED: {
++                long offset = value(ids);
++                int paletteSize = (int) (ids >>> 48 & 0xFF);
++                char[] palette = new char[16];
++
++                for (int i = 0; i < paletteSize; ++i) {
++                    palette[i] = this.mapping.get(CHAR_LE, offset + i * 2L);
++                }
++                section.athenaMapPackedIds(palette, paletteSize, this.mapping, offset + 32L);
++                break;
++            }
++            case KIND_RAW:
++                section.athenaMapRawIds(this.mapping, value(ids));
++                break;
++            default:
++                return false;
++        }
++
++        section.setBlocklightArray(this.light(blockLight));
++        if (sky) {
++            section.setSkylightArray(this.light(skyLight));
++        }
++        return true;
++    }
++
++    private NibbleArray light(long entry) {
++        switch (kind(entry)) {
++            case KIND_ZERO:
++                return NibbleArray.light();
++            case KIND_FULL:
++                return NibbleArray.lightFull();
++            default:
++                return NibbleArray.mapped(this.mapping, value(entry));
++        }
++    }
++
++    private static int kind(long entry) {
++        return (int) (entry >>> 56);
++    }
++
++    private static long value(long entry) {
++        return entry & 0xFFFFFFFFFFFFL;
++    }
++
++    private static long entry(int kind, long value) {
++        return (long) kind << 56 | value;
++    }
++
++    /** Size and modification time of every region file: what the store was built from. */
++    static long fingerprint(File directory) throws IOException {
++        File[] files = new File(directory, "region").listFiles((dir, name) -> name.endsWith(".mca"));
++
++        if (files == null) {
++            throw new IOException("no region directory in " + directory);
++        }
++        Arrays.sort(files);
++
++        long hash = 0xcbf29ce484222325L;
++
++        for (File file : files) {
++            hash = mix(hash, file.getName().hashCode());
++            hash = mix(hash, file.length());
++            hash = mix(hash, file.lastModified());
++        }
++        return hash;
++    }
++
++    private static long mix(long hash, long value) {
++        hash ^= value;
++        hash *= 0x100000001b3L;
++        return hash ^ hash >>> 29;
++    }
++
++    /**
++     * Builds the stores of the given template folders, or of every folder holding a region/ directory
++     * under them, so that the first match on a map does not have to:
++     * {@code java -cp <patched jar> net.minecraft.server.AthenaSectionStore /opt/mc/maps}.
++     * A store that already matches its region files is left alone.
++     */
++    public static void main(String[] args) throws IOException {
++        DispenserRegistry.register(); // the block registry the id conversion reads
++
++        List<File> templates = new ArrayList<File>();
++
++        for (String arg : args) {
++            File dir = new File(arg);
++
++            if (new File(dir, "region").isDirectory()) {
++                templates.add(dir);
++            } else {
++                File[] children = dir.listFiles(child -> new File(child, "region").isDirectory());
++
++                if (children != null) {
++                    Arrays.sort(children);
++                    templates.addAll(Arrays.asList(children));
++                }
++            }
++        }
++
++        for (File template : templates) {
++            long fingerprint = fingerprint(template);
++            File file = file(template, fingerprint);
++
++            if (file.isFile() && map(file, fingerprint) != null) {
++                System.out.println(template.getName() + ": up to date");
++                continue;
++            }
++
++            long started = System.nanoTime();
++            int chunks = build(template, file, fingerprint);
++
++            removeLeftovers(template, file);
++            System.out.println(template.getName() + ": " + chunks + " chunks, " + file.length() / 1000000L + " MB in " + (System.nanoTime() - started) / 1000000L + " ms");
++        }
++    }
++
++    // ------------------------------------------------------------------ building
++
++    /** One section's data as a load from NBT produces it, before it is classified. */
++    static final class SectionData {
++        final int y;
++        final char[] ids;
++        final byte[] blockLight;
++        final byte[] skyLight; // null where the NBT has none
++
++        SectionData(int y, char[] ids, byte[] blockLight, byte[] skyLight) {
++            this.y = y;
++            this.ids = ids;
++            this.blockLight = blockLight;
++            this.skyLight = skyLight;
++        }
++    }
++
++    /**
++     * Builds the store from every chunk of the template's region files; returns the chunk count.
++     * Streams: one chunk's NBT is in memory at a time, and what is kept per chunk is its 48 entries,
++     * so building a large map fits in a small heap.
++     */
++    static int build(File directory, File file, long fingerprint) throws IOException {
++        File[] regions = new File(directory, "region").listFiles((dir, name) -> name.matches("r\\.-?\\d+\\.-?\\d+\\.mca"));
++
++        if (regions == null) {
++            throw new IOException("no region directory in " + directory);
++        }
++
++        File temporary = new File(file.getParentFile(), file.getName() + ".tmp" + ProcessHandle.current().pid());
++
++        try (FileChannel out = FileChannel.open(temporary.toPath(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
++            BlobWriter blobs = new BlobWriter(out, HEADER);
++            Map<Long, long[]> table = new HashMap<Long, long[]>();
++
++            for (File region : regions) {
++                try (AthenaTemplateRegion reader = AthenaTemplateRegion.open(region)) {
++                    for (int z = 0; z < 32 && reader != null; ++z) {
++                        for (int x = 0; x < 32; ++x) {
++                            if (!reader.has(x, z)) {
++                                continue;
++                            }
++                            NBTTagCompound root;
++
++                            try {
++                                root = reader.read(x, z);
++                            } catch (IOException e) {
++                                continue; // the server will not load it either
++                            }
++                            if (root == null || !root.hasKeyOfType("Level", 10)) {
++                                continue;
++                            }
++                            NBTTagCompound level = root.getCompound("Level");
++
++                            if (level.hasKeyOfType("Sections", 9)) {
++                                // keyed on the chunk's own coordinates, which is what the loader asks for
++                                table.put(key(level.getInt("xPos"), level.getInt("zPos")), entries(blobs, sections(level)));
++                            }
++                        }
++                    }
++                }
++            }
++
++            finish(out, blobs, fingerprint, table);
++        } catch (IOException | RuntimeException e) {
++            temporary.delete();
++            throw e;
++        }
++        Files.move(temporary.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++        return countChunks(file);
++    }
++
++    private static int countChunks(File file) throws IOException {
++        try (FileChannel in = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
++            ByteBuffer header = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN);
++
++            in.read(header, 0L);
++            return header.getInt(12);
++        }
++    }
++
++    static List<SectionData> sections(NBTTagCompound level) {
++        NBTTagList list = level.getList("Sections", 10);
++        List<SectionData> sections = new ArrayList<SectionData>(list.size());
++
++        for (int k = 0; k < list.size(); ++k) {
++            NBTTagCompound section = list.get(k);
++            byte[] skyLight = section.hasKeyOfType("SkyLight", 7) ? section.getByteArray("SkyLight") : null;
++
++            sections.add(new SectionData(section.getByte("Y"), ChunkRegionLoader.athenaSectionIds(section), section.getByteArray("BlockLight"), skyLight));
++        }
++        return sections;
++    }
++
++    /** One chunk's 16 x 3 entries, its blobs written as they are met. */
++    static long[] entries(BlobWriter blobs, List<SectionData> sections) throws IOException {
++        long[] entries = new long[48];
++
++        for (SectionData section : sections) {
++            if (section.y < 0 || section.y >= 16) {
++                continue;
++            }
++            int at = section.y * 3;
++
++            entries[at] = ids(blobs, section.ids);
++            entries[at + 1] = light(blobs, section.blockLight);
++            entries[at + 2] = section.skyLight == null ? entry(KIND_ABSENT, 0L) : light(blobs, section.skyLight);
++        }
++        return entries;
++    }
++
++    /** Writes the key table, the entries and the header after the blobs. */
++    static void finish(FileChannel out, BlobWriter blobs, long fingerprint, Map<Long, long[]> table) throws IOException {
++        long[] keys = new long[table.size()];
++        int n = 0;
++
++        for (Long key : table.keySet()) {
++            keys[n++] = key;
++        }
++        Arrays.sort(keys);
++
++        long keysAt = blobs.align();
++        ByteBuffer tail = ByteBuffer.allocate(keys.length * 8 * 49).order(ByteOrder.LITTLE_ENDIAN);
++
++        for (long key : keys) {
++            tail.putLong(key);
++        }
++        for (long key : keys) {
++            for (long value : table.get(key)) {
++                tail.putLong(value);
++            }
++        }
++        tail.flip();
++        writeFully(out, tail, keysAt);
++
++        ByteBuffer header = ByteBuffer.allocate(HEADER).order(ByteOrder.LITTLE_ENDIAN);
++
++        header.putLong(MAGIC).putInt(VERSION).putInt(keys.length).putLong(fingerprint).putLong(keysAt).flip();
++        writeFully(out, header, 0L);
++        out.force(true);
++    }
++
++    /** Writes a store for the given chunks, all in memory: for tests. */
++    static void write(File file, long fingerprint, Map<Long, List<SectionData>> chunks) throws IOException {
++        try (FileChannel out = FileChannel.open(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
++            BlobWriter blobs = new BlobWriter(out, HEADER);
++            Map<Long, long[]> table = new HashMap<Long, long[]>();
++
++            for (Map.Entry<Long, List<SectionData>> chunk : chunks.entrySet()) {
++                table.put(chunk.getKey(), entries(blobs, chunk.getValue()));
++            }
++            finish(out, blobs, fingerprint, table);
++        }
++    }
++
++    private static long ids(BlobWriter blobs, char[] ids) throws IOException {
++        if (ids.length != 4096) {
++            return entry(KIND_ABSENT, 0L); // not a section the store can hold; the loader reads NBT
++        }
++
++        // the palette in order of first appearance, as ChunkSection.setDataSharingUniform builds it
++        char[] palette = new char[16];
++        int size = 0;
++        byte[] packed = new byte[2048];
++
++        for (int k = 0; k < 4096 && size <= 16; ++k) {
++            char c = ids[k];
++            int p = 0;
++
++            while (p < size && palette[p] != c) {
++                ++p;
++            }
++            if (p == size) {
++                if (size == 16) {
++                    size = 17;
++                    break;
++                }
++                palette[size++] = c;
++            }
++            packed[k >> 1] |= (byte) (p << ((k & 1) << 2));
++        }
++
++        if (size == 1) {
++            return entry(KIND_UNIFORM, ids[0]);
++        }
++        if (size <= 16) {
++            byte[] blob = new byte[32 + 2048];
++
++            for (int i = 0; i < 16; ++i) {
++                blob[i * 2] = (byte) palette[i];
++                blob[i * 2 + 1] = (byte) (palette[i] >> 8);
++            }
++            System.arraycopy(packed, 0, blob, 32, 2048);
++            return entry(KIND_PACKED, blobs.put(blob)) | (long) size << 48;
++        }
++
++        byte[] blob = new byte[8192];
++
++        for (int k = 0; k < 4096; ++k) {
++            blob[k * 2] = (byte) ids[k];
++            blob[k * 2 + 1] = (byte) (ids[k] >> 8);
++        }
++        return entry(KIND_RAW, blobs.put(blob));
++    }
++
++    private static long light(BlobWriter blobs, byte[] light) throws IOException {
++        if (light.length != 2048) {
++            return entry(KIND_ABSENT, 0L);
++        }
++
++        byte first = light[0];
++        int i = 1;
++
++        while (i < 2048 && light[i] == first) {
++            ++i;
++        }
++        if (i == 2048 && first == 0) {
++            return entry(KIND_ZERO, 0L);
++        }
++        if (i == 2048 && first == (byte) 0xFF) {
++            return entry(KIND_FULL, 0L);
++        }
++        return entry(KIND_LIGHT, blobs.put(light));
++    }
++
++    /**
++     * Appends 64-byte aligned blobs, each distinct content once. Only a hash and an offset are kept
++     * per blob; a blob whose hash matches is read back from the file and compared before it is
++     * reused, so a hash collision can only cost a duplicate.
++     */
++    static final class BlobWriter {
++        private final FileChannel out;
++        private final Map<Long, long[]> written = new HashMap<Long, long[]>();
++        private long end;
++
++        BlobWriter(FileChannel out, long start) {
++            this.out = out;
++            this.end = start;
++        }
++
++        long align() {
++            this.end = this.end + 63L & ~63L;
++            return this.end;
++        }
++
++        long put(byte[] data) throws IOException {
++            long hash = hash(data);
++            long[] offsets = this.written.get(hash);
++
++            if (offsets != null) {
++                for (long offset : offsets) {
++                    if (this.same(offset, data)) {
++                        return offset;
++                    }
++                }
++            }
++
++            long at = this.align();
++
++            writeFully(this.out, ByteBuffer.wrap(data), at);
++            this.end = at + data.length;
++            if (offsets == null) {
++                this.written.put(hash, new long[] {at});
++            } else {
++                long[] more = Arrays.copyOf(offsets, offsets.length + 1);
++
++                more[offsets.length] = at;
++                this.written.put(hash, more);
++            }
++            return at;
++        }
++
++        private boolean same(long offset, byte[] data) throws IOException {
++            ByteBuffer stored = ByteBuffer.allocate(data.length);
++            long at = offset;
++
++            while (stored.hasRemaining()) {
++                int n = this.out.read(stored, at);
++
++                if (n < 0) {
++                    return false;
++                }
++                at += n;
++            }
++            return Arrays.equals(stored.array(), data);
++        }
++
++        private static long hash(byte[] data) {
++            long hash = 0xcbf29ce484222325L ^ data.length;
++
++            for (int i = 0; i + 8 <= data.length; i += 8) {
++                long word = (data[i] & 0xFFL) | (data[i + 1] & 0xFFL) << 8 | (data[i + 2] & 0xFFL) << 16 | (data[i + 3] & 0xFFL) << 24
++                        | (data[i + 4] & 0xFFL) << 32 | (data[i + 5] & 0xFFL) << 40 | (data[i + 6] & 0xFFL) << 48 | (data[i + 7] & 0xFFL) << 56;
++
++                hash = (hash ^ word) * 0x9E3779B97F4A7C15L;
++                hash ^= hash >>> 31;
++            }
++            return hash;
++        }
++    }
++
++    private static void writeFully(FileChannel out, ByteBuffer buffer, long position) throws IOException {
++        long at = position;
++
++        while (buffer.hasRemaining()) {
++            at += out.write(buffer, at);
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index ea8f0d0902521419053df4de021c68ae8a38d1a0..2080b7861b1377d5351a84577289a99aebf4382d 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -6,7 +6,8 @@ import java.util.HashMap;
+ import java.util.Map;
+ 
+ // Athena - the chunk loader of a template world (see athena.api.Athena): chunks come from
+-// the template's region files, read only, and are never saved.
++// the template's region files, read only, and are never saved. Their sections' ids and light come
++// from the template's mapped section store when there is one (AthenaSectionStore).
+ //
+ // It is a ChunkRegionLoader so that every path that loads a chunk - the async chunk IO threads, the
+ // synchronous fallback, chunkExists deciding between loading and generating - goes through it
+@@ -21,9 +22,18 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+     private final Map<Long, AthenaTemplateRegion> regions = new HashMap<Long, AthenaTemplateRegion>();
+     private boolean closed;
+ 
++    // Athena - the template's mapped ids and light, or null while there is none yet; see AthenaSectionStore
++    private final AthenaSectionStore store;
++
+     AthenaTemplateChunkLoader(File directory) {
+         super(directory);
+         this.directory = directory;
++        this.store = AthenaSectionStore.open(directory);
++    }
++
++    @Override
++    protected boolean athenaSectionFromStore(int chunkX, int chunkZ, int sectionY, ChunkSection section, boolean sky) {
++        return this.store != null && this.store.apply(chunkX, chunkZ, sectionY, section, sky);
+     }
+ 
+     private synchronized AthenaTemplateRegion region(int chunkX, int chunkZ) throws IOException {
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 39a9813f3a25b8a8d0c0c01977577cf464dbcaf7..e37d0214459d1657a71d1c7eae8d9c94e2661c1d 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -296,6 +296,55 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+ 
+     }
+ 
++    // Athena start - the conversion of a stored section's Blocks, Add and Data into block state ids,
++    // CraftBukkit's repair of broken blocks included. AthenaSectionStore builds its files with this
++    // same method, so a section reads the same whichever of the two it was loaded from.
++    static char[] athenaSectionIds(NBTTagCompound nbttagcompound1) {
++        byte[] abyte = nbttagcompound1.getByteArray("Blocks");
++        NibbleArray nibblearray = new NibbleArray(nbttagcompound1.getByteArray("Data"));
++        NibbleArray nibblearray1 = nbttagcompound1.hasKeyOfType("Add", 7) ? new NibbleArray(nbttagcompound1.getByteArray("Add")) : null;
++        char[] achar = new char[abyte.length];
++
++        for (int l = 0; l < achar.length; ++l) {
++            int i1 = l & 15;
++            int j1 = l >> 8 & 15;
++            int k1 = l >> 4 & 15;
++            int l1 = nibblearray1 != null ? nibblearray1.get(i1, j1, k1) : 0;
++
++            // CraftBukkit start - fix broken blocks
++            // achar[l] = (char) (l1 << 12 | (abyte[l] & 255) << 4 | nibblearray.a(i1, j1, k1));
++
++            int ex =  l1;
++            int id = (abyte[l] & 255);
++            int data = nibblearray.get(i1, j1, k1);
++            int packed = ex << 12 | id << 4 | data;
++            if (Block.BLOCK_STATE_IDS.getByValue(packed) == null) {
++                Block block = Block.getById(ex << 8 | id);
++                if (block != null) {
++                    try {
++                        data = block.toLegacyData(block.fromLegacyData(data));
++                    } catch (Exception ignored) {
++                        data = block.toLegacyData(block.getBlockData());
++                    }
++                    packed = ex << 12 | id << 4 | data;
++                }
++            }
++            achar[l] = (char) packed;
++            // CraftBukkit end
++        }
++
++        return achar;
++    }
++
++    /**
++     * Fills a new section from a template's section store instead of its NBT. Only a template
++     * world's loader has a store (AthenaTemplateChunkLoader); false means load from NBT.
++     */
++    protected boolean athenaSectionFromStore(int chunkX, int chunkZ, int sectionY, ChunkSection section, boolean sky) {
++        return false;
++    }
++    // Athena end
++
+     private Chunk readChunkFromNBT(World world, NBTTagCompound nbttagcompound) {
+         int i = nbttagcompound.getInt("xPos");
+         int j = nbttagcompound.getInt("zPos");
+@@ -314,44 +363,18 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             NBTTagCompound nbttagcompound1 = nbttaglist.get(k);
+             byte b1 = nbttagcompound1.getByte("Y");
+             ChunkSection chunksection = new ChunkSection(b1 << 4, flag);
+-            byte[] abyte = nbttagcompound1.getByteArray("Blocks");
+-            NibbleArray nibblearray = new NibbleArray(nbttagcompound1.getByteArray("Data"));
+-            NibbleArray nibblearray1 = nbttagcompound1.hasKeyOfType("Add", 7) ? new NibbleArray(nbttagcompound1.getByteArray("Add")) : null;
+-            char[] achar = new char[abyte.length];
+-
+-            for (int l = 0; l < achar.length; ++l) {
+-                int i1 = l & 15;
+-                int j1 = l >> 8 & 15;
+-                int k1 = l >> 4 & 15;
+-                int l1 = nibblearray1 != null ? nibblearray1.get(i1, j1, k1) : 0;
+-
+-                // CraftBukkit start - fix broken blocks
+-                // achar[l] = (char) (l1 << 12 | (abyte[l] & 255) << 4 | nibblearray.a(i1, j1, k1));
+-
+-                int ex =  l1;
+-                int id = (abyte[l] & 255);
+-                int data = nibblearray.get(i1, j1, k1);
+-                int packed = ex << 12 | id << 4 | data;
+-                if (Block.BLOCK_STATE_IDS.getByValue(packed) == null) {
+-                    Block block = Block.getById(ex << 8 | id);
+-                    if (block != null) {
+-                        try {
+-                            data = block.toLegacyData(block.fromLegacyData(data));
+-                        } catch (Exception ignored) {
+-                            data = block.toLegacyData(block.getBlockData());
+-                        }
+-                        packed = ex << 12 | id << 4 | data;
+-                    }
+-                }
+-                achar[l] = (char) packed;
+-                // CraftBukkit end
+-            }
+ 
+-            chunksection.setDataSharingUniform(achar); // Athena - shared if one state
+-            chunksection.setBlocklightArray(NibbleArray.light(nbttagcompound1.getByteArray("BlockLight"))); // Athena - shared if uniform
+-            if (flag) {
+-                chunksection.setSkylightArray(NibbleArray.light(nbttagcompound1.getByteArray("SkyLight"))); // Athena - shared if uniform
++            // Athena start - a template section comes from its mapped store when there is one
++            if (!this.athenaSectionFromStore(i, j, b1, chunksection, flag)) {
++                chunksection.setDataSharingUniform(athenaSectionIds(nbttagcompound1)); // Athena - shared if one state
++                chunksection.setBlocklightArray(NibbleArray.light(nbttagcompound1.getByteArray("BlockLight"))); // Athena - shared if uniform
++                if (flag) {
++                    chunksection.setSkylightArray(NibbleArray.light(nbttagcompound1.getByteArray("SkyLight"))); // Athena - shared if uniform
++                }
++            } else if (AthenaIndexAudit.enabled()) {
++                AthenaIndexAudit.auditStoredSection(i, j, b1, chunksection, nbttagcompound1, flag);
+             }
++            // Athena end
+ 
+             chunksection.recalcBlockCounts();
+             achunksection[b1] = chunksection;
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 18226927c8d06153efd49d238610ad03c5ba3967..4f9a644598956083ec5ccbde7d4df62069a401c0 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -133,6 +133,9 @@ public class ChunkSection {
+         char newId = (char) Block.getStateId(iblockdata);
+         int idIndex = j << 8 | k << 4 | i;
+ 
++        if (this.blockIds == null && this.packedIds == null) {
++            this.copyMappedIds(); // Athena - the first write to a template section takes its ids onto the heap
++        }
+         if (this.blockIds == null) {
+             this.setPacked(idIndex, newId);
+         } else {
+@@ -327,6 +330,7 @@ public class ChunkSection {
+         this.idsShared = false; // Athena
+         this.packedIds = null; // Athena
+         this.palette = null; // Athena
++        this.mappedIds = null; // Athena
+         ++this.modCount; // Athena
+     }
+ 
+@@ -353,7 +357,12 @@ public class ChunkSection {
+         if (ids != null) {
+             return ids[index];
+         }
+-        return this.palette[this.packedIds[index >> 1] >> ((index & 1) << 2) & 15];
++        byte[] packed = this.packedIds;
++
++        if (packed != null) {
++            return this.palette[packed[index >> 1] >> ((index & 1) << 2) & 15];
++        }
++        return this.mappedStateIdAt(index); // Athena - a template section read from its store
+     }
+ 
+     private void setPacked(int index, char id) {
+@@ -400,6 +409,10 @@ public class ChunkSection {
+         char[] palette = this.palette;
+         byte[] packed = this.packedIds;
+ 
++        if (packed == null) {
++            return this.mappedUnpackInto(ids); // Athena
++        }
++
+         for (int k = 0; k < 4096; k += 2) {
+             int b = packed[k >> 1];
+ 
+@@ -411,7 +424,7 @@ public class ChunkSection {
+ 
+     /** Whether this section currently holds its ids packed; for tests and the audit. */
+     boolean isPacked() {
+-        return this.blockIds == null;
++        return this.blockIds == null && this.packedIds != null; // Athena - mapped ids are neither
+     }
+     // Athena end
+ 
+@@ -501,4 +514,88 @@ public class ChunkSection {
+         this.skyLight = nibblearray;
+         ++this.modCount; // Athena
+     }
++
++    // Athena start - ids read in place from a template's section store (see AthenaSectionStore).
++    //
++    // blockIds and packedIds are both null exactly while the ids are mapped: packed, a heap palette
++    // over 2048 mapped bytes of 4-bit indexes laid out as packedIds is; raw, 8192 mapped bytes of
++    // little-endian chars. The first setType copies them onto the heap in the same form (packed
++    // stays packed) and goes on from there as any loaded section does.
++    private java.lang.foreign.MemorySegment mappedIds; // the whole store's mapping, shared by every section
++    private long mappedAt;                              // where this section's ids start in it
++    private boolean mappedRaw;
++
++    /** A single state everywhere, shared as a load from NBT shares it. */
++    void athenaSetUniformIds(char id) {
++        this.setData(UNIFORM_IDS.computeIfAbsent(id, state -> {
++            char[] ids = new char[4096];
++
++            java.util.Arrays.fill(ids, state);
++            return ids;
++        }));
++        this.idsShared = true;
++    }
++
++    void athenaMapPackedIds(char[] palette, int paletteSize, java.lang.foreign.MemorySegment mapping, long at) {
++        this.setData(null);
++        this.palette = palette;
++        this.paletteSize = paletteSize;
++        this.mappedRaw = false;
++        this.mappedAt = at;
++        this.mappedIds = mapping;
++    }
++
++    void athenaMapRawIds(java.lang.foreign.MemorySegment mapping, long at) {
++        this.setData(null);
++        this.mappedRaw = true;
++        this.mappedAt = at;
++        this.mappedIds = mapping;
++    }
++
++    /** Whether the ids are still read from a mapped store; for tests and the audit. */
++    boolean isMapped() {
++        return this.blockIds == null && this.packedIds == null;
++    }
++
++    private char mappedStateIdAt(int index) {
++        java.lang.foreign.MemorySegment ids = this.mappedIds;
++
++        if (this.mappedRaw) {
++            return ids.get(AthenaSectionStore.CHAR_LE, this.mappedAt + ((long) index << 1));
++        }
++        return this.palette[ids.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (index >> 1)) >> ((index & 1) << 2) & 15];
++    }
++
++    private char[] mappedUnpackInto(char[] ids) {
++        java.lang.foreign.MemorySegment mapped = this.mappedIds;
++
++        if (this.mappedRaw) {
++            java.lang.foreign.MemorySegment.copy(mapped, AthenaSectionStore.CHAR_LE, this.mappedAt, ids, 0, 4096);
++            return ids;
++        }
++
++        char[] palette = this.palette;
++
++        for (int k = 0; k < 4096; k += 2) {
++            int b = mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (k >> 1));
++
++            ids[k] = palette[b & 15];
++            ids[k + 1] = palette[b >> 4 & 15];
++        }
++        return ids;
++    }
++
++    /** Takes mapped ids onto the heap, in the form they were mapped in. */
++    private void copyMappedIds() {
++        java.lang.foreign.MemorySegment mapped = this.mappedIds;
++
++        if (this.mappedRaw) {
++            this.blockIds = this.mappedUnpackInto(new char[4096]);
++        } else {
++            this.packedIds = mapped.asSlice(this.mappedAt, 2048L).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
++        }
++        // mappedIds stays: a reader that saw both heap forms null still finds it, as the packed
++        // arrays stay behind an unpacked section
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/NibbleArray.java b/src/main/java/net/minecraft/server/NibbleArray.java
+index b939d7fa5ec3bb965748235bb6bd9e8a12e70122..88cab2d104171d37de2fe0ffbd53963bf4ae837a 100644
+--- a/src/main/java/net/minecraft/server/NibbleArray.java
++++ b/src/main/java/net/minecraft/server/NibbleArray.java
+@@ -25,12 +25,37 @@ public class NibbleArray {
+ 
+     private byte[] data;
+     private boolean shared;
++    // Athena - a light array read from a template's section store (AthenaSectionStore): data is
++    // null and the nibbles are read from this slice of the mapped file until the first write that
++    // changes one, which copies them onto the heap. The slice is kept after that, so a reader that
++    // saw data still null finds it; it lives as long as the world does either way.
++    private java.lang.foreign.MemorySegment mapped; // the whole store's mapping
++    private long mappedAt;                           // where these 2048 bytes start in it
+ 
+     /** An all-zero light array. */
+     public static NibbleArray light() {
+         return new NibbleArray(SHARED_ZERO, true);
+     }
+ 
++    /** An all-15 light array. */
++    static NibbleArray lightFull() {
++        return new NibbleArray(SHARED_FULL, true);
++    }
++
++    /** A light array over 2048 mapped bytes, read in place. */
++    static NibbleArray mapped(java.lang.foreign.MemorySegment mapping, long at) {
++        NibbleArray array = new NibbleArray(null, false);
++
++        array.mappedAt = at;
++        array.mapped = mapping;
++        return array;
++    }
++
++    /** Whether this array still reads from a mapped file; for tests and the audit. */
++    boolean isMapped() {
++        return this.data == null;
++    }
++
+     /** A light array holding the given bytes, shared if they are uniformly 0 or 15. */
+     public static NibbleArray light(byte[] abyte) {
+         if (abyte.length == 2048) {
+@@ -81,8 +106,9 @@ public class NibbleArray {
+ 
+     public int getFromIndex(int i) {
+         int j = this.getNibbleIndex(i);
++        byte[] data = this.data; // Athena - or the mapped bytes
+ 
+-        return this.data[j] >> ((i & 1) << 2) & 15; // PandaSpigot
++        return (data != null ? data[j] : this.mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + j)) >> ((i & 1) << 2) & 15; // PandaSpigot
+     }
+ 
+     public void setIndex(int i, int j) {
+@@ -90,8 +116,13 @@ public class NibbleArray {
+ 
+         // PandaSpigot start
+         int shift = (i & 1) << 2;
+-        // Athena start - copy a shared array on the first write that changes it
+-        if (this.shared) {
++        // Athena start - copy a shared or mapped array on the first write that changes it
++        if (this.data == null) {
++            if ((this.mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + k) >> shift & 15) == (j & 15)) {
++                return;
++            }
++            this.data = this.mappedCopy();
++        } else if (this.shared) {
+             if ((this.data[k] >> shift & 15) == (j & 15)) {
+                 return;
+             }
+@@ -112,6 +143,14 @@ public class NibbleArray {
+     }
+ 
+     public byte[] getData() {
+-        return this.data;
++        byte[] data = this.data;
++
++        // Athena - a mapped array hands out a copy: every caller of getData on a light array only
++        // reads it (packets, saving, chunk snapshots), and keeping the copy would put it back on the heap
++        return data != null ? data : this.mappedCopy();
++    }
++
++    private byte[] mappedCopy() {
++        return this.mapped.asSlice(this.mappedAt, 2048L).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
+     }
+ }
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d490b28f93b493c89595b0d9203764f2ca358bec
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -0,0 +1,246 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++
++import java.io.DataOutputStream;
++import java.io.File;
++import java.nio.file.Files;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a template section read from its mapped store reads exactly as one loaded from NBT,
++ * and a write to it changes the section's own heap copy and nothing else.
++ */
++public class AthenaSectionStoreTest extends AbstractTestingBase {
++
++    private static final int STONE = Block.getStateId(Blocks.STONE.getBlockData());
++
++    /** Every state id the server knows, to build sections of many states from. */
++    private static List<Integer> states() {
++        List<Integer> states = new ArrayList<Integer>();
++
++        for (Object state : Block.BLOCK_STATE_IDS) {
++            states.add(Block.getStateId((IBlockData) state));
++        }
++        return states;
++    }
++
++    /** Blocks, Data and light for one section: the kinds of content the store tells apart. */
++    private static NBTTagCompound section(int y, int kind, Random random) {
++        List<Integer> states = states();
++        int[] palette;
++
++        switch (kind) {
++            case 0: palette = new int[] {STONE}; break;                              // uniform
++            case 1: palette = new int[] {0, STONE, states.get(40), states.get(90)}; break; // packed
++            default:                                                                  // raw
++                palette = new int[60];
++                for (int i = 0; i < palette.length; ++i) {
++                    palette[i] = states.get(random.nextInt(states.size()));
++                }
++        }
++
++        byte[] blocks = new byte[4096];
++        NibbleArray data = new NibbleArray();
++
++        for (int i = 0; i < 4096; ++i) {
++            int state = palette[random.nextInt(palette.length)];
++
++            blocks[i] = (byte) (state >> 4);
++            data.set(i & 15, i >> 8 & 15, i >> 4 & 15, state & 15);
++        }
++
++        byte[] blockLight = new byte[2048];
++        byte[] skyLight = new byte[2048];
++
++        if (kind == 2) {
++            random.nextBytes(blockLight);
++        }
++        if (kind == 1) {
++            java.util.Arrays.fill(skyLight, (byte) 0xFF);
++        } else if (kind == 2) {
++            random.nextBytes(skyLight);
++        }
++
++        NBTTagCompound section = new NBTTagCompound();
++
++        section.setByte("Y", (byte) y);
++        section.setByteArray("Blocks", blocks);
++        section.setByteArray("Data", data.getData());
++        section.setByteArray("BlockLight", blockLight);
++        section.setByteArray("SkyLight", skyLight);
++        return section;
++    }
++
++    private static NBTTagCompound chunk(int x, int z, Random random) {
++        NBTTagList sections = new NBTTagList();
++
++        for (int y = 0; y < 3; ++y) {
++            sections.add(section(y, Math.floorMod(x + z + y, 3), random));
++        }
++
++        NBTTagCompound level = new NBTTagCompound();
++
++        level.setInt("xPos", x);
++        level.setInt("zPos", z);
++        level.set("Sections", sections);
++
++        NBTTagCompound root = new NBTTagCompound();
++
++        root.set("Level", level);
++        return root;
++    }
++
++    private static File template(long seed) throws Exception {
++        File dir = Files.createTempDirectory("athena-store").toFile();
++        File regionDir = new File(dir, "region");
++
++        regionDir.mkdirs();
++        RegionFile region = new RegionFile(new File(regionDir, "r.-1.0.mca"));
++        Random random = new Random(seed);
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                try (DataOutputStream out = region.getChunkDataOutputStream(x, z)) {
++                    NBTCompressedStreamTools.write(chunk(-32 + x, z, random), (java.io.DataOutput) out);
++                }
++            }
++        }
++        region.close();
++        return dir;
++    }
++
++    private static AthenaSectionStore built(File dir) throws Exception {
++        assertNull("no store before one is built", AthenaSectionStore.open(dir));
++        AthenaSectionStore.awaitBuilds();
++
++        AthenaSectionStore store = AthenaSectionStore.open(dir);
++
++        assertNotNull(store);
++        return store;
++    }
++
++    private static ChunkSection fromNbt(NBTTagCompound nbt) {
++        ChunkSection section = new ChunkSection(nbt.getByte("Y") << 4, true);
++
++        section.setDataSharingUniform(ChunkRegionLoader.athenaSectionIds(nbt));
++        section.setBlocklightArray(NibbleArray.light(nbt.getByteArray("BlockLight")));
++        section.setSkylightArray(NibbleArray.light(nbt.getByteArray("SkyLight")));
++        section.recalcBlockCounts();
++        return section;
++    }
++
++    private static void assertSameContent(String where, ChunkSection expected, ChunkSection actual) {
++        for (int i = 0; i < 4096; ++i) {
++            int x = i & 15, y = i >> 8, z = i >> 4 & 15;
++
++            assertSame(where + " state at " + i, expected.getType(x, y, z), actual.getType(x, y, z));
++            assertEquals(where + " block light at " + i, expected.getExtBlocklightValue(x, y, z), actual.getExtBlocklightValue(x, y, z));
++            assertEquals(where + " sky light at " + i, expected.getExtSkylightValue(x, y, z), actual.getExtSkylightValue(x, y, z));
++        }
++        assertArrayEquals(where + " ids", expected.getIdArray(), actual.getIdArray());
++        assertArrayEquals(where + " block light", expected.getEmittedLightArray().getData(), actual.getEmittedLightArray().getData());
++        assertArrayEquals(where + " sky light", expected.getSkyLightArray().getData(), actual.getSkyLightArray().getData());
++        assertEquals(where + " empty", expected.isEmpty(), actual.isEmpty());
++        assertEquals(where + " ticks", expected.shouldTick(), actual.shouldTick());
++    }
++
++    @Test
++    public void aStoredSectionReadsAsItsNbt() throws Exception {
++        File dir = template(1L);
++        AthenaSectionStore store = built(dir);
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++        int mapped = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                NBTTagList sections = region.read(x, z).getCompound("Level").getList("Sections", 10);
++
++                for (int k = 0; k < sections.size(); ++k) {
++                    NBTTagCompound nbt = sections.get(k);
++                    ChunkSection section = new ChunkSection(nbt.getByte("Y") << 4, true);
++
++                    assertTrue(store.apply(-32 + x, z, nbt.getByte("Y"), section, true));
++                    section.recalcBlockCounts();
++                    assertSameContent((-32 + x) + "," + nbt.getByte("Y") + "," + z, fromNbt(nbt), section);
++                    if (section.isMapped()) {
++                        ++mapped;
++                    }
++                }
++            }
++        }
++        region.close();
++        assertTrue("packed and raw sections are mapped", mapped > 0);
++
++        assertFalse("no chunk there", store.apply(5, 5, 0, new ChunkSection(0, true), true));
++    }
++
++    @Test
++    public void aWriteChangesOnlyTheSectionsOwnCopy() throws Exception {
++        File dir = template(2L);
++        AthenaSectionStore store = built(dir);
++
++        int checked = 0;
++
++        for (int y = 0; y < 3; ++y) {
++            ChunkSection first = new ChunkSection(y << 4, true);
++            ChunkSection second = new ChunkSection(y << 4, true);
++
++            assertTrue(store.apply(-32, 0, y, first, true));
++            assertTrue(store.apply(-32, 0, y, second, true));
++            first.recalcBlockCounts();
++            second.recalcBlockCounts();
++            if (!first.isMapped()) {
++                continue; // a uniform section shares its ids the way a load from NBT does
++            }
++            ++checked;
++
++            IBlockData before = first.getType(3, 4, 5);
++            IBlockData glass = Blocks.GLASS.getBlockData();
++
++            first.setType(3, 4, 5, glass);
++            assertFalse("written ids are on the heap", first.isMapped());
++            assertSame(glass, first.getType(3, 4, 5));
++            assertSame("the other loaded copy is untouched", before, second.getType(3, 4, 5));
++            assertSame(second.getType(4, 4, 5), first.getType(4, 4, 5));
++
++            // light: a write of the value already there copies nothing; any other value copies
++            NibbleArray light = first.getSkyLightArray();
++            int sky = first.getExtSkylightValue(1, 2, 3);
++            boolean wasMapped = light.isMapped();
++
++            first.setExtSkylightValue(1, 2, 3, sky);
++            assertEquals("an unchanged write copies nothing", wasMapped, light.isMapped());
++            first.setExtSkylightValue(1, 2, 3, (sky + 1) & 15);
++            assertFalse(light.isMapped());
++            assertEquals((sky + 1) & 15, first.getExtSkylightValue(1, 2, 3));
++            assertEquals("the other loaded copy is untouched", sky, second.getExtSkylightValue(1, 2, 3));
++            assertEquals(second.getExtSkylightValue(2, 2, 3), first.getExtSkylightValue(2, 2, 3));
++        }
++        assertTrue("a mapped section was written", checked > 0);
++    }
++
++    @Test
++    public void aChangedTemplateIsRebuilt() throws Exception {
++        File dir = template(3L);
++
++        built(dir);
++
++        File region = new File(dir, "region/r.-1.0.mca");
++
++        assertTrue(region.setLastModified(region.lastModified() - 60000L));
++        assertNull("the store no longer matches its region files", AthenaSectionStore.open(dir));
++        AthenaSectionStore.awaitBuilds();
++        assertNotNull("and is rebuilt", AthenaSectionStore.open(dir));
++    }
++}

@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 06:17:14 +0900
+Subject: [PATCH] Create the chunk's queued tile entity queue only when
+ something queues one
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 04e487c08b2698f5171148b3f2880a43a5d4a17f..585ca7e700e6ab441e6e933868a7b461bc89939d 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -119,7 +119,14 @@ public class Chunk {
+     private int heightMapMinimum;
+     private long inhabitedTime;
+     private int queuedLightChecks;
+-    private ConcurrentLinkedQueue<BlockPosition> tileEntityPosQueue;
++    // Athena - created on the first QUEUED lookup rather than with the chunk. Nothing in the server
++    // asks for a QUEUED tile entity (it is the client's ChunkCache that does, in vanilla), yet b()
++    // asked this queue whether it was empty for every ticked chunk on every tick - two dependent
++    // loads, the queue and its head node, on objects nothing else touches. The production profile
++    // had ConcurrentLinkedQueue.first at 2.3% of the server thread. A null field answers the same
++    // question from the chunk itself. Volatile because a QUEUED lookup, if a plugin ever makes one,
++    // may come from another thread, and the queue must be seen whole once the field is seen.
++    private volatile ConcurrentLinkedQueue<BlockPosition> tileEntityPosQueue;
+     protected gnu.trove.map.hash.TObjectIntHashMap<Class> entityCount = new gnu.trove.map.hash.TObjectIntHashMap<Class>(); // Spigot
+     // Athena - true while this chunk's tally is folded into the world's creature census. Set only
+     // by ChunkCreatureCensus, at the points where the chunk enters or leaves the provider's map.
+@@ -209,7 +216,6 @@ public class Chunk {
+         this.updateSkylightColumns = new boolean[256];
+         this.tileEntities = new Long2ObjectOpenHashMap<TileEntity>(); // Athena
+         this.queuedLightChecks = 4096;
+-        this.tileEntityPosQueue = Queues.newConcurrentLinkedQueue();
+         this.entitySlices = (List[]) (new List[16]); // Spigot
+         this.world = world;
+         this.locX = i;
+@@ -1152,7 +1158,20 @@ public class Chunk {
+                 tileentity = this.createNewTileEntity(blockposition);
+                 this.world.setTileEntity(blockposition, tileentity);
+             } else if (chunk_enumtileentitystate == Chunk.EnumTileEntityState.QUEUED) {
+-                this.tileEntityPosQueue.add(blockposition);
++                // Athena start - see the field
++                ConcurrentLinkedQueue<BlockPosition> queue = this.tileEntityPosQueue;
++
++                if (queue == null) {
++                    synchronized (this) {
++                        queue = this.tileEntityPosQueue;
++                        if (queue == null) {
++                            this.tileEntityPosQueue = queue = Queues.newConcurrentLinkedQueue();
++                        }
++                    }
++                }
++
++                queue.add(blockposition);
++                // Athena end
+             }
+         } else if (tileentity.isInvalid()) {
+             this.tileEntities.remove(blockposition.asLong()); // Athena
+@@ -1612,8 +1631,10 @@ public class Chunk {
+             this.n();
+         }
+ 
+-        while (!this.tileEntityPosQueue.isEmpty()) {
+-            BlockPosition blockposition = (BlockPosition) this.tileEntityPosQueue.poll();
++        ConcurrentLinkedQueue<BlockPosition> queue = this.tileEntityPosQueue; // Athena - null until first used
++
++        while (queue != null && !queue.isEmpty()) {
++            BlockPosition blockposition = (BlockPosition) queue.poll();
+ 
+             if (this.getTileEntity(blockposition, Chunk.EnumTileEntityState.CHECK) == null && this.getType(blockposition).isTileEntity()) {
+                 TileEntity tileentity = this.createNewTileEntity(blockposition);
+@@ -1727,6 +1748,12 @@ public class Chunk {
+     }
+ 
+     public void enqueueRelightChecks() {
++        // Athena - a chunk that has run all 4096 of its checks, which is every chunk loaded for more
++        // than 512 ticks, leaves on the first test of the loop below; do that before building anything
++        if (this.queuedLightChecks >= 4096) {
++            return;
++        }
++
+         BlockPosition blockposition = new BlockPosition(this.locX << 4, 0, this.locZ << 4);
+ 
+         for (int i = 0; i < 8; ++i) {

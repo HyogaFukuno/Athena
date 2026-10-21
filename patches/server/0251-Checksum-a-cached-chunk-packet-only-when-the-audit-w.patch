@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 24 Sep 2026 11:05:02 +0900
+Subject: [PATCH] Checksum a cached chunk packet only when the audit will read
+ it
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index 5b2da9f4e12ff448205ba6b7150369898d6d3988..accc24ab3614d8a9ccf86cf6251981feba255845 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -61,7 +61,8 @@ final class AthenaChunkPacketCache {
+ 
+         this.biomes = chunk.getBiomeIndex().clone();
+         this.map = PacketPlayOutMapChunk.getExtractedData(chunk, true, !chunk.world.worldProvider.getHasNoSky(), FULL_MASK);
+-        this.dataChecksum = checksum(this.map.data);
++        // only the audit reads it, and a CRC of ~60 KB on every rebuild is not free
++        this.dataChecksum = AthenaIndexAudit.enabled() ? checksum(this.map.data) : 0L;
+     }
+ 
+     /** For tests: a cache over given chunk data, with no chunk behind it (it never matches one). */

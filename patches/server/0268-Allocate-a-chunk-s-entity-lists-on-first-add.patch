@@ -1,0 +1,195 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 10 Oct 2026 04:13:24 +0900
+Subject: [PATCH] Allocate a chunk's entity lists on first add
+
+A chunk keeps sixteen UnsafeLists for its entities, nearly all empty for
+their whole life. Made eagerly each was a 32-slot array, an iterator and
+an iterator pool: ~4 KB per chunk, ~6 MB of a 20-player match's live heap,
+allocated again on every chunk load. A list made with capacity 0 now holds
+nothing until its first add.
+
+Also fixes trimToSize, which rounded a size of 1 down to an empty array.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 775bd71000208365709966b202e3ec7902f277d5..d1337dacc56410e9979e6e833913017d4541e364 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -247,7 +247,7 @@ public class Chunk {
+         this.heightMap = new int[256];
+ 
+         for (int k = 0; k < this.entitySlices.length; ++k) {
+-            this.entitySlices[k] = new org.bukkit.craftbukkit.util.UnsafeList(); // Spigot
++            this.entitySlices[k] = new org.bukkit.craftbukkit.util.UnsafeList(0, 5); // Spigot // Athena - empty until an entity enters; see UnsafeList.EMPTY_DATA
+         }
+ 
+         Arrays.fill(this.precipitationHeightMap, -999);
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java b/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
+index 668557ae355978cc031bb627beb4ec7cfe4aa9e8..f062dcc31ccba1badaefc6e3caab836efabfde49 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
+@@ -26,8 +26,25 @@ public class UnsafeList<E> extends AbstractList<E> implements List<E>, RandomAcc
+     private int maxPool;
+     private int poolCounter;
+ 
++    // Athena start - a list made with capacity 0 holds nothing until its first add: no array and
++    // no iterator. A chunk keeps sixteen of these for its entities, nearly all empty for their
++    // whole life; made eagerly they were a 32-slot array, an iterator and a pool each, ~4 KB per
++    // chunk and ~6 MB of a 20-player match's live heap, allocated again on every chunk load.
++    private static final Object[] EMPTY_DATA = new Object[0];
++    private static final Iterator[] EMPTY_POOL = new Iterator[0];
++    // Athena end
++
+     public UnsafeList(int capacity, int maxIterPool) {
+         super();
++        // Athena start - capacity 0: allocate on first use; see EMPTY_DATA
++        if (capacity == 0) {
++            data = EMPTY_DATA;
++            initialCapacity = 0;
++            maxPool = Math.max(1, maxIterPool);
++            iterPool = EMPTY_POOL;
++            return;
++        }
++        // Athena end
+         if (capacity < 0) capacity = 32;
+         int rounded = Integer.highestOneBit(capacity - 1) << 1;
+         data = new Object[rounded];
+@@ -118,7 +135,7 @@ public class UnsafeList<E> extends AbstractList<E> implements List<E>, RandomAcc
+ 
+         // If array has grown too large create new one, otherwise just clear it
+         if (data.length > initialCapacity << 3) {
+-            data = new Object[initialCapacity];
++            data = initialCapacity == 0 ? EMPTY_DATA : new Object[initialCapacity]; // Athena
+         } else {
+             for (int i = 0; i < data.length; i++) {
+                 data[i] = null;
+@@ -129,7 +146,7 @@ public class UnsafeList<E> extends AbstractList<E> implements List<E>, RandomAcc
+     // actually rounds up to nearest power of two
+     public void trimToSize() {
+         int old = data.length;
+-        int rounded = Integer.highestOneBit(size - 1) << 1;
++        int rounded = size <= 1 ? size : Integer.highestOneBit(size - 1) << 1; // Athena - size 1 rounded to 0 and dropped the element
+         if (rounded < old) {
+             data = Arrays.copyOf(data, rounded);
+         }
+@@ -190,7 +207,8 @@ public class UnsafeList<E> extends AbstractList<E> implements List<E>, RandomAcc
+ 
+     private void growIfNeeded() {
+         if (size == data.length) {
+-            Object[] newData = new Object[data.length << 1];
++            // Athena - at least 4: an empty array (capacity 0, or trimToSize at size 0) doubled is still empty
++            Object[] newData = new Object[Math.max(4, data.length << 1)];
+             System.arraycopy(data, 0, newData, 0, size);
+             data = newData;
+         }
+diff --git a/src/test/java/org/bukkit/craftbukkit/util/AthenaUnsafeListTest.java b/src/test/java/org/bukkit/craftbukkit/util/AthenaUnsafeListTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..22effd40740b12dcbb8b932dfe5c465c7f742caf
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/util/AthenaUnsafeListTest.java
+@@ -0,0 +1,103 @@
++package org.bukkit.craftbukkit.util;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Random;
++import org.junit.Test;
++
++/**
++ * Athena - a list made with capacity 0 allocates nothing until its first add, and from then on
++ * behaves exactly as an eager one: the same answers as an ArrayList fed the same operations.
++ */
++public class AthenaUnsafeListTest {
++
++    @Test
++    public void anEmptyLazyListIteratesAndAnswersAsEmpty() {
++        UnsafeList<Integer> list = new UnsafeList<Integer>(0, 5);
++
++        assertTrue(list.isEmpty());
++        assertEquals(0, list.size());
++        assertFalse(list.iterator().hasNext());
++        assertFalse(list.contains(1));
++        assertFalse(list.remove((Object) 1));
++        list.clear();
++        assertTrue(list.isEmpty());
++    }
++
++    @Test
++    public void growsFromNothing() {
++        UnsafeList<Integer> list = new UnsafeList<Integer>(0, 5);
++
++        for (int i = 0; i < 100; ++i) {
++            list.add(i);
++        }
++        assertEquals(100, list.size());
++        for (int i = 0; i < 100; ++i) {
++            assertEquals(Integer.valueOf(i), list.get(i));
++            assertEquals(Integer.valueOf(i), list.unsafeGet(i));
++        }
++    }
++
++    @Test
++    public void anEmptyListTrimmedToSizeStillTakesAnAdd() {
++        // trimToSize at size 0 leaves an empty array, which doubled was still empty: the add threw
++        UnsafeList<Integer> eager = new UnsafeList<Integer>();
++        UnsafeList<Integer> lazy = new UnsafeList<Integer>(0, 5);
++
++        eager.trimToSize();
++        lazy.trimToSize();
++        eager.add(7);
++        lazy.add(7);
++        assertEquals(Integer.valueOf(7), eager.get(0));
++        assertEquals(Integer.valueOf(7), lazy.get(0));
++    }
++
++    @Test
++    public void nestedIterationGetsSeparateIterators() {
++        UnsafeList<Integer> list = new UnsafeList<Integer>(0, 5);
++
++        list.add(1);
++        list.add(2);
++        int pairs = 0;
++        for (Iterator<Integer> a = list.iterator(); a.hasNext(); a.next()) {
++            for (Iterator<Integer> b = list.iterator(); b.hasNext(); b.next()) {
++                ++pairs;
++            }
++        }
++        assertEquals(4, pairs);
++    }
++
++    @Test
++    public void matchesAnArrayListUnderRandomOperations() {
++        Random random = new Random(260930L);
++
++        for (int round = 0; round < 200; ++round) {
++            UnsafeList<Integer> list = new UnsafeList<Integer>(0, 5);
++            List<Integer> expected = new ArrayList<Integer>();
++
++            for (int op = 0; op < 300; ++op) {
++                int kind = random.nextInt(10);
++                int value = random.nextInt(20);
++
++                if (kind < 5) {
++                    list.add(value);
++                    expected.add(value);
++                } else if (kind < 8) {
++                    assertEquals(expected.remove((Object) value), list.remove((Object) value));
++                } else if (kind == 8 && random.nextInt(8) == 0) {
++                    list.clear();
++                    expected.clear();
++                } else if (random.nextInt(4) == 0) {
++                    list.trimToSize();
++                }
++                assertEquals(expected.size(), list.size());
++                assertEquals(expected, new ArrayList<Integer>(list));
++            }
++        }
++    }
++}

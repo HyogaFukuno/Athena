@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 12:59:53 +0900
+Subject: [PATCH] Hold a player's next chunk packets while four are still
+ waiting to be written
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index b4925df55c9ff32e6a08e0c96e833159d98c75af..d634ac0b35b297ace56157d735e0628ae27977a4 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -35,6 +35,28 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public double managedPosX;
+     public double managedPosZ;
+     public final List<ChunkCoordIntPair> chunkCoordIntPairQueue = Lists.newLinkedList();
++    // Athena start - chunk packets handed to Netty and not yet written out.
++    //
++    // The server builds up to maxBulkChunk chunks of packet data per player per tick; Netty
++    // compresses and writes them on its own threads. When those threads cannot keep up - a
++    // small box with twenty players joining at once, or one slow connection - nothing stopped the
++    // server building more, and the finished packets piled up in memory waiting for a write. On a
++    // half-core container that queue filled a 600 MB heap within a minute and the server fell over.
++    // A player with this many chunk packets still in flight gets no new ones this tick; the queue
++    // keeps its order and they go out as the earlier ones complete. On a server that keeps up the
++    // count is back to zero by the next tick and nothing changes.
++    static final int MAX_CHUNK_PACKETS_IN_FLIGHT = 4;
++    final java.util.concurrent.atomic.AtomicInteger chunkPacketsInFlight = new java.util.concurrent.atomic.AtomicInteger();
++    private final io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<? super Void>> chunkPacketDone =
++            future -> this.chunkPacketsInFlight.decrementAndGet();
++
++    private void sendChunkPacket(Packet packet) {
++        this.chunkPacketsInFlight.incrementAndGet();
++        if (!this.playerConnection.sendChunkPacket(packet, this.chunkPacketDone)) {
++            this.chunkPacketsInFlight.decrementAndGet();
++        }
++    }
++    // Athena end
+     // Athena start - hash index over chunkCoordIntPairQueue; see ChunkCoordQueueIndex for why.
+     //
+     // Keep this synced with every chunkCoordIntPairQueue mutation. They all live in
+@@ -267,7 +289,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+             this.playerConnection.sendPacket(new PacketPlayOutEntityDestroy(aint));
+         }
+ 
+-        if (!this.chunkCoordIntPairQueue.isEmpty()) {
++        if (!this.chunkCoordIntPairQueue.isEmpty() && this.chunkPacketsInFlight.get() < EntityPlayer.MAX_CHUNK_PACKETS_IN_FLIGHT) { // Athena - see chunkPacketsInFlight
+             ArrayList arraylist = Lists.newArrayList();
+             Iterator iterator1 = this.chunkCoordIntPairQueue.iterator();
+             ArrayList arraylist1 = Lists.newArrayList();
+@@ -295,9 +317,9 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+ 
+             if (!arraylist.isEmpty()) {
+                 if (arraylist.size() == 1) {
+-                    this.playerConnection.sendPacket(new PacketPlayOutMapChunk((Chunk) arraylist.get(0), true, '\uffff'));
++                    this.sendChunkPacket(new PacketPlayOutMapChunk((Chunk) arraylist.get(0), true, '\uffff')); // Athena - counted
+                 } else {
+-                    this.playerConnection.sendPacket(new PacketPlayOutMapChunkBulk(arraylist));
++                    this.sendChunkPacket(new PacketPlayOutMapChunkBulk(arraylist)); // Athena - counted
+                 }
+ 
+                 Iterator iterator2 = arraylist1.iterator();
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index b1c404cb77dd1d32846c27446d4e3090792b7957..71c5a49e233ed7af2b7cb1042e35dd55666d8b6c 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -924,6 +924,23 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     }
+ 
++    // Athena start
++    /**
++     * Sends a chunk packet and runs {@code written} once Netty has finished with it, written or
++     * failed. Returns false, without running the listener, if the packet was not handed on at all.
++     * Chunk packets are never chat or spawn-position packets, so the checks in sendPacket that
++     * would apply to them are the null and disconnect guards repeated here.
++     */
++    boolean sendChunkPacket(Packet packet, io.netty.util.concurrent.GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>> written) {
++        if (packet == null || this.processedDisconnect || !this.networkManager.isConnected()) {
++            return false;
++        }
++
++        this.networkManager.sendPacket(packet, written, (io.netty.util.concurrent.GenericFutureListener<? extends io.netty.util.concurrent.Future<? super Void>>[]) null);
++        return true;
++    }
++    // Athena end
++
+     public void sendPacket(final Packet packet) {
+         if (packet instanceof PacketPlayOutChat) {
+             PacketPlayOutChat packetplayoutchat = (PacketPlayOutChat) packet;

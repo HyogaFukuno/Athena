@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 24 Sep 2026 11:05:03 +0900
+Subject: [PATCH] Park the server thread until the next tick instead of waking
+ every millisecond
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index c7eeee74198f001e73bcc58f48957ed8a71f1de7..6e6dba814a02c9437490266d8cb6ff7cb901174f 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -652,9 +652,20 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     // PandaSpigot start - New Tick Loop System
+                     this.ab += 50L;
+ 
+-                    while(this.isAheadOfTime()) {
+-                        java.util.concurrent.locks.LockSupport.parkNanos(1_000_000);
++                    // Athena start - sleep until the next tick is due, not a millisecond at a time.
++                    //
++                    // The loop woke every millisecond to ask the clock whether the next tick was
++                    // due: ~900 wake-ups a second on an idle server, each a scheduler round trip.
++                    // On a one-core container that was a measurable share of the server thread,
++                    // and it grew as the other threads got lighter - an uncontended thread keeps
++                    // every one of its wake-ups. Parking for the time actually left gives the
++                    // same deadline in one wake-up; the loop stays, since a park can return early.
++                    long remaining;
++
++                    while ((remaining = this.ab - az()) > 0L) {
++                        java.util.concurrent.locks.LockSupport.parkNanos(remaining * 1_000_000L);
+                     }
++                    // Athena end
+                     // PandaSpigot end
+ 
+                     this.Q = true;

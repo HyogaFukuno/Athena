@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:13:28 +0900
+Subject: [PATCH] Document the section store a template folder gets
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 151be5551a6b9b44bc9ccfee66a48cc8a7e74763..e3d07a01ec2b6eb811dab97f8b919f5aa7aced11 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -18,9 +18,9 @@ import org.bukkit.entity.Player;
+  *
+  * <h2>Template worlds</h2>
+  *
+- * A template world is loaded from a map folder that stays exactly as it is: no copy, no unzip,
++ * A template world is loaded from a map folder that stays as it is: no copy, no unzip,
+  * no {@code session.lock}, no {@code uid.dat}, and no chunk, player or level data is ever saved into
+- * it. Several worlds - on this server or on other servers of the same machine - can use one
++ * it (the one file added is a cache of its sections; see below). Several worlds - on this server or on other servers of the same machine - can use one
+  * template at once, and the operating system's file cache holds the map's files once for all of
+  * them.
+  * <ul>
+@@ -36,6 +36,13 @@ import org.bukkit.entity.Player;
+  *       under different names.</li>
+  *   <li>Unload it with {@link org.bukkit.Server#unloadWorld(World, boolean)} as usual once no
+  *       player is left in it.</li>
++ *   <li>The one file the server adds to the folder is {@code athena-sections-<fingerprint>.bin},
++ *       built in the background the first time the template loads: the map's block ids and light
++ *       in a form the server reads in place from the file cache, so later loads keep almost none of
++ *       them on the Java heap. It is rebuilt whenever the region files change; the folder needs to
++ *       be writable for it, and without it the map loads onto the heap as before. Never overwrite
++ *       it in place while a server runs (cp, scp): copy maps with a tool that replaces files by
++ *       renaming them, such as rsync.</li>
+  * </ul>
+  *
+  * <h2>Teleports</h2>

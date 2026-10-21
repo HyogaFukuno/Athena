@@ -1,0 +1,34 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 18 Oct 2026 08:53:14 +0900
+Subject: [PATCH] Stop reading for a protocol switch only on the event loop
+
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index fefb43c2642a3398f00bc7cbd92106a5868bdeb9..31f76d8dd2b649bd79009483cb83f117b56c0be4 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -288,10 +288,22 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         final EnumProtocol enumprotocol = EnumProtocol.getFromPacket(packet);
+         final EnumProtocol enumprotocol1 = (EnumProtocol) this.channel.attr(NetworkManager.attrKeyConnectionState).get();
+ 
+-        if (enumprotocol1 != enumprotocol) {
++        // Athena start - stop reading for a protocol switch only on the event loop.
++        //
++        // setAutoRead(false) from another thread does not take the read interest off there and
++        // then: Netty posts that to the event loop as a task of its own. The write that switches
++        // the protocol, and turns reading back on, used to be a task posted after it, so the two
++        // ran in order. On the hand-off queue the write can be drained by a drain that is already
++        // running, before Netty's task: reading is turned back on, then the posted task takes the
++        // read interest off, and the channel - auto-read true - never reads again. The client is
++        // timed out 30 seconds later. That was 3-7 of 20 players logging in together. Off the
++        // event loop nothing is lost by not stopping: the channel keeps decoding in the protocol it
++        // is in until the drain switches it, which is when the packet is written.
++        if (enumprotocol1 != enumprotocol && this.channel.eventLoop().inEventLoop()) {
+             NetworkManager.logger.debug("Disabled auto read");
+             this.channel.config().setAutoRead(false);
+         }
++        // Athena end
+ 
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.athenaWriteInLoop(packet, agenericfuturelistener, flush, enumprotocol, enumprotocol1);

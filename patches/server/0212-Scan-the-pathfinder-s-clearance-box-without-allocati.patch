@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 30 Aug 2026 11:13:37 +0900
+Subject: [PATCH] Scan the pathfinder's clearance box without allocating a
+ position per block
+
+Navigation.isPositionClear walked BlockPosition.getAllInBox, which builds two
+BlockPositions for the corners, an Iterable, an AbstractIterator, and then one more
+BlockPosition for every step. It is reached from isDirectPathBetweenPoints for every
+candidate step of every path a mob plans, and an allocation profile of the saturating
+bench put it at 20.7% of everything the server thread allocates - the single largest
+site, with the iterator itself a further 7.8%.
+
+Walk the box directly instead, in the order getAllInBox used, through a per-thread
+scratch position. isSafeToStandAt's floor scan below it allocated one position per
+block for the same reason and gets the same treatment.
+
+The scratch is only ever handed to World.getType and Block.isPassable, neither of
+which keeps it - the contract PathfinderNormal.a already relies on.
+
+Measured +2.24% TPS, 5/6 pairwise wins, at 30,000 golems with four bots.
+
+diff --git a/src/main/java/net/minecraft/server/Navigation.java b/src/main/java/net/minecraft/server/Navigation.java
+index 3f41a5a51d049a1cede710a08fe10fe836ebac9c..7549e10807b18aef18413333bd4d16b86441f7ad 100644
+--- a/src/main/java/net/minecraft/server/Navigation.java
++++ b/src/main/java/net/minecraft/server/Navigation.java
+@@ -140,13 +140,15 @@ public class Navigation extends NavigationAbstract {
+         if (!this.isPositionClear(k1, j, l1, l, i1, j1, vec3d, d0, d1)) {
+             return false;
+         } else {
++            BlockPosition.MutableBlockPosition blockposition = FLOOR_POSITION.get(); // Athena
++
+             for (int i2 = k1; i2 < k1 + l; ++i2) {
+                 for (int j2 = l1; j2 < l1 + j1; ++j2) {
+                     double d2 = (double) i2 + 0.5D - vec3d.xCoord;
+                     double d3 = (double) j2 + 0.5D - vec3d.zCoord;
+ 
+                     if (d2 * d0 + d3 * d1 >= 0.0D) {
+-                        Block block = this.worldObj.getType(new BlockPosition(i2, j - 1, j2)).getBlock();
++                        Block block = this.worldObj.getType(blockposition.set(i2, j - 1, j2)).getBlock(); // Athena - scratch position
+                         Material material = block.getMaterial();
+ 
+                         if (material == Material.AIR) {
+@@ -168,19 +170,52 @@ public class Navigation extends NavigationAbstract {
+         }
+     }
+ 
++    // Athena start - per-thread scratch positions for the two scans below.
++    //
++    // isPositionClear used to walk BlockPosition.getAllInBox, which builds two BlockPositions for
++    // the corners, an Iterable, an AbstractIterator, and then one more BlockPosition per step. It
++    // is reached from isDirectPathBetweenPoints for every candidate step of every path, and the
++    // allocation profile put it at 20.7% of everything the server thread allocates - the single
++    // largest site. isSafeToStandAt's floor scan below is the same shape.
++    //
++    // The loop order here is the one getAllInBox used (x innermost, then y, then z), and the
++    // scratch is only ever read by getType and Block.isPassable, neither of which keeps it - the
++    // same contract PathfinderNormal.a already relies on.
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition> CLEAR_POSITION = new ThreadLocal<BlockPosition.MutableBlockPosition>() {
++        protected BlockPosition.MutableBlockPosition initialValue() {
++            return new BlockPosition.MutableBlockPosition();
++        }
++    };
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition> FLOOR_POSITION = new ThreadLocal<BlockPosition.MutableBlockPosition>() {
++        protected BlockPosition.MutableBlockPosition initialValue() {
++            return new BlockPosition.MutableBlockPosition();
++        }
++    };
++    // Athena end
++
+     private boolean isPositionClear(int i, int j, int k, int l, int i1, int j1, Vec3D vec3d, double d0, double d1) {
+-        for (BlockPosition blockposition : BlockPosition.getAllInBox(new BlockPosition(i, j, k), new BlockPosition(i + l - 1, j + i1 - 1, k + j1 - 1))) {
+-            double d2 = (double) blockposition.getX() + 0.5D - vec3d.xCoord;
+-            double d3 = (double) blockposition.getZ() + 0.5D - vec3d.zCoord;
++        // Athena start - scan the box directly instead of through getAllInBox
++        BlockPosition.MutableBlockPosition blockposition = CLEAR_POSITION.get();
++
++        for (int z = k; z < k + j1; ++z) {
++            double d3 = (double) z + 0.5D - vec3d.zCoord;
+ 
+-            if (d2 * d0 + d3 * d1 >= 0.0D) {
+-                Block block = this.worldObj.getType(blockposition).getBlock();
++            for (int y = j; y < j + i1; ++y) {
++                for (int x = i; x < i + l; ++x) {
++                    double d2 = (double) x + 0.5D - vec3d.xCoord;
+ 
+-                if (!block.isPassable(this.worldObj, blockposition)) {
+-                    return false;
++                    if (d2 * d0 + d3 * d1 >= 0.0D) {
++                        blockposition.set(x, y, z);
++                        Block block = this.worldObj.getType(blockposition).getBlock();
++
++                        if (!block.isPassable(this.worldObj, blockposition)) {
++                            return false;
++                        }
++                    }
+                 }
+             }
+         }
++        // Athena end
+ 
+         return true;
+     }

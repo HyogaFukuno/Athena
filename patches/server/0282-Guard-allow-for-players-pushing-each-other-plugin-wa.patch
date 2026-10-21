@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 21:33:36 +0900
+Subject: [PATCH] Guard: allow for players pushing each other, plugin walk
+ speeds; say more when a move fails
+
+From the first real play on sg1: a player overlapping another was flagged
+moving 0.118 in the air where the bound was 0.049. EntityLivingBase pushes
+the client away from every living entity it overlaps, up to 0.05 on each axis
+per entity per tick, and the client carries that into its next move; with
+0.025 x 0.91 + 0.026 + 0.0707 = 0.119 that is exactly what was seen. The
+horizontal bound now adds 0.0708 per overlapping pushable entity.
+
+The bound's walking speed follows Player.setWalkSpeed (never below vanilla's,
+and a lowered one only after the ping has passed). A failed speed or fly check
+now logs where, the client version, game mode, flight, walk speed, ground,
+wall, liquid, ladder, knockback and pushers - built only when it fails.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index f781ddcbddbe88d48f0328ed3a56da6045c5cacc..603fdf9ba832fdf023f15fa4acf23acf45e8f9d1 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -40,9 +40,15 @@ public final class AthenaGuard {
+     private static final double SPRINT_JUMP = 0.2D;
+     private static final double BASE_SPEED = 0.10000000149011612D;
+     private static final double EPS_H = 0.005D;
++    private static final double PUSH = 0.0708D; // 0.05 * sqrt(2)
+     private static final double EPS_V = 0.01D;
+ 
+     private final EntityPlayer player;
++    private final boolean legacy17; // a 1.7.10 client: for the log
++    // what the server saw around the move being checked, for the log
++    private double ctxX, ctxY, ctxZ;
++    private World ctxWorld;
++    private int ctxFlags, ctxPushers;
+ 
+     // movement state, as of the last accepted move
+     private boolean known;          // false after a teleport, a vehicle, flight: the next move only seeds the state
+@@ -58,6 +64,7 @@ public final class AthenaGuard {
+     private double grantH, grantV;  // knockback the server sent, and until when it may show up
+     private long grantUntil;
+     private int speedAmp = -1, jumpAmp = -1;
++    private double walkSpeed = BASE_SPEED; // the movement speed attribute's base (Player.setWalkSpeed / 2), never under vanilla's
+     private long effectsGraceUntil; // keep a potion's allowance a little after it ends: the client lags
+ 
+     // timer
+@@ -72,7 +79,12 @@ public final class AthenaGuard {
+     private final long[] lastLog = new long[8];
+ 
+     AthenaGuard(EntityPlayer player) {
++        this(player, false);
++    }
++
++    AthenaGuard(EntityPlayer player, boolean legacy17) {
+         this.player = player;
++        this.legacy17 = legacy17;
+     }
+ 
+     public static void configure(boolean enabled, boolean enforce, boolean movement, boolean timer, boolean combat, double maxReach, boolean log) {
+@@ -221,8 +233,13 @@ public final class AthenaGuard {
+         // that stopped it is over where it started (or, after sideways, over where it ended)
+         boolean ceiling = dy > 0.0D && this.groundStart && (ceilingAt(world, fromX, y, fromZ) || ceilingAt(world, x, y, z));
+         double slimeUp = dy > 0.0D ? this.slimeBounce(world, fromX, fromY, fromZ) : 0.0D;
++        int pushers = this.pushers(world, fromX, fromY, fromZ);
++        // kept as values; turned into text only if a check fails
++        this.ctxX = x; this.ctxY = y; this.ctxZ = z; this.ctxWorld = world;
++        this.ctxFlags = (groundNow ? 1 : 0) | (wall ? 2 : 0) | (inLiquid ? 4 : 0) | (climbing ? 8 : 0) | (granted ? 16 : 0);
++        this.ctxPushers = pushers;
+ 
+-        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp) != 0 && enforce) {
++        if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp, pushers) != 0 && enforce) {
+             this.known = false;
+             return false;
+         }
+@@ -236,7 +253,7 @@ public final class AthenaGuard {
+      * the next move unless it fails while enforcing.
+      */
+     int evaluate(int ticks, double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, boolean landed,
+-                 double slipNow, boolean granted, boolean inLiquid, boolean climbing, boolean ceiling, double slimeUp) {
++                 double slipNow, boolean granted, boolean inLiquid, boolean climbing, boolean ceiling, double slimeUp, int pushers) {
+         // landed: the packet covers ticks the client did not report, and it could have come down on
+         // something in them - and jumped again from it on the last
+         boolean fromGround = this.groundStart || landed;
+@@ -265,7 +282,7 @@ public final class AthenaGuard {
+         double fAccel = this.accelFriction;
+ 
+         for (int i = 0; i < ticks; ++i) {
+-            double a = ground ? Math.max(BASE_SPEED * 1.3D * speedMul * 0.16277136D / (fAccel * fAccel * fAccel), AIR_ACCEL) : AIR_ACCEL;
++            double a = ground ? Math.max(this.walkSpeed * 1.3D * speedMul * 0.16277136D / (fAccel * fAccel * fAccel), AIR_ACCEL) : AIR_ACCEL;
+ 
+             v = v * fMotion + a + (i == ticks - 1 && jumped ? SPRINT_JUMP : 0.0D);
+             maxH += v;
+@@ -279,11 +296,14 @@ public final class AthenaGuard {
+         if (granted) {
+             // knockback replaces the motion (an explosion adds to it); the push itself, the walk on
+             // top of it, and what was already there
+-            maxH = Math.max(maxH, (this.lastH + this.grantH + BASE_SPEED * 1.3D * speedMul + SPRINT_JUMP) * ticks);
++            maxH = Math.max(maxH, (this.lastH + this.grantH + this.walkSpeed * 1.3D * speedMul + SPRINT_JUMP) * ticks);
+         }
+         if (inLiquid) {
+             maxH = Math.max(maxH, 0.35D * ticks); // swimming is slower than this; the edge boost is not
+         }
++        // a player the client overlaps pushes it sideways (EntityLivingBase.collideWithNearbyEntities):
++        // at most 0.05 on each axis per pusher per tick, added to the motion the next move carries
++        maxH += pushers * PUSH * ticks;
+ 
+         if (h > maxH + EPS_H) {
+             this.flag(1, "speed", "moved %.3f, at most %.3f (ticks %d, last %.3f, friction %.3f/%.3f, ground %b)", h, maxH, ticks, this.lastH, this.motionFriction, this.accelFriction, this.groundStart);
+@@ -405,13 +425,17 @@ public final class AthenaGuard {
+         int s = speed != null ? speed.getAmplifier() : -1;
+         int j = jumpBoost != null ? jumpBoost.getAmplifier() : -1;
+ 
+-        if (s >= this.speedAmp && j >= this.jumpAmp) {
++        double w = Math.max(BASE_SPEED, this.player.abilities.walkSpeed);
++
++        if (s >= this.speedAmp && j >= this.jumpAmp && w >= this.walkSpeed) {
+             this.speedAmp = s;
+             this.jumpAmp = j;
++            this.walkSpeed = w;
+             this.effectsGraceUntil = tick + 20 + this.player.ping / 50;
+         } else if (tick > this.effectsGraceUntil) {
+             this.speedAmp = s;
+             this.jumpAmp = j;
++            this.walkSpeed = w;
+         }
+     }
+ 
+@@ -426,6 +450,21 @@ public final class AthenaGuard {
+         return world.hasCubes(player, x - HALF, y - 0.001D, z - HALF, x + HALF, y, z + HALF);
+     }
+ 
++    /** Players overlapping the box the client pushes against (its own, grown by 0.2), who push it back. */
++    private int pushers(World world, double x, double y, double z) {
++        java.util.List<Entity> near = world.getEntities(this.player, x - 0.5D, y - 0.2D, z - 0.5D, x + 0.5D, y + 2.0D, z + 0.5D);
++        int count = 0;
++
++        for (int i = 0; i < near.size(); ++i) {
++            Entity entity = near.get(i);
++
++            if (entity.canBePushed() && !(entity instanceof EntityPlayer && ((EntityPlayer) entity).isSpectator())) {
++                ++count;
++            }
++        }
++        return Math.min(count, 8);
++    }
++
+     /** Whether something under the feet at (x, y, z) is within depth below them. */
+     private boolean groundBelow(World world, double x, double y, double z, double depth) {
+         return world.hasCubes(this.player, x - HALF, y - depth, z - HALF, x + HALF, y, z + HALF);
+@@ -570,12 +609,25 @@ public final class AthenaGuard {
+     }
+ 
+     // ------------------------------------------------------------------ reporting
++    private String context() {
++        if (this.player == null || this.ctxWorld == null) {
++            return "";
++        }
++        return String.format(java.util.Locale.ROOT, " at %.2f,%.2f,%.2f in %s; %s, %s, fly %b/%b, walk %.3f, %s%s%s%s%s%s",
++                this.ctxX, this.ctxY, this.ctxZ, this.ctxWorld.getWorld().getName(), this.legacy17 ? "1.7" : "1.8",
++                this.player.playerInteractManager.getGameMode(), this.player.abilities.canFly, this.player.abilities.isFlying,
++                this.player.abilities.walkSpeed, (this.ctxFlags & 1) != 0 ? "ground" : "air", (this.ctxFlags & 2) != 0 ? ", wall" : "",
++                (this.ctxFlags & 4) != 0 ? ", liquid" : "", (this.ctxFlags & 8) != 0 ? ", climbing" : "",
++                (this.ctxFlags & 16) != 0 ? ", knockback" : "", this.ctxPushers > 0 ? ", pushed by " + this.ctxPushers : "");
++    }
++
+     private void flag(int check, String name, String format, Object... args) {
+         long now = System.currentTimeMillis();
+ 
+         if (log && now - this.lastLog[check] >= 2000L) {
+             this.lastLog[check] = now;
+-            LOGGER.info("{} {} [{}]: {}", this.player != null ? this.player.getName() : "-", name, enforce ? "blocked" : "detected", String.format(java.util.Locale.ROOT, format, args));
++            String detail = String.format(java.util.Locale.ROOT, format, args) + (check == 1 || check == 2 ? this.context() : "");
++            LOGGER.info("{} {} [{}]: {}", this.player != null ? this.player.getName() : "-", name, enforce ? "blocked" : "detected", detail);
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index b6db8352e574b65ad06e00041facff6d3820462e..a663d95c5c6349f4ab758685462401a59550913e 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -109,7 +109,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         this.player = entityplayer;
+         entityplayer.playerConnection = this;
+         this.legacy17 = AthenaLegacy17.isLegacy(networkmanager); // Athena
+-        this.guard = new AthenaGuard(entityplayer); // Athena
++        this.guard = new AthenaGuard(entityplayer, this.legacy17); // Athena
+ 
+         // CraftBukkit start - add fields and methods
+         this.server = minecraftserver.server;
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index 1db6cba5fce5b306d638d4e047947c2586177075..026555289dbfb445a95d26b4c3d84cdbc8f0aecd 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -253,7 +253,7 @@ public class AthenaGuardMovementTest {
+                 r = 0;
+             } else {
+                 boolean ceiling = dy > 0 && this.guard.groundStart() && (ceilingAt(this.x, ny, this.z) || ceilingAt(nx, ny, nz));
+-                r = this.guard.evaluate(ticks, Math.sqrt(dx * dx + dz * dz), dy, groundNow, maybeGround, certain, ticks > 1 && landing, slip, false, false, false, ceiling, 0.0);
++                r = this.guard.evaluate(ticks, Math.sqrt(dx * dx + dz * dz), dy, groundNow, maybeGround, certain, ticks > 1 && landing, slip, false, false, false, ceiling, 0.0, 0);
+             }
+             if (r == 0) {
+                 this.x = nx; this.y = ny; this.z = nz;

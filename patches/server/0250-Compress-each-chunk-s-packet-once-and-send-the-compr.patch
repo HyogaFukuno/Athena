@@ -1,0 +1,669 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 24 Sep 2026 10:35:14 +0900
+Subject: [PATCH] Compress each chunk's packet once and send the compressed
+ bytes to everyone who needs it
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index b00523c1a3810700922949f24ccad0006345a6ac..d731fdba9cf1053acfbfe49f15c3eec36a1b6e61 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -73,6 +73,18 @@ public class PandaSpigotWorldConfig {
+     public boolean useSpigotChunkTickingSelection = false;
+ 
+     // Athena start
++    @Comment("When enabled, each chunk's packet is compressed once and the compressed bytes are\n" +
++            "sent to every player that needs the chunk, until a block or light change in it\n" +
++            "makes a new one. On a small map players cross chunk borders constantly and 1.8\n" +
++            "resends a row of chunks each time: a 20-player arena compressed the same few\n" +
++            "hundred chunks 70,000 times in three minutes, and that compression was most of\n" +
++            "the CPU the server used. Chunks are then sent one per packet instead of in bulk\n" +
++            "packets; the chunk data is the same.\n" +
++            "Not used while anti-xray is on - it rewrites a chunk depending on its neighbours -\n" +
++            "or when network compression is off, where there is nothing to cache.\n" +
++            "Default: true")
++    public boolean cacheChunkPackets = true;
++
+     @Comment("When enabled, the first half of generating a brand new chunk - noise, biomes,\n" +
+             "surface blocks, caves and ravines - runs on a worker thread instead of the\n" +
+             "server thread. It is a pure function of the seed and the chunk coordinates, so\n" +
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b2da9f4e12ff448205ba6b7150369898d6d3988
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -0,0 +1,168 @@
++package net.minecraft.server;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import java.util.Arrays;
++import java.util.zip.CRC32;
++import java.util.zip.Deflater;
++
++// Athena - one chunk's full-chunk packet, compressed once and sent to every player who needs it.
++//
++// On a small map players cross chunk borders all the time, and 1.8 answers each crossing by
++// unloading one row of chunks from the client and sending another: a 20-player arena sent the
++// same few hundred chunks 70,000 times in three minutes. Every one of those sends was compressed
++// afresh on a Netty thread, and zlib was 85% of the CPU the whole server used. The bytes of a
++// chunk packet do not depend on who receives it, so this keeps them compressed, keyed on the
++// state they were built from, and the encoder writes them out as they are.
++//
++// The key is what a full-chunk packet is made of: each section - the object, and its modCount,
++// which every write of ids or light bumps - and the biome array, compared byte for byte since
++// generators and plugins write into it directly. Anything else changes the packet only through
++// those. A key that no longer matches is simply replaced; nothing is invalidated eagerly.
++//
++// Lifecycle of the bytes: the uncompressed chunk data is extracted on the server thread, exactly
++// as PacketPlayOutMapChunk always did. The first Netty thread to encode the packet compresses it
++// into a frame - the uncompressed length and the zlib stream, the bytes PacketCompressor would
++// have produced - and drops the uncompressed data, so a cached chunk holds a few kilobytes.
++final class AthenaChunkPacketCache {
++
++    /** The primary bit mask of a full chunk packet: every section that holds something. */
++    static final int FULL_MASK = 0xFFFF;
++
++    private static final ThreadLocal<Deflater> DEFLATER = ThreadLocal.withInitial(Deflater::new);
++
++    final int chunkX;
++    final int chunkZ;
++    private final ChunkSection[] sections = new ChunkSection[16];
++    private final int[] modCounts = new int[16];
++    private final byte[] biomes;
++    /** CRC32 of the uncompressed chunk data, for the index audit. */
++    final long dataChecksum;
++
++    // Written in this order and read in the reverse: frame is set before map is cleared, so a
++    // reader that finds map gone always finds frame set.
++    private volatile PacketPlayOutMapChunk.ChunkMap map;
++    private volatile byte[] frame;
++
++    AthenaChunkPacketCache(Chunk chunk) {
++        this.chunkX = chunk.locX;
++        this.chunkZ = chunk.locZ;
++
++        // key first, then the data: a write racing the extraction leaves a key that is already
++        // stale, never data newer than its key
++        ChunkSection[] chunkSections = chunk.getSections();
++
++        for (int i = 0; i < 16; ++i) {
++            ChunkSection section = chunkSections[i];
++
++            this.sections[i] = section;
++            this.modCounts[i] = section == null ? 0 : section.modCount;
++        }
++
++        this.biomes = chunk.getBiomeIndex().clone();
++        this.map = PacketPlayOutMapChunk.getExtractedData(chunk, true, !chunk.world.worldProvider.getHasNoSky(), FULL_MASK);
++        this.dataChecksum = checksum(this.map.data);
++    }
++
++    /** For tests: a cache over given chunk data, with no chunk behind it (it never matches one). */
++    AthenaChunkPacketCache(int chunkX, int chunkZ, PacketPlayOutMapChunk.ChunkMap map) {
++        this.chunkX = chunkX;
++        this.chunkZ = chunkZ;
++        this.biomes = new byte[0];
++        this.map = map;
++        this.dataChecksum = checksum(map.data);
++    }
++
++    /** Whether this was built from exactly the chunk's current contents. */
++    boolean matches(Chunk chunk) {
++        ChunkSection[] chunkSections = chunk.getSections();
++
++        for (int i = 0; i < 16; ++i) {
++            ChunkSection section = chunkSections[i];
++
++            if (section != this.sections[i] || (section != null && section.modCount != this.modCounts[i])) {
++                return false;
++            }
++        }
++
++        return Arrays.equals(this.biomes, chunk.getBiomeIndex());
++    }
++
++    /** The uncompressed data while it is still held, for a packet that may have to fall back to it. */
++    PacketPlayOutMapChunk.ChunkMap map() {
++        return this.map;
++    }
++
++    /**
++     * The compressed frame body for this packet under the given packet id and compression
++     * threshold, compressing it now if no thread has yet. Null if the packet is below the
++     * threshold - it then goes out uncompressed through the ordinary path, and the uncompressed
++     * data is kept for it.
++     */
++    byte[] frame(int packetId, int threshold) {
++        byte[] result = this.frame;
++
++        if (result != null) {
++            return result;
++        }
++
++        PacketPlayOutMapChunk.ChunkMap data = this.map;
++
++        if (data == null) {
++            return this.frame; // another thread compressed it between our two reads
++        }
++
++        ByteBuf raw = Unpooled.buffer(data.data.length + 32);
++
++        try {
++            PacketDataSerializer serializer = new PacketDataSerializer(raw);
++
++            serializer.writeVarIntToBuffer(packetId);
++            serializer.writeInt(this.chunkX);
++            serializer.writeInt(this.chunkZ);
++            serializer.writeBoolean(true);
++            serializer.writeShort((short) (data.dataSize & 0xFFFF));
++            serializer.writeByteArray(data.data);
++
++            int rawLength = raw.readableBytes();
++
++            if (rawLength < threshold) {
++                return null;
++            }
++
++            Deflater deflater = DEFLATER.get();
++            ByteBuf out = Unpooled.buffer(rawLength / 4 + 64);
++            PacketDataSerializer outSerializer = new PacketDataSerializer(out);
++            byte[] chunk = new byte[8192];
++
++            outSerializer.writeVarIntToBuffer(rawLength);
++            try {
++                deflater.setInput(raw.array(), raw.arrayOffset() + raw.readerIndex(), rawLength);
++                deflater.finish();
++
++                while (!deflater.finished()) {
++                    int n = deflater.deflate(chunk);
++
++                    out.writeBytes(chunk, 0, n);
++                }
++            } finally {
++                deflater.reset();
++            }
++
++            result = new byte[out.readableBytes()];
++            out.readBytes(result);
++            this.frame = result;
++            this.map = null;
++            return result;
++        } finally {
++            raw.release();
++        }
++    }
++
++    static long checksum(byte[] data) {
++        CRC32 crc = new CRC32();
++
++        crc.update(data, 0, data.length);
++        return crc.getValue();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index d63ee35a277120be2c095d07dc5d334e79a56998..011c3bcaa219c0e4b3ab4087a7057bebbe8b2527 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -20,6 +20,7 @@ import org.apache.logging.log4j.Logger;
+ //   Chunk.tickingSectionMask            promises, where a bit is clear, that the section is idle
+ //   PlayerChunkMap.instanceChunks       mirrors each player chunk instance's tombstone and chunk
+ //   Chunk.nonEmptySliceMask             mirrors which entity slices hold anything
++//   AthenaChunkPacketCache              a cache hit carries what a fresh chunk extraction would
+ //
+ // The census audit earns its keep: the site check in auditCensusSite found a real divergence in
+ // live play, where a decrement was applied to a class entityCount had no entry for.
+@@ -45,6 +46,7 @@ public final class AthenaIndexAudit {
+     private static long tickingBitChecks; // Athena
+     private static long instanceChunkChecks; // Athena
+     private static long sliceMaskChecks; // Athena
++    private static long chunkPacketChecks; // Athena
+     private static long liquidChecks;
+     private static long liquidChecksNonEmpty;
+ 
+@@ -385,6 +387,20 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    /**
++     * Athena - a hit in a chunk's compressed packet cache must carry what a fresh extraction would.
++     * Re-extracts the chunk and compares checksums of the uncompressed data.
++     */
++    public static void auditChunkPacketCache(Chunk chunk, AthenaChunkPacketCache cache) {
++        ++chunkPacketChecks;
++        long fresh = AthenaChunkPacketCache.checksum(PacketPlayOutMapChunk.getExtractedData(chunk, true,
++                !chunk.world.worldProvider.getHasNoSky(), AthenaChunkPacketCache.FULL_MASK).data);
++
++        if (fresh != cache.dataChecksum) {
++            report("chunk packet cache for " + chunk.locX + "," + chunk.locZ + " matched its key but its data differs from a fresh extraction");
++        }
++    }
++
+     /** Athena - PlayerChunkMap.instanceChunks mirrors each instance's tombstone flag and loaded chunk. */
+     public static void auditPlayerInstanceChunks(PlayerChunkMap map) {
+         ++instanceChunkChecks;
+@@ -440,13 +456,14 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, sliceMask={}, verticalOffset={} | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, instanceChunks={}, sliceMask={}, chunkPacketCache={}, verticalOffset={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
+                 tickingBitChecks,
+                 instanceChunkChecks,
+                 sliceMaskChecks,
++                chunkPacketChecks,
+                 offsetChecks,
+                 mismatches);
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index d4ba235e0e3553ee9fc7dc7a7b8252a1b011fd1e..775bd71000208365709966b202e3ec7902f277d5 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -142,6 +142,24 @@ public class Chunk {
+     public long lightUpdateTime;
+     // PaperSpigot end
+ 
++    // Athena start - this chunk's compressed full-chunk packet; see AthenaChunkPacketCache
++    private volatile AthenaChunkPacketCache athenaPacketCache;
++
++    /** A full-chunk packet for this chunk, from the compressed packet cache, rebuilt if stale. */
++    PacketPlayOutMapChunk athenaFullChunkPacket() {
++        AthenaChunkPacketCache cache = this.athenaPacketCache;
++
++        if (cache == null || !cache.matches(this)) {
++            cache = new AthenaChunkPacketCache(this);
++            this.athenaPacketCache = cache;
++        } else if (AthenaIndexAudit.enabled()) {
++            AthenaIndexAudit.auditChunkPacketCache(this, cache);
++        }
++
++        return new PacketPlayOutMapChunk(cache);
++    }
++    // Athena end
++
+     // PaperSpigot start - ChunkMap caching
+     private PacketPlayOutMapChunk.ChunkMap chunkMap;
+     private int emptySectionBits;
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 7a461d027cac96f857f997de6e18e10a57dc9496..7bbe03f91173c484b1bcf28c53cc49b429ea30f8 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -38,6 +38,12 @@ public class ChunkSection {
+     // Chunk.clearTickingSection when the tick finds this section idle, so that the first ticking
+     // block to arrive here can set the bit again. See Chunk.tickingSectionMask.
+     Chunk tickingMaskOwner;
++    // Athena - bumped by every write that can change what a chunk packet carries for this section:
++    // block ids, block light, sky light, or one of the arrays swapped out. AthenaChunkPacketCache
++    // keys a chunk's compressed packet on these counts, so a count that failed to move would send
++    // a player stale blocks. Bumped even when a light write stores the value already there; a
++    // spurious rebuild is only a cost.
++    int modCount;
+     // Athena end
+     private char[] blockIds;
+     private NibbleArray emittedLight;
+@@ -124,6 +130,7 @@ public class ChunkSection {
+         }
+ 
+         this.blockIds[j << 8 | k << 4 | i] = (char) Block.getStateId(iblockdata); // Athena - read the id off the state
++        ++this.modCount; // Athena
+         // Athena start - keep the ticking bitmap and the owning chunk's section mask in step
+         int index = j << 8 | k << 4 | i;
+ 
+@@ -196,6 +203,7 @@ public class ChunkSection {
+ 
+     public void setExtSkylightValue(int i, int j, int k, int l) {
+         this.skyLight.set(i, j, k, l);
++        ++this.modCount; // Athena
+         isDirty = true; // PaperSpigot
+     }
+ 
+@@ -205,6 +213,7 @@ public class ChunkSection {
+ 
+     public void setExtBlocklightValue(int i, int j, int k, int l) {
+         this.emittedLight.set(i, j, k, l);
++        ++this.modCount; // Athena
+         isDirty = true; // PaperSpigot
+     }
+ 
+@@ -213,6 +222,7 @@ public class ChunkSection {
+     }
+ 
+     public void recalcBlockCounts() {
++        ++this.modCount; // Athena - follows a bulk write of the id array (loader, plugin generator)
+         this.nonEmptyBlockCount = 0;
+         this.tickingBlockCount = 0;
+         this.waterCount = 0; // Athena
+@@ -291,6 +301,7 @@ public class ChunkSection {
+ 
+     public void setData(char[] achar) {
+         this.blockIds = achar;
++        ++this.modCount; // Athena
+     }
+ 
+     public NibbleArray getEmittedLightArray() {
+@@ -303,9 +314,11 @@ public class ChunkSection {
+ 
+     public void setBlocklightArray(NibbleArray nibblearray) {
+         this.emittedLight = nibblearray;
++        ++this.modCount; // Athena
+     }
+ 
+     public void setSkylightArray(NibbleArray nibblearray) {
+         this.skyLight = nibblearray;
++        ++this.modCount; // Athena
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index d634ac0b35b297ace56157d735e0628ae27977a4..94aa7d28becc13a909ff7e408f22e6bee0b8c1c5 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -45,17 +45,29 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     // A player with this many chunk packets still in flight gets no new ones this tick; the queue
+     // keeps its order and they go out as the earlier ones complete. On a server that keeps up the
+     // count is back to zero by the next tick and nothing changes.
+-    static final int MAX_CHUNK_PACKETS_IN_FLIGHT = 4;
+-    final java.util.concurrent.atomic.AtomicInteger chunkPacketsInFlight = new java.util.concurrent.atomic.AtomicInteger();
+-    private final io.netty.util.concurrent.GenericFutureListener<io.netty.util.concurrent.Future<? super Void>> chunkPacketDone =
+-            future -> this.chunkPacketsInFlight.decrementAndGet();
++    //
++    // Counted in chunks, not packets, since a bulk packet carries up to maxBulkChunk of them and a
++    // cached chunk goes out one to a packet: forty is four full bulk packets, as before.
++    static final int MAX_CHUNKS_IN_FLIGHT = 40;
++    final java.util.concurrent.atomic.AtomicInteger chunksInFlight = new java.util.concurrent.atomic.AtomicInteger();
+ 
+-    private void sendChunkPacket(Packet packet) {
+-        this.chunkPacketsInFlight.incrementAndGet();
+-        if (!this.playerConnection.sendChunkPacket(packet, this.chunkPacketDone)) {
+-            this.chunkPacketsInFlight.decrementAndGet();
++    private void sendChunkPacket(Packet packet, int chunks) {
++        this.chunksInFlight.addAndGet(chunks);
++        if (!this.playerConnection.sendChunkPacket(packet, future -> this.chunksInFlight.addAndGet(-chunks))) {
++            this.chunksInFlight.addAndGet(-chunks);
+         }
+     }
++
++    /**
++     * Whether full chunks go to this player from each chunk's compressed packet cache
++     * (AthenaChunkPacketCache) rather than as freshly built bulk packets. Anti-xray rewrites a
++     * chunk's data depending on its neighbours, so it keeps the old path; so does a server that
++     * does not compress, where there is nothing to cache.
++     */
++    private boolean useChunkPacketCache() {
++        return this.world.pandaSpigotConfig.cacheChunkPackets && !this.world.spigotConfig.antiXray
++                && this.server.aK() >= 0;
++    }
+     // Athena end
+     // Athena start - hash index over chunkCoordIntPairQueue; see ChunkCoordQueueIndex for why.
+     //
+@@ -289,7 +301,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+             this.playerConnection.sendPacket(new PacketPlayOutEntityDestroy(aint));
+         }
+ 
+-        if (!this.chunkCoordIntPairQueue.isEmpty() && this.chunkPacketsInFlight.get() < EntityPlayer.MAX_CHUNK_PACKETS_IN_FLIGHT) { // Athena - see chunkPacketsInFlight
++        if (!this.chunkCoordIntPairQueue.isEmpty() && this.chunksInFlight.get() < EntityPlayer.MAX_CHUNKS_IN_FLIGHT) { // Athena - see chunksInFlight
+             ArrayList arraylist = Lists.newArrayList();
+             Iterator iterator1 = this.chunkCoordIntPairQueue.iterator();
+             ArrayList arraylist1 = Lists.newArrayList();
+@@ -316,11 +328,17 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+             }
+ 
+             if (!arraylist.isEmpty()) {
+-                if (arraylist.size() == 1) {
+-                    this.sendChunkPacket(new PacketPlayOutMapChunk((Chunk) arraylist.get(0), true, '\uffff')); // Athena - counted
++                // Athena start - one cached packet per chunk, or the original packets; both counted
++                if (this.useChunkPacketCache()) {
++                    for (int n = 0; n < arraylist.size(); ++n) {
++                        this.sendChunkPacket(((Chunk) arraylist.get(n)).athenaFullChunkPacket(), 1);
++                    }
++                } else if (arraylist.size() == 1) {
++                    this.sendChunkPacket(new PacketPlayOutMapChunk((Chunk) arraylist.get(0), true, '\uffff'), 1);
+                 } else {
+-                    this.sendChunkPacket(new PacketPlayOutMapChunkBulk(arraylist)); // Athena - counted
++                    this.sendChunkPacket(new PacketPlayOutMapChunkBulk(arraylist), arraylist.size());
+                 }
++                // Athena end
+ 
+                 Iterator iterator2 = arraylist1.iterator();
+ 
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 7950b27f8bad34e8440e00e352852e93de83165e..19bc8971a32ecdf93a84eea70218630edae6d276 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -11,6 +11,14 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+     private final byte[] buffer = new byte[8192];
+     private final Deflater deflater;
+     private int treshold;
++    // Athena - the next message is a frame PacketEncoder took from AthenaChunkPacketCache, already
++    // in the form this handler produces; copy it through. Set and cleared on the channel's event
++    // loop, by the encoder for the message it has just written.
++    boolean passThroughNext;
++
++    int getThreshold() {
++        return this.treshold;
++    }
+ 
+     public PacketCompressor(int i) {
+         this.treshold = i;
+@@ -18,6 +26,12 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+     }
+ 
+     protected void a(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, ByteBuf bytebuf1) throws Exception {
++        if (this.passThroughNext) { // Athena
++            this.passThroughNext = false;
++            bytebuf1.writeBytes(bytebuf);
++            return;
++        }
++
+         int i = bytebuf.readableBytes();
+         PacketDataSerializer packetdataserializer = new PacketDataSerializer(bytebuf1);
+ 
+diff --git a/src/main/java/net/minecraft/server/PacketEncoder.java b/src/main/java/net/minecraft/server/PacketEncoder.java
+index 5242cb600a4cf92929f3d254ce1297d3a49419ee..f126a1d2583193a76b2af7906d2e5cf7f9e8e60f 100644
+--- a/src/main/java/net/minecraft/server/PacketEncoder.java
++++ b/src/main/java/net/minecraft/server/PacketEncoder.java
+@@ -30,6 +30,22 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+         if (integer == null) {
+             throw new IOException("Can't serialize unregistered packet");
+         } else {
++            // Athena start - a chunk packet with a cached compressed frame goes out as that frame
++            if (packet instanceof PacketPlayOutMapChunk && ((PacketPlayOutMapChunk) packet).athenaCache != null) {
++                io.netty.channel.ChannelHandler handler = channelhandlercontext.pipeline().get("compress");
++
++                if (handler instanceof PacketCompressor) {
++                    PacketCompressor compressor = (PacketCompressor) handler;
++                    byte[] frame = ((PacketPlayOutMapChunk) packet).athenaCache.frame(integer, compressor.getThreshold());
++
++                    if (frame != null) {
++                        bytebuf.writeBytes(frame);
++                        compressor.passThroughNext = true;
++                        return;
++                    }
++                }
++            }
++            // Athena end
+             PacketDataSerializer packetdataserializer = new PacketDataSerializer(bytebuf);
+ 
+             packetdataserializer.writeVarIntToBuffer(integer);
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index 9c08d41571c9190c388a8468dce15b930cc7ed73..288a25b7181884edd98c8642c9769069efc2e27e 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -15,9 +15,25 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+     private int chunkZ;
+     private PacketPlayOutMapChunk.ChunkMap extractedData;
+     private boolean d;
++    // Athena - set for a full chunk sent from AthenaChunkPacketCache; the encoder then writes the
++    // cached compressed frame instead of serialising and compressing this packet
++    AthenaChunkPacketCache athenaCache;
+ 
+     public PacketPlayOutMapChunk() {}
+ 
++    // Athena start
++    /** A full chunk packet backed by the chunk's compressed packet cache. */
++    PacketPlayOutMapChunk(AthenaChunkPacketCache cache) {
++        this.chunkX = cache.chunkX;
++        this.chunkZ = cache.chunkZ;
++        this.d = true;
++        this.athenaCache = cache;
++        // Held for the uncompressed fallback; null once a Netty thread has compressed the cache,
++        // and then the fallback cannot be needed - see AthenaChunkPacketCache.frame.
++        this.extractedData = cache.map();
++    }
++    // Athena end
++
+     public PacketPlayOutMapChunk(Chunk chunk, boolean flag, int i) {
+         this.chunkX = chunk.locX;
+         this.chunkZ = chunk.locZ;
+@@ -36,6 +52,9 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+     }
+ 
+     public void writePacketData(PacketDataSerializer packetdataserializer) throws IOException {
++        if (this.extractedData == null) { // Athena - a cached packet whose data went into the cache's frame
++            throw new IOException("cached chunk packet " + this.chunkX + "," + this.chunkZ + " has no uncompressed data to fall back to");
++        }
+         packetdataserializer.writeInt(this.chunkX);
+         packetdataserializer.writeInt(this.chunkZ);
+         packetdataserializer.writeBoolean(this.d);
+diff --git a/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cc4a0de1a4227a779cdf5c14e2b7c747d39c57ff
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+@@ -0,0 +1,132 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNull;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.util.Random;
++import java.util.zip.Inflater;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a chunk packet sent from AthenaChunkPacketCache must put exactly the bytes on the wire
++ * that the ordinary path does, and must not disturb the packets around it. This builds the real
++ * outbound pipeline order - PacketEncoder, then PacketCompressor - on an EmbeddedChannel and
++ * compares the two paths frame for frame.
++ */
++public class AthenaChunkPacketCacheTest extends AbstractTestingBase {
++
++    private static final int THRESHOLD = 256;
++
++    private static EmbeddedChannel pipeline() {
++        EmbeddedChannel channel = new EmbeddedChannel();
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        channel.pipeline().addLast("compress", new PacketCompressor(THRESHOLD));
++        channel.pipeline().addLast("encoder", new PacketEncoder(EnumProtocolDirection.CLIENTBOUND));
++        return channel;
++    }
++
++    private static PacketPlayOutMapChunk.ChunkMap chunkData(long seed) {
++        Random random = new Random(seed);
++        PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
++        map.dataSize = 0x00FF;
++        map.data = new byte[40000];
++        // compressible, like a real chunk: long runs with some noise
++        for (int i = 0; i < map.data.length; ++i) {
++            map.data[i] = (byte) (random.nextInt(8) == 0 ? random.nextInt(256) : (i / 97));
++        }
++        return map;
++    }
++
++    /** The packet the ordinary path would send for the same chunk data. */
++    private static PacketPlayOutMapChunk uncached(PacketPlayOutMapChunk.ChunkMap map) {
++        PacketPlayOutMapChunk packet = new PacketPlayOutMapChunk(new AthenaChunkPacketCache(3, -7, map));
++
++        packet.athenaCache = null;
++        return packet;
++    }
++
++    private static byte[] written(EmbeddedChannel channel, Object packet) {
++        channel.writeOutbound(packet);
++        ByteBuf out = channel.readOutbound();
++        byte[] bytes = new byte[out.readableBytes()];
++
++        out.readBytes(bytes);
++        out.release();
++        return bytes;
++    }
++
++    /** Undoes PacketCompressor: the uncompressed length, then the zlib stream (or the raw packet). */
++    private static byte[] inflate(byte[] frame) throws Exception {
++        PacketDataSerializer in = new PacketDataSerializer(io.netty.buffer.Unpooled.wrappedBuffer(frame));
++        int length = in.readVarIntFromBuffer();
++        byte[] rest = new byte[in.readableBytes()];
++
++        in.readBytes(rest);
++        if (length == 0) {
++            return rest;
++        }
++
++        Inflater inflater = new Inflater();
++        byte[] out = new byte[length];
++
++        inflater.setInput(rest);
++        assertEquals("inflated length", length, inflater.inflate(out));
++        inflater.end();
++        return out;
++    }
++
++    @Test
++    public void aCachedChunkPutsTheSameBytesOnTheWire() throws Exception {
++        PacketPlayOutMapChunk.ChunkMap map = chunkData(1L);
++        EmbeddedChannel ordinary = pipeline();
++        EmbeddedChannel cached = pipeline();
++        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(3, -7, chunkData(1L));
++
++        byte[] expected = written(ordinary, uncached(map));
++        byte[] first = written(cached, new PacketPlayOutMapChunk(cache));   // compresses and caches
++        byte[] second = written(cached, new PacketPlayOutMapChunk(cache));  // straight from the cache
++
++        assertArrayEquals("uncompressed packet, first send", inflate(expected), inflate(first));
++        assertArrayEquals("uncompressed packet, cached send", inflate(expected), inflate(second));
++        // zlib is deterministic for the same input and level, so the frames match byte for byte too
++        assertArrayEquals("frame, first send", expected, first);
++        assertArrayEquals("frame, cached send", expected, second);
++        assertNull("the uncompressed data is dropped once compressed", cache.map());
++    }
++
++    @Test
++    public void thePassThroughCoversOnlyTheCachedPacket() throws Exception {
++        EmbeddedChannel ordinary = pipeline();
++        EmbeddedChannel cached = pipeline();
++        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(0, 0, chunkData(2L));
++        Packet small = new PacketPlayOutKeepAlive(42);
++        Packet large = uncached(chunkData(3L));
++
++        written(cached, new PacketPlayOutMapChunk(cache));
++
++        // the packets after it must be framed by the compressor as usual, small and large alike
++        assertArrayEquals(written(ordinary, small), written(cached, small));
++        assertArrayEquals(inflate(written(ordinary, large)), inflate(written(cached, large)));
++    }
++
++    @Test
++    public void belowTheThresholdTheOrdinaryPathIsUsed() throws Exception {
++        PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
++        map.data = new byte[16];
++        map.dataSize = 0;
++
++        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(1, 1, map);
++        EmbeddedChannel channel = pipeline();
++        byte[] frame = written(channel, new PacketPlayOutMapChunk(cache));
++
++        assertEquals("sent uncompressed, as PacketCompressor does below its threshold", 0, frame[0]);
++        assertEquals("the data is kept for the next send", map, cache.map());
++    }
++}

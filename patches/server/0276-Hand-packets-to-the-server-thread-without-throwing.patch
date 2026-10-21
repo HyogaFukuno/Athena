@@ -1,0 +1,226 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 10:50:01 +0900
+Subject: [PATCH] Hand packets to the server thread without throwing
+
+ensureMainThread posted the packet and then threw a shared exception for
+NetworkManager to catch - an unwind for every play packet, about 400 a second
+with 20 players and about 1% of the process. The handlers now call
+postToMainThread and return when it answers true; ensureMainThread stays.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 38061dfd3ad5e85542f629544d2778616f169934..3b0e727cf65b1e2ae0d7b6465d91b94f5c0d2264 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -209,7 +209,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processInput(PacketPlayInSteerVehicle packetplayinsteervehicle) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinsteervehicle, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinsteervehicle, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.setEntityActionState(packetplayinsteervehicle.getStrafeSpeed(), packetplayinsteervehicle.getForwardSpeed(), packetplayinsteervehicle.isJumping(), packetplayinsteervehicle.isSneaking());
+     }
+ 
+@@ -218,7 +218,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processPlayer(PacketPlayInFlying packetplayinflying) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinflying, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinflying, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.b(packetplayinflying)) {
+             this.disconnect("Invalid move packet received");
+         } else {
+@@ -605,7 +605,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processPlayerDigging(PacketPlayInBlockDig packetplayinblockdig) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinblockdig, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinblockdig, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.player.dead) return; // CraftBukkit
+         WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+         BlockPosition blockposition = packetplayinblockdig.getPosition();
+@@ -699,7 +699,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     private int packets = 0;
+ 
+     public void processPlayerBlockPlacement(PacketPlayInBlockPlace packetplayinblockplace) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinblockplace, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinblockplace, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+         boolean throttled = false;
+         // PaperSpigot - Allow disabling the player interaction limiter
+@@ -831,7 +831,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void handleSpectate(PacketPlayInSpectate packetplayinspectate) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinspectate, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinspectate, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.player.isSpectator()) {
+             Entity entity = null;
+             WorldServer[] aworldserver = this.minecraftServer.worldServer;
+@@ -986,7 +986,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     public void processHeldItemChange(PacketPlayInHeldItemSlot packetplayinhelditemslot) {
+         // CraftBukkit start
+         if (this.player.dead) return;
+-        PlayerConnectionUtils.ensureMainThread(packetplayinhelditemslot, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinhelditemslot, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (packetplayinhelditemslot.getSlotId() >= 0 && packetplayinhelditemslot.getSlotId() < PlayerInventory.getHotbarSize()) {
+             PlayerItemHeldEvent event = new PlayerItemHeldEvent(this.getPlayer(), this.player.inventory.itemInHandIndex, packetplayinhelditemslot.getSlotId());
+             this.server.getPluginManager().callEvent(event);
+@@ -1008,7 +1008,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         // CraftBukkit start - async chat
+         boolean isSync = packetplayinchat.getMessage().startsWith("/");
+         if (packetplayinchat.getMessage().startsWith("/")) {
+-            PlayerConnectionUtils.ensureMainThread(packetplayinchat, this, this.player.getServerForPlayer());
++            if (PlayerConnectionUtils.postToMainThread(packetplayinchat, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         }
+         // CraftBukkit end
+         if (this.player.dead || this.player.getChatFlags() == EntityHuman.EnumChatVisibility.HIDDEN) { // CraftBukkit - dead men tell no tales
+@@ -1260,7 +1260,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void handleAnimation(PacketPlayInArmAnimation packetplayinarmanimation) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayinarmanimation, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinarmanimation, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+         // CraftBukkit start - Raytrace to look for 'rogue armswings'
+         float f1 = this.player.pitch;
+@@ -1294,7 +1294,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processEntityAction(PacketPlayInEntityAction packetplayinentityaction) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinentityaction, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinentityaction, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         // CraftBukkit start
+         if (this.player.dead) return;
+         switch (packetplayinentityaction.getAction()) {
+@@ -1361,7 +1361,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processUseEntity(PacketPlayInUseEntity packetplayinuseentity) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayinuseentity, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinuseentity, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+         Entity entity = packetplayinuseentity.getEntityFromWorld((World) worldserver);
+         // Spigot Start
+@@ -1455,7 +1455,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processClientStatus(PacketPlayInClientCommand packetplayinclientcommand) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinclientcommand, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinclientcommand, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+         PacketPlayInClientCommand.EnumClientCommand packetplayinclientcommand_enumclientcommand = packetplayinclientcommand.getStatus();
+ 
+@@ -1495,7 +1495,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processCloseWindow(PacketPlayInCloseWindow packetplayinclosewindow) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayinclosewindow, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinclosewindow, this, this.player.getServerForPlayer())) return; // Athena - no exception
+ 
+         CraftEventFactory.handleInventoryCloseEvent(this.player); // CraftBukkit
+ 
+@@ -1504,7 +1504,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processClickWindow(PacketPlayInWindowClick packetplayinwindowclick) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayinwindowclick, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinwindowclick, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+         if (this.player.activeContainer.windowId == packetplayinwindowclick.getWindowId() && this.player.activeContainer.getCanCraft(this.player)) {
+             boolean cancelled = this.player.isSpectator(); // CraftBukkit - see below if
+@@ -1819,7 +1819,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processEnchantItem(PacketPlayInEnchantItem packetplayinenchantitem) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinenchantitem, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinenchantitem, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+         if (this.player.activeContainer.windowId == packetplayinenchantitem.getWindowId() && this.player.activeContainer.getCanCraft(this.player) && !this.player.isSpectator()) {
+             this.player.activeContainer.enchantItem(this.player, packetplayinenchantitem.getButton());
+@@ -1829,7 +1829,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processCreativeInventoryAction(PacketPlayInSetCreativeSlot packetplayinsetcreativeslot) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinsetcreativeslot, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinsetcreativeslot, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.player.playerInteractManager.isCreative()) {
+             boolean flag = packetplayinsetcreativeslot.getSlotId() < 0;
+             ItemStack itemstack = packetplayinsetcreativeslot.getItemStack();
+@@ -1919,7 +1919,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processConfirmTransaction(PacketPlayInTransaction packetplayintransaction) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayintransaction, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayintransaction, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         Short oshort = (Short) this.n.get(this.player.activeContainer.windowId);
+ 
+         if (oshort != null && packetplayintransaction.getUid() == oshort.shortValue() && this.player.activeContainer.windowId == packetplayintransaction.getWindowId() && !this.player.activeContainer.getCanCraft(this.player) && !this.player.isSpectator()) {
+@@ -1930,7 +1930,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processUpdateSign(PacketPlayInUpdateSign packetplayinupdatesign) {
+         if (this.player.dead) return; // CraftBukkit
+-        PlayerConnectionUtils.ensureMainThread(packetplayinupdatesign, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinupdatesign, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+         WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+         BlockPosition blockposition = packetplayinupdatesign.getPosition();
+@@ -2000,7 +2000,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processPlayerAbilities(PacketPlayInAbilities packetplayinabilities) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinabilities, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinabilities, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         // CraftBukkit start
+         if (this.player.abilities.canFly && this.player.abilities.isFlying != packetplayinabilities.isFlying()) {
+             PlayerToggleFlightEvent event = new PlayerToggleFlightEvent(this.server.getPlayer(this.player), packetplayinabilities.isFlying());
+@@ -2055,7 +2055,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     }
+ 
+     public void processClientSettings(PacketPlayInSettings packetplayinsettings) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayinsettings, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayinsettings, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.handleClientSettings(packetplayinsettings);
+     }
+ 
+@@ -2099,7 +2099,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     // PandaSpigot end
+ 
+     public void processVanilla250Packet(PacketPlayInCustomPayload packetplayincustompayload) {
+-        PlayerConnectionUtils.ensureMainThread(packetplayincustompayload, this, this.player.getServerForPlayer());
++        if (PlayerConnectionUtils.postToMainThread(packetplayincustompayload, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         PacketDataSerializer packetdataserializer;
+         ItemStack itemstack;
+         ItemStack itemstack1;
+diff --git a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+index cb7b1aa82cc263089a6386b45fb115dd8433cf47..1396eb98a1aaad85bdadcc57ccb141e49400a9ce 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
++++ b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+@@ -13,4 +13,25 @@ public class PlayerConnectionUtils {
+             throw CancelledPacketHandleException.INSTANCE;
+         }
+     }
++
++    // Athena start - the same hand-off, answered with a return value instead of an exception.
++    //
++    // Every play packet but chat arrives on a Netty thread and comes through here to be run again on
++    // the server thread; ensureMainThread then throws a shared exception that NetworkManager catches.
++    // A throw is an unwind through the compiled frames between here and the catch, looked up by the
++    // runtime frame by frame - with twenty players, some 400 of them a second, about 1% of the
++    // process's CPU. The handlers call this and return when it answers true. ensureMainThread stays
++    // for anything outside the server that calls it.
++    public static <T extends PacketListener> boolean postToMainThread(final Packet<T> packet, final T t0, IAsyncTaskHandler iasynctaskhandler) {
++        if (!iasynctaskhandler.isMainThread()) {
++            iasynctaskhandler.postToMainThread(new Runnable() {
++                public void run() {
++                    packet.processPacket(t0);
++                }
++            });
++            return true;
++        }
++        return false;
++    }
++    // Athena end
+ }

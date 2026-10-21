@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 11 Oct 2026 21:59:32 +0900
+Subject: [PATCH] Never load or send chunks outside the pinned square
+
+ChunkProviderServer.getChunkAt and originalGetChunkAt hand back the empty
+chunk for a chunk outside the square that is not loaded, so nothing reads,
+generates or keeps it; PlayerChunkMap's instances for such chunks request
+no load, queue nothing to send and flag nothing dirty. Players see sky
+there.
+
+VPS, Lobby_Games, 20 bots seeing up to ~330 blocks from the centre, pin
+radius 250: no chunk loads in the live game (JFR), allocation 2.54 MB/s
+(5.81 with pin 300 before), 33 young GCs in 15 minutes, 20/20 bots, no
+errors.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 6f4a8f3856278a7de950e4d3266cca9d64af3da9..0dcadcf437bbbc6464023949be13a3f5ce9d06d4 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -89,6 +89,14 @@ public class ChunkProviderServer implements IChunkProvider {
+         return this.chunkLoader instanceof ChunkRegionLoader && ((ChunkRegionLoader) this.chunkLoader).chunkExists(this.world, x, z);
+     }
+ 
++    /**
++     * Whether the chunk lies outside the pinned square. Such a chunk does not exist for the world: it
++     * is never loaded or generated, reads as the empty chunk (air, nothing kept), and is not sent.
++     */
++    public boolean isOutsideBounds(int x, int z) {
++        return this.pinned && !(x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ);
++    }
++
+     public boolean isPinned(int x, int z) {
+         return this.pinned && x >= this.pinMinX && x <= this.pinMaxX && z >= this.pinMinZ && z <= this.pinMaxZ;
+     }
+@@ -343,6 +351,14 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public Chunk getChunkAt(int i, int j, Runnable runnable) {
++        // Athena start - outside the pinned square there is nothing to load
++        if (this.isOutsideBounds(i, j) && !this.chunks.containsKey(LongHash.toLong(i, j))) {
++            if (runnable != null) {
++                runnable.run();
++            }
++            return this.emptyChunk;
++        }
++        // Athena end
+         unloadQueue.remove(i, j);
+         Chunk chunk = chunks.get(LongHash.toLong(i, j));
+         ChunkRegionLoader loader = null;
+@@ -392,6 +408,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+     public Chunk originalGetChunkAt(int i, int j) {
+         long key = LongHash.toLong(i, j); // PandaSpigot - Only create key once
++        if (this.isOutsideBounds(i, j) && !this.chunks.containsKey(key)) return this.emptyChunk; // Athena - see getChunkAt
+         this.unloadQueue.remove(i, j);
+         Chunk chunk = (Chunk) this.chunks.get(key); // PandaSpigot - Reuse key
+         boolean newChunk = false;
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 90187fc0f21d38c96accf0ed6f069f56a36c2ae4..1fff038a93a7291614fc8ad36dcda08f942446e4 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -555,8 +555,14 @@ public class PlayerChunkMap {
+         };
+         // CraftBukkit end
+ 
++        // Athena - outside the world's pinned square: the chunk does not exist for this world. Nothing is
++        // loaded and nothing is sent; the instance only keeps the bookkeeping of who has it in view.
++        private final boolean outside;
++
+         public PlayerChunk(int i, int j) {
+             this.location = new ChunkCoordIntPair(i, j);
++            this.outside = PlayerChunkMap.this.getWorldServer().chunkProviderServer.isOutsideBounds(i, j); // Athena
++            if (!this.outside) // Athena
+             PlayerChunkMap.this.getWorldServer().chunkProviderServer.getChunkAt(i, j, loadedRunnable); // CraftBukkit
+         }
+ 
+@@ -569,6 +575,12 @@ public class PlayerChunkMap {
+                 }
+ 
+                 this.playersWatchingChunk.add(entityplayer);
++                // Athena start - never queued, so never sent
++                if (this.outside) {
++                    this.players.put(entityplayer, null);
++                    return;
++                }
++                // Athena end
+                 // CraftBukkit start - use async chunk io
+                 Runnable playerRunnable;
+                 if (this.loaded) {
+@@ -592,6 +604,18 @@ public class PlayerChunkMap {
+ 
+         public void removePlayer(EntityPlayer entityplayer) {
+             if (this.playersWatchingChunk.contains(entityplayer)) {
++                // Athena start - nothing was loaded or sent: only the bookkeeping to undo
++                if (this.outside) {
++                    this.playersWatchingChunk.remove(entityplayer);
++                    this.players.remove(entityplayer);
++                    if (this.playersWatchingChunk.isEmpty()) {
++                        long key = (long) this.location.x + 2147483647L | (long) this.location.z + 2147483647L << 32;
++                        PlayerChunkMap.this.playerInstances.remove(key);
++                        PlayerChunkMap.this.removePlayerInstance(this);
++                    }
++                    return;
++                }
++                // Athena end
+                 // CraftBukkit start - If we haven't loaded yet don't load the chunk just so we can clean it up
+                 if (!this.loaded) {
+                     ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.getWorldServer(), this.location.x, this.location.z, this.players.get(entityplayer));
+@@ -651,6 +675,7 @@ public class PlayerChunkMap {
+ 
+         // Athena - dirtyCount 64 is the case onUpdate() sends the whole chunk for
+         public void flagWholeChunkForUpdate(int sectionMask) {
++            if (this.outside) return; // Athena - nothing was sent
+             if (this.dirtyCount == 0) {
+                 PlayerChunkMap.this.playerInstancesToUpdate.add(this);
+             }
+@@ -660,6 +685,7 @@ public class PlayerChunkMap {
+         }
+ 
+         public void flagChunkForUpdate(int i, int j, int k) {
++            if (this.outside) return; // Athena - nothing was sent
+             if (this.dirtyCount == 0) {
+                 PlayerChunkMap.this.playerInstancesToUpdate.add(this);
+             }

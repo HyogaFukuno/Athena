@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 4 Sep 2026 20:15:01 +0900
+Subject: [PATCH] Walk rayTrace on a scratch position
+
+The block walk built a BlockPosition for every step, up to 201 per call, and
+handed all but a couple of them straight to getTypeIfLoaded, which only reads
+one. Escape analysis cannot remove them: the position is passed to
+collisionRayTrace and getCollisionBoundingBox, both virtual with dozens of
+overrides, so C2 cannot inline the call and cannot prove the argument does not
+escape.
+
+The walk now uses a per-thread scratch, and a real position is built only at
+the two places one outlives the step - the MovingObjectPosition that
+collisionRayTrace returns, and the MISS position - because both are handed to
+the caller. A ray through open air allocates none at all: canCollideCheck is
+isCollidable(), false for air, so the escaping branch is never entered, and the
+one block the ray stops on ends the walk.
+
+Nothing else can retain it. getTypeIfLoaded reads three ints off it;
+getCollisionBoundingBox returns an AxisAlignedBB of plain doubles and no
+override stores the position (checked across every override), and it is only
+reached at all when flag1 is set, which is three callers - arrows, boats and
+the guardian's navigation.
+
+The arithmetic is untouched, so results are bit-identical.
+
+Not measured: rayTrace does not appear in either the saturating bench profile
+or a live capture, because neither load has a mob with a target to look at.
+This is for the projectile- and monster-heavy load the fork is aimed at, and
+should be A/B-ed once a bench can produce one.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index a830d0769a0705872d1456dcf2245ffe9bf78bb3..2536641e589b56a9bb3163e25c9983b4a9c43737 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1058,7 +1058,24 @@ public abstract class World implements IBlockAccess {
+                 int l = MathHelper.floor(vec3d.xCoord);
+                 int i1 = MathHelper.floor(vec3d.yCoord);
+                 int j1 = MathHelper.floor(vec3d.zCoord);
+-                BlockPosition blockposition = new BlockPosition(l, i1, j1);
++                // Athena start - walk on a scratch position, materialise only where one escapes.
++                //
++                // The walk built a BlockPosition for every step, up to 201 of them per call, and
++                // handed all but one of them straight to getTypeIfLoaded, which only reads it. The
++                // two places a position genuinely outlives the step are the MovingObjectPosition
++                // that collisionRayTrace builds and the MISS position below - both of which are
++                // returned to the caller, so both get a real one. Everything else reads the
++                // scratch.
++                //
++                // A ray through open air therefore allocates no positions at all: canCollideCheck
++                // is isCollidable(), false for air, so the escaping branch is not entered. Only the
++                // block the ray stops on costs an object, and the walk ends there.
++                //
++                // The arithmetic is untouched - this changes what is allocated, not what is
++                // computed, so the answers are bit-identical to before.
++                BlockPosition.MutableBlockPosition blockposition = scratchPos(10);
++
++                blockposition.set(l, i1, j1);
+                 // PandaSpigot start - avoid loading chunks
+                 IBlockData iblockdata = this.getTypeIfLoaded(blockposition);
+                 if (iblockdata == null) return null;
+@@ -1066,12 +1083,14 @@ public abstract class World implements IBlockAccess {
+                 Block block = iblockdata.getBlock();
+ 
+                 if ((!flag1 || block.getCollisionBoundingBox(this, blockposition, iblockdata) != null) && block.canCollideCheck(iblockdata, flag)) {
+-                    MovingObjectPosition movingobjectposition = block.collisionRayTrace(this, blockposition, vec3d, vec3d1);
++                    // the position reaches the caller inside the result, so it cannot be the scratch
++                    MovingObjectPosition movingobjectposition = block.collisionRayTrace(this, new BlockPosition(l, i1, j1), vec3d, vec3d1);
+ 
+                     if (movingobjectposition != null) {
+                         return movingobjectposition;
+                     }
+                 }
++                // Athena end
+ 
+                 MovingObjectPosition movingobjectposition1 = null;
+                 int k1 = 200;
+@@ -1163,7 +1182,7 @@ public abstract class World implements IBlockAccess {
+                     l = MathHelper.floor(vec3d.xCoord) - (enumdirection == EnumDirection.EAST ? 1 : 0);
+                     i1 = MathHelper.floor(vec3d.yCoord) - (enumdirection == EnumDirection.UP ? 1 : 0);
+                     j1 = MathHelper.floor(vec3d.zCoord) - (enumdirection == EnumDirection.SOUTH ? 1 : 0);
+-                    blockposition = new BlockPosition(l, i1, j1);
++                    blockposition.set(l, i1, j1); // Athena - the scratch, not a fresh object
+                     // PandaSpigot start - ray tracing into an unloaded chunk should be treated as a miss, this saves a ton of lag for when AI tries to raytrace near unloaded chunks.
+                     IBlockData iblockdata1 = this.getTypeIfLoaded(blockposition);
+                     if (iblockdata1 == null) return null;
+@@ -1172,7 +1191,8 @@ public abstract class World implements IBlockAccess {
+ 
+                     if (!flag1 || block1.getCollisionBoundingBox(this, blockposition, iblockdata1) != null) {
+                         if (block1.canCollideCheck(iblockdata1, flag)) {
+-                            MovingObjectPosition movingobjectposition2 = block1.collisionRayTrace(this, blockposition, vec3d, vec3d1);
++                            // Athena - escapes inside the result, so it gets a position of its own
++                            MovingObjectPosition movingobjectposition2 = block1.collisionRayTrace(this, new BlockPosition(l, i1, j1), vec3d, vec3d1);
+ 
+                             if (movingobjectposition2 != null) {
+                                 return movingobjectposition2;
+@@ -1185,7 +1205,8 @@ public abstract class World implements IBlockAccess {
+                             // hasLineOfSight - the target selectors' visibility check, run for every
+                             // mob against every candidate - passes false, and the walk is capped at
+                             // 200 steps.
+-                            movingobjectposition1 = new MovingObjectPosition(MovingObjectPosition.EnumMovingObjectType.MISS, vec3d, enumdirection, blockposition);
++                            // Athena - this one is returned too, so it also needs a real position
++                            movingobjectposition1 = new MovingObjectPosition(MovingObjectPosition.EnumMovingObjectType.MISS, vec3d, enumdirection, new BlockPosition(l, i1, j1));
+                         }
+                     }
+                 }
+@@ -1818,7 +1839,7 @@ public abstract class World implements IBlockAccess {
+     // asked per block, so an out-of-range y still answers air rather than touching a chunk.
+     // Athena end
+ 
+-    private static final int SCRATCH_POS_SLOTS = 16; // Athena - 14 is isBlockFullCube's, 15 the weather checks'
++    private static final int SCRATCH_POS_SLOTS = 16; // Athena - 10 is rayTrace's, 14 isBlockFullCube's, 15 the weather checks'
+     private static final ThreadLocal<BlockPosition.MutableBlockPosition[]> SCRATCH_POSITIONS = new ThreadLocal<BlockPosition.MutableBlockPosition[]>() {
+         protected BlockPosition.MutableBlockPosition[] initialValue() {
+             BlockPosition.MutableBlockPosition[] slots = new BlockPosition.MutableBlockPosition[SCRATCH_POS_SLOTS];

@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 31 Aug 2026 12:18:23 +0900
+Subject: [PATCH] Stop the collision block scan from asking air for a box
+
+World.getCubes is what Entity.move spends its time in - 14.23% of the server thread in a
+profile at 0218, 11.69% of it under move alone, which runs the scan twice for a mob that
+can step up. Three things in it were work the answer never depended on.
+
+Air reached Block.addCollisionBoxes and then Block.getCollisionBounds, two virtual calls,
+to be told what BlockAir answers unconditionally: no box. Those two frames were 4.09% of
+the thread, and the box an entity moves through is mostly air. Testing the block reference
+first also means the scratch position is only written for blocks that can contribute one -
+inside the border it is not needed before that point at all.
+
+The world border's four edges are fixed for the whole call but were read from the border
+object once per chunk visited; WorldBorder.maxZ alone was 1.02% of the thread. They are
+also only needed when the entity is inside the border.
+
+The PaperSpigot rule letting falling blocks and TNT collide with signs depends on the
+config and the entity, and was two instanceof tests and a config read per block.
+
+Verified against the previous jar with the ghost harness, three runs each: live entity
+counts, spawn and destroy totals and position corrections are indistinguishable, so the
+4,000 golems are still standing on the terrain rather than falling through it.
+
+Measured +1.45% TPS, 6/6 pairwise wins, at 30,000 golems with four bots.
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 64082b5550412078c5a2c8fae2c02722c65758e4..d5c42c72a1f377886c856d821a03c13d54459c2f 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1448,6 +1448,31 @@ public abstract class World implements IBlockAccess {
+         boolean flag = entity.isOutsideBorder();
+         boolean flag1 = this.isInsideBorder(worldborder, entity);
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = scratchPos(0); // Athena - reuse a per-thread scratch position
++        // Athena start - three things below the chunk loop that never varied inside it.
++        //
++        // The world border's four edges are fixed for the whole call, and the per-chunk
++        // allInsideBorder test asked the border object for each of them again for every chunk it
++        // visited; a profile of the saturating bench had WorldBorder.maxZ alone at 1.02% of the
++        // server thread. They are only needed when the entity is inside the border at all.
++        //
++        // The PaperSpigot rule that lets falling blocks and TNT collide with signs depends on the
++        // config and on the entity, so it was two instanceof tests and a config read per block of
++        // every box scanned, to answer the same thing every time.
++        double borderMinX = 0.0D;
++        double borderMaxX = 0.0D;
++        double borderMinZ = 0.0D;
++        double borderMaxZ = 0.0D;
++
++        if (flag1) {
++            borderMinX = worldborder.minX();
++            borderMaxX = worldborder.maxX();
++            borderMinZ = worldborder.minZ();
++            borderMaxZ = worldborder.maxZ();
++        }
++
++        boolean fallingCollider = this.paperSpigotConfig.fallingBlocksCollideWithSigns
++                && (entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock);
++        // Athena end
+ 
+         // Spigot start
+         int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
+@@ -1506,8 +1531,8 @@ public abstract class World implements IBlockAccess {
+                 // for every block in it. When they are all inside, the per-block test disappears
+                 // and the empty-section skip below is sound.
+                 boolean allInsideBorder = !flag1
+-                        || ( (double) ( xstart + 1 ) > worldborder.minX() && (double) ( xend - 1 ) < worldborder.maxX()
+-                          && (double) ( zstart + 1 ) > worldborder.minZ() && (double) ( zend - 1 ) < worldborder.maxZ() );
++                        || ( (double) ( xstart + 1 ) > borderMinX && (double) ( xend - 1 ) < borderMaxX
++                          && (double) ( zstart + 1 ) > borderMinZ && (double) ( zend - 1 ) < borderMaxZ ); // Athena - hoisted above
+                 ChunkSection[] sections = chunk.getSections();
+ 
+                 for ( int y = ystart; y < l; y++ )
+@@ -1525,10 +1550,16 @@ public abstract class World implements IBlockAccess {
+                     {
+                         for ( int x = xstart; x < xend; x++ )
+                         {
+-                            BlockPosition blockposition = blockposition_mutableblockposition.set( x, y, z );
+-
++                            // Athena start - the box an entity moves through is mostly air, and air
++                            // was reaching Block.addCollisionBoxes and then Block.getCollisionBounds
++                            // to be told what BlockAir answers unconditionally: no box. The two
++                            // virtual calls together were 4.09% of the server thread.
++                            //
++                            // Testing the block reference first also means the scratch position only
++                            // has to be written for blocks that can contribute one. Inside the
++                            // border the position is not needed before that point at all.
+                             IBlockData block;
+-                            if (!allInsideBorder && !worldborder.contains(blockposition)) {
++                            if (!allInsideBorder && !worldborder.contains(blockposition_mutableblockposition.set( x, y, z ))) {
+                                 block = Blocks.STONE.getBlockData();
+                             } else if (sectionEmpty) {
+                                 continue;
+@@ -1538,9 +1569,17 @@ public abstract class World implements IBlockAccess {
+                             }
+                             if ( block != null )
+                             {
+-                                // PaperSpigot start - FallingBlocks and TNT collide with specific non-collidable blocks
+                                 Block b = block.getBlock();
+-                                if (entity.world.paperSpigotConfig.fallingBlocksCollideWithSigns && (entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock) && (b instanceof BlockSign || b instanceof BlockFenceGate || b instanceof BlockTorch || b instanceof BlockButtonAbstract || b instanceof BlockLever || b instanceof BlockTripwireHook || b instanceof BlockTripwire || b instanceof BlockChest || b instanceof BlockSlowSand || b instanceof BlockBed || b instanceof BlockEnderChest || b instanceof BlockEnchantmentTable || b instanceof BlockBrewingStand)) {
++
++                                if ( b == Blocks.AIR )
++                                {
++                                    continue;
++                                }
++
++                                BlockPosition blockposition = blockposition_mutableblockposition.set( x, y, z );
++                                // Athena end
++                                // PaperSpigot start - FallingBlocks and TNT collide with specific non-collidable blocks
++                                if (fallingCollider && (b instanceof BlockSign || b instanceof BlockFenceGate || b instanceof BlockTorch || b instanceof BlockButtonAbstract || b instanceof BlockLever || b instanceof BlockTripwireHook || b instanceof BlockTripwire || b instanceof BlockChest || b instanceof BlockSlowSand || b instanceof BlockBed || b instanceof BlockEnderChest || b instanceof BlockEnchantmentTable || b instanceof BlockBrewingStand)) { // Athena - invariant hoisted
+                                     sink.addIfIntersects(x, y, z, x + 1.0D, y + 1.0D, z + 1.0D, minX, minY, minZ, maxX, maxY, maxZ);
+                                 } else {
+                                     b.addCollisionBoxes(this, blockposition, block, minX, minY, minZ, maxX, maxY, maxZ, sink, entity);

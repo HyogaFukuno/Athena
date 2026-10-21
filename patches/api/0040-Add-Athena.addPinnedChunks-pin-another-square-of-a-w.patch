@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 00:50:37 +0900
+Subject: [PATCH] Add Athena.addPinnedChunks: pin another square of a world
+
+A match map whose deathmatch arena lies away from its centre could only be pinned as one square
+big enough for both, which also made the land between them exist. addPinnedChunks adds a square
+to the world's pinned area and keeps the ones before; pinChunks still replaces them all, and
+unpinChunks ends them all.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index bc07357e89b50104cc468960f0a605b54a0fcb1a..151be5551a6b9b44bc9ccfee66a48cc8a7e74763 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -120,7 +120,7 @@ public final class Athena {
+      * soon, the radius is too small.
+      *
+      * <p>Pin before players enter the world: a chunk already in a player's view when the square is
+-     * set or changed keeps what it had. Pinning again replaces the world's previous square.
++     * set or changed keeps what it had. Pinning again replaces the world's previous squares; {@link #addPinnedChunks} adds one instead.
+      *
+      * <p>Meant for a match map: a chunk is read once per match instead of again each time players
+      * come back to it, its changes stay (on a template world an unloaded chunk loses them), and
+@@ -136,6 +136,27 @@ public final class Athena {
+         getServer().pinChunks(center, radius);
+     }
+ 
++    /**
++     * Adds the square of {@code radius} blocks around {@code center} to {@code center}'s world's
++     * pinned area, keeping the squares pinned before; the world is then every pinned square, and
++     * chunks outside all of them do not exist, as with {@link #pinChunks}. Pins the square alone if
++     * the world has no pin.
++     *
++     * <p>Meant for a part of a match map away from the main square, such as a deathmatch arena: pin
++     * the main square with {@link #pinChunks}, then add the arena, instead of one square big enough
++     * for both (which would also make the land between them exist). As with {@link #pinChunks}, make
++     * the square the area players there may see, and add it before players enter the world: a chunk
++     * already in a player's view when the square is added keeps what it had.
++     * {@link #unpinChunks} ends every square at once.
++     *
++     * @param center the middle of the square, and the world
++     * @param radius half the square's side, in blocks
++     * @throws IllegalArgumentException if {@code center} has no world or {@code radius} is negative
++     */
++    public static void addPinnedChunks(Location center, int radius) {
++        getServer().addPinnedChunks(center, radius);
++    }
++
+     /**
+      * Ends {@code world}'s pin, if it has one; the chunks it kept that no player is using are
+      * queued to unload as usual.
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 493d059b0b62e522dcf2d216052e8c828ef0a4bf..0b6e7fd29cc01abe3b20abb4abd621d047793ea7 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -26,6 +26,8 @@ public interface AthenaServer {
+ 
+     void pinChunks(Location center, int radius);
+ 
++    void addPinnedChunks(Location center, int radius);
++
+     void unpinChunks(World world);
+ 
+     CompletableFuture<Integer> preloadChunks(Location center, int radius, int perTick);

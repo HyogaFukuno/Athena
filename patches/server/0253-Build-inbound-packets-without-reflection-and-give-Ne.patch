@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 24 Sep 2026 21:26:05 +0900
+Subject: [PATCH] Build inbound packets without reflection and give Netty
+ threads fast thread-locals
+
+
+diff --git a/src/main/java/net/minecraft/server/EnumProtocol.java b/src/main/java/net/minecraft/server/EnumProtocol.java
+index 2e9279d5675249969530d25053883719e6cc37f7..c93482de7cf9a1c95af4cc929645b346320aa091 100644
+--- a/src/main/java/net/minecraft/server/EnumProtocol.java
++++ b/src/main/java/net/minecraft/server/EnumProtocol.java
+@@ -168,11 +168,70 @@ public enum EnumProtocol {
+     }
+ 
+     public Packet getPacket(EnumProtocolDirection enumprotocoldirection, int i) throws IllegalAccessException, InstantiationException {
++        // Athena start - construct through a generated factory, not Class.newInstance
++        java.util.function.Supplier<Packet>[] factories = enumprotocoldirection == EnumProtocolDirection.SERVERBOUND ? this.serverboundFactories : this.clientboundFactories;
++
++        if (i >= 0 && i < factories.length) {
++            java.util.function.Supplier<Packet> factory = factories[i];
++
++            if (factory == null) {
++                Class oclass = (Class) ((BiMap) this.directionMaps.get(enumprotocoldirection)).get(i);
++
++                if (oclass == null) {
++                    return null;
++                }
++                factory = packetFactory(oclass);
++                factories[i] = factory; // a racing thread builds an equivalent one; either is fine
++            }
++            return factory.get();
++        }
++        // Athena end
+         Class oclass = (Class) ((BiMap) this.directionMaps.get(enumprotocoldirection)).get(i);
+ 
+         return oclass == null ? null : (Packet) oclass.newInstance();
+     }
+ 
++    // Athena start - every inbound packet was built with Class.newInstance: an access check and a
++    // reflective call per packet, ~5% of the Netty threads' samples on a 20-player server. A
++    // LambdaMetafactory Supplier over the no-arg constructor is an ordinary call. Built on first
++    // use of each id, from directionMaps, so it builds exactly the class the map would have.
++    private final java.util.function.Supplier<Packet>[] serverboundFactories = newFactoryArray();
++    private final java.util.function.Supplier<Packet>[] clientboundFactories = newFactoryArray();
++
++    @SuppressWarnings("unchecked")
++    private static java.util.function.Supplier<Packet>[] newFactoryArray() {
++        return new java.util.function.Supplier[256];
++    }
++
++    @SuppressWarnings("unchecked")
++    private static java.util.function.Supplier<Packet> packetFactory(Class<? extends Packet> oclass) {
++        try {
++            java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.lookup();
++            java.lang.invoke.MethodHandle constructor = lookup.findConstructor(oclass, java.lang.invoke.MethodType.methodType(void.class));
++            java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(lookup, "get",
++                    java.lang.invoke.MethodType.methodType(java.util.function.Supplier.class),
++                    java.lang.invoke.MethodType.methodType(Object.class), constructor,
++                    java.lang.invoke.MethodType.methodType(oclass));
++
++            return (java.util.function.Supplier<Packet>) site.getTarget().invoke();
++        } catch (Throwable t) {
++            // not reachable for the vanilla packets; keep the old behaviour for anything odd
++            return () -> {
++                try {
++                    return oclass.newInstance();
++                } catch (ReflectiveOperationException e) {
++                    throw EnumProtocol.<RuntimeException>sneakyThrow(e);
++                }
++            };
++        }
++    }
++
++    @SuppressWarnings("unchecked")
++    private static <T extends Throwable> T sneakyThrow(Throwable t) throws T {
++        throw (T) t;
++    }
++    // Athena end
++
+     public int getId() {
+         return this.id;
+     }
+diff --git a/src/main/java/net/minecraft/server/ServerConnection.java b/src/main/java/net/minecraft/server/ServerConnection.java
+index ace88926f6128cb694ebd5d8586dc3011f89cb7f..7c56a749fdf9fcf79f0febefa6db336e326ea15b 100644
+--- a/src/main/java/net/minecraft/server/ServerConnection.java
++++ b/src/main/java/net/minecraft/server/ServerConnection.java
+@@ -31,9 +31,26 @@ import org.apache.logging.log4j.Logger;
+ public class ServerConnection {
+ 
+     private static final Logger logger = LogManager.getLogger();
++
++    // Athena start - event loop threads Netty can keep its thread-locals on.
++    // Netty keeps per-thread state (buffer pool caches, the recycler, pipeline scratch) in
++    // FastThreadLocals, which on a FastThreadLocalThread are an array index and on any other
++    // thread fall back to a java.lang.ThreadLocal lookup. Guava's factory made plain threads, and
++    // that fallback was ~5% of every Netty thread's samples. Same names, same daemon flag.
++    private static java.util.concurrent.ThreadFactory nettyThreads(String nameFormat) {
++        java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger();
++
++        return runnable -> {
++            Thread thread = new io.netty.util.concurrent.FastThreadLocalThread(runnable, String.format(nameFormat, count.getAndIncrement()));
++
++            thread.setDaemon(true);
++            return thread;
++        };
++    }
++    // Athena end
+     public static final LazyInitVar<NioEventLoopGroup> eventLoops = new LazyInitVar() {
+         protected NioEventLoopGroup load() {
+-            return new NioEventLoopGroup(0, (new ThreadFactoryBuilder()).setNameFormat("Netty Server IO #%d").setDaemon(true).build());
++            return new NioEventLoopGroup(0, nettyThreads("Netty Server IO #%d") /* Athena */);
+         }
+ 
+         protected Object init() {
+@@ -42,7 +59,7 @@ public class ServerConnection {
+     };
+     public static final LazyInitVar<EpollEventLoopGroup> SERVER_EPOLL_EVENTLOOP = new LazyInitVar() {
+         protected EpollEventLoopGroup load() {
+-            return new EpollEventLoopGroup(0, (new ThreadFactoryBuilder()).setNameFormat("Netty Epoll Server IO #%d").setDaemon(true).build());
++            return new EpollEventLoopGroup(0, nettyThreads("Netty Epoll Server IO #%d") /* Athena */);
+         }
+ 
+         protected Object init() {
+@@ -51,7 +68,7 @@ public class ServerConnection {
+     };
+     public static final LazyInitVar<LocalEventLoopGroup> SERVER_LOCAL_EVENTLOOP = new LazyInitVar() {
+         protected LocalEventLoopGroup load() {
+-            return new LocalEventLoopGroup(0, (new ThreadFactoryBuilder()).setNameFormat("Netty Local Server IO #%d").setDaemon(true).build());
++            return new LocalEventLoopGroup(0, nettyThreads("Netty Local Server IO #%d") /* Athena */);
+         }
+ 
+         protected Object init() {
+diff --git a/src/test/java/net/minecraft/server/AthenaPacketFactoryTest.java b/src/test/java/net/minecraft/server/AthenaPacketFactoryTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8d7c508cefb7266099b51e1ada81a5fdeef1b6c6
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaPacketFactoryTest.java
+@@ -0,0 +1,52 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertNull;
++
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - EnumProtocol.getPacket builds packets through generated factories instead of
++ * Class.newInstance. For every state, direction and id it must build a fresh instance of exactly
++ * the class the protocol's map registers, and nothing where the map has no class.
++ */
++public class AthenaPacketFactoryTest extends AbstractTestingBase {
++
++    @Test
++    public void everyRegisteredIdBuildsItsOwnClass() throws Exception {
++        int checked = 0;
++
++        for (EnumProtocol protocol : EnumProtocol.values()) {
++            for (EnumProtocolDirection direction : EnumProtocolDirection.values()) {
++                try {
++                    protocol.getPacket(direction, 0);
++                } catch (NullPointerException e) {
++                    continue; // no packets at all in this direction (handshaking, clientbound) - as before
++                }
++                for (int id = -1; id < 256; ++id) {
++                    Class<?> expected;
++
++                    Packet first = protocol.getPacket(direction, id);
++                    Packet second = protocol.getPacket(direction, id);
++
++                    if (first == null) {
++                        assertNull(second);
++                        continue;
++                    }
++                    expected = first.getClass();
++                    assertEquals(expected, second.getClass());
++                    assertNotSame("a fresh packet per call", first, second);
++                    assertEquals("id round-trips", Integer.valueOf(id), protocol.getPacketId(direction, first));
++                    assertEquals(protocol, EnumProtocol.getFromPacket(first));
++                    ++checked;
++                }
++            }
++        }
++        assertNotNull(Integer.valueOf(checked));
++        // 1.8: 1 handshake + 2+2 status + 4+2 login + 49+26 play... at least the play packets
++        org.junit.Assert.assertTrue("checked " + checked, checked > 80);
++    }
++}

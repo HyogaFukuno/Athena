@@ -1,0 +1,124 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 08:20:19 +0900
+Subject: [PATCH] Fetch a pathfinding request's chunks when they are first read
+
+ChunkCache fetched every chunk of the query box in its constructor. For a mob
+with the default follow range that box is 65 blocks each way, so a single path
+request called getChunkIfLoaded - a lookup in the chunk provider's map -
+twenty five times, and built a jagged array to hold the answers. A search
+rarely leaves the handful of chunks around the mob, so most of those lookups
+were for chunks no block was ever read from.
+
+The chunks now live in one flat array and are looked up on the first read that
+falls in them. A parallel `resolved` array is what makes that work: null
+cannot mean "not looked at yet" because null is also the answer for a chunk
+that is not loaded, and that answer has to stick or every block read through
+an unloaded chunk would go back to the provider.
+
+Flattening the array also takes one indirection off every block read and drops
+the per-row allocations.
+
+getTileEntity now throws NPE rather than ArrayIndexOutOfBounds for a position
+outside the box. Nothing calls it on a ChunkCache; pathfinding does not.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkCache.java b/src/main/java/net/minecraft/server/ChunkCache.java
+index 213060438e6764a6ed0ee752dc33acea8a7710da..bb9c07726db134235c825aa15ef1f09962b795b1 100644
+--- a/src/main/java/net/minecraft/server/ChunkCache.java
++++ b/src/main/java/net/minecraft/server/ChunkCache.java
+@@ -5,7 +5,11 @@ public class ChunkCache implements IBlockAccess {
+ 
+     protected int chunkX;
+     protected int chunkZ;
+-    protected Chunk[][] chunkArray;
++    // Athena - flat, and filled on demand. See the constructor.
++    protected int chunksAlongX;
++    protected int chunksAlongZ;
++    protected Chunk[] chunks;
++    protected boolean[] resolved;
+     protected World worldObj;
+ 
+     public ChunkCache(World world, BlockPosition blockposition, BlockPosition blockposition1, int i) {
+@@ -15,42 +19,57 @@ public class ChunkCache implements IBlockAccess {
+         int j = blockposition1.getX() + i >> 4;
+         int k = blockposition1.getZ() + i >> 4;
+ 
+-        this.chunkArray = new Chunk[j - this.chunkX + 1][k - this.chunkZ + 1];
++        // Athena start - hold the chunks in one flat array and look them up when they are first
++        // asked for, rather than fetching the whole box up front.
++        //
++        // A path request for a mob with the default follow range spans 65 blocks each way, so this
++        // used to call getChunkIfLoaded - a lookup in the provider's map - twenty five times, and
++        // build a jagged array to hold the answers. A search rarely leaves the few chunks around
++        // the mob, so most of those lookups were for chunks no block was ever read from.
++        //
++        // `resolved` is what makes it lazy rather than merely deferred: a null entry cannot mean
++        // "not looked at yet", because null is also the answer for a chunk that is not loaded, and
++        // that answer has to stick or an unloaded chunk would be looked up again on every block
++        // read through it.
++        this.chunksAlongX = j - this.chunkX + 1;
++        this.chunksAlongZ = k - this.chunkZ + 1;
++        this.chunks = new Chunk[this.chunksAlongX * this.chunksAlongZ];
++        this.resolved = new boolean[this.chunks.length];
++        // Athena end
++    }
+ 
+-        for (int l = this.chunkX; l <= j; ++l) {
+-            for (int i1 = this.chunkZ; i1 <= k; ++i1) {
+-                this.chunkArray[l - this.chunkX][i1 - this.chunkZ] = world.getChunkIfLoaded(l, i1); // PandaSpigot - Don't load chunks for pathfinding
+-            }
++    // Athena start - the chunk covering a block, or null if it is outside the box or not loaded
++    private Chunk chunkFor(int x, int z) {
++        int i = (x >> 4) - this.chunkX;
++        int j = (z >> 4) - this.chunkZ;
++
++        if (i < 0 || i >= this.chunksAlongX || j < 0 || j >= this.chunksAlongZ) {
++            return null;
++        }
++
++        int k = i * this.chunksAlongZ + j;
++
++        if (!this.resolved[k]) {
++            this.chunks[k] = this.worldObj.getChunkIfLoaded(i + this.chunkX, j + this.chunkZ); // PandaSpigot - Don't load chunks for pathfinding
++            this.resolved[k] = true;
+         }
+ 
+-        // Athena - the second loop that used to stand here computed a `hasExtendedLevels` flag that
+-        // nothing in the server ever read: the field was written here and nowhere else, and it has
+-        // no reader in NMS, in CraftBukkit, or in the deprecation mappings. Computing it was not
+-        // free - it asked getAreLevelsEmpty, which walks the sections of a chunk over the whole
+-        // y range of the query box, once per chunk of the box. This runs for every pathfinding
+-        // request, so the work was pure loss. The flag and its loop are gone.
++        return this.chunks[k];
+     }
++    // Athena end
+ 
+     @Override
+     public TileEntity getTileEntity(BlockPosition blockposition) {
+-        int i = (blockposition.getX() >> 4) - this.chunkX;
+-        int j = (blockposition.getZ() >> 4) - this.chunkZ;
+-
+-        return this.chunkArray[i][j].getTileEntity(blockposition, Chunk.EnumTileEntityState.IMMEDIATE);
++        return this.chunkFor(blockposition.getX(), blockposition.getZ()).getTileEntity(blockposition, Chunk.EnumTileEntityState.IMMEDIATE);
+     }
+ 
+     @Override
+     public IBlockData getType(BlockPosition blockposition) {
+         if (blockposition.getY() >= 0 && blockposition.getY() < 256) {
+-            int i = (blockposition.getX() >> 4) - this.chunkX;
+-            int j = (blockposition.getZ() >> 4) - this.chunkZ;
+-
+-            if (i >= 0 && i < this.chunkArray.length && j >= 0 && j < this.chunkArray[i].length) {
+-                Chunk chunk = this.chunkArray[i][j];
++            Chunk chunk = this.chunkFor(blockposition.getX(), blockposition.getZ()); // Athena
+ 
+-                if (chunk != null) {
+-                    return chunk.getBlockData(blockposition);
+-                }
++            if (chunk != null) {
++                return chunk.getBlockData(blockposition);
+             }
+         }
+ 

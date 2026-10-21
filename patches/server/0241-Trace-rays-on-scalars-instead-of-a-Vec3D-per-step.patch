@@ -1,0 +1,574 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 5 Sep 2026 11:06:15 +0900
+Subject: [PATCH] Trace rays on scalars instead of a Vec3D per step
+
+World.rayTrace rebuilt the current point as a fresh Vec3D on every step of the DDA
+walk - up to 200 per call - and the only things that read it were the next step's
+arithmetic and Block.collisionRayTrace. Escape analysis could not remove them: the
+object crossed a virtual call with six overrides, so the callee did not inline and
+the allocation was never proved non-escaping.
+
+Block.collisionRayTrace is now dispatched on a scalar signature and the six
+overrides move with it; the Vec3D-taking form stays as a final bridge for anything
+outside the walk. That lets the walk carry its point in three locals, and lets the
+intersection test drop the two shift vectors and the six face candidates it built
+per collidable block.
+
+The arithmetic is transcribed, not rewritten - same face order, same strict "<" so
+a tie still keeps the earlier face, and nz() reproduces the -0.0 folding that
+Vec3D's constructor did at each point one was built. Checked against the original
+algorithm over four million random box/ray pairs: identical results, -0.0 included.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 6e9a3a7f6a4a954f2d7edcefa6387abde7e82489..a88ffaaf5e9b017994f00a32923e63167c1e82b3 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -453,111 +453,138 @@ public class Block {
+         return this.durability / 5.0F;
+     }
+ 
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
+-        this.updateShape(world, blockposition);
+-        vec3d = vec3d.add((double) (-blockposition.getX()), (double) (-blockposition.getY()), (double) (-blockposition.getZ()));
+-        vec3d1 = vec3d1.add((double) (-blockposition.getX()), (double) (-blockposition.getY()), (double) (-blockposition.getZ()));
+-        Vec3D vec3d2 = vec3d.getIntermediateWithXValue(vec3d1, this.minX);
+-        Vec3D vec3d3 = vec3d.getIntermediateWithXValue(vec3d1, this.maxX);
+-        Vec3D vec3d4 = vec3d.getIntermediateWithYValue(vec3d1, this.minY);
+-        Vec3D vec3d5 = vec3d.getIntermediateWithYValue(vec3d1, this.maxY);
+-        Vec3D vec3d6 = vec3d.getIntermediateWithZValue(vec3d1, this.minZ);
+-        Vec3D vec3d7 = vec3d.getIntermediateWithZValue(vec3d1, this.maxZ);
+-
+-        if (!this.isVecInsideYZBounds(vec3d2)) {
+-            vec3d2 = null;
+-        }
+-
+-        if (!this.isVecInsideYZBounds(vec3d3)) {
+-            vec3d3 = null;
+-        }
+-
+-        if (!this.isVecInsideXZBounds(vec3d4)) {
+-            vec3d4 = null;
+-        }
+-
+-        if (!this.isVecInsideXZBounds(vec3d5)) {
+-            vec3d5 = null;
+-        }
+-
+-        if (!this.isVecInsideXYBounds(vec3d6)) {
+-            vec3d6 = null;
+-        }
+-
+-        if (!this.isVecInsideXYBounds(vec3d7)) {
+-            vec3d7 = null;
+-        }
+-
+-        Vec3D vec3d8 = null;
+-
+-        if (vec3d2 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d2) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d2;
+-        }
+-
+-        if (vec3d3 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d3) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d3;
+-        }
+-
+-        if (vec3d4 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d4) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d4;
+-        }
+-
+-        if (vec3d5 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d5) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d5;
+-        }
+-
+-        if (vec3d6 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d6) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d6;
+-        }
+-
+-        if (vec3d7 != null && (vec3d8 == null || vec3d.distanceSquared(vec3d7) < vec3d.distanceSquared(vec3d8))) {
+-            vec3d8 = vec3d7;
+-        }
++    // Athena start - the ray/box intersection, on scalars.
++    //
++    // The 1.8 shape of this method allocated nine Vec3D per collidable block a ray touched: two
++    // for the shift into block-local space, six candidate face intersections, and the point that
++    // reaches the caller. None of them escaped except the last, but none of them were scalar
++    // replaced either - the method is virtual with six overrides, so the callee never inlines into
++    // World.rayTrace and escape analysis never gets to look at it.
++    //
++    // So the dispatch point moved to a scalar signature and the six overrides moved with it. The
++    // Vec3D-taking form below is kept as a bridge for anything outside this walk; it is no longer
++    // overridden by anything, so it does not need to be.
++    //
++    // The arithmetic is transcribed, not rewritten. Face candidates are still visited in the order
++    // minX, maxX, minY, maxY, minZ, maxZ and still selected on a strict "<", so a tie still keeps
++    // the earlier face - which is what the old identity comparisons against vec3d2..vec3d7 did.
++    // Vec3D's constructor folds -0.0 to 0.0, so nz() below does the same at each point where a
++    // Vec3D used to be built.
++    public final MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++        return this.collisionRayTrace(world, blockposition, vec3d.xCoord, vec3d.yCoord, vec3d.zCoord,
++                                      vec3d1.xCoord, vec3d1.yCoord, vec3d1.zCoord);
++    }
+ 
+-        if (vec3d8 == null) {
+-            return null;
+-        } else {
+-            EnumDirection enumdirection = null;
++    static double nz(double d0) {
++        return d0 == 0.0D ? 0.0D : d0;   // folds -0.0 to 0.0, as new Vec3D(..) does
++    }
+ 
+-            if (vec3d8 == vec3d2) {
+-                enumdirection = EnumDirection.WEST;
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition,
++                                                  double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
++        this.updateShape(world, blockposition);
++        double d6 = (double) blockposition.getX();
++        double d7 = (double) blockposition.getY();
++        double d8 = (double) blockposition.getZ();
++
++        d0 = nz(d0 - d6);
++        d1 = nz(d1 - d7);
++        d2 = nz(d2 - d8);
++        d3 = nz(d3 - d6);
++        d4 = nz(d4 - d7);
++        d5 = nz(d5 - d8);
++
++        // the ray direction, once - getIntermediateWith*Value recomputed all three on every call
++        double dx = d3 - d0;
++        double dy = d4 - d1;
++        double dz = d5 - d2;
++        double epsx = dx * dx;
++        double epsy = dy * dy;
++        double epsz = dz * dz;
++
++        int best = -1;
++        double bestDist = 0.0D;
++        double bestX = 0.0D;
++        double bestY = 0.0D;
++        double bestZ = 0.0D;
++
++        for (int face = 0; face < 6; ++face) {
++            double t;
++
++            switch (face) {
++            case 0:
++                if (epsx < (double) 1.0E-7F) continue;
++                t = (this.minX - d0) / dx;
++                break;
++            case 1:
++                if (epsx < (double) 1.0E-7F) continue;
++                t = (this.maxX - d0) / dx;
++                break;
++            case 2:
++                if (epsy < (double) 1.0E-7F) continue;
++                t = (this.minY - d1) / dy;
++                break;
++            case 3:
++                if (epsy < (double) 1.0E-7F) continue;
++                t = (this.maxY - d1) / dy;
++                break;
++            case 4:
++                if (epsz < (double) 1.0E-7F) continue;
++                t = (this.minZ - d2) / dz;
++                break;
++            default:
++                if (epsz < (double) 1.0E-7F) continue;
++                t = (this.maxZ - d2) / dz;
++                break;
+             }
+ 
+-            if (vec3d8 == vec3d3) {
+-                enumdirection = EnumDirection.EAST;
+-            }
++            if (!(t >= 0.0D && t <= 1.0D)) continue;   // the old code returned null here
+ 
+-            if (vec3d8 == vec3d4) {
+-                enumdirection = EnumDirection.DOWN;
+-            }
++            double px = nz(d0 + dx * t);
++            double py = nz(d1 + dy * t);
++            double pz = nz(d2 + dz * t);
++            boolean inside;
+ 
+-            if (vec3d8 == vec3d5) {
+-                enumdirection = EnumDirection.UP;
++            if (face < 2) {          // isVecInsideYZBounds
++                inside = py >= this.minY && py <= this.maxY && pz >= this.minZ && pz <= this.maxZ;
++            } else if (face < 4) {   // isVecInsideXZBounds
++                inside = px >= this.minX && px <= this.maxX && pz >= this.minZ && pz <= this.maxZ;
++            } else {                 // isVecInsideXYBounds
++                inside = px >= this.minX && px <= this.maxX && py >= this.minY && py <= this.maxY;
+             }
+ 
+-            if (vec3d8 == vec3d6) {
+-                enumdirection = EnumDirection.NORTH;
+-            }
++            if (!inside) continue;
+ 
+-            if (vec3d8 == vec3d7) {
+-                enumdirection = EnumDirection.SOUTH;
+-            }
++            double ex = px - d0;
++            double ey = py - d1;
++            double ez = pz - d2;
++            double dist = ex * ex + ey * ey + ez * ez;
+ 
+-            return new MovingObjectPosition(vec3d8.add((double) blockposition.getX(), (double) blockposition.getY(), (double) blockposition.getZ()), enumdirection, blockposition);
++            if (best < 0 || dist < bestDist) {
++                best = face;
++                bestDist = dist;
++                bestX = px;
++                bestY = py;
++                bestZ = pz;
++            }
+         }
+-    }
+ 
+-    private boolean isVecInsideYZBounds(Vec3D vec3d) {
+-        return vec3d == null ? false : vec3d.yCoord >= this.minY && vec3d.yCoord <= this.maxY && vec3d.zCoord >= this.minZ && vec3d.zCoord <= this.maxZ;
+-    }
++        if (best < 0) {
++            return null;
++        }
+ 
+-    private boolean isVecInsideXZBounds(Vec3D vec3d) {
+-        return vec3d == null ? false : vec3d.xCoord >= this.minX && vec3d.xCoord <= this.maxX && vec3d.zCoord >= this.minZ && vec3d.zCoord <= this.maxZ;
+-    }
++        EnumDirection enumdirection = switch (best) {
++            case 0 -> EnumDirection.WEST;
++            case 1 -> EnumDirection.EAST;
++            case 2 -> EnumDirection.DOWN;
++            case 3 -> EnumDirection.UP;
++            case 4 -> EnumDirection.NORTH;
++            default -> EnumDirection.SOUTH;
++        };
+ 
+-    private boolean isVecInsideXYBounds(Vec3D vec3d) {
+-        return vec3d == null ? false : vec3d.xCoord >= this.minX && vec3d.xCoord <= this.maxX && vec3d.yCoord >= this.minY && vec3d.yCoord <= this.maxY;
++        return new MovingObjectPosition(new Vec3D(bestX + d6, bestY + d7, bestZ + d8), enumdirection, blockposition);
+     }
++    // Athena end
+ 
+     public void wasExploded(World world, BlockPosition blockposition, Explosion explosion) {}
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockDoor.java b/src/main/java/net/minecraft/server/BlockDoor.java
+index af0c685ccac9dd8ef8c09f5391503f0c5d558cdf..f345bdbde85d2d5de4e0b2b220b3493822f96c2b 100644
+--- a/src/main/java/net/minecraft/server/BlockDoor.java
++++ b/src/main/java/net/minecraft/server/BlockDoor.java
+@@ -197,9 +197,10 @@ public class BlockDoor extends Block {
+         return iblockdata.get(BlockDoor.HALF) == BlockDoor.EnumDoorHalf.UPPER ? null : this.getItem();
+     }
+ 
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         this.updateShape(world, blockposition);
+-        return super.collisionRayTrace(world, blockposition, vec3d, vec3d1);
++        return super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+     }
+ 
+     public boolean canPlace(World world, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+index db66e57036553429f15ee9f0075f86dc2fcee003..a7fcdf7e515817ca8fa0dba4a7d69cb21b0462df 100644
+--- a/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockMinecartTrackAbstract.java
+@@ -34,9 +34,10 @@ public abstract class BlockMinecartTrackAbstract extends Block {
+         return false;
+     }
+ 
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         this.updateShape(world, blockposition);
+-        return super.collisionRayTrace(world, blockposition, vec3d, vec3d1);
++        return super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+diff --git a/src/main/java/net/minecraft/server/BlockPistonMoving.java b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+index 4f1395b7bf2aeb5c3cdc56ad4fe1c1478ea65852..580306a6f8a9be2edf49174c7c44ff5a4009eb3f 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonMoving.java
++++ b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+@@ -95,7 +95,8 @@ public class BlockPistonMoving extends BlockContainer {
+     }
+ 
+     @Override
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         return null;
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockStairs.java b/src/main/java/net/minecraft/server/BlockStairs.java
+index c64a9f087b86396765b9f7b1f459033bdfff7bc9..8d0d6d19c0bec847975fe9e0855fe5b01cd01a33 100644
+--- a/src/main/java/net/minecraft/server/BlockStairs.java
++++ b/src/main/java/net/minecraft/server/BlockStairs.java
+@@ -502,7 +502,8 @@ public class BlockStairs extends Block {
+     }
+ 
+     @Override
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         MovingObjectPosition[] amovingobjectposition = new MovingObjectPosition[8];
+         IBlockData iblockdata = world.getType(blockposition);
+         int i = ((EnumDirection) iblockdata.get(BlockStairs.FACING)).getHorizontalIndex();
+@@ -514,7 +515,7 @@ public class BlockStairs extends Block {
+         for (int j = 0; j < 8; ++j) {
+             this.rayTracePass = j;
+             if (Arrays.binarySearch(aint, j) < 0) {
+-                amovingobjectposition[j] = super.collisionRayTrace(world, blockposition, vec3d, vec3d1);
++                amovingobjectposition[j] = super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+             }
+         }
+ 
+@@ -523,15 +524,20 @@ public class BlockStairs extends Block {
+         }
+ 
+         MovingObjectPosition movingobjectposition = null;
+-        double d0 = 0.0D;
++        double best = 0.0D;
+ 
+         for (MovingObjectPosition movingobjectposition1 : amovingobjectposition) {
+             if (movingobjectposition1 != null) {
+-                double d1 = movingobjectposition1.pos.distanceSquared(vec3d1);
+-
+-                if (d1 > d0) {
++                // Athena - distanceSquared(vec3d1) on scalars; Vec3D.distanceSquared is (other - this)
++                Vec3D vec3d = movingobjectposition1.pos;
++                double ex = d3 - vec3d.xCoord;
++                double ey = d4 - vec3d.yCoord;
++                double ez = d5 - vec3d.zCoord;
++                double dist = ex * ex + ey * ey + ez * ez;
++
++                if (dist > best) {
+                     movingobjectposition = movingobjectposition1;
+-                    d0 = d1;
++                    best = dist;
+                 }
+             }
+         }
+diff --git a/src/main/java/net/minecraft/server/BlockTorch.java b/src/main/java/net/minecraft/server/BlockTorch.java
+index 40d63c7fac4a5b9137522f89d7997fa0360cf0fc..989ddf3c1398bf476a513c9796c9806fc699016f 100644
+--- a/src/main/java/net/minecraft/server/BlockTorch.java
++++ b/src/main/java/net/minecraft/server/BlockTorch.java
+@@ -135,7 +135,8 @@ public class BlockTorch extends Block {
+     }
+ 
+     @Override
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         EnumDirection enumdirection = (EnumDirection) world.getType(blockposition).get(BlockTorch.FACING);
+         float f = 0.15F;
+ 
+@@ -152,7 +153,7 @@ public class BlockTorch extends Block {
+             this.setBlockBounds(0.5F - f, 0.0F, 0.5F - f, 0.5F + f, 0.6F, 0.5F + f);
+         }
+ 
+-        return super.collisionRayTrace(world, blockposition, vec3d, vec3d1);
++        return super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/BlockTrapdoor.java b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+index e794e489e9c1643daa87cc2e0f72176851c126f5..aef89bb3dbb56e058b7cb08c29b120bc33c1ddc4 100644
+--- a/src/main/java/net/minecraft/server/BlockTrapdoor.java
++++ b/src/main/java/net/minecraft/server/BlockTrapdoor.java
+@@ -135,9 +135,10 @@ public class BlockTrapdoor extends Block {
+         }
+     }
+ 
+-    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, Vec3D vec3d, Vec3D vec3d1) {
++    public MovingObjectPosition collisionRayTrace(World world, BlockPosition blockposition, double d0, double d1, double d2,
++                                                  double d3, double d4, double d5) {
+         this.updateShape(world, blockposition);
+-        return super.collisionRayTrace(world, blockposition, vec3d, vec3d1);
++        return super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+     }
+ 
+     public IBlockData getPlacedState(World world, BlockPosition blockposition, EnumDirection enumdirection, float f, float f1, float f2, int i, EntityLiving entityliving) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 2536641e589b56a9bb3163e25c9983b4a9c43737..f91e1ce09d5a2132a660fcda584fc5ecc1e57d37 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1050,29 +1050,37 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public MovingObjectPosition rayTrace(Vec3D vec3d, Vec3D vec3d1, boolean flag, boolean flag1, boolean flag2) {
++        // Athena start - the DDA walk on scalars.
++        //
++        // The loop rebuilt the current point as a fresh Vec3D on every step - up to 200 per call -
++        // and the only things that ever read it were the next step's arithmetic and
++        // collisionRayTrace, which now takes doubles. Escape analysis could not remove them: the
++        // Vec3D crossed a virtual call with six overrides, so the callee never inlined and the
++        // object was never proved non-escaping.
++        //
++        // Carrying the point in three locals removes every one of those allocations. What is left
++        // is a Vec3D only where one is genuinely returned to the caller: inside a MISS result, and
++        // that is behind flag2.
++        //
++        // The arithmetic is unchanged, including Vec3D's -0.0 folding, which nz() reproduces at the
++        // three places the constructor used to do it.
+         if (!Double.isNaN(vec3d.xCoord) && !Double.isNaN(vec3d.yCoord) && !Double.isNaN(vec3d.zCoord)) {
+             if (!Double.isNaN(vec3d1.xCoord) && !Double.isNaN(vec3d1.yCoord) && !Double.isNaN(vec3d1.zCoord)) {
+-                int i = MathHelper.floor(vec3d1.xCoord);
+-                int j = MathHelper.floor(vec3d1.yCoord);
+-                int k = MathHelper.floor(vec3d1.zCoord);
+-                int l = MathHelper.floor(vec3d.xCoord);
+-                int i1 = MathHelper.floor(vec3d.yCoord);
+-                int j1 = MathHelper.floor(vec3d.zCoord);
+-                // Athena start - walk on a scratch position, materialise only where one escapes.
+-                //
+-                // The walk built a BlockPosition for every step, up to 201 of them per call, and
+-                // handed all but one of them straight to getTypeIfLoaded, which only reads it. The
+-                // two places a position genuinely outlives the step are the MovingObjectPosition
+-                // that collisionRayTrace builds and the MISS position below - both of which are
+-                // returned to the caller, so both get a real one. Everything else reads the
+-                // scratch.
+-                //
+-                // A ray through open air therefore allocates no positions at all: canCollideCheck
+-                // is isCollidable(), false for air, so the escaping branch is not entered. Only the
+-                // block the ray stops on costs an object, and the walk ends there.
+-                //
+-                // The arithmetic is untouched - this changes what is allocated, not what is
+-                // computed, so the answers are bit-identical to before.
++                double ex = vec3d1.xCoord;
++                double ey = vec3d1.yCoord;
++                double ez = vec3d1.zCoord;
++                double cx = vec3d.xCoord;
++                double cy = vec3d.yCoord;
++                double cz = vec3d.zCoord;
++                int i = MathHelper.floor(ex);
++                int j = MathHelper.floor(ey);
++                int k = MathHelper.floor(ez);
++                int l = MathHelper.floor(cx);
++                int i1 = MathHelper.floor(cy);
++                int j1 = MathHelper.floor(cz);
++                // walk on a scratch position, materialise only where one escapes: the two
++                // MovingObjectPosition results below both carry theirs back to the caller, so both
++                // get a real BlockPosition. Everything else reads the scratch.
+                 BlockPosition.MutableBlockPosition blockposition = scratchPos(10);
+ 
+                 blockposition.set(l, i1, j1);
+@@ -1083,20 +1091,18 @@ public abstract class World implements IBlockAccess {
+                 Block block = iblockdata.getBlock();
+ 
+                 if ((!flag1 || block.getCollisionBoundingBox(this, blockposition, iblockdata) != null) && block.canCollideCheck(iblockdata, flag)) {
+-                    // the position reaches the caller inside the result, so it cannot be the scratch
+-                    MovingObjectPosition movingobjectposition = block.collisionRayTrace(this, new BlockPosition(l, i1, j1), vec3d, vec3d1);
++                    MovingObjectPosition movingobjectposition = block.collisionRayTrace(this, new BlockPosition(l, i1, j1), cx, cy, cz, ex, ey, ez);
+ 
+                     if (movingobjectposition != null) {
+                         return movingobjectposition;
+                     }
+                 }
+-                // Athena end
+ 
+                 MovingObjectPosition movingobjectposition1 = null;
+                 int k1 = 200;
+ 
+                 while (k1-- >= 0) {
+-                    if (Double.isNaN(vec3d.xCoord) || Double.isNaN(vec3d.yCoord) || Double.isNaN(vec3d.zCoord)) {
++                    if (Double.isNaN(cx) || Double.isNaN(cy) || Double.isNaN(cz)) {
+                         return null;
+                     }
+ 
+@@ -1138,20 +1144,20 @@ public abstract class World implements IBlockAccess {
+                     double d3 = 999.0D;
+                     double d4 = 999.0D;
+                     double d5 = 999.0D;
+-                    double d6 = vec3d1.xCoord - vec3d.xCoord;
+-                    double d7 = vec3d1.yCoord - vec3d.yCoord;
+-                    double d8 = vec3d1.zCoord - vec3d.zCoord;
++                    double d6 = ex - cx;
++                    double d7 = ey - cy;
++                    double d8 = ez - cz;
+ 
+                     if (flag3) {
+-                        d3 = (d0 - vec3d.xCoord) / d6;
++                        d3 = (d0 - cx) / d6;
+                     }
+ 
+                     if (flag4) {
+-                        d4 = (d1 - vec3d.yCoord) / d7;
++                        d4 = (d1 - cy) / d7;
+                     }
+ 
+                     if (flag5) {
+-                        d5 = (d2 - vec3d.zCoord) / d8;
++                        d5 = (d2 - cz) / d8;
+                     }
+ 
+                     if (d3 == -0.0D) {
+@@ -1170,19 +1176,25 @@ public abstract class World implements IBlockAccess {
+ 
+                     if (d3 < d4 && d3 < d5) {
+                         enumdirection = i > l ? EnumDirection.WEST : EnumDirection.EAST;
+-                        vec3d = new Vec3D(d0, vec3d.yCoord + d7 * d3, vec3d.zCoord + d8 * d3);
++                        cy = Block.nz(cy + d7 * d3);
++                        cz = Block.nz(cz + d8 * d3);
++                        cx = Block.nz(d0);
+                     } else if (d4 < d5) {
+                         enumdirection = j > i1 ? EnumDirection.DOWN : EnumDirection.UP;
+-                        vec3d = new Vec3D(vec3d.xCoord + d6 * d4, d1, vec3d.zCoord + d8 * d4);
++                        cx = Block.nz(cx + d6 * d4);
++                        cz = Block.nz(cz + d8 * d4);
++                        cy = Block.nz(d1);
+                     } else {
+                         enumdirection = k > j1 ? EnumDirection.NORTH : EnumDirection.SOUTH;
+-                        vec3d = new Vec3D(vec3d.xCoord + d6 * d5, vec3d.yCoord + d7 * d5, d2);
++                        cx = Block.nz(cx + d6 * d5);
++                        cy = Block.nz(cy + d7 * d5);
++                        cz = Block.nz(d2);
+                     }
+ 
+-                    l = MathHelper.floor(vec3d.xCoord) - (enumdirection == EnumDirection.EAST ? 1 : 0);
+-                    i1 = MathHelper.floor(vec3d.yCoord) - (enumdirection == EnumDirection.UP ? 1 : 0);
+-                    j1 = MathHelper.floor(vec3d.zCoord) - (enumdirection == EnumDirection.SOUTH ? 1 : 0);
+-                    blockposition.set(l, i1, j1); // Athena - the scratch, not a fresh object
++                    l = MathHelper.floor(cx) - (enumdirection == EnumDirection.EAST ? 1 : 0);
++                    i1 = MathHelper.floor(cy) - (enumdirection == EnumDirection.UP ? 1 : 0);
++                    j1 = MathHelper.floor(cz) - (enumdirection == EnumDirection.SOUTH ? 1 : 0);
++                    blockposition.set(l, i1, j1); // the scratch, not a fresh object
+                     // PandaSpigot start - ray tracing into an unloaded chunk should be treated as a miss, this saves a ton of lag for when AI tries to raytrace near unloaded chunks.
+                     IBlockData iblockdata1 = this.getTypeIfLoaded(blockposition);
+                     if (iblockdata1 == null) return null;
+@@ -1191,22 +1203,20 @@ public abstract class World implements IBlockAccess {
+ 
+                     if (!flag1 || block1.getCollisionBoundingBox(this, blockposition, iblockdata1) != null) {
+                         if (block1.canCollideCheck(iblockdata1, flag)) {
+-                            // Athena - escapes inside the result, so it gets a position of its own
+-                            MovingObjectPosition movingobjectposition2 = block1.collisionRayTrace(this, new BlockPosition(l, i1, j1), vec3d, vec3d1);
++                            MovingObjectPosition movingobjectposition2 = block1.collisionRayTrace(this, new BlockPosition(l, i1, j1), cx, cy, cz, ex, ey, ez);
+ 
+                             if (movingobjectposition2 != null) {
+                                 return movingobjectposition2;
+                             }
+                         } else if (flag2) {
+-                            // Athena - only build the miss position when the caller asked for it.
++                            // only build the miss result when the caller asked for it.
+                             // movingobjectposition1 is read by exactly two statements, both of them
+                             // `return flag2 ? movingobjectposition1 : null`, so with flag2 false the
+                             // object was allocated on every step of the walk and then thrown away.
+                             // hasLineOfSight - the target selectors' visibility check, run for every
+                             // mob against every candidate - passes false, and the walk is capped at
+                             // 200 steps.
+-                            // Athena - this one is returned too, so it also needs a real position
+-                            movingobjectposition1 = new MovingObjectPosition(MovingObjectPosition.EnumMovingObjectType.MISS, vec3d, enumdirection, new BlockPosition(l, i1, j1));
++                            movingobjectposition1 = new MovingObjectPosition(MovingObjectPosition.EnumMovingObjectType.MISS, new Vec3D(cx, cy, cz), enumdirection, new BlockPosition(l, i1, j1));
+                         }
+                     }
+                 }
+@@ -1218,6 +1228,7 @@ public abstract class World implements IBlockAccess {
+         } else {
+             return null;
+         }
++        // Athena end
+     }
+ 
+     public void makeSound(Entity entity, String s, float f, float f1) {

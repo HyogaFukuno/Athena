@@ -1,0 +1,123 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 12:39:30 +0900
+Subject: [PATCH] Put a direct-mapped table in front of the chunk map
+
+The activation range asks for the 25 chunks around each player every tick,
+10,000 chunk-map lookups a second with 20 players, and JFR with
+DebugNonSafepoints put LongObjectHashMap.get and getChunkIfLoaded at 12.8% of
+the server thread: each lookup is three or four dependent misses through the
+map's pointer tables. getChunkIfLoaded, isChunkLoaded and getOrCreateChunk now
+try a 64x64 table indexed by the low bits of the coordinates first. A slot is
+validated the way the one-entry memo is (final coordinates, isLoaded()), only
+loaded chunks are entered, and both removal paths clear the chunk's slot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 0dcadcf437bbbc6464023949be13a3f5ce9d06d4..3d95c87a283976b0db85e501ecf56ded51d49de2 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -48,7 +48,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public boolean isChunkLoaded(int i, int j) {
+-        return this.chunks.containsKey(LongHash.toLong(i, j)); // CraftBukkit
++        return this.lookupChunk(i, j) != null; // CraftBukkit // Athena - through the lookup table; the map holds no null values
+     }
+ 
+     // CraftBukkit start - Change return type to Collection and return the values of our chunk map
+@@ -186,6 +186,53 @@ public class ChunkProviderServer implements IChunkProvider {
+     public void forgetCachedChunk() {
+         this.lastChunk = null;
+     }
++
++    /** Drops the memo and the chunk's lookup slot. Called wherever a chunk leaves {@link #chunks}. */
++    public void forgetCachedChunk(Chunk chunk) {
++        this.lastChunk = null;
++        int slot = lookupSlot(chunk.locX, chunk.locZ);
++
++        if (this.lookupTable[slot] == chunk) {
++            this.lookupTable[slot] = null;
++        }
++    }
++    // Athena end
++
++    // Athena start - a direct-mapped table in front of the chunk map.
++    //
++    // The memo above answers a run of reads in one chunk; this answers reads that move between
++    // chunks. The activation range alone asks for 25 chunks around each player every tick - 10,000
++    // map lookups a second with twenty players - and with the bookkeeping JFR attributes exactly
++    // (DebugNonSafepoints) LongObjectHashMap.get and getChunkIfLoaded were 12.8% of the server
++    // thread, each lookup some 180 ns of dependent misses through the map's pointer tables.
++    //
++    // A slot is picked by the low six bits of each coordinate, z innermost, so a row of neighbouring
++    // chunks sits in one or two cache lines and a lookup that hits costs that one load. It is
++    // validated exactly like the memo - final coordinates and isLoaded(), which removeEntities
++    // clears before every removal from the map - so a stale or overwritten slot can only miss and
++    // fall through to the map. Only a loaded chunk is entered, and forgetCachedChunk(Chunk) clears
++    // the slot when that chunk leaves, so the table never keeps an unloaded chunk alive.
++    private final Chunk[] lookupTable = new Chunk[64 * 64];
++
++    private static int lookupSlot(int x, int z) {
++        return (x & 63) << 6 | (z & 63);
++    }
++
++    private Chunk lookupChunk(int x, int z) {
++        int slot = lookupSlot(x, z);
++        Chunk chunk = this.lookupTable[slot];
++
++        if (chunk != null && chunk.locX == x && chunk.locZ == z && chunk.isLoaded()) {
++            return chunk;
++        }
++
++        chunk = this.chunks.get(LongHash.toLong(x, z));
++        if (chunk != null && chunk.isLoaded() && chunk.locX == x && chunk.locZ == z) {
++            this.lookupTable[slot] = chunk;
++        }
++
++        return chunk;
++    }
+     // Athena end
+ 
+     // Athena start - shaping brand new chunks off the server thread.
+@@ -343,7 +390,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     // Athena end
+ 
+     public Chunk getChunkIfLoaded(int x, int z) {
+-        return chunks.get(LongHash.toLong(x, z));
++        return this.lookupChunk(x, z); // Athena - through the lookup table
+     }
+ 
+     public Chunk getChunkAt(int i, int j) {
+@@ -490,7 +537,7 @@ public class ChunkProviderServer implements IChunkProvider {
+         }
+         // Athena end
+         // CraftBukkit start
+-        Chunk chunk = (Chunk) this.chunks.get(LongHash.toLong(i, j));
++        Chunk chunk = this.lookupChunk(i, j); // Athena - through the lookup table
+ 
+         chunk = chunk == null ? (!this.world.isFindingSpawnPoint() && !this.forceChunkLoad ? this.emptyChunk : this.getChunkAt(i, j)) : chunk;
+ 
+@@ -705,7 +752,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                         this.saveChunkNOP(chunk);
+                         this.chunks.remove(chunkcoordinates); // CraftBukkit
+                         this.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
+-                        this.forgetCachedChunk(); // Athena - the memo must never outlive the map entry
++                        this.forgetCachedChunk(chunk); // Athena - the memo and the lookup slot must never outlive the map entry
+                     // }
+                     // PandaSpigot end
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index 4a228772d5941297168e5cc30b6a34a3214d900f..567188816c81509633e5bf113c5a8bab94a6d61e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -223,7 +223,7 @@ public class CraftWorld implements World {
+         world.chunkProviderServer.unloadQueue.remove(x, z);
+         world.chunkProviderServer.chunks.remove(LongHash.toLong(x, z));
+         world.chunkProviderServer.creatureCensus.chunkRemoved(chunk); // Athena - take the chunk's tally back out
+-        world.chunkProviderServer.forgetCachedChunk(); // Athena - the memo must never outlive the map entry
++        world.chunkProviderServer.forgetCachedChunk(chunk); // Athena - the memo and the lookup slot must never outlive the map entry
+ 
+         return true;
+     }

@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 30 Aug 2026 20:38:47 +0900
+Subject: [PATCH] Stop the liquid flow scan and the sense cache from allocating
+
+BlockFluids.getFlowVector built a BlockPosition per neighbour, two iterators, and a Vec3D
+for every accumulation step; an allocation profile of the saturating bench put Vec3D from
+here at roughly a quarter of everything the server thread allocates. EntitySenses cleared
+two ArrayLists for every mob on every tick, both almost always empty, at 2.3% of the
+thread's samples.
+
+The arithmetic is unchanged: the deltas the old code took as the difference between two
+positions are the direction's own offsets, Vec3D.add was a double add in the same order,
+and the two normalize steps run in the same order through the same MathHelper.sqrt.
+getLevel also read the same position through getType twice; now once.
+
+diff --git a/src/main/java/net/minecraft/server/BlockFluids.java b/src/main/java/net/minecraft/server/BlockFluids.java
+index 37082bc079b10152588dc31644fc6532ce4d5b5d..9d8b49cd4b4604596cb3bd5829f29eafd663ef87 100644
+--- a/src/main/java/net/minecraft/server/BlockFluids.java
++++ b/src/main/java/net/minecraft/server/BlockFluids.java
+@@ -28,7 +28,9 @@ public abstract class BlockFluids extends Block {
+     }
+ 
+     protected int getLevel(IBlockAccess iblockaccess, BlockPosition blockposition) {
+-        return iblockaccess.getType(blockposition).getBlock().getMaterial() == this.material ? ((Integer) iblockaccess.getType(blockposition).get(BlockFluids.LEVEL)).intValue() : -1;
++        IBlockData iblockdata = iblockaccess.getType(blockposition); // Athena - was read twice
++
++        return iblockdata.getBlock().getMaterial() == this.material ? ((Integer) iblockdata.get(BlockFluids.LEVEL)).intValue() : -1;
+     }
+ 
+     // Athena - coordinate form for the flow scan, which visits hundreds of neighbours per update.
+@@ -79,49 +81,94 @@ public abstract class BlockFluids extends Block {
+         return 0;
+     }
+ 
++    // Athena start - the flow scan runs for every entity standing in liquid, on every tick, through
++    // World.handleMaterialAcceleration. It built a BlockPosition per neighbour, two iterators, and a
++    // Vec3D for every accumulation step; an allocation profile of the saturating bench put Vec3D
++    // coming out of here at roughly a quarter of everything the server thread allocates.
++    //
++    // Accumulate in three doubles, walk the shared horizontal array instead of an iterator, and read
++    // the neighbours through a per-thread scratch position - the contract PathfinderNormal.a and
++    // Navigation.isPositionClear already rely on. The arithmetic is unchanged: the deltas the old
++    // code took as blockposition1.getX() - blockposition.getX() are the direction's own offsets, and
++    // the two normalize steps happen in the same order, through the same MathHelper.sqrt.
++    private static final ThreadLocal<BlockPosition.MutableBlockPosition> FLOW_POSITION = new ThreadLocal<BlockPosition.MutableBlockPosition>() {
++        protected BlockPosition.MutableBlockPosition initialValue() {
++            return new BlockPosition.MutableBlockPosition();
++        }
++    };
++
+     protected Vec3D getFlowVector(IBlockAccess iblockaccess, BlockPosition blockposition) {
+-        Vec3D vec3d = new Vec3D(0.0D, 0.0D, 0.0D);
++        double d0 = 0.0D;
++        double d1 = 0.0D;
++        double d2 = 0.0D;
++        int x = blockposition.getX();
++        int y = blockposition.getY();
++        int z = blockposition.getZ();
++        BlockPosition.MutableBlockPosition scratch = FLOW_POSITION.get();
+         int i = this.getEffectiveFlowDecay(iblockaccess, blockposition);
+-        Iterator iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
+-
+-        EnumDirection enumdirection;
+-        BlockPosition blockposition1;
+-
+-        while (iterator.hasNext()) {
+-            enumdirection = (EnumDirection) iterator.next();
+-            blockposition1 = blockposition.shift(enumdirection);
+-            int j = this.getEffectiveFlowDecay(iblockaccess, blockposition1);
++        EnumDirection[] horizontals = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
++
++        for (int idx = 0; idx < horizontals.length; ++idx) {
++            EnumDirection enumdirection = horizontals[idx];
++            int ax = enumdirection.getAdjacentX();
++            int ay = enumdirection.getAdjacentY();
++            int az = enumdirection.getAdjacentZ();
++            int nx = x + ax;
++            int ny = y + ay;
++            int nz = z + az;
++            int j = this.getEffectiveFlowDecay(iblockaccess, scratch.set(nx, ny, nz));
+             int k;
+ 
+             if (j < 0) {
+-                if (!iblockaccess.getType(blockposition1).getBlock().getMaterial().isSolid()) {
+-                    j = this.getEffectiveFlowDecay(iblockaccess, blockposition1.down());
++                if (!iblockaccess.getType(scratch.set(nx, ny, nz)).getBlock().getMaterial().isSolid()) {
++                    j = this.getEffectiveFlowDecay(iblockaccess, scratch.set(nx, ny - 1, nz));
+                     if (j >= 0) {
+                         k = j - (i - 8);
+-                        vec3d = vec3d.add((double) ((blockposition1.getX() - blockposition.getX()) * k), (double) ((blockposition1.getY() - blockposition.getY()) * k), (double) ((blockposition1.getZ() - blockposition.getZ()) * k));
++                        d0 += (double) (ax * k);
++                        d1 += (double) (ay * k);
++                        d2 += (double) (az * k);
+                     }
+                 }
+-            } else if (j >= 0) {
++            } else {
+                 k = j - i;
+-                vec3d = vec3d.add((double) ((blockposition1.getX() - blockposition.getX()) * k), (double) ((blockposition1.getY() - blockposition.getY()) * k), (double) ((blockposition1.getZ() - blockposition.getZ()) * k));
++                d0 += (double) (ax * k);
++                d1 += (double) (ay * k);
++                d2 += (double) (az * k);
+             }
+         }
+ 
+         if (((Integer) iblockaccess.getType(blockposition).get(BlockFluids.LEVEL)).intValue() >= 8) {
+-            iterator = EnumDirection.EnumDirectionLimit.HORIZONTAL.iterator();
++            for (int idx = 0; idx < horizontals.length; ++idx) {
++                EnumDirection enumdirection = horizontals[idx];
++                int nx = x + enumdirection.getAdjacentX();
++                int ny = y + enumdirection.getAdjacentY();
++                int nz = z + enumdirection.getAdjacentZ();
++
++                if (this.isBlockSolid(iblockaccess, scratch.set(nx, ny, nz), enumdirection)
++                        || this.isBlockSolid(iblockaccess, scratch.set(nx, ny + 1, nz), enumdirection)) {
++                    double len = (double) MathHelper.sqrt(d0 * d0 + d1 * d1 + d2 * d2);
++
++                    if (len < 1.0E-4D) {
++                        d0 = 0.0D;
++                        d1 = 0.0D;
++                        d2 = 0.0D;
++                    } else {
++                        d0 /= len;
++                        d1 /= len;
++                        d2 /= len;
++                    }
+ 
+-            while (iterator.hasNext()) {
+-                enumdirection = (EnumDirection) iterator.next();
+-                blockposition1 = blockposition.shift(enumdirection);
+-                if (this.isBlockSolid(iblockaccess, blockposition1, enumdirection) || this.isBlockSolid(iblockaccess, blockposition1.up(), enumdirection)) {
+-                    vec3d = vec3d.normalize().add(0.0D, -6.0D, 0.0D);
++                    d1 += -6.0D;
+                     break;
+                 }
+             }
+         }
+ 
+-        return vec3d.normalize();
++        double len = (double) MathHelper.sqrt(d0 * d0 + d1 * d1 + d2 * d2);
++
++        return len < 1.0E-4D ? new Vec3D(0.0D, 0.0D, 0.0D) : new Vec3D(d0 / len, d1 / len, d2 / len);
+     }
++    // Athena end
+ 
+     public Vec3D modifyAcceleration(World world, BlockPosition blockposition, Entity entity, Vec3D vec3d) {
+         return vec3d.add(this.getFlowVector(world, blockposition));
+diff --git a/src/main/java/net/minecraft/server/EntitySenses.java b/src/main/java/net/minecraft/server/EntitySenses.java
+index a1bd0da4536c995a227200e44f5eaacd6d551805..ec231e10a58eccd2b65781a369d7c01630d5677f 100644
+--- a/src/main/java/net/minecraft/server/EntitySenses.java
++++ b/src/main/java/net/minecraft/server/EntitySenses.java
+@@ -7,19 +7,35 @@ import java.util.List;
+ public class EntitySenses {
+ 
+     EntityInsentient entityObj;
+-    List<Entity> seenEntities = Lists.newArrayList();
+-    List<Entity> unseenEntities = Lists.newArrayList();
++    // Athena - allocated on first use. clearSensingCache runs for every mob on every tick and both
++    // lists are almost always empty, so clearing them was two dependent cache misses per mob per
++    // tick on objects most mobs never fill; a profile of the saturating bench put it at 2.3% of the
++    // server thread. A mob that never asks canSee now never touches anything but these two fields.
++    List<Entity> seenEntities;
++    List<Entity> unseenEntities;
+ 
+     public EntitySenses(EntityInsentient entityinsentient) {
+         this.entityObj = entityinsentient;
+     }
+ 
+     public void clearSensingCache() {
+-        this.seenEntities.clear();
+-        this.unseenEntities.clear();
++        // Athena - isEmpty() would still have to follow the reference; a null does not
++        if (this.seenEntities != null && !this.seenEntities.isEmpty()) {
++            this.seenEntities.clear();
++        }
++
++        if (this.unseenEntities != null && !this.unseenEntities.isEmpty()) {
++            this.unseenEntities.clear();
++        }
+     }
+ 
+     public boolean canSee(Entity entity) {
++        // Athena start
++        if (this.seenEntities == null) {
++            this.seenEntities = Lists.newArrayList();
++            this.unseenEntities = Lists.newArrayList();
++        }
++        // Athena end
+         if (this.seenEntities.contains(entity)) {
+             return true;
+         } else if (this.unseenEntities.contains(entity)) {

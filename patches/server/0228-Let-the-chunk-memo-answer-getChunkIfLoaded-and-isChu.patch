@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 11:29:54 +0900
+Subject: [PATCH] Let the chunk memo answer getChunkIfLoaded and isChunkLoaded
+
+getOrCreateChunk has answered from a one-entry memo since patch 0161, but the
+two methods next to it went straight to the chunk map, and a profile of the
+saturating bench put them together above four percent of the server thread.
+
+getChunkIfLoaded is what every "is there liquid, an entity, a collision box in
+this area" query goes through. An entity asks mayHoldLiquid about the same one
+or two chunks five times in a tick - isInLava three times, and
+handleMaterialAcceleration twice - and each was a hash of a packed long and a
+probe.
+
+isChunkLoaded is the containsKey behind isAreaLoaded, which walks the chunks of
+a box asking the question before the scan that follows resolves the same chunks
+again. It was 1.1% of the thread on its own.
+
+The memo only ever holds a chunk that came out of the map, so a hit means the
+chunk is loaded and is what the map would have returned. As in getOrCreateChunk,
+correctness rests on the isLoaded() test rather than on an audit: the window in
+which a memo could outlive its map entry is a few instructions wide, and an
+audit over 5.2 million deliberately broken hits never caught it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 8b580340cc3e968cb85e2f4a88feb387355fbaf0..41a4b8f0dd593265941a50a193e905355b7a5f8b 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -48,6 +48,16 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public boolean isChunkLoaded(int i, int j) {
++        // Athena - the memo answers this too. isAreaLoaded walks the chunks of a box asking this
++        // question, and the box scan that follows then resolves the same chunks again; a profile
++        // put this containsKey at 1.1% of the server thread on its own. Only a positive answer can
++        // come from the memo, which is the common case - the negative one falls through.
++        Chunk cached = this.lastChunk;
++
++        if (cached != null && cached.locX == i && cached.locZ == j && cached.isLoaded()) {
++            return true;
++        }
++
+         return this.chunks.containsKey(LongHash.toLong(i, j)); // CraftBukkit
+     }
+ 
+@@ -298,7 +308,33 @@ public class ChunkProviderServer implements IChunkProvider {
+     // Athena end
+ 
+     public Chunk getChunkIfLoaded(int x, int z) {
+-        return chunks.get(LongHash.toLong(x, z));
++        // Athena start - share getOrCreateChunk's one-entry memo.
++        //
++        // getOrCreateChunk has answered from a memo since patch 0161, but this method - the one
++        // every "is there liquid / an entity / a collision box in this area" query goes through -
++        // went straight to the map. An entity asks mayHoldLiquid about the same one or two chunks
++        // five times in a tick (isInLava three times, handleMaterialAcceleration twice), and each
++        // of those was a hash of a packed long and a probe.
++        //
++        // The memo only ever holds a chunk that came out of the map - getOrCreateChunk returns
++        // emptyChunk before it stores - so a hit here means the chunk is loaded and is the one the
++        // map would have returned. As there, correctness rests on isLoaded() rather than on an
++        // audit: the window in which a memo could outlive its map entry is a few instructions wide,
++        // and an audit over 5.2 million deliberately broken hits never caught it.
++        Chunk cached = this.lastChunk;
++
++        if (cached != null && cached.locX == x && cached.locZ == z && cached.isLoaded()) {
++            return cached;
++        }
++
++        Chunk chunk = chunks.get(LongHash.toLong(x, z));
++
++        if (chunk != null) {
++            this.lastChunk = chunk;
++        }
++
++        return chunk;
++        // Athena end
+     }
+ 
+     public Chunk getChunkAt(int i, int j) {

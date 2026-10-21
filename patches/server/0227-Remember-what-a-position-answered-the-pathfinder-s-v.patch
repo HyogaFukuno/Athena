@@ -1,0 +1,227 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 1 Sep 2026 08:51:31 +0900
+Subject: [PATCH] Remember what a position answered the pathfinder's vertical
+ offset scan
+
+findPathOptions asks for the vertical offset of the node above the one it is
+expanding and then of each of its four neighbours, and getSafePoint asks again
+for the block below a candidate it wants to step down onto. A node that four
+neighbours border is therefore scanned from all four of them, and every scan
+walks the mob's whole footprint - twelve blocks for an iron golem, each one a
+block read through the chunk.
+
+The answer depends only on the position, the block access, the mob's size and
+the three flags, and all of those are fixed for the length of one search:
+initProcessor installs them, and the only one that moves afterwards -
+avoidsWater, cleared by getPathPointTo for a swimming mob - moves before the
+first offset is asked for. So a generation counter bumped once per search
+invalidates the whole table without touching it.
+
+The table is shared per thread rather than held per navigator: there is one
+PathfinderNormal per mob, and a table large enough to be worth having would be
+tens of kilobytes each.
+
+The static PathfinderNormal.a keeps no memo - its other caller passes its own
+world and flags.
+
+What can go wrong with a cache of a pure function is invalidation, not
+bookkeeping, so the audit under debugVerifyAthenaIndexes rescans on every hit
+and compares rather than rebuilding anything.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index dec143df5b73fed0deb7e7f102efe60222725c3e..cb72cfef40ffb99ff925cb107c293a3c9ad524ee 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -44,6 +44,8 @@ public final class AthenaIndexAudit {
+     private static long bucketChecksIndexed;
+     private static long bucketEntities;
+ 
++    private static long offsetChecks;
++
+     private static long mismatches;
+     private static int reports;
+     private static int lastSummaryTick;
+@@ -348,6 +350,20 @@ public final class AthenaIndexAudit {
+         }
+     }
+ 
++    /**
++     * Checks a hit in PathfinderNormal's vertical offset memo against a fresh scan of the same
++     * position. Unlike the structures above this one is not rebuilt from anything - it caches a
++     * pure function, and what can go wrong is the invalidation: a stale entry surviving into a
++     * search with a different mob, a different block access, or different flags.
++     */
++    public static void auditVerticalOffset(int x, int y, int z, int cached, int fresh) {
++        ++offsetChecks;
++        if (cached != fresh) {
++            report("vertical offset memo says " + cached + " for " + x + "," + y + "," + z
++                    + " but a fresh scan says " + fresh);
++        }
++    }
++
+     // ------------------------------------------------------------------
+ 
+     private static void report(String message) {
+@@ -372,10 +388,11 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty) | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), verticalOffset={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
++                offsetChecks,
+                 mismatches);
+ 
+         if (censusChecksNonEmpty == 0 && bucketChecks == 0) {
+diff --git a/src/main/java/net/minecraft/server/PathfinderNormal.java b/src/main/java/net/minecraft/server/PathfinderNormal.java
+index cd50758c8c2dbcacd032961060f4bb0a326449bf..1895a1c168fcbf54f25cf5bde71ee27e34406397 100644
+--- a/src/main/java/net/minecraft/server/PathfinderNormal.java
++++ b/src/main/java/net/minecraft/server/PathfinderNormal.java
+@@ -14,6 +14,7 @@ public class PathfinderNormal extends PathfinderAbstract {
+     public void initProcessor(IBlockAccess iblockaccess, Entity entity) {
+         super.initProcessor(iblockaccess, entity);
+         this.shouldAvoidWater = this.avoidsWater;
++        PathfinderNormal.OFFSET_CACHE.get().beginSearch(); // Athena - see getVerticalOffset
+     }
+ 
+     public void postProcess() {
+@@ -140,8 +141,133 @@ public class PathfinderNormal extends PathfinderAbstract {
+     };
+     // Athena end
+ 
++    // Athena start - remember what a position answered, for the length of one search.
++    //
++    // findPathOptions asks for the offset of the node above the one it is expanding and then for
++    // each of the four neighbours, and getSafePoint asks again for the block below a candidate it
++    // wants to step down onto. A node that four neighbours border is therefore scanned from all
++    // four of them, and each scan walks the mob's whole footprint - twelve blocks for an iron
++    // golem, each one a block read through the chunk.
++    //
++    // The answer depends only on the position, the block access, the mob's size and the three
++    // flags, and all of those are fixed for the length of a search. initProcessor installs them,
++    // and the one that moves afterwards - avoidsWater, which getPathPointTo clears for a swimming
++    // mob - moves before the first offset is asked for. So one counter bumped per search
++    // invalidates the whole table without touching it.
++    //
++    // The table is shared rather than held per navigator. There is one PathfinderNormal per mob,
++    // and a table large enough to be worth having would be tens of kilobytes each.
++    private static final ThreadLocal<PathfinderNormal.VerticalOffsetCache> OFFSET_CACHE = new ThreadLocal<PathfinderNormal.VerticalOffsetCache>() {
++        protected PathfinderNormal.VerticalOffsetCache initialValue() {
++            return new PathfinderNormal.VerticalOffsetCache();
++        }
++    };
++
++    private static final class VerticalOffsetCache {
++
++        static final int MISSING = Integer.MIN_VALUE;
++
++        private static final int CAPACITY = 8192; // power of two
++        private static final int MASK = PathfinderNormal.VerticalOffsetCache.CAPACITY - 1;
++        private static final int PROBE = 8;
++
++        private final long[] keys = new long[PathfinderNormal.VerticalOffsetCache.CAPACITY];
++        private final int[] generations = new int[PathfinderNormal.VerticalOffsetCache.CAPACITY];
++        private final byte[] values = new byte[PathfinderNormal.VerticalOffsetCache.CAPACITY];
++        /** Which search a slot belongs to. Zero is never a live generation, so the zeroed array reads as empty. */
++        private int generation;
++
++        void beginSearch() {
++            if (++this.generation == 0) {
++                // Wrapped: every slot would read as belonging to this search. Only reachable after
++                // four billion searches, so clearing here costs nothing on average.
++                java.util.Arrays.fill(this.generations, 0);
++                this.generation = 1;
++            }
++        }
++
++        int get(int x, int y, int z) {
++            long key = PathfinderNormal.VerticalOffsetCache.key(x, y, z);
++            int slot = PathfinderNormal.VerticalOffsetCache.slot(key);
++
++            for (int i = 0; i < PathfinderNormal.VerticalOffsetCache.PROBE; ++i) {
++                int j = slot + i & PathfinderNormal.VerticalOffsetCache.MASK;
++
++                if (this.generations[j] != this.generation) {
++                    return PathfinderNormal.VerticalOffsetCache.MISSING; // put fills the first free slot of the run, so the run ends here
++                }
++
++                if (this.keys[j] == key) {
++                    return this.values[j];
++                }
++            }
++
++            return PathfinderNormal.VerticalOffsetCache.MISSING;
++        }
++
++        void put(int x, int y, int z, int value) {
++            long key = PathfinderNormal.VerticalOffsetCache.key(x, y, z);
++            int slot = PathfinderNormal.VerticalOffsetCache.slot(key);
++
++            for (int i = 0; i < PathfinderNormal.VerticalOffsetCache.PROBE; ++i) {
++                int j = slot + i & PathfinderNormal.VerticalOffsetCache.MASK;
++
++                if (this.generations[j] != this.generation || this.keys[j] == key) {
++                    this.store(j, key, value);
++                    return;
++                }
++            }
++
++            // Eight in a row taken. Overwriting the first is cheaper than growing, and the worst a
++            // lost entry can do is make a later lookup miss - which costs exactly the scan this
++            // table is there to avoid, never a wrong answer.
++            this.store(slot, key, value);
++        }
++
++        private void store(int slot, long key, int value) {
++            this.keys[slot] = key;
++            this.values[slot] = (byte) value;
++            this.generations[slot] = this.generation;
++        }
++
++        /**
++         * 26 bits of x, 26 of z, 12 of y. The world border stops well inside 2^25 blocks, and y
++         * runs from -1 to a little over 255, so no two positions a search can reach collide.
++         */
++        private static long key(int x, int y, int z) {
++            return ((long) x & 0x3FFFFFFL) << 38 | ((long) z & 0x3FFFFFFL) << 12 | (long) (y & 0xFFF);
++        }
++
++        private static int slot(long key) {
++            int i = (int) (key ^ key >>> 32);
++
++            return i * 0x9E3779B1 >>> 13 & PathfinderNormal.VerticalOffsetCache.MASK;
++        }
++    }
++    // Athena end
++
+     private int getVerticalOffset(Entity entity, int i, int j, int k) {
+-        return a(this.blockaccess, entity, i, j, k, this.entitySizeX, this.entitySizeY, this.entitySizeZ, this.avoidsWater, this.canBreakDoors, this.canEnterDoors);
++        // Athena start
++        PathfinderNormal.VerticalOffsetCache cache = PathfinderNormal.OFFSET_CACHE.get();
++        int cached = cache.get(i, j, k);
++
++        if (cached != PathfinderNormal.VerticalOffsetCache.MISSING) {
++            if (!AthenaIndexAudit.enabled()) {
++                return cached;
++            }
++
++            // What can go wrong here is invalidation, not bookkeeping: a stale entry surviving into
++            // a search with a different mob, block access, or flags. Only a fresh scan can catch it.
++            AthenaIndexAudit.auditVerticalOffset(i, j, k, cached,
++                    a(this.blockaccess, entity, i, j, k, this.entitySizeX, this.entitySizeY, this.entitySizeZ, this.avoidsWater, this.canBreakDoors, this.canEnterDoors));
++            return cached;
++        }
++        // Athena end
++
++        int value = a(this.blockaccess, entity, i, j, k, this.entitySizeX, this.entitySizeY, this.entitySizeZ, this.avoidsWater, this.canBreakDoors, this.canEnterDoors); // Athena
++
++        cache.put(i, j, k, value); // Athena
++        return value; // Athena
+     }
+ 
+     public static int a(IBlockAccess iblockaccess, Entity entity, int i, int j, int k, int l, int i1, int j1, boolean flag, boolean flag1, boolean flag2) {

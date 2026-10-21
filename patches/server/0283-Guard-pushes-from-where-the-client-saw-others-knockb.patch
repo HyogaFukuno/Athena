@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 13 Oct 2026 01:14:49 +0900
+Subject: [PATCH] Guard: pushes from where the client saw others, knockback
+ until the client has moved on it
+
+From play on sg2 with a 1.7 client: two speed flags in the air with nobody
+counted as pushing. One was over the bound by 0.071, one push's worth: the
+client pushes against other players where it sees them, a network trip and
+an interpolation behind the server's box, so another player now counts if
+any of its boxes over the last 4 + ping/50 ticks overlaps (other entities
+get 0.3 of room). The other was 0.3 over; a knockback window measured in
+server ticks alone ends early when the client stalls, so it now also lasts
+until the client has sent 10 + ping/50 ticks of moves after it.
+
+A failed move check now also logs the six moves before it, the nearest
+other player, how long ago knockback was sent and the ping.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 603fdf9ba832fdf023f15fa4acf23acf45e8f9d1..21917a232ad74863e9479daff5e1b2b9f617316d 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -49,6 +49,11 @@ public final class AthenaGuard {
+     private double ctxX, ctxY, ctxZ;
+     private World ctxWorld;
+     private int ctxFlags, ctxPushers;
++    // the last moves checked, newest first at histHead - 1: h, dy, ticks, ground at the start
++    private final double[] histH = new double[6], histDy = new double[6];
++    private final int[] histTicks = new int[6];
++    private final boolean[] histGround = new boolean[6];
++    private int histHead, histCount;
+ 
+     // movement state, as of the last accepted move
+     private boolean known;          // false after a teleport, a vehicle, flight: the next move only seeds the state
+@@ -63,6 +68,8 @@ public final class AthenaGuard {
+     private int freshTicks;         // ticks since the state was seeded, while still unsure of the client's onGround
+     private double grantH, grantV;  // knockback the server sent, and until when it may show up
+     private long grantUntil;
++    private int grantMoves;         // and for at least this many of the client's ticks: a client that stalls applies it late
++    private long grantSentTick = Long.MIN_VALUE; // for the log
+     private int speedAmp = -1, jumpAmp = -1;
+     private double walkSpeed = BASE_SPEED; // the movement speed attribute's base (Player.setWalkSpeed / 2), never under vanilla's
+     private long effectsGraceUntil; // keep a potion's allowance a little after it ends: the client lags
+@@ -140,6 +147,8 @@ public final class AthenaGuard {
+         this.grantH = Math.max(this.grantH, h);
+         this.grantV = Math.max(this.grantV, y);
+         this.grantUntil = MinecraftServer.currentTick + 10 + this.player.ping / 50;
++        this.grantMoves = 10 + this.player.ping / 50;
++        this.grantSentTick = MinecraftServer.currentTick;
+     }
+ 
+     // ------------------------------------------------------------------ timer
+@@ -197,6 +206,8 @@ public final class AthenaGuard {
+ 
+         int ticks = this.ticksSincePos + 1;
+         this.ticksSincePos = 0;
++        boolean granted = MinecraftServer.currentTick <= this.grantUntil || this.grantMoves > 0;
++        this.grantMoves = Math.max(this.grantMoves - ticks, 0);
+ 
+         double dx = x - fromX;
+         double dy = y - fromY;
+@@ -226,7 +237,6 @@ public final class AthenaGuard {
+         }
+ 
+         this.refreshEffects();
+-        boolean granted = MinecraftServer.currentTick <= this.grantUntil;
+         boolean inLiquid = this.player.isInWater() || this.player.isInLava() || liquidAt(world, x, y, z);
+         boolean climbing = this.player.isOnLadder();
+         // a jump cut short by a ceiling: the client moves up before it moves sideways, so the ceiling
+@@ -238,11 +248,16 @@ public final class AthenaGuard {
+         this.ctxX = x; this.ctxY = y; this.ctxZ = z; this.ctxWorld = world;
+         this.ctxFlags = (groundNow ? 1 : 0) | (wall ? 2 : 0) | (inLiquid ? 4 : 0) | (climbing ? 8 : 0) | (granted ? 16 : 0);
+         this.ctxPushers = pushers;
++        boolean groundBefore = this.groundStart;
+ 
+         if (this.evaluate(ticks, h, dy, groundNow, maybeGround, certain, ticks > 1 && landing, slipNow, granted, inLiquid, climbing, ceiling, slimeUp, pushers) != 0 && enforce) {
+             this.known = false;
+             return false;
+         }
++        int slot = this.histHead;
++        this.histH[slot] = h; this.histDy[slot] = dy; this.histTicks[slot] = ticks; this.histGround[slot] = groundBefore;
++        this.histHead = (slot + 1) % this.histH.length;
++        this.histCount = Math.min(this.histCount + 1, this.histH.length);
+         return true;
+     }
+ 
+@@ -450,19 +465,52 @@ public final class AthenaGuard {
+         return world.hasCubes(player, x - HALF, y - 0.001D, z - HALF, x + HALF, y, z + HALF);
+     }
+ 
+-    /** Players overlapping the box the client pushes against (its own, grown by 0.2), who push it back. */
++    /**
++     * Entities overlapping the box the client pushes against (its own, grown by 0.2), who push it back.
++     * The client sees them where they were: another player a network trip and an interpolation behind
++     * where it says it is now, so any of its positions over that time counts; anything else is
++     * interpolated too, and gets a little room.
++     */
+     private int pushers(World world, double x, double y, double z) {
+-        java.util.List<Entity> near = world.getEntities(this.player, x - 0.5D, y - 0.2D, z - 0.5D, x + 0.5D, y + 2.0D, z + 0.5D);
++        int lookback = Math.min(20, 4 + (this.player.ping + 49) / 50);
++        double reach = 0.5D + lookback * 0.4D; // how far another player can be from where it was then
++        java.util.List<Entity> near = world.getEntities(this.player, x - reach, y - 2.0D, z - reach, x + reach, y + 3.8D, z + reach);
++        double minX = x - 0.5D, minY = y, minZ = z - 0.5D, maxX = x + 0.5D, maxY = y + 1.8D, maxZ = z + 0.5D;
++        int tick = MinecraftServer.currentTick;
+         int count = 0;
+ 
+         for (int i = 0; i < near.size(); ++i) {
+             Entity entity = near.get(i);
+ 
+-            if (entity.canBePushed() && !(entity instanceof EntityPlayer && ((EntityPlayer) entity).isSpectator())) {
+-                ++count;
++            if (!entity.canBePushed() || entity instanceof EntityPlayer && ((EntityPlayer) entity).isSpectator()) {
++                continue;
++            }
++            boolean touches = false;
++
++            if (entity instanceof EntityPlayer) {
++                EntityPlayer other = (EntityPlayer) entity;
++
++                for (int back = 0; back <= lookback && !touches; ++back) {
++                    double[] box = other.athenaBoxAt(tick - back);
++
++                    if (box == null) {
++                        if (back > 0) {
++                            break;
++                        }
++                        box = new double[] { entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ };
++                    }
++                    touches = box[0] < maxX && box[3] > minX && box[1] < maxY && box[4] > minY && box[2] < maxZ && box[5] > minZ;
++                }
++            } else {
++                touches = entity.boundingBoxMinX < maxX + 0.3D && entity.boundingBoxMaxX > minX - 0.3D
++                        && entity.boundingBoxMinY < maxY + 0.3D && entity.boundingBoxMaxY > minY - 0.3D
++                        && entity.boundingBoxMinZ < maxZ + 0.3D && entity.boundingBoxMaxZ > minZ - 0.3D;
++            }
++            if (touches && ++count >= 8) {
++                break;
+             }
+         }
+-        return Math.min(count, 8);
++        return count;
+     }
+ 
+     /** Whether something under the feet at (x, y, z) is within depth below them. */
+@@ -618,7 +666,40 @@ public final class AthenaGuard {
+                 this.player.playerInteractManager.getGameMode(), this.player.abilities.canFly, this.player.abilities.isFlying,
+                 this.player.abilities.walkSpeed, (this.ctxFlags & 1) != 0 ? "ground" : "air", (this.ctxFlags & 2) != 0 ? ", wall" : "",
+                 (this.ctxFlags & 4) != 0 ? ", liquid" : "", (this.ctxFlags & 8) != 0 ? ", climbing" : "",
+-                (this.ctxFlags & 16) != 0 ? ", knockback" : "", this.ctxPushers > 0 ? ", pushed by " + this.ctxPushers : "");
++                (this.ctxFlags & 16) != 0 ? ", knockback" : "", this.ctxPushers > 0 ? ", pushed by " + this.ctxPushers : "")
++                + this.recent();
++    }
++
++    /** The moves before this one, the nearest other player, the last knockback: what a false positive needs. */
++    private String recent() {
++        StringBuilder sb = new StringBuilder("; before:");
++
++        for (int i = 1; i <= this.histCount; ++i) {
++            int slot = (this.histHead - i + this.histH.length) % this.histH.length;
++            sb.append(String.format(java.util.Locale.ROOT, " %.3f/%+.3f%s%s", this.histH[slot], this.histDy[slot],
++                    this.histGround[slot] ? "g" : "", this.histTicks[slot] > 1 ? "x" + this.histTicks[slot] : ""));
++        }
++        double nearest = Double.MAX_VALUE;
++        String nearestName = null;
++
++        for (EntityHuman other : this.ctxWorld.players) {
++            if (other != this.player) {
++                double d = other.getDistanceSq(this.player.locX, this.player.locY, this.player.locZ);
++
++                if (d < nearest) {
++                    nearest = d;
++                    nearestName = other.getName();
++                }
++            }
++        }
++        if (nearestName != null) {
++            sb.append(String.format(java.util.Locale.ROOT, "; nearest %s %.2f", nearestName, Math.sqrt(nearest)));
++        }
++        if (this.grantSentTick != Long.MIN_VALUE) {
++            sb.append(String.format(java.util.Locale.ROOT, "; knockback sent %d ticks ago", MinecraftServer.currentTick - this.grantSentTick));
++        }
++        sb.append("; ping ").append(this.player.ping);
++        return sb.toString();
+     }
+ 
+     private void flag(int check, String name, String format, Object... args) {

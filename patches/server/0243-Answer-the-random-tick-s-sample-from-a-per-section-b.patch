@@ -1,0 +1,469 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 23 Sep 2026 04:29:14 +0900
+Subject: [PATCH] Answer the random tick's sample from a per-section bitmap and
+ skip idle sections
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index b877fd9302227c586f04db88fd4a02973944dbb9..90f11bafee90a8b819a14c3c14ccbbb9309512a8 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -16,6 +16,8 @@ import org.apache.logging.log4j.Logger;
+ //                                        per-slice IMonster and EntityHuman counts
+ //   ChunkSection block counts           water, lava, fire, and blocks that react to an entity
+ //                                        standing in them - all mirror the blocks the section holds
++//   ChunkSection.tickingBits            mirrors which positions hold a randomly ticking block, and
++//   Chunk.tickingSectionMask            promises, where a bit is clear, that the section is idle
+ //
+ // The census audit earns its keep: the site check in auditCensusSite found a real divergence in
+ // live play, where a decrement was applied to a class entityCount had no entry for.
+@@ -38,6 +40,7 @@ public final class AthenaIndexAudit {
+     private static long censusChecksNonEmpty;
+ 
+     private static int liquidCursor;
++    private static long tickingBitChecks; // Athena
+     private static long liquidChecks;
+     private static long liquidChecksNonEmpty;
+ 
+@@ -313,6 +316,12 @@ public final class AthenaIndexAudit {
+         for (int i = 0; i < sections.length; ++i) {
+             ChunkSection section = sections[i];
+ 
++            // Athena - a clear bit in the chunk's section mask promises the random tick has nothing here
++            if ((chunk.tickingSectionMask & 1 << i) == 0 && section != null && section.shouldTick()) {
++                report("section " + i + " of chunk " + chunk.locX + "," + chunk.locZ
++                        + " holds ticking blocks but the chunk's tickingSectionMask has it cleared");
++            }
++
+             if (section == null) {
+                 continue;
+             }
+@@ -341,6 +350,14 @@ public final class AthenaIndexAudit {
+                         if (block != Blocks.AIR && block.hasEntityCollisionHandler()) {
+                             ++handlers;
+                         }
++
++                        // Athena - the random tick's bitmap, position by position
++                        ++tickingBitChecks;
++                        if (section.isTickingAt(y << 8 | z << 4 | x) != block.isTicking()) {
++                            report("ticking bit at " + x + "," + y + "," + z + " of section " + i + " of chunk "
++                                    + chunk.locX + "," + chunk.locZ + " says " + !block.isTicking()
++                                    + " but the block there is " + block);
++                        }
+                     }
+                 }
+             }
+@@ -401,10 +418,11 @@ public final class AthenaIndexAudit {
+         }
+ 
+         lastSummaryTick = currentTick;
+-        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), verticalOffset={} | mismatches={}",
++        LOGGER.info("checks: census={} ({} non-empty), entityBuckets={} ({} indexed, {} entities), sectionLiquids={} ({} non-empty), tickingBits={}, verticalOffset={} | mismatches={}",
+                 censusChecks, censusChecksNonEmpty,
+                 bucketChecks, bucketChecksIndexed, bucketEntities,
+                 liquidChecks, liquidChecksNonEmpty,
++                tickingBitChecks,
+                 offsetChecks,
+                 mismatches);
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 029979452082e6a64a378af660b8a35cf3f10e67..04e487c08b2698f5171148b3f2880a43a5d4a17f 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -29,6 +29,29 @@ public class Chunk {
+ 
+     private static final Logger logger = LogManager.getLogger();
+     private final ChunkSection[] sections;
++    // Athena start - which sections the random tick has to look at, one bit per section.
++    //
++    // A set bit means "may tick"; a clear bit is a promise that the section is null or holds no
++    // ticking block, so WorldServer.tickBlocks can skip it without loading the section at all. The
++    // bits are cleared lazily - the tick clears one when it finds the section idle - and set again
++    // eagerly, from the only two ways a section can start ticking: a new section placed into the
++    // array (every such site calls setTickingSection), or a ticking block arriving in a section
++    // whose bit was cleared (the section remembers this chunk as its tickingMaskOwner). The
++    // production profile had the section walk alone at 5% of the server thread, most sections
++    // being solid stone or empty.
++    int tickingSectionMask = 0xFFFF;
++
++    void setTickingSection(int index) {
++        this.tickingSectionMask |= 1 << index;
++    }
++
++    void clearTickingSection(int index, ChunkSection section) {
++        this.tickingSectionMask &= ~(1 << index);
++        if (section != null) {
++            section.tickingMaskOwner = this;
++        }
++    }
++    // Athena end
+     private final byte[] blockBiomeArray;
+     private final int[] precipitationHeightMap;
+     private final boolean[] updateSkylightColumns;
+@@ -657,6 +680,7 @@ public class Chunk {
+                 }
+ 
+                 chunksection = this.sections[j >> 4] = new ChunkSection(j >> 4 << 4, !this.world.worldProvider.getHasNoSky());
++                this.setTickingSection(j >> 4); // Athena
+                 flag = j >= i1;
+             }
+ 
+@@ -753,6 +777,7 @@ public class Chunk {
+ 
+         if (chunksection == null) {
+             chunksection = this.sections[k >> 4] = new ChunkSection(k >> 4 << 4, !this.world.worldProvider.getHasNoSky());
++            this.setTickingSection(k >> 4); // Athena
+             this.initLighting();
+         }
+ 
+@@ -1661,6 +1686,8 @@ public class Chunk {
+                 this.sections[i] = achunksection[i];
+             }
+ 
++            this.tickingSectionMask = 0xFFFF; // Athena - every section is new
++
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+index 75fca7810e339a025e2d04fdfa19b9e54c1b69b8..812e32920c730611085110bea42690390e3b7cd0 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationBuffer.java
+@@ -297,6 +297,7 @@ public class ChunkDecorationBuffer {
+ 
+                 section = new ChunkSection(y >> 4 << 4, hasSky);
+                 sections[y >> 4] = section;
++                chunk.setTickingSection(y >> 4); // Athena - see Chunk.tickingSectionMask
+             }
+ 
+             lastSectionY = y >> 4;
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 7650f92471e06318c326c18ddaa66fa30b8a9eb6..7a461d027cac96f857f997de6e18e10a57dc9496 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -23,6 +23,21 @@ public class ChunkSection {
+     public static final int HAS_LAVA = 2;
+     public static final int HAS_FIRE = 4;
+     public static final int HAS_COLLISION_HANDLER = 8;
++
++    // Athena - one bit per position, set where the block there ticks randomly (Block.isTicking).
++    //
++    // The random tick picks three positions per section per tick and reads each one's block id
++    // only to ask whether it ticks. Those reads land at random in an 8 KB array, for every ticking
++    // section of every chunk near a player, and the production profile had the loop at 22% of the
++    // server thread - almost all of it waiting on memory. This bitmap answers the same question from
++    // 512 bytes, so the id is read only for the positions that do tick. It is kept exactly: every
++    // write of a block id goes through setType or is followed by recalcBlockCounts, the same two
++    // points that keep tickingBlockCount. Allocated with the first ticking block; null until then.
++    long[] tickingBits;
++    // Athena - the chunk whose tickingSectionMask has this section's bit cleared, if any. Set by
++    // Chunk.clearTickingSection when the tick finds this section idle, so that the first ticking
++    // block to arrive here can set the bit again. See Chunk.tickingSectionMask.
++    Chunk tickingMaskOwner;
+     // Athena end
+     private char[] blockIds;
+     private NibbleArray emittedLight;
+@@ -109,6 +124,22 @@ public class ChunkSection {
+         }
+ 
+         this.blockIds[j << 8 | k << 4 | i] = (char) Block.getStateId(iblockdata); // Athena - read the id off the state
++        // Athena start - keep the ticking bitmap and the owning chunk's section mask in step
++        int index = j << 8 | k << 4 | i;
++
++        if (block1.isTicking()) {
++            if (this.tickingBits == null) {
++                this.tickingBits = new long[64];
++            }
++
++            this.tickingBits[index >>> 6] |= 1L << index;
++            if (this.tickingMaskOwner != null) {
++                this.tickingMaskOwner.setTickingSection(this.yPos >> 4);
++            }
++        } else if (this.tickingBits != null) {
++            this.tickingBits[index >>> 6] &= ~(1L << index);
++        }
++        // Athena end
+         isDirty = true; // PaperSpigot
+     }
+ 
+@@ -188,6 +219,9 @@ public class ChunkSection {
+         this.lavaCount = 0; // Athena
+         this.fireCount = 0; // Athena
+         this.collisionHandlerCount = 0; // Athena
++        if (this.tickingBits != null) {
++            java.util.Arrays.fill(this.tickingBits, 0L); // Athena - rebuilt below
++        }
+ 
+         for (int i = 0; i < 16; ++i) {
+             for (int j = 0; j < 16; ++j) {
+@@ -198,6 +232,15 @@ public class ChunkSection {
+                         ++this.nonEmptyBlockCount;
+                         if (block.isTicking()) {
+                             ++this.tickingBlockCount;
++                            // Athena start - the bitmap, indexed the way getType(i, j, k) indexes blockIds
++                            if (this.tickingBits == null) {
++                                this.tickingBits = new long[64];
++                            }
++
++                            int index = j << 8 | k << 4 | i;
++
++                            this.tickingBits[index >>> 6] |= 1L << index;
++                            // Athena end
+                         }
+ 
+                         // Athena start
+@@ -220,7 +263,27 @@ public class ChunkSection {
+             }
+         }
+ 
++        this.notifyTickingOwner(); // Athena
++    }
++
++    // Athena start
++    /**
++     * Whether the block at this packed index ({@code y << 8 | z << 4 | x}) ticks randomly - the same
++     * answer as {@code getType(x, y, z).getBlock().isTicking()}, without reading the block id.
++     */
++    public boolean isTickingAt(int index) {
++        long[] bits = this.tickingBits;
++
++        return bits != null && (bits[index >>> 6] & 1L << index) != 0L;
++    }
++
++    // Athena - after a bulk recount the owning chunk may have to hear that this section ticks again
++    void notifyTickingOwner() {
++        if (this.tickingMaskOwner != null && this.tickingBlockCount > 0) {
++            this.tickingMaskOwner.setTickingSection(this.yPos >> 4);
++        }
+     }
++    // Athena end
+ 
+     public char[] getIdArray() {
+         return this.blockIds;
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 2e8c81e5011b21a61c03cc3ea6f14c6f679ff2e4..42e8d40a951f3cb3d0bf4fd629eaf5a740f1ecc3 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -655,24 +655,55 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     private void tickBlocks(Chunk chunk, int k, int l, int i1) { // Athena - rate passed in
+         timings.chunkTicksBlocks.startTiming(); // Spigot
+         if (i1 > 0) {
+-            for (ChunkSection chunksection : chunk.getSections()) {
+-                if (chunksection != null && chunksection.shouldTick()) {
+-                    for (int l1 = 0; l1 < i1; ++l1) {
+-                        this.updateLCG = this.updateLCG * 3 + 1013904223;
+-                        int i2 = this.updateLCG >> 2;
+-                        int j2 = i2 & 15;
+-                        int k2 = i2 >> 8 & 15;
+-                        int l2 = i2 >> 16 & 15;
++            // Athena start - walk only the sections that may tick, and read a block only where one ticks.
++            //
++            // The production profile had this loop at 22% of the server thread, nearly all of it
++            // memory latency: a section object per section, then a random char out of an 8 KB id
++            // array per sample, for every chunk near a player. Chunk.tickingSectionMask skips the
++            // sections that are null or idle without loading them, and ChunkSection.tickingBits
++            // says whether a sampled position ticks without reading its id.
++            //
++            // Nothing observable moves. Sections are still visited in ascending order and the LCG
++            // still advances three times for each ticking section, so every sample lands where it
++            // did; a sample is still skipped exactly when the block there does not tick. Both
++            // structures are kept exact at the writes (see ChunkSection.setType), so a block a
++            // random tick places is seen by the samples after it, as before.
++            //
++            // The mask is re-read after every section rather than copied once: a random tick can
++            // place a ticking block in a higher section of this chunk (a tree growing upwards), and
++            // the original loop would then tick that section later in this same pass.
++            ChunkSection[] sections = chunk.getSections();
++
++            for (int index = -1; ; ) {
++                int mask = chunk.tickingSectionMask & -1 << index + 1;
++
++                if (mask == 0) {
++                    break;
++                }
++
++                index = Integer.numberOfTrailingZeros(mask);
++                ChunkSection chunksection = sections[index];
+ 
++                if (chunksection == null || !chunksection.shouldTick()) {
++                    chunk.clearTickingSection(index, chunksection);
++                    continue;
++                }
++
++                for (int l1 = 0; l1 < i1; ++l1) {
++                    this.updateLCG = this.updateLCG * 3 + 1013904223;
++                    int i2 = this.updateLCG >> 2;
++                    int j2 = i2 & 15;
++                    int k2 = i2 >> 8 & 15;
++                    int l2 = i2 >> 16 & 15;
++
++                    if (chunksection.isTickingAt(l2 << 8 | k2 << 4 | j2)) {
+                         IBlockData iblockdata = chunksection.getType(j2, l2, k2);
+-                        Block block = iblockdata.getBlock();
+ 
+-                        if (block.isTicking()) {
+-                            block.randomTick(this, new BlockPosition(j2 + k, l2 + chunksection.getYPosition(), k2 + l), iblockdata, this.random);
+-                        }
++                        iblockdata.getBlock().randomTick(this, new BlockPosition(j2 + k, l2 + chunksection.getYPosition(), k2 + l), iblockdata, this.random);
+                     }
+                 }
+             }
++            // Athena end
+         }
+         timings.chunkTicksBlocks.stopTiming(); // Spigot
+     }
+diff --git a/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java b/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..141abf1a14c777720cd2e892f325791514b20b18
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java
+@@ -0,0 +1,147 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.Random;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - WorldServer.tickBlocks answers "does the block at this sampled position tick?" from
++ * ChunkSection.tickingBits instead of reading the block, and skips sections whose bit in
++ * Chunk.tickingSectionMask is clear without loading them.
++ *
++ * <p>Both are load-bearing in one direction. A bit that is clear where a ticking block stands
++ * means that block is never randomly ticked again - grass stops spreading, crops stop growing,
++ * leaves never decay - and nothing would ever say so. A bit set where nothing ticks would be
++ * caught by the random tick itself (it reads the block and calls randomTick on something that
++ * does not tick), so it is the clear bits these tests go after.
++ */
++public class ChunkTickingBitsTest extends AbstractTestingBase {
++
++    private static final IBlockData[] PALETTE = new IBlockData[] {
++        Blocks.AIR.getBlockData(),
++        Blocks.STONE.getBlockData(),
++        Blocks.DIRT.getBlockData(),
++        Blocks.GRASS.getBlockData(),      // ticks
++        Blocks.LEAVES.getBlockData(),     // ticks
++        Blocks.WHEAT.getBlockData(),      // ticks
++        Blocks.ICE.getBlockData(),        // ticks
++        Blocks.FIRE.getBlockData(),       // ticks
++        Blocks.WATER.getBlockData(),
++        Blocks.LAVA.getBlockData(),
++    };
++
++    private static void assertBitsAgree(ChunkSection section, String what) {
++        int ticking = 0;
++
++        for (int x = 0; x < 16; ++x) {
++            for (int y = 0; y < 16; ++y) {
++                for (int z = 0; z < 16; ++z) {
++                    boolean truth = section.getBlockByExtId(x, y, z).isTicking();
++
++                    if (truth) {
++                        ++ticking;
++                    }
++
++                    assertEquals(what + ": ticking bit at " + x + "," + y + "," + z,
++                            truth, section.isTickingAt(y << 8 | z << 4 | x));
++                }
++            }
++        }
++
++        assertEquals(what + ": shouldTick", ticking > 0, section.shouldTick());
++    }
++
++    @Test
++    public void bitsSurviveEveryWriteTransition() {
++        ChunkSection section = new ChunkSection(0, true);
++        Random random = new Random(20260923L);
++
++        assertBitsAgree(section, "empty section");
++
++        for (int write = 0; write < 20000; ++write) {
++            section.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16),
++                    PALETTE[random.nextInt(PALETTE.length)]);
++
++            if (write < 500 || write % 97 == 0) {
++                assertBitsAgree(section, "after write " + write);
++            }
++        }
++
++        assertBitsAgree(section, "after the last write");
++    }
++
++    @Test
++    public void recalcRebuildsTheBits() {
++        ChunkSection section = new ChunkSection(0, true);
++        Random random = new Random(99L);
++
++        for (int write = 0; write < 4000; ++write) {
++            section.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16),
++                    PALETTE[random.nextInt(PALETTE.length)]);
++        }
++
++        // what ChunkRegionLoader does: swap the id array, then recount
++        ChunkSection other = new ChunkSection(0, true);
++
++        for (int write = 0; write < 4000; ++write) {
++            other.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16),
++                    PALETTE[random.nextInt(PALETTE.length)]);
++        }
++
++        section.setData(other.getIdArray().clone());
++        section.recalcBlockCounts();
++        assertBitsAgree(section, "after setData and recalc");
++
++        // and the bulk constructor, which CustomChunkGenerator uses
++        assertBitsAgree(new ChunkSection(0, true, other.getIdArray().clone()), "bulk loaded section");
++    }
++
++    @Test
++    public void aClearedSectionBitComesBackWithItsFirstTickingBlock() {
++        Chunk chunk = new EmptyChunk(null, 0, 0);
++        ChunkSection section = new ChunkSection(3 << 4, true);
++
++        chunk.getSections()[3] = section;
++        section.setType(1, 2, 3, Blocks.STONE.getBlockData());
++
++        // the random tick finds it idle and clears its bit
++        chunk.clearTickingSection(3, section);
++        assertEquals(0, chunk.tickingSectionMask & 1 << 3);
++
++        // a non-ticking write must not matter; a ticking one must set the bit again
++        section.setType(4, 5, 6, Blocks.DIRT.getBlockData());
++        assertEquals(0, chunk.tickingSectionMask & 1 << 3);
++        section.setType(4, 5, 6, Blocks.GRASS.getBlockData());
++        assertTrue("grass arriving did not set the section's bit", (chunk.tickingSectionMask & 1 << 3) != 0);
++    }
++
++    @Test
++    public void aRecountThatFindsTickingBlocksSetsTheBit() {
++        Chunk chunk = new EmptyChunk(null, 0, 0);
++        ChunkSection section = new ChunkSection(5 << 4, true);
++
++        chunk.getSections()[5] = section;
++        chunk.clearTickingSection(5, section);
++
++        ChunkSection source = new ChunkSection(5 << 4, true);
++
++        source.setType(0, 0, 0, Blocks.LEAVES.getBlockData());
++        section.setData(source.getIdArray().clone());
++        section.recalcBlockCounts();
++        assertTrue("recount found leaves but left the bit clear", (chunk.tickingSectionMask & 1 << 5) != 0);
++    }
++
++    @Test
++    public void clearingOneSectionLeavesTheOthers() {
++        Chunk chunk = new EmptyChunk(null, 0, 0);
++
++        assertEquals("a new chunk must start with every section eligible", 0xFFFF, chunk.tickingSectionMask);
++        chunk.clearTickingSection(7, null);
++        assertEquals(0xFFFF & ~(1 << 7), chunk.tickingSectionMask);
++        assertFalse(new ChunkSection(0, true).isTickingAt(0));
++    }
++}

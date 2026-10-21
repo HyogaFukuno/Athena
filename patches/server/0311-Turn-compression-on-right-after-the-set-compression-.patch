@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 16:49:56 +0900
+Subject: [PATCH] Turn compression on right after the set-compression packet is
+ written
+
+The login enabled compression from a listener on that packet's write and relied on it having run
+before LoginSuccess was written. That holds when a write completes inside its flush (epoll), not
+when the kernel reports it later (io_uring). The packet is encoded by the time write returns, so
+the compressor goes in there for exactly the packets after it; the listener only sets the same
+threshold again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index c28e26f3d3e61ea08e3acf0e19a96b4bf5b829ef..fefb43c2642a3398f00bc7cbd92106a5868bdeb9 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -338,6 +338,18 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         // PandaSpigot end
+ 
+         channelfuture.addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
++        // Athena start - compression starts with the packet after this one, here and now.
++        //
++        // The login turns compression on from a listener on this packet's write, and the packets
++        // behind it relied on that listener having run by the time they were written. It runs when
++        // the write completes: on epoll that happens inside the flush, on io_uring only once the
++        // kernel reports it, by which time LoginSuccess has gone out uncompressed. The packet has
++        // been encoded by now, so the compressor goes in for exactly the packets after it; the
++        // listener's own call then finds it there and only sets the same threshold again.
++        if (packet instanceof PacketLoginOutSetCompression) {
++            this.setCompressionTreshold(((PacketLoginOutSetCompression) packet).athenaThreshold());
++        }
++        // Athena end
+         // PandaSpigot start
+         } catch (Exception e) {
+             logger.error("NetworkException: {}", player, e);
+diff --git a/src/main/java/net/minecraft/server/PacketLoginOutSetCompression.java b/src/main/java/net/minecraft/server/PacketLoginOutSetCompression.java
+index a0091e38bbfa19812eafc6b16beac36278e47a74..8f59ce3752da2f8bd080213a059de371bab22471 100644
+--- a/src/main/java/net/minecraft/server/PacketLoginOutSetCompression.java
++++ b/src/main/java/net/minecraft/server/PacketLoginOutSetCompression.java
+@@ -23,6 +23,8 @@ public class PacketLoginOutSetCompression implements Packet<PacketLoginOutListen
+         packetdataserializer.writeVarIntToBuffer(this.compressionTreshold);
+     }
+ 
++    int athenaThreshold() { return this.compressionTreshold; } // Athena - see NetworkManager.athenaWriteInLoop
++
+     public void processPacket(PacketLoginOutListener packetloginoutlistener) {
+         packetloginoutlistener.handleEnableCompression(this);
+     }

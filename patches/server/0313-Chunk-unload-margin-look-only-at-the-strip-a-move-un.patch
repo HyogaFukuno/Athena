@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 16 Oct 2026 22:13:05 +0900
+Subject: [PATCH] Chunk unload margin: look only at the strip a move uncovers,
+ make no empty instances
+
+The margin's move looked up every chunk of the new view square (289 hash lookups and list scans a
+crossing) where only the strip outside the old view square can be new; and filterChunkLoadQueue,
+widened to the margin, called getPlayerInstance(create) on every chunk of its spiral, leaving an
+empty PlayerChunk in every margin chunk for good. On the VPS SG bench movePlayer +
+filterChunkLoadQueue had become 8% of the process. The spiral now creates nothing and returns at
+once when nothing is queued, view-distance growth is centred on the managed position the
+invariant uses, and the index audit checks the view squares (in view watched, nothing past the
+margin, no instance without a player).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaIndexAudit.java b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+index dd440b85eb5d3de48c1fccdb8b6ad3b9b0082265..4620f5e568765aae62918802386d49687fdb8de8 100644
+--- a/src/main/java/net/minecraft/server/AthenaIndexAudit.java
++++ b/src/main/java/net/minecraft/server/AthenaIndexAudit.java
+@@ -443,6 +443,14 @@ public final class AthenaIndexAudit {
+         if (wrong != 0) {
+             report(wrong + " slots of PlayerChunkMap.instanceChunks disagree with the instance they mirror");
+         }
++
++        // and the view squares the chunk unload margin relies on
++        int[] squares = map.auditViewSquares();
++
++        if (squares[0] != 0 || squares[1] != 0 || squares[2] != 0) {
++            report("player view squares: " + squares[0] + " chunks in view not watched, " + squares[1]
++                    + " watched past the margin, " + squares[2] + " instances with no player");
++        }
+     }
+ 
+     /**
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 4e63d02b5c2ad157eb9c988be5f4a57f4aba0cb9..ad0e44c1a0eb281182159e0d6fe4e721ce137e07 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -129,6 +129,52 @@ public class PlayerChunkMap {
+ 
+         return wrong;
+     }
++
++    /**
++     * For the index audit only: the view squares as the margin invariant has them. Every chunk within
++     * a player's view distance of its managed position is watched by the player, none past view
++     * distance + chunkUnloadMargin is, and no instance is left without a player. Returns
++     * {missing, beyond, empty}.
++     */
++    int[] auditViewSquares() {
++        int missing = 0;
++        int beyond = 0;
++        int empty = 0;
++
++        for (EntityPlayer player : this.managedPlayers) {
++            int cx = (int) player.managedPosX >> 4;
++            int cz = (int) player.managedPosZ >> 4;
++            int r = player.viewDistance;
++
++            for (int x = cx - r; x <= cx + r; ++x) {
++                for (int z = cz - r; z <= cz + r; ++z) {
++                    PlayerChunkMap.PlayerChunk playerchunk = this.getPlayerInstance(x, z, false);
++
++                    if (playerchunk == null || !playerchunk.playersWatchingChunk.contains(player)) {
++                        ++missing;
++                    }
++                }
++            }
++        }
++
++        for (PlayerChunkMap.PlayerChunk playerchunk : this.playerInstanceList) {
++            if (playerchunk.removedFromInstanceList) {
++                continue;
++            }
++            if (playerchunk.playersWatchingChunk.isEmpty()) {
++                ++empty;
++            }
++            for (EntityPlayer player : playerchunk.playersWatchingChunk) {
++                int m = player.viewDistance + this.athenaUnloadMargin;
++
++                if (!this.overlaps(playerchunk.location.x, playerchunk.location.z, (int) player.managedPosX >> 4, (int) player.managedPosZ >> 4, m)) {
++                    ++beyond;
++                }
++            }
++        }
++
++        return new int[] {missing, beyond, empty};
++    }
+     // Athena end
+     private int playerViewRadius;
+     private long previousTotalWorldTime;
+@@ -177,11 +223,17 @@ public class PlayerChunkMap {
+         entityplayer.managedPosX = entityplayer.locX;
+         entityplayer.managedPosZ = entityplayer.locZ;
+ 
+-        // sent: the new view square, less what the player still has
++        // sent: the new view square, less what the player still has. Everything within r of the old
++        // position is watched already (it was sent when it came within r, and only goes past m), so
++        // only the strip outside the old view square is looked at, and of that only the part inside
++        // the old margin can be held already.
+         List<ChunkCoordIntPair> chunksToLoad = new ArrayList<ChunkCoordIntPair>();
+ 
+         for (int x = i - r; x <= i + r; ++x) {
+             for (int z = j - r; z <= j + r; ++z) {
++                if (this.overlaps(x, z, k, l, r)) {
++                    continue;
++                }
+                 if (this.overlaps(x, z, k, l, m)) {
+                     PlayerChunkMap.PlayerChunk playerchunk = this.getPlayerInstance(x, z, false);
+ 
+@@ -381,6 +433,17 @@ public class PlayerChunkMap {
+         this.filterChunkLoadQueue(entityplayer);
+     }
+ 
++    // Athena start - the queued coordinate at x, z, or null. The spiral used to make a PlayerChunk at
++    // every position it passed just to read its location: harmless at the view distance, where the
++    // player watches every chunk anyway, but past it (chunkUnloadMargin) it left an empty instance
++    // in every chunk of the margin, for good. A queued chunk always has an instance.
++    private ChunkCoordIntPair athenaQueuedAt(int x, int z, java.util.Set<ChunkCoordIntPair> queued) {
++        PlayerChunkMap.PlayerChunk playerchunk = this.getPlayerInstance(x, z, false);
++
++        return playerchunk != null && queued.contains(playerchunk.location) ? playerchunk.location : null;
++    }
++    // Athena end
++
+     public void filterChunkLoadQueue(EntityPlayer entityplayer) {
+         // Athena start - the snapshot is only ever probed with contains().
+         //
+@@ -389,6 +452,10 @@ public class PlayerChunkMap {
+         // step, so a view distance of 10 cost ~441 * 441 ChunkCoordIntPair.equals calls every time
+         // a player crossed 8 blocks. Nothing here depends on the snapshot's order - the order the
+         // queue is rebuilt in comes from the spiral below - so a HashSet is an exact substitute.
++        // Athena - nothing queued, nothing to keep or reorder: most moves get here with every chunk sent
++        if (entityplayer.chunkCoordIntPairQueue.isEmpty()) {
++            return;
++        }
+         java.util.Set<ChunkCoordIntPair> arraylist = new java.util.HashSet<ChunkCoordIntPair>(entityplayer.chunkCoordIntPairQueue);
+         // Athena end
+         int i = 0;
+@@ -397,11 +464,11 @@ public class PlayerChunkMap {
+         int l = (int) entityplayer.locZ >> 4;
+         int i1 = 0;
+         int j1 = 0;
+-        ChunkCoordIntPair chunkcoordintpair = this.getPlayerInstance(k, l, true).location;
++        ChunkCoordIntPair chunkcoordintpair = this.athenaQueuedAt(k, l, arraylist); // Athena
+ 
+         entityplayer.chunkCoordIntPairQueue.clear();
+         entityplayer.queuedChunkClear(); // Athena - keep the queue index in sync
+-        if (arraylist.contains(chunkcoordintpair)) {
++        if (chunkcoordintpair != null) {
+             entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
+             entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+         }
+@@ -415,8 +482,8 @@ public class PlayerChunkMap {
+                 for (int i2 = 0; i2 < k1; ++i2) {
+                     i1 += aint[0];
+                     j1 += aint[1];
+-                    chunkcoordintpair = this.getPlayerInstance(k + i1, l + j1, true).location;
+-                    if (arraylist.contains(chunkcoordintpair)) {
++                    chunkcoordintpair = this.athenaQueuedAt(k + i1, l + j1, arraylist); // Athena - no instance made for an unwatched chunk
++                    if (chunkcoordintpair != null) {
+                         entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
+                         entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+                     }
+@@ -429,8 +496,8 @@ public class PlayerChunkMap {
+         for (k1 = 0; k1 < j * 2; ++k1) {
+             i1 += this.xzDirectionsConst[i][0];
+             j1 += this.xzDirectionsConst[i][1];
+-            chunkcoordintpair = this.getPlayerInstance(k + i1, l + j1, true).location;
+-            if (arraylist.contains(chunkcoordintpair)) {
++            chunkcoordintpair = this.athenaQueuedAt(k + i1, l + j1, arraylist); // Athena - no instance made for an unwatched chunk
++            if (chunkcoordintpair != null) {
+                 entityplayer.chunkCoordIntPairQueue.add(chunkcoordintpair);
+                 entityplayer.queuedChunkAdd(chunkcoordintpair); // Athena - keep the queue index in sync
+             }
+@@ -538,8 +605,10 @@ public class PlayerChunkMap {
+                 int j1;
+ 
+                 if (j > 0) {
+-                    for (i1 = k - i; i1 <= k + i; ++i1) {
+-                        for (j1 = l - i; j1 <= l + i; ++j1) {
++                    // Athena - around the managed position; see updateViewDistance
++                    int gk = (int) entityplayer.managedPosX >> 4, gl = (int) entityplayer.managedPosZ >> 4;
++                    for (i1 = gk - i; i1 <= gk + i; ++i1) {
++                        for (j1 = gl - i; j1 <= gl + i; ++j1) {
+                             PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk = this.getPlayerInstance(i1, j1, true);
+ 
+                             if (!playerchunkmap_playerchunk.playersWatchingChunk.contains(entityplayer)) {
+@@ -576,8 +645,11 @@ public class PlayerChunkMap {
+             int cz = (int) player.locZ >> 4;
+ 
+             if (viewDistance - player.viewDistance > 0) {
+-                for (int x = cx - viewDistance; x <= cx + viewDistance; ++x) {
+-                    for (int z = cz - viewDistance; z <= cz + viewDistance; ++z) {
++                // Athena - around the managed position, like every other view square here: movePlayer
++                // takes everything within the view of it as watched already
++                int gx = (int) player.managedPosX >> 4, gz = (int) player.managedPosZ >> 4;
++                for (int x = gx - viewDistance; x <= gx + viewDistance; ++x) {
++                    for (int z = gz - viewDistance; z <= gz + viewDistance; ++z) {
+                         PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk = this.getPlayerInstance(x, z, true);
+ 
+                         if (!playerchunkmap_playerchunk.playersWatchingChunk.contains(player)) {

@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 12 Oct 2026 10:01:04 +0900
+Subject: [PATCH] Read a 1.7 client's item NBT under the 1.8 read limit
+
+AthenaLegacy17.readCompressedNbt used NBTCompressedStreamTools.readCompressed,
+which reads with NBTReadLimiter.INFINITE. Any player joining with protocol 5
+could send a few kilobytes of gzip declaring a 2^24-element int array and
+have the server allocate 64 MB per packet (the heap is 144 MB). Read it with
+the 50,000-byte limit a 1.8 client's item NBT gets instead; the declared size
+is refused before anything is allocated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17.java b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+index 25f94cbe860fff77acd878941742f16cfd7367a2..d97a70380c106e5d12485e08a8ff80c22c2e377f 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+@@ -213,7 +213,16 @@ public final class AthenaLegacy17 {
+         byte[] bytes = new byte[length];
+ 
+         in.readBytes(bytes);
+-        return NBTCompressedStreamTools.readCompressed(new ByteArrayInputStream(bytes));
++        // what a client sends: the same read limit as a 1.8 client's item NBT
++        // (PacketDataSerializer.readNBTTagCompoundFromBuffer). readCompressed reads without one, so
++        // a few kilobytes of gzip declaring a huge int or byte array had the server allocate it.
++        java.io.DataInputStream data = new java.io.DataInputStream(new java.io.BufferedInputStream(new java.util.zip.GZIPInputStream(new ByteArrayInputStream(bytes))));
++
++        try {
++            return NBTCompressedStreamTools.read((DataInput) data, new NBTReadLimiter(50000L));
++        } finally {
++            data.close();
++        }
+     }
+ 
+     // --- chat -----------------------------------------------------------------------------------
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17NbtLimitTest.java b/src/test/java/net/minecraft/server/AthenaLegacy17NbtLimitTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a674d8c3411cf6795d5d0bf61c223ce84ee2ae33
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17NbtLimitTest.java
+@@ -0,0 +1,63 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import io.netty.buffer.Unpooled;
++import java.io.ByteArrayOutputStream;
++import java.io.DataOutputStream;
++import java.util.zip.GZIPOutputStream;
++import org.junit.Test;
++
++/**
++ * Athena - a 1.7.10 client's item NBT comes gzipped, and is read under the same limit as a 1.8
++ * client's: a small packet must not get the server to allocate what the NBT merely declares.
++ */
++public class AthenaLegacy17NbtLimitTest {
++
++    /** A compound holding one int array that declares {@code length} ints and supplies none. */
++    private static PacketDataSerializer packetDeclaringIntArray(int length) throws Exception {
++        ByteArrayOutputStream gzipped = new ByteArrayOutputStream();
++        DataOutputStream nbt = new DataOutputStream(new GZIPOutputStream(gzipped));
++
++        nbt.writeByte(10);          // TAG_Compound
++        nbt.writeUTF("");
++        nbt.writeByte(11);          // TAG_Int_Array
++        nbt.writeUTF("a");
++        nbt.writeInt(length);
++        nbt.close();
++
++        PacketDataSerializer in = new PacketDataSerializer(Unpooled.buffer());
++        byte[] bytes = gzipped.toByteArray();
++
++        in.writeShort(bytes.length);
++        in.writeBytes(bytes);
++        return in;
++    }
++
++    @Test
++    public void aDeclaredHugeArrayIsRefusedBeforeItIsAllocated() throws Exception {
++        try {
++            AthenaLegacy17.readCompressedNbt(packetDeclaringIntArray((1 << 24) - 1));
++            fail("a 64 MB int array declared by a client was read");
++        } catch (RuntimeException e) {
++            // the limiter's refusal, not an end-of-stream after the array was already allocated
++            assertTrue(e.getMessage(), e.getMessage().contains("too big"));
++        }
++    }
++
++    @Test
++    public void anOrdinaryItemTagStillReads() throws Exception {
++        NBTTagCompound display = new NBTTagCompound();
++        NBTTagCompound tag = new NBTTagCompound();
++
++        display.setString("Name", "Sword");
++        tag.set("display", display);
++
++        PacketDataSerializer in = new PacketDataSerializer(Unpooled.buffer());
++
++        AthenaLegacy17.writeCompressedNbt(in, tag);
++        assertEquals("Sword", AthenaLegacy17.readCompressedNbt(in).getCompound("display").getString("Name"));
++    }
++}

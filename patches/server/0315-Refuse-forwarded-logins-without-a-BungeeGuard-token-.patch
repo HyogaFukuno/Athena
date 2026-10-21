@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 17 Oct 2026 04:08:25 +0900
+Subject: [PATCH] Refuse forwarded logins without a BungeeGuard token
+ (pandaspigot.yml bungeeGuardTokens)
+
+With bungeecord on, whoever reaches the server's port can claim any UUID; the only defence was that
+nobody but the proxy could reach it. Velocity's BUNGEEGUARD forwarding adds a bungeeguard-token
+profile property holding its forwarding secret. When bungeeGuardTokens lists tokens, a login must
+carry exactly one property whose value is one of them, compared in constant time, or it is refused
+and the real remote address is logged. The token is removed from the profile, which otherwise goes to
+every player in the tab list. No tokens configured: unchanged behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index 61efe20391fd8269f4eae6bcb44c28429c362a74..80c9fb65d1b2500a032c4b5da4909a2a0a10c012 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -13,7 +13,9 @@ import org.spongepowered.configurate.objectmapping.meta.Comment;
+ import org.spongepowered.configurate.util.MapFactories;
+ import org.spongepowered.configurate.util.NamingSchemes;
+ import java.io.File;
++import java.util.ArrayList;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
+ 
+ 
+@@ -160,6 +162,22 @@ public class PandaSpigotConfig {
+     public boolean ioUring = false;
+     // Athena end
+ 
++    // Athena start - BungeeGuard tokens; see net.minecraft.server.AthenaBungeeGuard
++    @Comment("Tokens a proxy must send to log players in, when bungeecord is on in spigot.yml.\n" +
++        "IP forwarding lets whoever reaches this server's port claim any player's UUID, an operator's\n" +
++        "included. With a token listed here, a login that does not carry one of them is refused, so\n" +
++        "only the proxy can log players in even if the port is reachable. Velocity sends the contents\n" +
++        "of its forwarding.secret file when player-info-forwarding-mode = \"BUNGEEGUARD\"; the\n" +
++        "BungeeGuard plugin does the same for BungeeCord. Keep this file private. Empty: no check.\n" +
++        "Write one token per line, as a block list - a one-line [\"...\"] list is read as a single\n" +
++        "token, brackets and all, and then no login gets in:\n" +
++        "  bungeeGuardTokens:\n" +
++        "    - the-contents-of-forwarding.secret\n" +
++        "Takes effect on restart.\n" +
++        "Default: []")
++    public List<String> bungeeGuardTokens = new ArrayList<>();
++    // Athena end
++
+     // Athena start - network compression level
+     @Comment("The zlib level (1-9) packets over the network compression threshold are compressed\n" +
+         "at. Chunks are compressed once and cached (see cacheChunkPackets) and always use the\n" +
+diff --git a/src/main/java/net/minecraft/server/AthenaBungeeGuard.java b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1fe14fec7a6264b3c0c6b09c3be05adabe130b49
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+@@ -0,0 +1,78 @@
++package net.minecraft.server;
++
++import com.mojang.authlib.properties.Property;
++import java.nio.charset.StandardCharsets;
++import java.security.MessageDigest;
++import java.util.ArrayList;
++import java.util.List;
++
++// Athena - BungeeGuard: only a proxy that holds a configured token may log players in.
++//
++// With bungeecord on in spigot.yml the proxy writes the player's address, UUID and profile
++// properties into the handshake, and the server believes them. That is all IP forwarding is: whoever
++// reaches the server's port can claim any UUID, an operator's included, and the only defence is that
++// nobody but the proxy can reach the port. A firewall rule or a bind address that goes back to its
++// default undoes that silently.
++//
++// Velocity's player-info-forwarding-mode = "BUNGEEGUARD" (and the BungeeGuard plugin for
++// BungeeCord) adds one more profile property, "bungeeguard-token", whose value is a secret the proxy
++// and the server share. When pandaspigot.yml lists tokens, a login must carry exactly one such
++// property and its value must be one of them, or the connection is refused. The token is then taken
++// out of the profile: the properties go on to every player in the tab list, so a token left in would
++// be handed to everyone online.
++final class AthenaBungeeGuard {
++
++    static final String TOKEN_PROPERTY = "bungeeguard-token";
++
++    private AthenaBungeeGuard() {
++    }
++
++    /**
++     * Checks the forwarded profile properties against the configured tokens.
++     *
++     * @param properties the properties the proxy forwarded, or null when it sent none
++     * @param tokens the accepted tokens; empty means no check
++     * @return the properties without the token, to use for the profile, or null when the login must
++     *     be refused (no token, more than one, or one that is not accepted)
++     */
++    static Property[] check(Property[] properties, List<String> tokens) {
++        if (tokens.isEmpty()) {
++            return properties;
++        }
++        if (properties == null) {
++            return null;
++        }
++        String token = null;
++        int found = 0;
++        List<Property> rest = new ArrayList<>(properties.length);
++        for (Property property : properties) {
++            if (property != null && TOKEN_PROPERTY.equals(property.getName())) {
++                token = property.getValue();
++                found++;
++            } else {
++                rest.add(property);
++            }
++        }
++        // More than one token is refused too: a client cannot get a property past the proxy, but
++        // there is no reason to guess which of several to believe
++        if (found != 1 || token == null || !accepted(token, tokens)) {
++            return null;
++        }
++        return rest.toArray(new Property[0]);
++    }
++
++    // Compares every configured token in constant time, so the time a refusal takes says nothing
++    // about how much of a token was right
++    private static boolean accepted(String token, List<String> tokens) {
++        byte[] given = token.getBytes(StandardCharsets.UTF_8);
++        boolean match = false;
++        for (String accepted : tokens) {
++            // A token pasted from a file may keep its newline; the proxy sends it without one
++            String trimmed = accepted == null ? "" : accepted.trim();
++            if (!trimmed.isEmpty() && MessageDigest.isEqual(given, trimmed.getBytes(StandardCharsets.UTF_8))) {
++                match = true;
++            }
++        }
++        return match;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index ec67ca8badefc648ac44080269f2df3d8b81939c..ce45d3599a472f5e791fac0c283d02c09c631ef5 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -109,6 +109,7 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                 // PandaSpigot end
+                 // Spigot Start
+                 //if (org.spigotmc.SpigotConfig.bungee) { // PandaSpigot - comment out, we check above!
++                    java.net.SocketAddress remoteAddress = networkManager.getSocketAddress(); // Athena - before the forwarded address replaces it
+                     String[] split = packethandshakinginsetprotocol.hostname.split("\00");
+                     if ( split.length == 3 || split.length == 4 ) {
+                         // PandaSpigot start - Unix domain socket support
+@@ -128,6 +129,21 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                     {
+                         networkManager.spoofedProfile = gson.fromJson(split[3], com.mojang.authlib.properties.Property[].class);
+                     }
++                    // Athena start - BungeeGuard: refuse a login the proxy's token does not come with
++                    java.util.List<String> guardTokens = com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().bungeeGuardTokens;
++                    if (!guardTokens.isEmpty()) {
++                        com.mojang.authlib.properties.Property[] properties = AthenaBungeeGuard.check(networkManager.spoofedProfile, guardTokens);
++                        if (properties == null) {
++                            // The address that matters is the one the connection came from, not the one it claimed
++                            org.apache.logging.log4j.LogManager.getLogger().warn("Refused a forwarded login from {}: no valid BungeeGuard token", remoteAddress);
++                            chatcomponenttext = new ChatComponentText("Unable to authenticate - no data was forwarded by the proxy.");
++                            this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
++                            this.networkManager.close(chatcomponenttext);
++                            return;
++                        }
++                        networkManager.spoofedProfile = properties;
++                    }
++                    // Athena end
+                 }
+                 // Spigot End
+                 ((LoginListener) this.networkManager.getPacketListener()).hostname = packethandshakinginsetprotocol.hostname + ":" + packethandshakinginsetprotocol.port; // CraftBukkit - set hostname
+diff --git a/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java b/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b6672bbbe7b7ff7b123a135ce64490964faa943c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java
+@@ -0,0 +1,62 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++
++import com.mojang.authlib.properties.Property;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import org.junit.Test;
++
++/**
++ * Athena - a forwarded login is accepted only with exactly one configured BungeeGuard token, and the
++ * token never reaches the profile the server builds (and hands to everyone in the tab list).
++ */
++public class AthenaBungeeGuardTest {
++
++    private static final List<String> TOKENS = Collections.singletonList("s3cret-token");
++    private static final Property TEXTURES = new Property("textures", "abc", "sig");
++
++    private static Property token(String value) {
++        return new Property(AthenaBungeeGuard.TOKEN_PROPERTY, value, "");
++    }
++
++    @Test
++    public void withoutTokensConfiguredEverythingPassesUnchanged() {
++        Property[] properties = { TEXTURES };
++        assertSame(properties, AthenaBungeeGuard.check(properties, Collections.<String>emptyList()));
++        assertNull(AthenaBungeeGuard.check(null, Collections.<String>emptyList()));
++    }
++
++    @Test
++    public void theRightTokenIsAcceptedAndRemoved() {
++        Property[] result = AthenaBungeeGuard.check(new Property[] { TEXTURES, token("s3cret-token") }, TOKENS);
++        assertArrayEquals(new Property[] { TEXTURES }, result);
++    }
++
++    @Test
++    public void anyOfSeveralTokensIsAccepted() {
++        List<String> tokens = Arrays.asList("old-token", "s3cret-token");
++        assertArrayEquals(new Property[0], AthenaBungeeGuard.check(new Property[] { token("old-token") }, tokens));
++    }
++
++    @Test
++    public void aTokenFileWithANewlineStillMatches() {
++        assertArrayEquals(new Property[0],
++            AthenaBungeeGuard.check(new Property[] { token("s3cret-token") }, Collections.singletonList("s3cret-token\n")));
++    }
++
++    @Test
++    public void loginsWithoutTheRightSingleTokenAreRefused() {
++        assertNull("no properties", AthenaBungeeGuard.check(null, TOKENS));
++        assertNull("no token", AthenaBungeeGuard.check(new Property[] { TEXTURES }, TOKENS));
++        assertNull("wrong token", AthenaBungeeGuard.check(new Property[] { token("guess") }, TOKENS));
++        assertNull("prefix of the token", AthenaBungeeGuard.check(new Property[] { token("s3cret") }, TOKENS));
++        assertNull("empty token", AthenaBungeeGuard.check(new Property[] { token("") }, TOKENS));
++        assertNull("two tokens", AthenaBungeeGuard.check(new Property[] { token("s3cret-token"), token("s3cret-token") }, TOKENS));
++        assertNull("blank configured token matches nothing",
++            AthenaBungeeGuard.check(new Property[] { token("") }, Collections.singletonList("  ")));
++    }
++}

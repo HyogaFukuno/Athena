@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 29 Aug 2026 02:42:26 +0900
+Subject: [PATCH] Gate the checkIfActive timer behind verbose timings
+
+SpigotTimings.checkIfActiveTimer wraps ActivationRange.checkIfActive, which runs
+once per entity per tick and measures a handful of field reads, an int modulo and
+one chunk lookup. The timer costs more than the work it times.
+
+Every other per-item timer in the same file is already gated - "## tickEntity",
+"## tickTileEntity", "## tickEntity - <type>", "## Scheduled Block: <name>" - and
+a name beginning with ## is only enabled when timings.verbose is set. This one was
+not gated, so it ran on every server with timings on at all, which is the default.
+
+Measured with JFR on a fixed route, all runs with timings enabled and verbose off,
+so the only difference is this line:
+
+                         without    with
+  ActivationRange.checkIfActive   2.20%  ->  0.88% of the server thread
+  TimingHandler.addDiff           3.43%  ->  2.05%
+
+For reference the same route with the stock config (verbose on) spends 5.81% of
+the server thread inside TimingHandler, and with timings switched off entirely
+checkIfActive costs 1.32% - so with this change a verbose-off server pays less for
+the check than the timer alone used to cost.
+
+This changes what /timings reports only for operators who have set
+timings.verbose to false, which is the setting that already drops the per-entity
+and per-tile-entity breakdowns. The default, timings.verbose = true, reports
+exactly what it did before.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/co/aikar/timings/SpigotTimings.java b/src/main/java/co/aikar/timings/SpigotTimings.java
+index 2a87b088f57adecf78ba0b7ea4c9358d805075f4..f64ebd2513f45763229bd79b951da5e48f39d3db 100644
+--- a/src/main/java/co/aikar/timings/SpigotTimings.java
++++ b/src/main/java/co/aikar/timings/SpigotTimings.java
+@@ -27,7 +27,13 @@ public final class SpigotTimings {
+     public static final Timing playerCommandTimer = Timings.ofSafe("playerCommand");
+ 
+     public static final Timing entityActivationCheckTimer = Timings.ofSafe("entityActivationCheck");
+-    public static final Timing checkIfActiveTimer = Timings.ofSafe("checkIfActive");
++    // Athena - mark this one verbose, the way every other per-entity timer in this file already
++    // is. It runs once per entity per tick, and what it measures is a handful of field reads, an
++    // int modulo and one chunk lookup - a JFR capture put ActivationRange.checkIfActive at 3.07%
++    // of the server thread with timings on and 1.32% with them off, so the timer cost more than
++    // half of what was attributed to the method it was timing. "## tickEntity" and
++    // "## tickTileEntity" next to it are gated for exactly this reason; this one was not.
++    public static final Timing checkIfActiveTimer = Timings.ofSafe("## checkIfActive");
+ 
+     public static final Timing antiXrayUpdateTimer = Timings.ofSafe("anti-xray - update");
+     public static final Timing antiXrayObfuscateTimer = Timings.ofSafe("anti-xray - obfuscate");
