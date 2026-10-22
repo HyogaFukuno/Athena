@@ -1,0 +1,109 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 22 Oct 2026 21:02:53 +0900
+Subject: [PATCH] Guard: a move after held-back positions is bounded by the
+ 0.03 the client may hold
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 57f7d00bba4a8f10d97de3343b879ca2c6052e19..8ebd101da31a4a09fe41c7b332aebf950abb550e 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -303,6 +303,22 @@ public final class AthenaGuard {
+     }
+ 
+     // ------------------------------------------------------------------ movement
++    // The most client ticks one movement packet can stand for. The 1.8 client (and 1.7's) sends its
++    // position whenever it has moved 0.03 from the last one it sent, and every 20th tick whatever it
++    // did, so an honest packet covers at most 20 ticks: 19 without a position, then this one. A
++    // client that holds its position back for longer - still sending its flying packets on time, so
++    // the timer check sees nothing - had every one of those ticks counted as a tick it could have
++    // walked, and could then jump as far as Spigot's 10-block moved-too-quickly limit in one packet
++    // (a "blink"). Past 20 the extra ticks are not counted: the bound is that of 20 ticks.
++    static final int MAX_TICKS = 20;
++    /** How far a client may be from the position it last sent before it must send another: sqrt(9.0E-4). */
++    private static final double HELD = 0.03D;
++
++    /** The client ticks a packet with a position covers, after ticksSincePos packets without one. */
++    static int countedTicks(int ticksSincePos) {
++        return Math.min(ticksSincePos + 1, MAX_TICKS);
++    }
++
+     /**
+      * Checks one movement packet against what the client could have done since the last accepted
+      * one. (fromX, fromY, fromZ) is the last accepted position, (x, y, z) the reported one.
+@@ -314,7 +330,7 @@ public final class AthenaGuard {
+             return true;
+         }
+ 
+-        int ticks = this.ticksSincePos + 1;
++        int ticks = countedTicks(this.ticksSincePos);
+         this.ticksSincePos = 0;
+         boolean granted = MinecraftServer.currentTick <= this.grantUntil || this.grantMoves > 0;
+         this.grantMoves = Math.max(this.grantMoves - ticks, 0);
+@@ -455,6 +471,19 @@ public final class AthenaGuard {
+             ground = true;
+             fAccel = 0.546D;
+         }
++        if (ticks > 1) {
++            // The loop lets every unreported tick speed up as if in the air, ~1.4 blocks a tick after a
++            // dozen of them. But a tick goes unreported only while the client is within HELD of the
++            // position it last sent (it compares against that one, not the last tick's), so each such
++            // tick moved under 2 x HELD, and the last tick starts within HELD of the start, with at
++            // most that motion: one tick of acceleration and the jump on top of it. Without this a
++            // client holding its position back could blink as far as moved-too-quickly allows, and
++            // the bound carried into the next packet as lastH let it run on for several more.
++            double vLast = HELD * 2.0D * 0.91D + Math.max(this.walkSpeed * 1.3D * speedMul * 0.16277136D / (0.546D * 0.546D * 0.546D), AIR_ACCEL) + (jumped ? SPRINT_JUMP : 0.0D);
++
++            v = Math.min(v, vLast);
++            maxH = Math.min(maxH, HELD + vLast);
++        }
+ 
+         if (granted) {
+             // knockback replaces the motion (an explosion adds to it); the push itself, the walk on
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index b1677331b21b20665e0db186eb51885936952e87..a1d9bc9ecb2629c1ece08050138eb59b0ba06ae8 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -243,7 +243,7 @@ public class AthenaGuardMovementTest {
+ 
+         /** A packet with a position; returns the guard's verdict. */
+         int receive(double nx, double ny, double nz) {
+-            int ticks = this.skipped + 1;
++            int ticks = AthenaGuard.countedTicks(this.skipped);
+             this.skipped = 0;
+             double dx = nx - this.x, dy = ny - this.y, dz = nz - this.z;
+             boolean groundA = groundAt(this.x, ny, this.z), groundB = groundAt(nx, ny, nz);
+@@ -408,6 +408,32 @@ public class AthenaGuardMovementTest {
+         assertTrue(this.flagsFor(1.0, true, -100, 200) > 10);
+     }
+ 
++    /**
++     * Positions held back while the flying packets keep coming on time, then one long move: every
++     * withheld tick used to count as one the client could have walked.
++     */
++    @Test
++    public void blinkIsCaught() {
++        Server s = new Server(0.5, 0, 0.5, -1);
++        // past the first few moves after seeding, which allow the air's friction
++        for (int t = 0; t < 5; ++t) {
++            assertEquals(0, s.receive(0.5, 0, 0.5));
++        }
++        for (int t = 0; t < 60; ++t) {
++            s.noPosition();
++        }
++        assertEquals(1, s.receive(9.5, 0, 0.5));
++
++        // and an honest client standing still, which reports every 20th tick, is not
++        Server still = new Server(0.5, 0, 0.5, -1);
++        for (int round = 0; round < 5; ++round) {
++            for (int t = 0; t < 19; ++t) {
++                still.noPosition();
++            }
++            assertEquals(0, still.receive(0.5, 0, 0.5));
++        }
++    }
++
+     @Test
+     public void stepAndMiniHopsAreCaught() {
+         Server s = new Server(0.5, 0, 0.5, -1);
