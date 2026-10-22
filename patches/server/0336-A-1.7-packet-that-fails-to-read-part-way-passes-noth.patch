@@ -1,0 +1,118 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 22 Oct 2026 21:24:00 +0900
+Subject: [PATCH] A 1.7 packet that fails to read part way passes nothing on
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+index 4510830aaf7f8ac8b36f0d175730a2bc03f25892..2f32c732f086f119a32dc033ea1b556ee22d4a08 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+@@ -26,8 +26,23 @@ final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
+         if (!msg.isReadable()) {
+             return;
+         }
++        // A packet that fails to read part way has its 1.8 packet already in out, and Netty passes on
++        // what is in out even when decode throws: the packet decoder was handed a truncated packet
++        // before the channel closed. Drop what this packet put there.
++        int before = out.size();
++
++        try {
++            this.decode(ctx, msg, out, new PacketDataSerializer(msg));
++        } catch (Throwable t) {
++            for (int i = out.size() - 1; i >= before; --i) {
++                io.netty.util.ReferenceCountUtil.release(out.remove(i));
++            }
++            throw t;
++        }
++    }
++
++    private void decode(ChannelHandlerContext ctx, ByteBuf msg, List<Object> out, PacketDataSerializer in) throws Exception {
+         EnumProtocol state = ctx.channel().attr(NetworkManager.attrKeyConnectionState).get();
+-        PacketDataSerializer in = new PacketDataSerializer(msg);
+         int id = in.readVarIntFromBuffer();
+ 
+         if (state == EnumProtocol.LOGIN && id == 0x01) {
+@@ -35,7 +50,7 @@ final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
+             PacketDataSerializer p = packet(ctx, id, out);
+ 
+             for (int i = 0; i < 2; ++i) {
+-                byte[] bytes = new byte[in.readShort()];
++                byte[] bytes = new byte[length(in, in.readShort())];
+ 
+                 in.readBytes(bytes);
+                 p.writeByteArray(bytes);
+@@ -48,6 +63,14 @@ final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
+         }
+     }
+ 
++    /** A length the client sent, refused when negative or past what the packet holds. */
++    private static int length(PacketDataSerializer in, int length) {
++        if (length < 0 || length > in.readableBytes()) {
++            throw new io.netty.handler.codec.DecoderException("bad length " + length + " with " + in.readableBytes() + " bytes left");
++        }
++        return length;
++    }
++
+     private static PacketDataSerializer packet(ChannelHandlerContext ctx, int id, List<Object> out) {
+         ByteBuf buf = ctx.alloc().buffer();
+         PacketDataSerializer packet = new PacketDataSerializer(buf);
+@@ -240,6 +263,10 @@ final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
+     private void pluginMessage(ChannelHandlerContext ctx, int id, PacketDataSerializer in, List<Object> out) throws Exception {
+         String channel = in.readStringFromBuffer(20);
+         int length = in.readShort();
++
++        if (length < 0) {
++            throw new io.netty.handler.codec.DecoderException("plugin message " + channel + " with length " + length);
++        }
+         PacketDataSerializer p = packet(ctx, id, out);
+ 
+         p.writeString(channel);
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+index af30a7b4fb88abbf3b30aaf0b16edcc4db837a9e..a46debf1b73bed37dfd827584648b44d4652275b 100644
+--- a/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17Test.java
+@@ -533,6 +533,43 @@ public class AthenaLegacy17Test extends AbstractTestingBase {
+         assertFalse(received.isReadable());
+     }
+ 
++    /** A packet that fails to read part way: refused, and nothing of it goes on to the packet decoder. */
++    private static void refusedWhole(EmbeddedChannel channel, PacketDataSerializer packet) {
++        try {
++            channel.writeInbound(packet);
++            throw new AssertionError("a malformed packet was read");
++        } catch (io.netty.handler.codec.DecoderException expected) {
++        }
++        assertNull("a part of the malformed packet was passed on", channel.readInbound());
++        assertEquals(0, packet.refCnt());
++    }
++
++    @Test
++    public void aPacketThatFailsPartWayIsDroppedWhole() {
++        // click window: window, slot, button, action number, mode, then an item cut off after its id
++        PacketDataSerializer click = packet(0x0E);
++        click.writeByte(1);
++        click.writeShort(3);
++        click.writeByte(0);
++        click.writeShort(7);
++        click.writeByte(0);
++        click.writeShort(1);
++        refusedWhole(this.in(), click);
++
++        // a plugin message declaring a negative length
++        PacketDataSerializer plugin = packet(0x17);
++        plugin.writeString("MC|Brand");
++        plugin.writeShort(-5);
++        refusedWhole(this.in(), plugin);
++
++        // an encryption response whose first array declares a negative length
++        EmbeddedChannel login = this.in();
++        login.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.LOGIN);
++        PacketDataSerializer encryption = packet(0x01);
++        encryption.writeShort(-1);
++        refusedWhole(login, encryption);
++    }
++
+     private static byte[] inflate(byte[] compressed, int length) throws Exception {
+         Inflater inflater = new Inflater();
+         byte[] out = new byte[length + 1];

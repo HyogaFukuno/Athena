@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 22 Oct 2026 21:24:00 +0900
+Subject: [PATCH] Warn at startup when bungeecord is on without a usable
+ BungeeGuard token
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBungeeGuard.java b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+index 2085cb4e1c594b45c28bc421fa0a560386fcdcd4..15c8ef3dfac2a5aacd9bcb3def7c6b0d09e9f4da 100644
+--- a/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaBungeeGuard.java
+@@ -61,6 +61,39 @@ final class AthenaBungeeGuard {
+         return rest.toArray(new Property[0]);
+     }
+ 
++    /**
++     * What to warn about at startup, or null when nothing. With bungeecord on and no token the
++     * forwarded UUID is believed from anyone who reaches the port, and nothing said so; a list of
++     * blank tokens, or one written as a one-line ["..."] list, refuses every login instead.
++     *
++     * @param bungee whether bungeecord is on in spigot.yml
++     * @param tokens the configured tokens
++     */
++    static String startupWarning(boolean bungee, List<String> tokens) {
++        if (!bungee) {
++            return null;
++        }
++        boolean usable = false;
++
++        for (String token : tokens) {
++            String trimmed = token == null ? "" : token.trim();
++
++            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
++                return "athena.yml bungeeGuardTokens has a token in brackets: a one-line [\"...\"] list is read as one token, brackets and all, and no login will get in. Write one token per line, as a block list.";
++            }
++            if (!trimmed.isEmpty()) {
++                usable = true;
++            }
++        }
++        if (tokens.isEmpty()) {
++            return "bungeecord is on in spigot.yml and athena.yml lists no bungeeGuardTokens: anyone who can reach this server's port can log in as any player, operators included. Set the proxy's forwarding secret in bungeeGuardTokens, or make sure only the proxy can reach the port.";
++        }
++        if (!usable) {
++            return "athena.yml bungeeGuardTokens lists only blank tokens: no login will get in.";
++        }
++        return null;
++    }
++
+     // Compares every configured token in constant time, so the time a refusal takes says nothing
+     // about how much of a token was right
+     private static boolean accepted(String token, List<String> tokens) {
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index 92954f7e831230b18b319fc495f2c1114fa775fd..4da3aecc203f37ba3a47e320626e8ffa4a6a9c04 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -211,6 +211,12 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             bindAddress = new java.net.InetSocketAddress(inetaddress, this.R());
+             }
+             athena.server.AthenaConfig.init((File) options.valueOf("athena-settings"), (File) options.valueOf("pandaspigot-settings")); // Athena - first: it moves its keys out of pandaspigot.yml
++            // Athena start - say so when forwarded logins are believed without a token
++            String bungeeGuardWarning = AthenaBungeeGuard.startupWarning(org.spigotmc.SpigotConfig.bungee, athena.server.AthenaConfig.get().bungeeGuardTokens);
++            if (bungeeGuardWarning != null) {
++                DedicatedServer.LOGGER.warn("**** " + bungeeGuardWarning);
++            }
++            // Athena end
+             com.hpfxd.pandaspigot.config.PandaSpigotConfig.init((File) options.valueOf("pandaspigot-settings"));
+             // PandaSpigot end
+             // PaperSpigot start
+diff --git a/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java b/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java
+index b6672bbbe7b7ff7b123a135ce64490964faa943c..c3b319b63b9ed2c3ba11baa61b744cf325dec5f0 100644
+--- a/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java
++++ b/src/test/java/net/minecraft/server/AthenaBungeeGuardTest.java
+@@ -1,6 +1,7 @@
+ package net.minecraft.server;
+ 
+ import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertSame;
+ 
+@@ -59,4 +60,14 @@ public class AthenaBungeeGuardTest {
+         assertNull("blank configured token matches nothing",
+             AthenaBungeeGuard.check(new Property[] { token("") }, Collections.singletonList("  ")));
+     }
++
++    @Test
++    public void startupWarnsWhenForwardedLoginsAreBelievedWithoutAToken() {
++        assertNull("bungeecord off", AthenaBungeeGuard.startupWarning(false, Collections.<String>emptyList()));
++        assertNull("a token", AthenaBungeeGuard.startupWarning(true, TOKENS));
++        assertNotNull("no token", AthenaBungeeGuard.startupWarning(true, Collections.<String>emptyList()));
++        assertNotNull("only blank tokens", AthenaBungeeGuard.startupWarning(true, Arrays.asList("", "  ")));
++        assertNotNull("a one-line list", AthenaBungeeGuard.startupWarning(true, Collections.singletonList("[\"s3cret-token\"]")));
++        assertNull("a blank beside a real one", AthenaBungeeGuard.startupWarning(true, Arrays.asList("", "s3cret-token")));
++    }
+ }
