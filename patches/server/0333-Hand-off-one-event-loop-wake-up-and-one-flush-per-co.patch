@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 22 Oct 2026 08:55:11 +0000
+Subject: [PATCH] Hand-off: one event loop wake-up and one flush per connection
+ per tick
+
+
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 92f1e449b9e0deeb081eec3cc28663100ec1d7c0..351b028d7726fc10f9c6184f3fe8842e9f0e56bb 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -776,7 +776,12 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         }
+ 
+         this.methodProfiler.startSection("root");
++        NetworkManager.athenaBeginBatch(); // Athena
++        try {
+         this.B();
++        } finally {
++            NetworkManager.athenaEndBatch(); // Athena
++        }
+         if (i - this.X >= 5000000000L) {
+             this.X = i;
+             this.r.setPlayerSample(new ServerPing.ServerPingPlayerSample(this.J(), this.I()));
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index b95e26045ed983863504c2fe829bdfce8790682b..25d8db452b648afcbc7238904c73420cecac0b1b 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -378,14 +378,12 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     // task, an offer onto Netty's shared task queue and a wake-up of the loop (an eventfd write -
+     // 1.1% of a 20-player server's CPU on the VPS, all of it on the server thread). The server
+     // thread now appends to this connection's queue and posts one drain task when the queue goes
+-    // from empty to non-empty; the drain writes everything queued, flushing exactly where the
+-    // server thread asked for a flush. Nothing waits: the first packet of a batch is posted at
+-    // once, as before.
++    // from empty to non-empty; the drain writes everything queued and flushes once at its end.
+     //
+-    // Order is what it was, flushes included. Flushes and closes from other threads go through the
+-    // same queue, so a kick message is still written and flushed before the channel closes behind
+-    // it. A drain that finds the queue empty clears the flag and looks once more, so an entry added
+-    // in between is never stranded.
++    // Order is what it was. Flushes and closes from other threads go through the same queue, and a
++    // drain flushes what it has written before it runs a close, so a kick message is still written
++    // and flushed before the channel closes behind it. A drain that finds the queue empty clears
++    // the flag and looks once more, so an entry added in between is never stranded.
+     private static final Object ATHENA_FLUSH = new Object();
+     private final Queue<Object> athenaHandOff = io.netty.util.internal.PlatformDependent.newMpscQueue();
+     private final java.util.concurrent.atomic.AtomicBoolean athenaDrainPosted = new java.util.concurrent.atomic.AtomicBoolean();
+@@ -405,8 +403,42 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         }
+     }
+ 
++    // Inside a tick the server thread only queues, and posts each connection's drain once when the
++    // tick ends. The loop drains a queue faster than the server thread fills it, so posting on the
++    // first entry still woke the loop for nearly every packet: with 20 bots, ~945 eventfd writes a
++    // second, down to ~515 this way. Other threads post at once, as before.
++    static Thread athenaBatchThread;
++    private static final java.util.ArrayList<NetworkManager> athenaToPost = new java.util.ArrayList<NetworkManager>();
++    private boolean athenaPostPending;
++
++    public static void athenaBeginBatch() {
++        athenaBatchThread = Thread.currentThread();
++    }
++
++    public static void athenaEndBatch() {
++        athenaBatchThread = null;
++        for (int i = 0, n = athenaToPost.size(); i < n; ++i) {
++            NetworkManager manager = athenaToPost.get(i);
++
++            manager.athenaPostPending = false;
++            manager.athenaPostDrain();
++        }
++        athenaToPost.clear();
++    }
++
+     private void athenaHandOff(Object entry) {
+         this.athenaHandOff.offer(entry);
++        if (Thread.currentThread() == athenaBatchThread) {
++            if (!this.athenaPostPending) {
++                this.athenaPostPending = true;
++                athenaToPost.add(this);
++            }
++            return;
++        }
++        this.athenaPostDrain();
++    }
++
++    private void athenaPostDrain() {
+         if (this.athenaDrainPosted.compareAndSet(false, true)) {
+             try {
+                 this.channel.eventLoop().execute(this.athenaDrain);
+@@ -420,16 +452,18 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     }
+ 
+     private void athenaDrainHandOff() {
++        boolean flush = false;
++
+         for (;;) {
+             Object entry;
+ 
+             while ((entry = this.athenaHandOff.poll()) != null) {
+                 if (entry == ATHENA_FLUSH) {
+-                    // Exactly where it was asked for, not once at the end of the batch: a write's
+-                    // listeners run when it is flushed, and some change the pipeline for the packets
+-                    // after it - the login's set-compression adds the compressor that way, and a
+-                    // packet written before that flush would go out uncompressed.
+-                    this.channel.flush();
++                    // Once, at the end of the batch or before a close: one write to the socket for
++                    // a tick's packets instead of one per flush (~420 to ~255 a second with 20 bots).
++                    // The set-compression no longer needs its flush here - the compressor goes in
++                    // when that packet is written; see athenaWriteInLoop.
++                    flush = true;
+                 } else if (entry instanceof Packet) {
+                     this.athenaWriteInLoop((Packet) entry, null, false, null, null);
+                 } else if (entry instanceof AthenaPendingWrite) {
+@@ -437,10 +471,19 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+ 
+                     this.athenaWriteInLoop(write.packet, write.listeners, false, write.protocol, write.channelProtocol);
+                 } else {
++                    if (flush) {
++                        flush = false;
++                        this.channel.flush();
++                    }
+                     ((Runnable) entry).run(); // a close
+                 }
+             }
+ 
++            if (flush) {
++                flush = false;
++                this.channel.flush();
++            }
++
+             this.athenaDrainPosted.set(false);
+             if (this.athenaHandOff.isEmpty() || !this.athenaDrainPosted.compareAndSet(false, true)) {
+                 break;
