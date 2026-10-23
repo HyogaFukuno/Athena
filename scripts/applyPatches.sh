@@ -4,7 +4,10 @@
 PS1="$"
 basedir="$(cd "$1" && pwd -P)"
 workdir="$basedir/base"
-gitcmd="git -c commit.gpgsign=false"
+# git am and fetch kick off auto gc/maintenance in the background; the next
+# applyPatch clones the repo just patched, and a repack under that clone
+# deletes objects out from under it
+gitcmd="git -c commit.gpgsign=false -c gc.auto=0 -c maintenance.auto=false"
 applycmd="$gitcmd am --3way --ignore-whitespace"
 # Windows detection to workaround ARG_MAX limitation
 windows="$([[ "$OSTYPE" == "cygwin" || "$OSTYPE" == "msys" ]] && echo "true" || echo "false")"
@@ -16,15 +19,20 @@ function applyPatch {
     branch=$3
     patch_folder=$4
 
-    cd "$basedir/$what"
+    cd "$basedir/$what" || return 1
     $gitcmd fetch
-    $gitcmd branch -f upstream "$branch" >/dev/null
+    $gitcmd branch -f upstream "$branch" >/dev/null || return 1
 
     cd "$basedir"
     if [ ! -d "$basedir/$target" ]; then
-        $gitcmd clone "$what" "$target"
+        if ! $gitcmd clone "$what" "$target"; then
+            echo "  Failed to clone $what into $target"
+            rm -rf "$basedir/$target"
+            return 1
+        fi
     fi
-    cd "$basedir/$target"
+    # without this a failed cd leaves the commands below resetting the parent repo
+    cd "$basedir/$target" || return 1
 
     echo "Resetting $target to $what_name..."
     $gitcmd remote rm origin > /dev/null 2>&1
@@ -32,7 +40,7 @@ function applyPatch {
     $gitcmd remote add upstream "$basedir/$what" >/dev/null 2>&1
     $gitcmd checkout master 2>/dev/null || $gitcmd checkout -b master
     $gitcmd fetch upstream >/dev/null 2>&1
-    $gitcmd reset --hard upstream/upstream
+    $gitcmd reset --hard upstream/upstream || return 1
 
     echo "  Applying patches to $target..."
 
