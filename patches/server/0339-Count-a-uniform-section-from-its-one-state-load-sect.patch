@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 23 Oct 2026 17:18:28 +0900
+Subject: [PATCH] Count a uniform section from its one state; load sections
+ without an array to throw away
+
+recalcBlockCounts visited all 4096 blocks of a shared uniform section, which
+is one state 4096 times: its counts and ticking bits now follow from that
+state. A template chunk is mostly uniform air sections, and counting them was
+about 60% of what a chunk load from the section store cost the chunk IO
+thread. ChunkRegionLoader also no longer builds each section with an 8 KB
+array of zeros that the store or a shared uniform array replaces at once.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 0241fd1fc6035fbec9d4e645e71d19592adcae45..dff1f9355f17e25227b967d633d79efad9040bc8 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -385,7 +385,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+         for (int k = 0; k < nbttaglist.size(); ++k) {
+             NBTTagCompound nbttagcompound1 = nbttaglist.get(k);
+             byte b1 = nbttagcompound1.getByte("Y");
+-            ChunkSection chunksection = new ChunkSection(b1 << 4, flag);
++            ChunkSection chunksection = ChunkSection.athenaUnfilled(b1 << 4, flag); // Athena - its ids are set just below
+ 
+             // Athena start - a template section comes from its mapped store when there is one
+             if (!this.athenaSectionFromStore(i, j, b1, chunksection, flag)) {
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 187bf360eae31424902ab8c2b30961b60874c715..dad291b89c702807fcc936cdf524fb7df1afdf7a 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -60,6 +60,22 @@ public class ChunkSection {
+ 
+     }
+ 
++    // Athena start - a section whose loader sets its ids right after (ChunkRegionLoader): without the
++    // 8 KB array of zeros the other constructor makes, which a load from the section store or a
++    // shared uniform array replaces at once. Not to be read before its ids are set.
++    static ChunkSection athenaUnfilled(int y, boolean flag) {
++        return new ChunkSection(y, flag, (Void) null);
++    }
++
++    private ChunkSection(int y, boolean flag, Void unfilled) {
++        this.yPos = y;
++        this.emittedLight = NibbleArray.light(); // shared until lit
++        if (flag) {
++            this.skyLight = NibbleArray.light(); // shared until lit
++        }
++    }
++    // Athena end
++
+     // CraftBukkit start
+     public ChunkSection(int y, boolean flag, char[] blockIds) {
+         this.yPos = y;
+@@ -307,13 +323,41 @@ public class ChunkSection {
+         int nonEmpty = 0, ticking = 0, water = 0, lava = 0, fire = 0, collision = 0;
+         long[] bits = null;
+         char[] ids = this.blockIds;
++
++        // a shared uniform section is one state 4096 times, so its counts are that state's, 4096
++        // times over, with no need to visit each block. Most of a template's sections are uniform -
++        // air above the map - and counting them was most of what a chunk load cost the chunk IO thread.
++        if (this.idsShared && ids != null) {
++            int f = flags[ids[0]];
++
++            if (f != 0) {
++                nonEmpty = 4096;
++                if ((f & FLAG_TICKING) != 0) {
++                    ticking = 4096;
++                    bits = this.tickingBits != null ? this.tickingBits : new long[64];
++                    java.util.Arrays.fill(bits, -1L);
++                }
++                if ((f & FLAG_WATER) != 0) {
++                    water = 4096;
++                } else if ((f & FLAG_LAVA) != 0) {
++                    lava = 4096;
++                } else if ((f & FLAG_FIRE) != 0) {
++                    fire = 4096;
++                }
++                if ((f & FLAG_COLLISION) != 0) {
++                    collision = 4096;
++                }
++            }
++            ids = null; // counted: skip the loop below
++        }
++
+         byte[] packed = this.packedIds;
+         java.lang.foreign.MemorySegment mapped = this.mappedIds;
+         char[] palette = this.palette;
+ 
+         // the ids read in place, whatever form they are in: unpacking them into an array first, and
+         // a branch-free loop over a histogram of the flags, both measured slower than this
+-        for (int index = 0; index < 4096; ++index) {
++        for (int index = 0; index < 4096 && !this.idsShared; ++index) { // Athena - a uniform section is counted above
+             int id;
+ 
+             if (ids != null) {
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 2935f485c482fae7899235cc4c6a800ad380077d..7e8e43caa33f555fcbea31b83da4407838d51deb 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -313,6 +313,23 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+ 
+         rawSection.setData(raw);
+         assertSameCounts("raw, any id", rawSection);
++
++        // a shared uniform section of each of them is counted from its one state, not block by
++        // block: it must come to the same counts and ticking bits
++        for (int state : special) {
++            char[] uniform = new char[4096];
++
++            java.util.Arrays.fill(uniform, (char) state);
++            for (ChunkSection section : new ChunkSection[] {new ChunkSection(0, true), ChunkSection.athenaUnfilled(0, true)}) {
++                section.setDataSharingUniform(uniform);
++                assertSameCounts("uniform " + state, section);
++            }
++
++            ChunkSection fromStore = ChunkSection.athenaUnfilled(0, true);
++
++            fromStore.athenaSetUniformIds((char) state);
++            assertSameCounts("uniform from the store " + state, fromStore);
++        }
+     }
+ 
+     // ------------------------------------------------------------------ slim NBT
