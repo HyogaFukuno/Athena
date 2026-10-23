@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 23 Oct 2026 15:05:13 +0900
+Subject: [PATCH] Timings: fastutil in place of trove
+
+The server no longer ships trove, so the timings' child map is an
+Int2ObjectOpenHashMap and fastutil is the library the API compiles against.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 44b5e9d1571c85999850703feb954c287925555b..672276a91f256d8cbeee546dc7db0859efcff965 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -29,7 +29,7 @@ dependencies {
+     api("net.kyori:adventure-text-serializer-gson:$adventureVersion")
+     api("net.kyori:adventure-text-serializer-plain:$adventureVersion")
+     // PandaSpigot end
+-    compileOnlyApi("net.sf.trove4j:trove4j:3.0.3") // provided by server
++    compileOnlyApi("it.unimi.dsi:fastutil:8.5.19") // provided by server // Athena - fastutil in place of trove
+ 
+     // bundled with Minecraft, should be kept in sync
+     api("com.google.guava:guava:17.0")
+@@ -39,7 +39,7 @@ dependencies {
+     // testing
+     testImplementation("junit:junit:4.12")
+     testImplementation("org.hamcrest:hamcrest-library:1.3")
+-    testImplementation("net.sf.trove4j:trove4j:3.0.3") // required by tests
++    testImplementation("it.unimi.dsi:fastutil:8.5.19") // required by tests // Athena - fastutil in place of trove
+ }
+ 
+ tasks {
+diff --git a/src/main/java/co/aikar/timings/TimingHandler.java b/src/main/java/co/aikar/timings/TimingHandler.java
+index 4918a17c5a26e3afa2ed7ccad60163325ba07071..c8b43dae3442fe5d5ed816b462a2014769259407 100644
+--- a/src/main/java/co/aikar/timings/TimingHandler.java
++++ b/src/main/java/co/aikar/timings/TimingHandler.java
+@@ -23,7 +23,7 @@
+  */
+ package co.aikar.timings;
+ 
+-import gnu.trove.map.hash.TIntObjectHashMap;
++import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap; // Athena - fastutil in place of trove
+ import org.bukkit.Bukkit;
+ import co.aikar.util.LoadingIntMap;
+ import co.aikar.util.LoadingMap;
+@@ -40,7 +40,7 @@ class TimingHandler implements Timing {
+     final String name;
+     final boolean verbose;
+ 
+-    final TIntObjectHashMap<TimingData> children = new LoadingIntMap<TimingData>(TimingData.LOADER);
++    final Int2ObjectOpenHashMap<TimingData> children = new LoadingIntMap<TimingData>(TimingData.LOADER);
+ 
+     final TimingData record;
+     final TimingHandler groupHandler;
+@@ -80,7 +80,7 @@ class TimingHandler implements Timing {
+         }
+ 
+         record.processTick(violated);
+-        for (TimingData handler : children.valueCollection()) {
++        for (TimingData handler : children.values()) {
+             handler.processTick(violated);
+         }
+     }
+diff --git a/src/main/java/co/aikar/timings/TimingHistoryEntry.java b/src/main/java/co/aikar/timings/TimingHistoryEntry.java
+index eac4e218b37efce30eb577908c2b8d272d95eef0..a5c5dfd87bfe06a9641f2686f1c1ba0605e0539c 100644
+--- a/src/main/java/co/aikar/timings/TimingHistoryEntry.java
++++ b/src/main/java/co/aikar/timings/TimingHistoryEntry.java
+@@ -37,7 +37,7 @@ class TimingHistoryEntry {
+         this.data = handler.record.clone();
+         children = new TimingData[handler.children.size()];
+         int i = 0;
+-        for (TimingData child : handler.children.valueCollection()) {
++        for (TimingData child : handler.children.values()) {
+             children[i++] = child.clone();
+         }
+     }
+diff --git a/src/main/java/co/aikar/util/LoadingIntMap.java b/src/main/java/co/aikar/util/LoadingIntMap.java
+index 8d0f2691944c0db7c3221524848dbd95b4904fdf..682dfff9c4cda1dfa12cf29719e2b628c6fcda3a 100644
+--- a/src/main/java/co/aikar/util/LoadingIntMap.java
++++ b/src/main/java/co/aikar/util/LoadingIntMap.java
+@@ -8,7 +8,7 @@ package co.aikar.util;
+ 
+ 
+ import com.google.common.base.Function;
+-import gnu.trove.map.hash.TIntObjectHashMap;
++import it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap; // Athena - fastutil in place of trove
+ 
+ /**
+  * Allows you to pass a Loader function that when a key is accessed that doesn't exist,
+@@ -24,7 +24,7 @@ import gnu.trove.map.hash.TIntObjectHashMap;
+  *
+  * @param <V> Value
+  */
+-public class LoadingIntMap<V> extends TIntObjectHashMap<V> {
++public class LoadingIntMap<V> extends Int2ObjectOpenHashMap<V> { // Athena - fastutil in place of trove
+     private final Function<Integer, V> loader;
+ 
+     /**

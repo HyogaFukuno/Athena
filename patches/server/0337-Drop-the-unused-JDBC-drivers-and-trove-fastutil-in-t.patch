@@ -1,0 +1,513 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 23 Oct 2026 15:05:13 +0900
+Subject: [PATCH] Drop the unused JDBC drivers and trove; fastutil in their
+ place
+
+mysql-connector-java 5.1.14 and sqlite-jdbc 3.7.2 (both from 2010) are
+removed: the server never loads them and the plugins it runs ship their own
+relocated MariaDB driver. Only a plugin using Bukkit's ebean database would
+need one, and none does.
+
+trove4j 3.0.3 is replaced by fastutil, already on the classpath, in
+DataWatcher, World/WorldServer (chunkTickList), Chunk.entityCount,
+ChunkCreatureCensus, SpawnerCreature, CaseInsensitiveMap, SpigotConfig,
+AntiXray and CraftMetaItem, keeping trove's answers for absent keys.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 6a8ef0285a3f417b88ba8d59d092238e14b587ec..550bb20c7aa1f38557c040c7d1b2db570908c1be 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -36,11 +36,8 @@ dependencies {
+     implementation("commons-codec:commons-codec:1.9")
+     implementation("com.google.guava:guava:17.0")
+     implementation("com.google.code.gson:gson:2.2.4")
+-    implementation("net.sf.trove4j:trove4j:3.0.3")
+     implementation("net.sf.jopt-simple:jopt-simple:3.2")
+ 
+-    implementation("org.xerial:sqlite-jdbc:3.7.2")
+-    implementation("mysql:mysql-connector-java:5.1.14")
+ 
+     // PandaSpigot start - Use TerminalConsoleAppender
+     implementation("net.minecrell:terminalconsoleappender:1.3.0")
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index be38f8999a74d7bfbda909e49af7ad4ad57b2db5..b245c953bb6ddf588d2c0f787bc6dde2c2cbd333 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -137,7 +137,7 @@ public class Chunk {
+     // question from the chunk itself. Volatile because a QUEUED lookup, if a plugin ever makes one,
+     // may come from another thread, and the queue must be seen whole once the field is seen.
+     private volatile ConcurrentLinkedQueue<BlockPosition> tileEntityPosQueue;
+-    protected gnu.trove.map.hash.TObjectIntHashMap<Class> entityCount = new gnu.trove.map.hash.TObjectIntHashMap<Class>(); // Spigot
++    protected it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class> entityCount = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class>(); // Spigot // Athena - fastutil in place of trove
+     // Athena - true while this chunk's tally is folded into the world's creature census. Set only
+     // by ChunkCreatureCensus, at the points where the chunk enters or leaves the provider's map.
+     boolean inCreatureCensus;
+@@ -1107,7 +1107,7 @@ public class Chunk {
+         // chunk: a chicken jockey loses its rider, a wolf or ocelot is tamed, a mob picks up loot.
+         // Asking it a second time in removeEntityAtIndex can therefore answer differently from the
+         // way it answers here, and the pair stops being symmetric - a decrement runs for an entity
+-        // that was never incremented, or an increment is never taken back out. Trove's adjustValue
++        // that was never incremented, or an increment is never taken back out. The decrement below
+         // silently does nothing when the key is absent, so entityCount hides half of that, but the
+         // census applies its adjustment unconditionally and drifts away from the sum it mirrors.
+         // Record the decision once, here, and let removal follow it instead of re-deciding.
+@@ -1126,7 +1126,7 @@ public class Chunk {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+                 if ( AthenaIndexAudit.enabled() ) AthenaIndexAudit.auditCensusSite( this, "Chunk.addEntity", creatureType.getCreatureClass(), false ); // Athena - audit hook
+-                this.entityCount.adjustOrPutValue( creatureType.getCreatureClass(), 1, 1 );
++                this.entityCount.addTo( creatureType.getCreatureClass(), 1 ); // Athena - fastutil: absent counts from 0
+                 if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), 1 ); // Athena - keep the world total in step
+             }
+         }
+@@ -1201,7 +1201,7 @@ public class Chunk {
+             if ( creatureType.getCreatureClass().isAssignableFrom( entity.getClass() ) )
+             {
+                 if ( AthenaIndexAudit.enabled() ) AthenaIndexAudit.auditCensusSite( this, "Chunk.removeEntityAtIndex", creatureType.getCreatureClass(), true ); // Athena - audit hook
+-                this.entityCount.adjustValue( creatureType.getCreatureClass(), -1 );
++                if ( this.entityCount.containsKey( creatureType.getCreatureClass() ) ) this.entityCount.addTo( creatureType.getCreatureClass(), -1 ); // Athena - fastutil: as trove's adjustValue, nothing when absent
+                 if ( this.inCreatureCensus ) this.world.getCreatureCensus().adjust( creatureType.getCreatureClass(), -1 ); // Athena - keep the world total in step
+             }
+         }
+diff --git a/src/main/java/net/minecraft/server/ChunkCreatureCensus.java b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+index 29cb8bd09575379960c709c58a04de4ef2256cb5..508e1aedccb63d08232ecb1e8705282e2dece027 100644
+--- a/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
++++ b/src/main/java/net/minecraft/server/ChunkCreatureCensus.java
+@@ -1,7 +1,8 @@
+ package net.minecraft.server;
+ 
+-import gnu.trove.iterator.TObjectIntIterator;
+-import gnu.trove.map.hash.TObjectIntHashMap;
++import it.unimi.dsi.fastutil.objects.Object2IntMap;
++import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
++import it.unimi.dsi.fastutil.objects.ObjectIterator;
+ import java.util.Collection;
+ 
+ /**
+@@ -30,11 +31,11 @@ import java.util.Collection;
+  */
+ public final class ChunkCreatureCensus {
+ 
+-    private final TObjectIntHashMap<Class> counts = new TObjectIntHashMap<Class>();
++    private final Object2IntOpenHashMap<Class> counts = new Object2IntOpenHashMap<Class>();
+ 
+     /** The sum for one creature class. Zero when nothing of that class is loaded. */
+     public int count(Class creatureClass) {
+-        return this.counts.get(creatureClass);
++        return this.counts.getInt(creatureClass);
+     }
+ 
+     /** Applies one chunk-level change. Called only while the chunk is in the provider's map. */
+@@ -43,7 +44,7 @@ public final class ChunkCreatureCensus {
+             return;
+         }
+ 
+-        int now = this.counts.adjustOrPutValue(creatureClass, delta, delta);
++        int now = this.counts.addTo(creatureClass, delta) + delta; // addTo answers the value before
+ 
+         if (now == 0) {
+             this.counts.remove(creatureClass);
+@@ -71,13 +72,13 @@ public final class ChunkCreatureCensus {
+     }
+ 
+     private void fold(Chunk chunk, int sign) {
+-        // Iterate rather than calling keys(), which builds an Object[] per call. This runs on every
++        // A fast iterator hands back one reused entry rather than one per mapping. This runs on every
+         // chunk load and unload, and the audit runs it over every loaded chunk once a tick.
+-        TObjectIntIterator<Class> iterator = chunk.entityCount.iterator();
++        ObjectIterator<Object2IntMap.Entry<Class>> iterator = chunk.entityCount.object2IntEntrySet().fastIterator();
+ 
+         while (iterator.hasNext()) {
+-            iterator.advance();
+-            this.adjust(iterator.key(), sign * iterator.value());
++            Object2IntMap.Entry<Class> entry = iterator.next();
++            this.adjust(entry.getKey(), sign * entry.getIntValue());
+         }
+     }
+ 
+@@ -99,23 +100,17 @@ public final class ChunkCreatureCensus {
+     public String describeDifference(ChunkCreatureCensus expected) {
+         StringBuilder builder = new StringBuilder();
+ 
+-        TObjectIntIterator<Class> wanted = expected.counts.iterator();
++        for (Object2IntMap.Entry<Class> wanted : expected.counts.object2IntEntrySet()) {
++            int have = this.counts.getInt(wanted.getKey());
+ 
+-        while (wanted.hasNext()) {
+-            wanted.advance();
+-            int have = this.counts.get(wanted.key());
+-
+-            if (wanted.value() != have) {
+-                builder.append("\n  ").append(wanted.key().getName()).append(": tracked ").append(have).append(", actual ").append(wanted.value());
++            if (wanted.getIntValue() != have) {
++                builder.append("\n  ").append(wanted.getKey().getName()).append(": tracked ").append(have).append(", actual ").append(wanted.getIntValue());
+             }
+         }
+ 
+-        TObjectIntIterator<Class> tracked = this.counts.iterator();
+-
+-        while (tracked.hasNext()) {
+-            tracked.advance();
+-            if (!expected.counts.containsKey(tracked.key())) {
+-                builder.append("\n  ").append(tracked.key().getName()).append(": tracked ").append(tracked.value()).append(", actual 0");
++        for (Object2IntMap.Entry<Class> tracked : this.counts.object2IntEntrySet()) {
++            if (!expected.counts.containsKey(tracked.getKey())) {
++                builder.append("\n  ").append(tracked.getKey().getName()).append(": tracked ").append(tracked.getIntValue()).append(", actual 0");
+             }
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/DataWatcher.java b/src/main/java/net/minecraft/server/DataWatcher.java
+index 05ac43db5c6e6ea8554e44cb637ff06a61f174b6..efe9fbd0763add9033ca766fd0e15da3b7dbcedd 100644
+--- a/src/main/java/net/minecraft/server/DataWatcher.java
++++ b/src/main/java/net/minecraft/server/DataWatcher.java
+@@ -17,11 +17,14 @@ public class DataWatcher {
+     private final Entity owner;
+     private boolean isBlank = true;
+     // Spigot Start
+-    private static final gnu.trove.map.TObjectIntMap classToId = new gnu.trove.map.hash.TObjectIntHashMap( 10, 0.5f, -1 );
+-    private final gnu.trove.map.TIntObjectMap dataValues = new gnu.trove.map.hash.TIntObjectHashMap( 10, 0.5f, -1 );
++    // Athena start - fastutil in place of trove: the same primitive-keyed maps from the library the
++    // server already uses everywhere else, and Map views without a decorator in between
++    private static final it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class<?>> classToId = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class<?>>( 10, 0.5f );
++    private final it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<DataWatcher.WatchableObject> dataValues = new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<DataWatcher.WatchableObject>( 10, 0.5f );
+     // These exist as an attempt at backwards compatability for (broken) NMS plugins
+-    private static final Map<Class<?>, Integer> dataTypes = gnu.trove.TDecorators.wrap( classToId );
+-    private final Map<Integer, DataWatcher.WatchableObject> watchedObjects = gnu.trove.TDecorators.wrap( dataValues );
++    private static final Map<Class<?>, Integer> dataTypes = classToId;
++    private final Map<Integer, DataWatcher.WatchableObject> watchedObjects = dataValues;
++    // Athena end
+     // Spigot End
+     // Athena start - index the watched objects by id, and remember which ones are dirty.
+     //
+@@ -53,7 +56,7 @@ public class DataWatcher {
+     boolean registrationLocked; // PandaSpigot
+     public <T> void addObject(int i, T t0) {
+         if (registrationLocked) throw new IllegalStateException("Registering datawatcher object after entity initialization"); // PandaSpigot
+-        int integer = classToId.get(t0.getClass()); // Spigot
++        int integer = classToId.getInt(t0.getClass()); // Spigot
+ 
+         if (integer == -1) { // Spigot
+             throw new IllegalArgumentException("Unknown data type: " + t0.getClass());
+@@ -143,7 +146,7 @@ public class DataWatcher {
+             return this.byId[i];
+         }
+ 
+-        return (WatchableObject) this.dataValues.get(i);
++        return this.dataValues.get(i);
+         // PandaSpigot end
+     }
+ 
+@@ -241,7 +244,7 @@ public class DataWatcher {
+     // Athena start - the pre-index path, kept for the case the mask cannot represent
+     private List<DataWatcher.WatchableObject> getChangedSlow() {
+         ArrayList arraylist = null;
+-        Iterator iterator = this.dataValues.valueCollection().iterator();
++        Iterator iterator = this.dataValues.values().iterator();
+ 
+         while (iterator.hasNext()) {
+             DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
+@@ -272,7 +275,7 @@ public class DataWatcher {
+ 
+     public void writeTo(PacketDataSerializer packetdataserializer) throws IOException {
+         // this.f.readLock().lock(); // PandaSpigot
+-        Iterator iterator = this.dataValues.valueCollection().iterator(); // Spigot
++        Iterator iterator = this.dataValues.values().iterator(); // Spigot
+ 
+         while (iterator.hasNext()) {
+             DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
+@@ -289,7 +292,7 @@ public class DataWatcher {
+ 
+         // this.f.readLock().lock(); // PandaSpigot
+ 
+-        arraylist.addAll(this.dataValues.valueCollection()); // Spigot
++        arraylist.addAll(this.dataValues.values()); // Spigot
+         // Spigot start - copy ItemStacks to prevent ConcurrentModificationExceptions
+         for ( int i = 0; i < arraylist.size(); i++ )
+         {
+@@ -428,6 +431,7 @@ public class DataWatcher {
+ 
+     static {
+         // Spigot Start - remove valueOf
++        classToId.defaultReturnValue(-1); // Athena - an unknown type answers -1, as trove's no-entry value did
+         classToId.put(Byte.class, 0);
+         classToId.put(Short.class, 1);
+         classToId.put(Integer.class, 2);
+diff --git a/src/main/java/net/minecraft/server/ServerStatisticManager.java b/src/main/java/net/minecraft/server/ServerStatisticManager.java
+index 717809b413c372d6962860c364b60acca7e53680..96517d983bc9f22eeae9d3c73af8b3e0a87539a7 100644
+--- a/src/main/java/net/minecraft/server/ServerStatisticManager.java
++++ b/src/main/java/net/minecraft/server/ServerStatisticManager.java
+@@ -36,7 +36,7 @@ public class ServerStatisticManager extends StatisticManager {
+         for ( String name : org.spigotmc.SpigotConfig.forcedStats.keySet() )
+         {
+             StatisticWrapper wrapper = new StatisticWrapper();
+-            wrapper.setIntegerValue( org.spigotmc.SpigotConfig.forcedStats.get( name ) );
++            wrapper.setIntegerValue( org.spigotmc.SpigotConfig.forcedStats.getInt( name ) /* Athena - fastutil */ );
+             statsData.put( StatisticList.getStatistic( name ), wrapper );
+         }
+         // Spigot end
+diff --git a/src/main/java/net/minecraft/server/SpawnerCreature.java b/src/main/java/net/minecraft/server/SpawnerCreature.java
+index e04dd3b14e9b0407d22a6e0b17effc821fa09bf7..ee3c2c2e2e7d15f595a0b44b4bd3eb8754a04917 100644
+--- a/src/main/java/net/minecraft/server/SpawnerCreature.java
++++ b/src/main/java/net/minecraft/server/SpawnerCreature.java
+@@ -42,7 +42,7 @@ public final class SpawnerCreature {
+             int z = LongHash.lsw( coord );
+             if ( !server.chunkProviderServer.unloadQueue.contains( coord ) && server.isChunkLoaded( x, z, true ) )
+             {
+-                i += server.getChunkAt( x, z ).entityCount.get( oClass );
++                i += server.getChunkAt( x, z ).entityCount.getInt( oClass ); // Athena - fastutil
+             }
+         }
+         return i;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 816cc67e2e95dbba5b1015965b4476e386fafba6..73ef85952e77665ca848a650b1ee1298d153ad3f 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -130,7 +130,7 @@ public abstract class World implements IBlockAccess {
+ 
+     // Spigot start
+     private boolean guardEntityList;
+-    protected final gnu.trove.map.hash.TLongShortHashMap chunkTickList;
++    protected final it.unimi.dsi.fastutil.longs.Long2ShortOpenHashMap chunkTickList; // Athena - fastutil in place of trove
+     protected float growthOdds = 100;
+     protected float modifiedOdds = 100;
+     private final byte chunkTickRadius;
+@@ -219,8 +219,11 @@ public abstract class World implements IBlockAccess {
+         // CraftBukkit end
+         // Spigot start
+         this.chunkTickRadius = (byte) ( ( this.getServer().getViewDistance() < 7 ) ? this.getServer().getViewDistance() : 7 );
+-        this.chunkTickList = new gnu.trove.map.hash.TLongShortHashMap( spigotConfig.chunksPerTick * 5, 0.7f, Long.MIN_VALUE, Short.MIN_VALUE );
+-        this.chunkTickList.setAutoCompactionFactor( 0 );
++        // Athena start - fastutil in place of trove; a fastutil map never shrinks on remove, as the
++        // auto compaction factor of 0 kept trove's from doing, and a missing key answers Short.MIN_VALUE
++        this.chunkTickList = new it.unimi.dsi.fastutil.longs.Long2ShortOpenHashMap( spigotConfig.chunksPerTick * 5, 0.7f );
++        this.chunkTickList.defaultReturnValue( Short.MIN_VALUE );
++        // Athena end
+         // Spigot end
+ 
+         this.ambientTickCountdown = this.random.nextInt(12000);
+@@ -3209,7 +3212,7 @@ public abstract class World implements IBlockAccess {
+                 int dx = ( random.nextBoolean() ? 1 : -1 ) * random.nextInt( randRange );
+                 int dz = ( random.nextBoolean() ? 1 : -1 ) * random.nextInt( randRange );
+                 long hash = chunkToKey( dx + j, dz + k );
+-                if ( !chunkTickList.contains( hash ) && this.chunkProvider.isChunkLoaded(dx + j, dz + k ) )
++                if ( !chunkTickList.containsKey( hash ) && this.chunkProvider.isChunkLoaded(dx + j, dz + k ) )
+                 {
+                     chunkTickList.put( hash, (short) -1 ); // no players
+                 }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 2a2db852605f0051024d07c7c39cc620abe4b4f9..a34fa936824f4c10e24497320eec77c45872e260 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -397,11 +397,10 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         super.updateBlocks();
+         if (this.worldData.getType() == WorldType.DEBUG_ALL_BLOCK_STATES) {
+             // Spigot start
+-           gnu.trove.iterator.TLongShortIterator iterator = this.chunkTickList.iterator();
++           it.unimi.dsi.fastutil.longs.LongIterator iterator = this.chunkTickList.keySet().iterator(); // Athena - fastutil
+ 
+             while (iterator.hasNext()) {
+-                iterator.advance();
+-                long chunkCoord = iterator.key();
++                long chunkCoord = iterator.nextLong();
+ 
+                 this.getChunkAt(World.keyToX( chunkCoord ), World.keyToZ( chunkCoord )).b(false);
+                 // Spigot end
+@@ -417,10 +416,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             //    int k = chunkcoordintpair1.x * 16;
+             //    int l = chunkcoordintpair1.z * 16;
+             // Spigot start
+-            for (gnu.trove.iterator.TLongShortIterator iter = chunkTickList.iterator(); iter.hasNext(); )
++            for (it.unimi.dsi.fastutil.longs.LongIterator iter = chunkTickList.keySet().iterator(); iter.hasNext(); ) // Athena - fastutil
+             {
+-                iter.advance();
+-                long chunkCoord = iter.key();
++                long chunkCoord = iter.nextLong();
+                 int chunkX = World.keyToX( chunkCoord );
+                 int chunkZ = World.keyToZ( chunkCoord );
+                 // If unloaded, or in procedd of being unloaded, drop it
+@@ -534,18 +532,16 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+     private void tickSpigotChunkTickSelection() {
+         if (this.worldData.getType() == WorldType.DEBUG_ALL_BLOCK_STATES) {
+-            gnu.trove.iterator.TLongShortIterator iterator = this.chunkTickList.iterator();
++            it.unimi.dsi.fastutil.longs.LongIterator iterator = this.chunkTickList.keySet().iterator(); // Athena - fastutil
+             while (iterator.hasNext()) {
+-                iterator.advance();
+-                long chunkCoord = iterator.key();
++                long chunkCoord = iterator.nextLong();
+                 this.getChunkAt(World.keyToX(chunkCoord), World.keyToZ(chunkCoord)).b(false);
+             }
+         } else {
+             int randomTickSpeed = this.getGameRules().getInt("randomTickSpeed"); // Athena - hoisted; see tickPandaChunkTickSelection
+ 
+-            for (gnu.trove.iterator.TLongShortIterator iterator = this.chunkTickList.iterator(); iterator.hasNext(); ) {
+-                iterator.advance();
+-                long chunkCoord = iterator.key();
++            for (it.unimi.dsi.fastutil.longs.LongIterator iterator = this.chunkTickList.keySet().iterator(); iterator.hasNext(); ) { // Athena - fastutil
++                long chunkCoord = iterator.nextLong();
+                 int chunkX = World.keyToX(chunkCoord);
+                 int chunkZ = World.keyToZ(chunkCoord);
+                 // If unloaded, or in process of being unloaded, drop it
+diff --git a/src/main/java/org/bukkit/craftbukkit/inventory/CraftMetaItem.java b/src/main/java/org/bukkit/craftbukkit/inventory/CraftMetaItem.java
+index f5f8d3d682397e60bbb3caea9c598daa3ec4914c..8ea6fd475270b9bee55a21331cdc3bc9983af497 100644
+--- a/src/main/java/org/bukkit/craftbukkit/inventory/CraftMetaItem.java
++++ b/src/main/java/org/bukkit/craftbukkit/inventory/CraftMetaItem.java
+@@ -286,8 +286,8 @@ class CraftMetaItem implements ItemMeta, Repairable {
+             NBTTagList nbttaglist = tag.getList(ATTRIBUTES.NBT, 10);
+ 
+             // Spigot start
+-            gnu.trove.map.hash.TObjectDoubleHashMap<String> attributeTracker = new gnu.trove.map.hash.TObjectDoubleHashMap<String>();
+-            gnu.trove.map.hash.TObjectDoubleHashMap<String> attributeTrackerX = new gnu.trove.map.hash.TObjectDoubleHashMap<String>();
++            it.unimi.dsi.fastutil.objects.Object2DoubleOpenHashMap<String> attributeTracker = new it.unimi.dsi.fastutil.objects.Object2DoubleOpenHashMap<String>(); // Athena - fastutil in place of trove
++            it.unimi.dsi.fastutil.objects.Object2DoubleOpenHashMap<String> attributeTrackerX = new it.unimi.dsi.fastutil.objects.Object2DoubleOpenHashMap<String>(); // Athena - fastutil in place of trove
+             Map<String, IAttribute> attributesByName = new HashMap<String, IAttribute>();
+             attributeTracker.put( "generic.maxHealth", 20.0 );
+             attributesByName.put( "generic.maxHealth", GenericAttributes.maxHealth );
+@@ -354,7 +354,7 @@ class CraftMetaItem implements ItemMeta, Repairable {
+                 String name = nbtTagCompound.getString( ATTRIBUTES_IDENTIFIER.NBT );
+                 if ( attributeTracker.containsKey( name ) )
+                 {
+-                    double val = attributeTracker.get( name );
++                    double val = attributeTracker.getDouble( name );
+                     val += nbtTagCompound.getDouble( ATTRIBUTES_VALUE.NBT );
+                     if ( val != attributesByName.get( name ).clampValue( val ) )
+                     {
+@@ -366,15 +366,15 @@ class CraftMetaItem implements ItemMeta, Repairable {
+             }
+             for ( String name : attributeTracker.keySet() )
+             {
+-                attributeTrackerX.put( name, attributeTracker.get( name ) );
++                attributeTrackerX.put( name, attributeTracker.getDouble( name ) );
+             }
+             for ( NBTTagCompound nbtTagCompound : op1 )
+             {
+                 String name = nbtTagCompound.getString( ATTRIBUTES_IDENTIFIER.NBT );
+                 if ( attributeTracker.containsKey( name ) )
+                 {
+-                    double val = attributeTracker.get( name );
+-                    double valX = attributeTrackerX.get( name );
++                    double val = attributeTracker.getDouble( name );
++                    double valX = attributeTrackerX.getDouble( name );
+                     val += valX * nbtTagCompound.getDouble( ATTRIBUTES_VALUE.NBT );
+                     if ( val != attributesByName.get( name ).clampValue( val ) )
+                     {
+@@ -389,7 +389,7 @@ class CraftMetaItem implements ItemMeta, Repairable {
+                 String name = nbtTagCompound.getString( ATTRIBUTES_IDENTIFIER.NBT );
+                 if ( attributeTracker.containsKey( name ) )
+                 {
+-                    double val = attributeTracker.get( name );
++                    double val = attributeTracker.getDouble( name );
+                     val += val * nbtTagCompound.getDouble( ATTRIBUTES_VALUE.NBT );
+                     if ( val != attributesByName.get( name ).clampValue( val ) )
+                     {
+diff --git a/src/main/java/org/spigotmc/AntiXray.java b/src/main/java/org/spigotmc/AntiXray.java
+index 387f040696fea7dd60b1f0455ce41f64a3ed86f4..1d8f8ac45c4279d3f9dc5ba24024966e220948aa 100644
+--- a/src/main/java/org/spigotmc/AntiXray.java
++++ b/src/main/java/org/spigotmc/AntiXray.java
+@@ -1,7 +1,5 @@
+ package org.spigotmc;
+ 
+-import gnu.trove.set.TByteSet;
+-import gnu.trove.set.hash.TByteHashSet;
+ import net.minecraft.server.Block;
+ import net.minecraft.server.BlockPosition;
+ import net.minecraft.server.Blocks;
+@@ -37,7 +35,7 @@ public class AntiXray
+         }
+ 
+         // For every block
+-        TByteSet blocks = new TByteHashSet();
++        it.unimi.dsi.fastutil.bytes.ByteOpenHashSet blocks = new it.unimi.dsi.fastutil.bytes.ByteOpenHashSet(); // Athena - fastutil in place of trove
+         for ( Integer i : config.hiddenBlocks )
+         {
+             Block block = Block.getById( i );
+@@ -49,7 +47,7 @@ public class AntiXray
+             }
+         }
+         // Bake it to a flat array of replacements
+-        replacementOres = blocks.toArray();
++        replacementOres = blocks.toByteArray(); // Athena - fastutil
+     }
+ 
+     /**
+diff --git a/src/main/java/org/spigotmc/CaseInsensitiveHashingStrategy.java b/src/main/java/org/spigotmc/CaseInsensitiveHashingStrategy.java
+index 1ae1f107116f38d4c302902b5bf2dc054279e2c9..40ff2467c0372aaab45ba3aee75f57d73140d897 100644
+--- a/src/main/java/org/spigotmc/CaseInsensitiveHashingStrategy.java
++++ b/src/main/java/org/spigotmc/CaseInsensitiveHashingStrategy.java
+@@ -1,19 +1,22 @@
+ package org.spigotmc;
+ 
+-import gnu.trove.strategy.HashingStrategy;
++import it.unimi.dsi.fastutil.Hash; // Athena - fastutil in place of trove
+ 
+ 
+-class CaseInsensitiveHashingStrategy implements HashingStrategy {
++class CaseInsensitiveHashingStrategy implements Hash.Strategy<String> { // Athena - fastutil in place of trove
+ 
+     static final CaseInsensitiveHashingStrategy INSTANCE = new CaseInsensitiveHashingStrategy();
+ 
+     @Override
+-    public int computeHashCode(Object object) {
+-        return ((String) object).toLowerCase().hashCode();
++    public int hashCode(String object) { // Athena - fastutil's name; fastutil asks for the null key too
++        return object == null ? 0 : object.toLowerCase().hashCode();
+     }
+ 
+     @Override
+-    public boolean equals(Object o1, Object o2) {
+-        return o1.equals(o2) || (o1 instanceof String && o2 instanceof String && ((String) o1).toLowerCase().equals(((String) o2).toLowerCase()));
++    public boolean equals(String o1, String o2) { // Athena - fastutil compares against null to find the null key
++        if (o1 == null || o2 == null) {
++            return o1 == o2;
++        }
++        return o1.equals(o2) || o1.toLowerCase().equals(o2.toLowerCase());
+     }
+ }
+diff --git a/src/main/java/org/spigotmc/CaseInsensitiveMap.java b/src/main/java/org/spigotmc/CaseInsensitiveMap.java
+index 08f946f600c35500d0392c72fade1969f3273961..ba1539da0fc6b98a5ec06c2cdb56fc39ec1f4e9a 100644
+--- a/src/main/java/org/spigotmc/CaseInsensitiveMap.java
++++ b/src/main/java/org/spigotmc/CaseInsensitiveMap.java
+@@ -1,16 +1,16 @@
+ package org.spigotmc;
+ 
+-import gnu.trove.map.hash.TCustomHashMap;
++import it.unimi.dsi.fastutil.objects.Object2ObjectOpenCustomHashMap; // Athena - fastutil in place of trove
+ import java.util.Map;
+ 
+ 
+-public class CaseInsensitiveMap<V> extends TCustomHashMap<String, V> {
++public class CaseInsensitiveMap<V> extends Object2ObjectOpenCustomHashMap<String, V> { // Athena - fastutil in place of trove
+ 
+     public CaseInsensitiveMap() {
+         super(CaseInsensitiveHashingStrategy.INSTANCE);
+     }
+ 
+     public CaseInsensitiveMap(Map<? extends String, ? extends V> map) {
+-        super(CaseInsensitiveHashingStrategy.INSTANCE, map);
++        super(map, CaseInsensitiveHashingStrategy.INSTANCE); // Athena - fastutil takes the map first
+     }
+ }
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+index d258f01a8469eb1a42f4e8664af33d5f4cd128eb..3cfe3d0e8a63b2db785b5a748dbdf06dbed13edf 100644
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -14,7 +14,6 @@ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.TimeUnit;
+ import java.util.logging.Level;
+-import gnu.trove.map.hash.TObjectIntHashMap;
+ import com.google.common.collect.Lists;
+ import net.minecraft.server.AttributeRanged;
+ import net.minecraft.server.GenericAttributes;
+@@ -285,7 +284,7 @@ public class SpigotConfig
+     }
+ 
+     public static boolean disableStatSaving;
+-    public static TObjectIntHashMap<String> forcedStats = new TObjectIntHashMap<String>();
++    public static it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<String> forcedStats = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<String>(); // Athena - fastutil in place of trove
+     private static void stats()
+     {
+         disableStatSaving = getBoolean( "stats.disable-saving", false );
