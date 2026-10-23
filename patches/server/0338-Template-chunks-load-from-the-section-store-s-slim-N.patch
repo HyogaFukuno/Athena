@@ -1,0 +1,406 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 23 Oct 2026 16:28:30 +0900
+Subject: [PATCH] Template chunks load from the section store's slim NBT
+
+The section store now also keeps each chunk's NBT with the section arrays
+left out (store version 2). A template chunk whose sections are all in the
+store loads from it and its region file is not read: the arrays it skips are
+nearly all a template chunk inflates to (about 160 of 162 KB on a production
+map), and the mapped copy replaced them anyway. A chunk read goes from about
+313 to 12 microseconds on map_lobby_games; the store grows from 35 to 45 MB.
+
+A chunk with a section the store lacks has no slim NBT and loads from the
+region as before, and so does every chunk while the index audit runs.
+A version 1 store is rebuilt in the background on first use.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index a5d1c880ebf3645cd6a9d5fbeb494db579f49e96..6f49b115ffdc33c0b9bf5f23db0a9964c48d457f 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -43,20 +43,37 @@ import org.apache.logging.log4j.Logger;
+ // the two at load. The file records the size and modification time of every region file it was
+ // built from and is rebuilt when they change.
+ //
++// It also keeps each chunk's NBT with the section arrays left out - the "slim" NBT: every section
++// only says its Y, and the rest (entities, tile entities, scheduled ticks, height map, biomes) is
++// as the region file has it. With every section of a chunk in the store, that is all a load reads,
++// and the region file is not read at all. Most of what a template chunk inflates to is those
++// arrays - on a production map about 160 KB of the 162 a chunk inflates to, nearly all of it air
++// sections - so inflating them took some 290 of the 330 microseconds a chunk read cost, to be
++// thrown away for the mapped copy. The slim NBT inflates to under 2 KB and reads in about 10.
++//
+ // File layout, little-endian:
+ //   header   MAGIC (8), version (4), chunk count (4), source fingerprint (8), key table offset (8)
+ //   blobs    2048-byte packed ids (with a 16-char palette in front), 8192-byte raw ids, 2048-byte
+ //            light arrays, each 64-byte aligned and stored once however many sections share it
++//   blobs    also each chunk's slim NBT, zlib deflated
+ //   keys     chunk count longs, chunk x << 32 | z, ascending
+-//   entries  per chunk, 16 sections x 3 longs: ids, block light, sky light (see the KIND_ codes)
++//   entries  per chunk, 16 sections x 3 longs: ids, block light, sky light (see the KIND_ codes),
++//            then 2 longs: the slim NBT's offset (0: none) and its deflated length << 32 | length
+ final class AthenaSectionStore {
+ 
+     private static final Logger LOGGER = LogManager.getLogger("Athena/SectionStore");
+ 
+-    static final String FILE_PREFIX = "athena-sections-";
++    // Athena - "athena-sections2-" from version 2 on: the old name begins with "athena-sections-", which
++    // this does not, so a server still on version 1 and one on version 2 can load the same template
++    // side by side, each with its own file, without either taking the other's for a leftover. A
++    // version 1 file is left alone; it can be deleted once no server reads it.
++    static final String FILE_PREFIX = "athena-sections2-";
+     static final String FILE_SUFFIX = ".bin";
+     private static final long MAGIC = 0x3130434553485441L; // "ATHSEC01"
+-    private static final int VERSION = 1;
++    private static final int VERSION = 2; // 2: the slim NBT
++    private static final int CHUNK_LONGS = 16 * 3 + 2;
++    private static final long CHUNK_BYTES = CHUNK_LONGS * 8L;
++    private static final int SLIM = 16 * 3; // the slim NBT's two longs in a chunk's entries
+     private static final int HEADER = 32;
+ 
+     // an entry's kind is its top byte, its value the low 48 bits
+@@ -213,7 +230,7 @@ final class AthenaSectionStore {
+             int count = mapping.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN), 12L);
+             long keysAt = mapping.get(LONG_LE, 24L);
+ 
+-            if (count < 0 || keysAt < HEADER || keysAt + (long) count * 8L * (1L + 48L) > size) {
++            if (count < 0 || keysAt < HEADER || keysAt + (long) count * 8L * (1L + CHUNK_LONGS) > size) {
+                 return null;
+             }
+ 
+@@ -245,7 +262,7 @@ final class AthenaSectionStore {
+             return false;
+         }
+ 
+-        long at = this.entries + ((long) index * 16L + sectionY) * 24L;
++        long at = this.entries + (long) index * CHUNK_BYTES + sectionY * 24L;
+         long ids = this.mapping.get(LONG_LE, at);
+         long blockLight = this.mapping.get(LONG_LE, at + 8L);
+         long skyLight = this.mapping.get(LONG_LE, at + 16L);
+@@ -287,6 +304,60 @@ final class AthenaSectionStore {
+         return true;
+     }
+ 
++    // one per thread that reads chunks: the chunk IO threads and the server thread
++    private static final ThreadLocal<java.util.zip.Inflater> INFLATER = ThreadLocal.withInitial(java.util.zip.Inflater::new);
++
++    /**
++     * The chunk's slim NBT - all of it but the section arrays, which apply() fills in from the
++     * store - or null if the store has none for it; the caller then reads the region file. There is
++     * one only for a chunk every section of which the store holds, so a load from it never falls
++     * back to a section's arrays.
++     */
++    NBTTagCompound chunk(int chunkX, int chunkZ) throws java.io.IOException {
++        int index = Arrays.binarySearch(this.keys, key(chunkX, chunkZ));
++
++        if (index < 0) {
++            return null;
++        }
++
++        long at = this.entries + (long) index * CHUNK_BYTES + SLIM * 8L;
++        long offset = this.mapping.get(LONG_LE, at);
++        long lengths = this.mapping.get(LONG_LE, at + 8L);
++        int deflated = (int) (lengths >>> 32);
++        int length = (int) lengths;
++
++        if (offset == 0L || deflated <= 0 || length <= 0 || offset + deflated > this.mapping.byteSize()) {
++            return null;
++        }
++
++        // a byte of room past the length, so that the stream's end is read and a longer one is seen
++        byte[] nbt = new byte[length + 1];
++        java.util.zip.Inflater inflater = INFLATER.get();
++
++        try {
++            inflater.setInput(this.mapping.asSlice(offset, deflated).asByteBuffer());
++
++            int n = 0;
++
++            while (!inflater.finished() && n <= length) {
++                int k = inflater.inflate(nbt, n, nbt.length - n);
++
++                if (k == 0 && (inflater.needsInput() || inflater.needsDictionary())) {
++                    return null; // cut short: read the region file instead
++                }
++                n += k;
++            }
++            if (n != length || !inflater.finished()) {
++                return null; // not what the file says it is: read the region file instead
++            }
++        } catch (java.util.zip.DataFormatException e) {
++            return null;
++        } finally {
++            inflater.reset(); // also lets go of the mapping, which a world that unloads frees
++        }
++        return NBTCompressedStreamTools.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(nbt, 0, length)));
++    }
++
+     private NibbleArray light(long entry) {
+         switch (kind(entry)) {
+             case KIND_ZERO:
+@@ -433,8 +504,11 @@ final class AthenaSectionStore {
+                             NBTTagCompound level = root.getCompound("Level");
+ 
+                             if (level.hasKeyOfType("Sections", 9)) {
++                                long[] entries = entries(blobs, sections(level));
++
++                                slim(blobs, root, entries);
+                                 // keyed on the chunk's own coordinates, which is what the loader asks for
+-                                table.put(key(level.getInt("xPos"), level.getInt("zPos")), entries(blobs, sections(level)));
++                                table.put(key(level.getInt("xPos"), level.getInt("zPos")), entries);
+                             }
+                         }
+                     }
+@@ -472,9 +546,9 @@ final class AthenaSectionStore {
+         return sections;
+     }
+ 
+-    /** One chunk's 16 x 3 entries, its blobs written as they are met. */
++    /** One chunk's 16 x 3 entries, its blobs written as they are met; no slim NBT yet. */
+     static long[] entries(BlobWriter blobs, List<SectionData> sections) throws IOException {
+-        long[] entries = new long[48];
++        long[] entries = new long[CHUNK_LONGS];
+ 
+         for (SectionData section : sections) {
+             if (section.y < 0 || section.y >= 16) {
+@@ -489,6 +563,56 @@ final class AthenaSectionStore {
+         return entries;
+     }
+ 
++    /**
++     * Writes the chunk's slim NBT and records it in its entries - if every section the NBT lists is
++     * in the store with its ids and both lights, so that a load from the slim NBT finds each one
++     * there whether the world has sky or not. Otherwise the chunk has none and loads from the region.
++     */
++    static void slim(BlobWriter blobs, NBTTagCompound root, long[] entries) throws IOException {
++        NBTTagCompound copy = (NBTTagCompound) root.clone();
++        NBTTagCompound level = copy.getCompound("Level");
++        NBTTagList sections = level.getList("Sections", 10);
++        NBTTagList slim = new NBTTagList();
++
++        for (int k = 0; k < sections.size(); ++k) {
++            int y = sections.get(k).getByte("Y");
++
++            if (y < 0 || y >= 16 || kind(entries[y * 3]) == KIND_ABSENT || kind(entries[y * 3 + 1]) == KIND_ABSENT || kind(entries[y * 3 + 2]) == KIND_ABSENT) {
++                return;
++            }
++
++            NBTTagCompound section = new NBTTagCompound();
++
++            section.setByte("Y", (byte) y);
++            slim.add(section);
++        }
++        level.set("Sections", slim);
++
++        java.io.ByteArrayOutputStream raw = new java.io.ByteArrayOutputStream();
++
++        NBTCompressedStreamTools.write(copy, (java.io.DataOutput) new java.io.DataOutputStream(raw));
++
++        byte[] nbt = raw.toByteArray();
++        java.util.zip.Deflater deflater = new java.util.zip.Deflater();
++        java.io.ByteArrayOutputStream deflated = new java.io.ByteArrayOutputStream(nbt.length / 4 + 64);
++        byte[] buffer = new byte[4096];
++
++        try {
++            deflater.setInput(nbt);
++            deflater.finish();
++            while (!deflater.finished()) {
++                deflated.write(buffer, 0, deflater.deflate(buffer));
++            }
++        } finally {
++            deflater.end();
++        }
++
++        byte[] blob = deflated.toByteArray();
++
++        entries[SLIM] = blobs.put(blob);
++        entries[SLIM + 1] = (long) blob.length << 32 | nbt.length & 0xFFFFFFFFL;
++    }
++
+     /** Writes the key table, the entries and the header after the blobs. */
+     static void finish(FileChannel out, BlobWriter blobs, long fingerprint, Map<Long, long[]> table) throws IOException {
+         long[] keys = new long[table.size()];
+@@ -500,7 +624,7 @@ final class AthenaSectionStore {
+         Arrays.sort(keys);
+ 
+         long keysAt = blobs.align();
+-        ByteBuffer tail = ByteBuffer.allocate(keys.length * 8 * 49).order(ByteOrder.LITTLE_ENDIAN);
++        ByteBuffer tail = ByteBuffer.allocate(keys.length * 8 * (1 + CHUNK_LONGS)).order(ByteOrder.LITTLE_ENDIAN);
+ 
+         for (long key : keys) {
+             tail.putLong(key);
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index ee913abfe86b20aed134f3e4b24a12fa04e41ef9..9d237246c1ef9bc97722ad1942e232130e190d29 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -68,8 +68,16 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     @Override
+     public Object[] loadChunk(World world, int i, int j) throws IOException {
+-        AthenaTemplateRegion region = this.region(i, j);
+-        NBTTagCompound nbttagcompound = region == null ? null : region.read(i & 31, j & 31);
++        // Athena - the slim NBT from the store when it has one: the section arrays it leaves out come
++        // from the store anyway (see AthenaSectionStore). Not while the audit runs, which compares
++        // each stored section with the region file's.
++        NBTTagCompound nbttagcompound = this.store != null && !AthenaIndexAudit.enabled() ? this.store.chunk(i, j) : null;
++
++        if (nbttagcompound == null) {
++            AthenaTemplateRegion region = this.region(i, j);
++
++            nbttagcompound = region == null ? null : region.read(i & 31, j & 31);
++        }
+ 
+         return nbttagcompound == null ? null : athenaTrimAfterBuild(this.a(world, i, j, nbttagcompound)); // Athena - see there
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index f1819a17ec6f7c40177d7626e79eb0067b8fa309..2935f485c482fae7899235cc4c6a800ad380077d 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -314,4 +314,145 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         rawSection.setData(raw);
+         assertSameCounts("raw, any id", rawSection);
+     }
++
++    // ------------------------------------------------------------------ slim NBT
++
++    /** A chunk with everything a template chunk carries besides its sections. */
++    private static NBTTagCompound fullChunk(int x, int z, Random random, boolean missingSkyLight) {
++        NBTTagCompound root = chunk(x, z, random);
++        NBTTagCompound level = root.getCompound("Level");
++        int[] heights = new int[256];
++        byte[] biomes = new byte[256];
++
++        for (int i = 0; i < 256; ++i) {
++            heights[i] = random.nextInt(64);
++        }
++        random.nextBytes(biomes);
++        level.setIntArray("HeightMap", heights);
++        level.setByteArray("Biomes", biomes);
++        level.setBoolean("TerrainPopulated", true);
++        level.setBoolean("LightPopulated", true);
++        level.setLong("InhabitedTime", random.nextInt(100000));
++
++        NBTTagCompound sign = new NBTTagCompound();
++
++        sign.setString("id", "Sign");
++        sign.setInt("x", x * 16 + 3);
++        sign.setInt("y", 20);
++        sign.setInt("z", z * 16 + 4);
++        sign.setString("Text1", "{\"text\":\"chunk " + x + "," + z + "\"}");
++
++        NBTTagList tileEntities = new NBTTagList();
++
++        tileEntities.add(sign);
++        level.set("TileEntities", tileEntities);
++
++        NBTTagCompound item = new NBTTagCompound();
++
++        item.setString("id", "Item");
++        item.set("Pos", new NBTTagList());
++        level.set("Entities", new NBTTagList());
++        level.getList("Entities", 10).add(item);
++
++        NBTTagCompound tick = new NBTTagCompound();
++
++        tick.setString("i", "minecraft:water");
++        tick.setInt("x", x * 16);
++        tick.setInt("y", 10);
++        tick.setInt("z", z * 16);
++        tick.setInt("t", 5);
++        tick.setInt("p", 0);
++
++        NBTTagList ticks = new NBTTagList();
++
++        ticks.add(tick);
++        level.set("TileTicks", ticks);
++        if (missingSkyLight) {
++            level.getList("Sections", 10).get(1).remove("SkyLight");
++        }
++        return root;
++    }
++
++    /** The full NBT with each section cut down to its Y: what the slim NBT must equal. */
++    private static NBTTagCompound slimmed(NBTTagCompound full) {
++        NBTTagCompound copy = (NBTTagCompound) full.clone();
++        NBTTagList sections = copy.getCompound("Level").getList("Sections", 10);
++        NBTTagList ys = new NBTTagList();
++
++        for (int k = 0; k < sections.size(); ++k) {
++            NBTTagCompound y = new NBTTagCompound();
++
++            y.setByte("Y", sections.get(k).getByte("Y"));
++            ys.add(y);
++        }
++        copy.getCompound("Level").set("Sections", ys);
++        return copy;
++    }
++
++    private static File fullTemplate(long seed) throws Exception {
++        File dir = Files.createTempDirectory("athena-slim").toFile();
++        File regionDir = new File(dir, "region");
++
++        regionDir.mkdirs();
++        RegionFile region = new RegionFile(new File(regionDir, "r.-1.0.mca"));
++        Random random = new Random(seed);
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                try (DataOutputStream out = region.getChunkDataOutputStream(x, z)) {
++                    NBTCompressedStreamTools.write(fullChunk(-32 + x, z, random, x == 14), (java.io.DataOutput) out);
++                }
++            }
++        }
++        region.close();
++        return dir;
++    }
++
++    @Test
++    public void aVersionOneStoreIsLeftForTheServersStillReadingIt() throws Exception {
++        File dir = template(7L);
++        File old = new File(dir, String.format("athena-sections-%016x.bin", AthenaSectionStore.fingerprint(dir)));
++
++        assertTrue(old.createNewFile());
++        built(dir);
++        assertTrue("a version 1 server's file is not taken for a leftover", old.isFile());
++        assertTrue(AthenaSectionStore.file(dir, AthenaSectionStore.fingerprint(dir)).getName().startsWith("athena-sections2-"));
++    }
++
++    @Test
++    public void aSlimChunkIsTheRegionChunkWithoutItsSectionArrays() throws Exception {
++        File dir = fullTemplate(5L);
++        AthenaSectionStore store = built(dir);
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++        int slim = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                NBTTagCompound full = region.read(x, z);
++                NBTTagCompound fromStore = store.chunk(-32 + x, z);
++
++                if (x == 14) {
++                    // one section has no sky light: the store cannot give a sky world all of it
++                    assertNull("a chunk the store does not hold whole loads from the region", fromStore);
++                    continue;
++                }
++                assertNotNull(fromStore);
++                assertEquals((-32 + x) + "," + z, slimmed(full), fromStore);
++                ++slim;
++
++                // and every section it lists is in the store, for a world with sky and without
++                NBTTagList sections = fromStore.getCompound("Level").getList("Sections", 10);
++
++                for (int k = 0; k < sections.size(); ++k) {
++                    int y = sections.get(k).getByte("Y");
++
++                    assertTrue(store.apply(-32 + x, z, y, new ChunkSection(y << 4, true), true));
++                    assertTrue(store.apply(-32 + x, z, y, new ChunkSection(y << 4, false), false));
++                }
++            }
++        }
++        region.close();
++        assertTrue(slim > 0);
++        assertNull("no chunk there", store.chunk(5, 5));
++    }
+ }

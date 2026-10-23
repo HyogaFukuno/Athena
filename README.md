@@ -10,7 +10,8 @@ On top of PandaSpigot it adds:
 - **Lower CPU and memory**: entity, collision, chunk ticking, tracker and network work cut down
   (`patches/server/0138` onwards); a 20-player match runs in 320 MB with `-Xmx160M`.
 - **Template worlds** (`Athena.loadTemplateWorld`): match maps opened read only, with block ids
-  and light read from a memory-mapped `athena-sections-<hash>.bin` beside the region files. Never
+  and light read from a memory-mapped `athena-sections2-<hash>.bin` beside the region files, which
+  also holds each chunk's other data so that a load reads no region file. Never
   overwrite that file in place while a server runs (`cp`, `scp` onto it): a mapped file changed
   underneath a running JVM crashes it. Copy maps with `rsync` (which writes a new file and renames
   it), or stop the servers first.

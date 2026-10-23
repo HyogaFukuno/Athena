@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 23 Oct 2026 16:29:52 +0900
+Subject: [PATCH] Template worlds: the section store's new file name
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 8775dfc2e1b38a9a2ea4137ee16a8a2002a52216..ac7b46d66f9d5a536d258879e24bddc518bbc53e 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -38,10 +38,12 @@ import org.bukkit.entity.Player;
+  *       under different names.</li>
+  *   <li>Unload it with {@link org.bukkit.Server#unloadWorld(World, boolean)} as usual once no
+  *       player is left in it.</li>
+- *   <li>The one file the server adds to the folder is {@code athena-sections-<fingerprint>.bin},
++ *   <li>The one file the server adds to the folder is {@code athena-sections2-<fingerprint>.bin},
+  *       built in the background the first time the template loads: the map's block ids and light
+  *       in a form the server reads in place from the file cache, so later loads keep almost none of
+- *       them on the Java heap. It is rebuilt whenever the region files change; the folder needs to
++ *       them on the Java heap, and each chunk's other data, so that a later load does not read the
++ *       region files at all. (Servers before the slim chunk data wrote
++ *       {@code athena-sections-<fingerprint>.bin}; it can be deleted once none of them reads the map.) It is rebuilt whenever the region files change; the folder needs to
+  *       be writable for it, and without it the map loads onto the heap as before. Never overwrite
+  *       it in place while a server runs (cp, scp): copy maps with a tool that replaces files by
+  *       renaming them, such as rsync.</li>
