@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 24 Oct 2026 20:00:36 +0900
+Subject: [PATCH] Bound the chunk packet compressor's backlog; compress cached
+ frames at the configured level
+
+Chunk.athenaWarmPacketCache queued every preloaded chunk on the one compressor
+thread with no bound, each holding its uncompressed packet data (up to about
+190 KB) until compressed. Preloading a dense map in 2 s queued chunks faster
+than they were compressed: on sg1, Return_To_Moonbase_9 left 700 of them,
+70 MB, in a 144 MB heap, and the server died of OutOfMemoryError 8 s into the
+map load.
+
+At most 64 chunks now wait for the compressor: the preloader holds its
+requests while loads in flight and queued compressions reach that, and a warm
+past it builds nothing, the chunk's packet being compressed at its first send
+instead. Cached frames are also compressed at athena.yml
+networkCompressionLevel, as PacketCompressor's are, instead of always at 6.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index 02734d1d5f94a325c6e1d0f5881896dab9423108..92b5b8fd081bc550c8ddd776d0166f113b276949 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -29,7 +29,10 @@ final class AthenaChunkPacketCache {
+     /** The primary bit mask of a full chunk packet: every section that holds something. */
+     static final int FULL_MASK = 0xFFFF;
+ 
+-    private static final ThreadLocal<Deflater> DEFLATER = ThreadLocal.withInitial(Deflater::new);
++    // Athena - at the configured level (athena.yml networkCompressionLevel), as PacketCompressor: a
++    // cached frame stood in for what PacketCompressor would have sent, yet was always made at the
++    // default level 6
++    private static final ThreadLocal<Deflater> DEFLATER = ThreadLocal.withInitial(() -> new Deflater(PacketCompressor.level()));
+ 
+     // Athena - one low-priority thread that compresses caches built ahead of their first send; see
+     // Chunk.athenaWarmPacketCache
+@@ -40,8 +43,34 @@ final class AthenaChunkPacketCache {
+         return thread;
+     });
+ 
++    // Athena - how many caches are queued for AHEAD and not compressed yet. Each holds its chunk's
++    // uncompressed packet data, up to about 190 KB for a chunk full of blocks, until it is
++    // compressed. The queue had no bound: preloading a dense map in 2 s queued chunks faster than
++    // the one thread compressed them, and 700 of them - 70 MB - filled a 144 MB heap
++    // (Return_To_Moonbase_9 on sg1). The preloader waits while this is at AHEAD_LIMIT, and
++    // Chunk.athenaWarmPacketCache builds nothing past it: such a chunk's packet is compressed when
++    // it is first sent instead. 64 such chunks are at most about 12 MB.
++    static final int AHEAD_LIMIT = 64;
++    private static final java.util.concurrent.atomic.AtomicInteger AHEAD_QUEUED = new java.util.concurrent.atomic.AtomicInteger();
++
++    static int aheadQueued() {
++        return AHEAD_QUEUED.get();
++    }
++
+     static void compressAhead(final AthenaChunkPacketCache cache, final int packetId, final int threshold) {
+-        AHEAD.execute(() -> cache.frame(packetId, threshold));
++        AHEAD_QUEUED.incrementAndGet();
++        try {
++            AHEAD.execute(() -> {
++                try {
++                    cache.frame(packetId, threshold);
++                } finally {
++                    AHEAD_QUEUED.decrementAndGet();
++                }
++            });
++        } catch (RuntimeException e) {
++            AHEAD_QUEUED.decrementAndGet(); // not queued after all
++            throw e;
++        }
+     }
+ 
+     final int chunkX;
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+index 9ae1cfa3de7c3b757909778983ee97c7820b9b09..0669c9e03104ee7e864dd1ae6c8879ff2cfca33d 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+@@ -74,6 +74,15 @@ public final class AthenaChunkPreloader {
+         }
+ 
+         List<Batch> finished = null;
++        // Athena - room for more requests: a request in flight, or a loaded chunk whose packet waits
++        // for the compressor, holds the chunk's packet data until it is compressed. Past
++        // AthenaChunkPacketCache.AHEAD_LIMIT the requests wait, so a dense map is read only as fast as
++        // its packets are compressed, and the memory that waits stays bounded.
++        int inFlight = AthenaChunkPacketCache.aheadQueued();
++
++        for (Batch batch : this.batches) {
++            inFlight += batch.pending;
++        }
+ 
+         for (Batch batch : this.batches.toArray(new Batch[0])) {
+             boolean worldGone = !MinecraftServer.getServer().worlds.contains(batch.world);
+@@ -82,7 +91,7 @@ public final class AthenaChunkPreloader {
+                 ChunkProviderServer provider = batch.world.chunkProviderServer;
+                 int sent = 0;
+ 
+-                while (sent < batch.perTick && batch.next < batch.chunks.length) {
++                while (sent < batch.perTick && batch.next < batch.chunks.length && inFlight < AthenaChunkPacketCache.AHEAD_LIMIT) {
+                     long key = batch.chunks[batch.next++];
+                     int x = (int) key, z = (int) (key >>> 32);
+ 
+@@ -91,6 +100,7 @@ public final class AthenaChunkPreloader {
+                     }
+                     ++sent;
+                     ++batch.pending;
++                    ++inFlight; // Athena
+                     final Batch owner = batch;
+                     final int chunkX = x, chunkZ = z;
+                     provider.getChunkAt(x, z, new Runnable() {
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index b245c953bb6ddf588d2c0f787bc6dde2c2cbd333..d194ae814deff4f532683fbc898d896afa3d774d 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -178,6 +178,9 @@ public class Chunk {
+         if (threshold < 0) {
+             return; // no compression: packets are never served from the cache
+         }
++        if (AthenaChunkPacketCache.aheadQueued() >= AthenaChunkPacketCache.AHEAD_LIMIT) {
++            return; // Athena - the compressor is behind: compress this one when it is first sent (see AHEAD_LIMIT)
++        }
+         AthenaChunkPacketCache cache = this.athenaPacketCache;
+ 
+         if (cache != null && cache.matches(this)) {
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index f8b5068274e4efb3e8dba5ff4d1211290e031315..1bf2d049ef5014ef7ad968e2c0b3113f6e42a661 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -26,6 +26,11 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+     public static void setLevel(int configured) {
+         level = configured >= 1 && configured <= 9 ? configured : Deflater.DEFAULT_COMPRESSION;
+     }
++
++    /** The configured level; AthenaChunkPacketCache compresses its frames with it too. */
++    static int level() {
++        return level;
++    }
+     private static final io.netty.util.concurrent.FastThreadLocal<byte[]> BUFFER = new io.netty.util.concurrent.FastThreadLocal<byte[]>() {
+         @Override
+         protected byte[] initialValue() {
