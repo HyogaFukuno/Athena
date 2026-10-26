@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 26 Oct 2026 21:38:34 +0900
+Subject: [PATCH] Athena.setAllowDisguise: plugins decide when players may
+ disguise
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index ac7b46d66f9d5a536d258879e24bddc518bbc53e..ac5af64d98285958ed60cfe7e2e76b0646ea03ec 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -268,4 +268,22 @@ public final class Athena {
+                                                                int perTick) {
+         return getServer().teleportGradually(players, destinations, perTick);
+     }
++
++    // ---- disguise ----
++
++    /**
++     * Whether players may run {@code /disguise} from now on (it is allowed until a plugin says
++     * otherwise). This only gates starting a disguise or picking a new one: players already
++     * disguised stay disguised, and {@code /undisguise} always works. For a minigame that lets
++     * players disguise in the lobby only, allow it when the lobby starts and disallow it when the
++     * game does.
++     */
++    public static void setAllowDisguise(boolean allow) {
++        getServer().setAllowDisguise(allow);
++    }
++
++    /** Whether players may run {@code /disguise} now; see {@link #setAllowDisguise}. */
++    public static boolean isDisguiseAllowed() {
++        return getServer().isDisguiseAllowed();
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 3218efbe5c3dd1e0cfff6d061f1ddab6eda3647c..9431dce5a58eedb280963dcad99bb8c01b33df45 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -41,4 +41,8 @@ public interface AthenaServer {
+     CompletableFuture<Integer> teleportGradually(Collection<? extends Player> players, Function<? super Player, ? extends Location> destination, int perTick);
+ 
+     CompletableFuture<Integer> teleportGradually(List<? extends Player> players, List<? extends Location> destinations, int perTick);
++
++    void setAllowDisguise(boolean allow);
++
++    boolean isDisguiseAllowed();
+ }

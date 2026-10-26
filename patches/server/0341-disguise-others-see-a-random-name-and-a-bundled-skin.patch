@@ -10,12 +10,33 @@ the server already signed by Mojang, so disguising asks nobody anything.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index ed912e067fc2e16c44ed48f582975f7b1796a52c..ac23d0e70a10996b9c42d1c88925ebf39f4cbede 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -167,6 +167,16 @@ public final class AthenaServerImpl implements AthenaServer {
+         return AthenaTeleportQueue.INSTANCE.teleportGradually(players, (index, player) -> to.get(index), perTick);
+     }
+ 
++    @Override
++    public void setAllowDisguise(boolean allow) {
++        DisguiseCommand.allowed = allow;
++    }
++
++    @Override
++    public boolean isDisguiseAllowed() {
++        return DisguiseCommand.allowed;
++    }
++
+     private static void checkPerTick(int perTick) {
+         if (perTick < 1) {
+             throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
 diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..39e63dd7349aa239686ffee403110c33adb907a2
+index 0000000000000000000000000000000000000000..cf7ffe9b6c52db18a11f2be8260a9f3c6f816eb9
 --- /dev/null
 +++ b/src/main/java/athena/server/DisguiseCommand.java
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,139 @@
 +package athena.server;
 +
 +import com.mojang.authlib.GameProfile;
@@ -41,6 +62,8 @@ index 0000000000000000000000000000000000000000..39e63dd7349aa239686ffee403110c33
 + * name (over the head and in the tab list) and with one of the skins in
 + * {@code athena/disguise-skins.txt}; the player still sees their own. {@code /disguise} again picks
 + * a new name and skin. Lasts until {@code /undisguise} or until the player leaves the server.
++ * A plugin can stop players from disguising for a while with Athena.setAllowDisguise(false);
++ * that leaves existing disguises alone.
 + *
 + * <p>Nothing about it runs per packet: the server picks which tab list entry to build when it
 + * builds one (PacketPlayOutPlayerInfo.athenaSeenBy), which only happens when a player joins,
@@ -58,6 +81,8 @@ index 0000000000000000000000000000000000000000..39e63dd7349aa239686ffee403110c33
 +            "Badger", "Falcon", "Viper", "Moose", "Gecko", "Koala", "Bison", "Crow", "Owl", "Yeti"};
 +    /** The skins to pick from: Mojang's signed textures properties. Read once, the first time someone disguises. */
 +    private static List<Property> skins;
++    /** Whether /disguise may be used now (Athena.setAllowDisguise). /undisguise always may. */
++    static volatile boolean allowed = true;
 +
 +    private final boolean undisguise;
 +
@@ -87,6 +112,11 @@ index 0000000000000000000000000000000000000000..39e63dd7349aa239686ffee403110c33
 +                player.athenaDisguise(null);
 +                sender.sendMessage(ChatColor.GREEN + "You are no longer disguised.");
 +            }
++            return true;
++        }
++
++        if (!allowed) {
++            sender.sendMessage(ChatColor.RED + "You cannot disguise right now.");
 +            return true;
 +        }
 +
