@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 02:42:40 +0900
+Subject: [PATCH] /disguise: Athena-prefixed messages warn that it is logged,
+ and the server log records who disguised as whom
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index cf7ffe9b6c52db18a11f2be8260a9f3c6f816eb9..2c26f177aab06b0429361aefa12eb4b11aacf556 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -23,6 +23,7 @@ import org.bukkit.entity.Player;
+  * name (over the head and in the tab list) and with one of the skins in
+  * {@code athena/disguise-skins.txt}; the player still sees their own. {@code /disguise} again picks
+  * a new name and skin. Lasts until {@code /undisguise} or until the player leaves the server.
++ * Every disguise goes to the server log with the player's real name, as the player is warned.
+  * A plugin can stop players from disguising for a while with Athena.setAllowDisguise(false);
+  * that leaves existing disguises alone.
+  *
+@@ -42,6 +43,7 @@ public final class DisguiseCommand extends Command {
+             "Badger", "Falcon", "Viper", "Moose", "Gecko", "Koala", "Bison", "Crow", "Owl", "Yeti"};
+     /** The skins to pick from: Mojang's signed textures properties. Read once, the first time someone disguises. */
+     private static List<Property> skins;
++    private static final String PREFIX = "&8[&5Athena&8] ";
+     /** Whether /disguise may be used now (Athena.setAllowDisguise). /undisguise always may. */
+     static volatile boolean allowed = true;
+ 
+@@ -61,23 +63,25 @@ public final class DisguiseCommand extends Command {
+             return true;
+         }
+         if (!(sender instanceof Player)) {
+-            sender.sendMessage(ChatColor.RED + "Only a player can disguise.");
++            sender.sendMessage(message("&cOnly a player can disguise."));
+             return true;
+         }
+         CraftPlayer player = (CraftPlayer) sender;
+ 
+         if (this.undisguise) {
+-            if (player.getHandle().athenaDisguise == null) {
+-                sender.sendMessage(ChatColor.RED + "You are not disguised.");
++            GameProfile disguise = player.getHandle().athenaDisguise;
++            if (disguise == null) {
++                sender.sendMessage(message("&cYou are not disguised."));
+             } else {
+                 player.athenaDisguise(null);
+-                sender.sendMessage(ChatColor.GREEN + "You are no longer disguised.");
++                MinecraftServer.LOGGER.info("[Disguise] {} ({}) is no longer disguised as {}", player.getName(), player.getUniqueId(), disguise.getName());
++                sender.sendMessage(message("&fYou are no longer disguised."));
+             }
+             return true;
+         }
+ 
+         if (!allowed) {
+-            sender.sendMessage(ChatColor.RED + "You cannot disguise right now.");
++            sender.sendMessage(message("&cYou cannot disguise right now."));
+             return true;
+         }
+ 
+@@ -88,10 +92,18 @@ public final class DisguiseCommand extends Command {
+             disguise.getProperties().put("textures", skins.get(ThreadLocalRandom.current().nextInt(skins.size())));
+         }
+         player.athenaDisguise(disguise);
+-        sender.sendMessage(ChatColor.GREEN + "Others now see you as " + name + ".");
++        MinecraftServer.LOGGER.info("[Disguise] {} ({}) disguised as {}", player.getName(), player.getUniqueId(), name);
++        sender.sendMessage(message("&c&lWarning! &cThis command is logged."));
++        sender.sendMessage(message("&cStaff can see your true username while using this command."));
++        sender.sendMessage(message("&fYou now appear as &a" + name + "&f."));
++        sender.sendMessage(message("&fTo undisguise, use &8[&7/undisguise&8]&f."));
+         return true;
+     }
+ 
++    private static String message(String text) {
++        return ChatColor.translateAlternateColorCodes('&', PREFIX + text);
++    }
++
+     /**
+      * A name like SwiftFox482 that no one on the server has, real or disguised: two tab list
+      * entries of one name confuse the clients' teams and name tags.
