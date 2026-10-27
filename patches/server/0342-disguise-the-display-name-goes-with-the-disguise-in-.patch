@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 27 Oct 2026 00:32:06 +0900
+Subject: [PATCH] /disguise: the display name goes with the disguise, in the
+ Regular rank's green
+
+Chat and plugins' messages show the display name, so it gave the player away.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 1dee7039ae5657c7dccd35fa794fcd8e2a88bbd1..f86aa63825f3ab4d881638d411e5531ce3de3dab 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1115,14 +1115,28 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+     }
+ 
+     // Athena start - /disguise
++    private String athenaRealDisplayName; // the display name to give back on undisguise
++
+     /**
+      * Shows everyone else {@code disguise} (a profile with this player's UUID) in place of this player's
+      * name and skin, or the real ones again if it is null. This player keeps seeing the real ones.
++     * The display name follows the disguise for everyone, since chat shows one line to all.
+      * Each other player gets the tab list entry again and, if they can see this player, the entity
+      * respawned, so that the client picks up the new skin.
+      */
+     public void athenaDisguise(GameProfile disguise) {
+         EntityPlayer self = getHandle();
++        // the display name (chat, plugins' messages) goes with the disguise, in the Regular rank's green;
++        // the real one comes back on undisguise. Kept from the first disguise: picking a new one keeps it
++        if (disguise != null) {
++            if (self.athenaDisguise == null) {
++                this.athenaRealDisplayName = getDisplayName();
++            }
++            setDisplayName(org.bukkit.ChatColor.DARK_GREEN + disguise.getName() + org.bukkit.ChatColor.RESET);
++        } else if (self.athenaDisguise != null) {
++            setDisplayName(this.athenaRealDisplayName);
++            this.athenaRealDisplayName = null;
++        }
+         self.athenaDisguise = disguise;
+         for (EntityPlayer player : server.getServer().getPlayerList().players) {
+             if (player != self) {
