@@ -1,0 +1,408 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 27 Oct 2026 08:29:00 +0900
+Subject: [PATCH] 1.7 Lunar Client sees the world border and titles, through
+ Apollo
+
+A vanilla 1.7 client has neither, so the 1.7 translation dropped them. A client that registers
+lunar:apollo now gets them as Apollo's lightweight JSON messages instead; plugins keep using
+Bukkit's world border and titles. AthenaLegacy17Ui is the seam for other clients' APIs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17.java b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+index d97a70380c106e5d12485e08a8ff80c22c2e377f..97c2b89b507b8d978d266d73f8aff674dcbe529e 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+@@ -85,6 +85,22 @@ public final class AthenaLegacy17 {
+         float yaw;
+         float pitch;
+         boolean onGround;
++        // Athena start - the world border and titles, for a client that can show them (AthenaLegacy17Ui)
++        /** Set by the decoder when the client registers a channel of a UI we know; null for vanilla 1.7. */
++        AthenaLegacy17Ui ui;
++        boolean uiStarted;
++        /** Join and each respawn put the client in a new world; the UI is told its name, from this. */
++        int world;
++        /** The world border as 1.8 last described it; size is NaN until it has been. */
++        double borderX;
++        double borderZ;
++        double borderSize = Double.NaN;
++        double borderTarget;
++        long borderMillis;
++        int titleFadeIn = 10;
++        int titleStay = 70;
++        int titleFadeOut = 20;
++        // Athena end
+ 
+         AthenaLegacy17Data.Kind kind(int entityId) {
+             AthenaLegacy17Data.Kind kind = this.kinds.get(entityId);
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Apollo.java b/src/main/java/net/minecraft/server/AthenaLegacy17Apollo.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4d88fb8b03c0f88d8bf9c2808c5f5c6b1483a385
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Apollo.java
+@@ -0,0 +1,114 @@
++package net.minecraft.server;
++
++import com.google.gson.JsonArray;
++import com.google.gson.JsonObject;
++import java.nio.charset.StandardCharsets;
++
++// Athena - the world border and titles for 1.7 Lunar Client players, through Apollo.
++//
++// Apollo's lightweight JSON messages (https://lunarclient.dev/apollo/developers/lightweight/json):
++// the client registers lunar:apollo, and takes messages on apollo:json, each a JSON object naming
++// its protobuf type. No Apollo plugin is needed on the server. The Border and Title modules
++// backport 1.8's world border and titles to 1.7 Lunar Client.
++final class AthenaLegacy17Apollo implements AthenaLegacy17Ui {
++
++    static final String DETECT_CHANNEL = "lunar:apollo";
++    static final String CHANNEL = "apollo:json";
++    private static final String TYPE = "type.googleapis.com/lunarclient.apollo.";
++    private static final String BORDER_ID = "athena:world-border";
++    /** Borders at least this large are the vanilla default (60,000,000 across): no border. */
++    private static final double NO_BORDER = 5.0E7D;
++    // 1.8's colours for a border standing, shrinking and growing
++    private static final int STILL = 0xFF20A0FF;
++    private static final int SHRINKING = 0xFFFF3030;
++    private static final int GROWING = 0xFF40FF80;
++
++    @Override
++    public void start(Messages to) {
++        send(to, message("border.v1.ResetBordersMessage"));
++        send(to, message("title.v1.ResetTitlesMessage"));
++
++        JsonArray modules = new JsonArray();
++        modules.add(module("border"));
++        modules.add(module("title"));
++        JsonObject enable = message("configurable.v1.OverrideConfigurableSettingsMessage");
++        enable.add("configurable_settings", modules);
++        send(to, enable);
++    }
++
++    @Override
++    public void world(String name, Messages to) {
++        JsonObject world = message("player.v1.UpdatePlayerWorldMessage");
++        world.addProperty("world", name);
++        send(to, world);
++    }
++
++    @Override
++    public void border(String world, double centerX, double centerZ, double size, double targetSize, long millis, Messages to) {
++        if (targetSize >= NO_BORDER) {
++            JsonObject remove = message("border.v1.RemoveBorderMessage");
++            remove.addProperty("id", BORDER_ID);
++            send(to, remove);
++            return;
++        }
++        JsonObject bounds = new JsonObject();
++        bounds.addProperty("min_x", centerX - targetSize / 2.0D);
++        bounds.addProperty("min_z", centerZ - targetSize / 2.0D);
++        bounds.addProperty("max_x", centerX + targetSize / 2.0D);
++        bounds.addProperty("max_z", centerZ + targetSize / 2.0D);
++        JsonObject color = new JsonObject();
++        color.addProperty("color", millis <= 0 || targetSize == size ? STILL : targetSize < size ? SHRINKING : GROWING);
++
++        JsonObject border = message("border.v1.DisplayBorderMessage");
++        border.addProperty("id", BORDER_ID);
++        border.addProperty("world", world);
++        // only drawn: the server still keeps the player inside, as for a vanilla 1.7 client
++        border.addProperty("cancel_entry", false);
++        border.addProperty("cancel_exit", false);
++        border.addProperty("can_shrink_or_expand", true);
++        border.add("color", color);
++        border.add("bounds", bounds);
++        border.addProperty("duration_ticks", Math.max(0L, millis / 50L));
++        send(to, border);
++    }
++
++    @Override
++    public void title(boolean subtitle, String json, int fadeIn, int stay, int fadeOut, Messages to) {
++        JsonObject title = message("title.v1.DisplayTitleMessage");
++        title.addProperty("title_type", subtitle ? 2 : 1);
++        title.addProperty("adventure_json_message", json);
++        title.addProperty("scale", 1.0F);
++        title.addProperty("fade_in_time", duration(fadeIn));
++        title.addProperty("display_time", duration(stay));
++        title.addProperty("fade_out_time", duration(fadeOut));
++        send(to, title);
++    }
++
++    @Override
++    public void clearTitles(Messages to) {
++        send(to, message("title.v1.ResetTitlesMessage"));
++    }
++
++    private static JsonObject message(String type) {
++        JsonObject message = new JsonObject();
++        message.addProperty("@type", TYPE + type);
++        return message;
++    }
++
++    private static JsonObject module(String id) {
++        JsonObject module = new JsonObject();
++        module.addProperty("apollo_module", id);
++        module.addProperty("enable", true);
++        return module;
++    }
++
++    /** {@code ticks} as a protobuf Duration in JSON: seconds with an "s", like "3.5s". */
++    private static String duration(int ticks) {
++        int millis = Math.max(0, ticks) * 50;
++        return millis % 1000 == 0 ? millis / 1000 + "s" : String.format(java.util.Locale.ROOT, "%d.%03ds", millis / 1000, millis % 1000);
++    }
++
++    private static void send(Messages to, JsonObject message) {
++        to.send(CHANNEL, message.toString().getBytes(StandardCharsets.UTF_8));
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+index 2f32c732f086f119a32dc033ea1b556ee22d4a08..4eb2508789e5fc6bbb6574507886914616349398 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Decoder.java
+@@ -305,6 +305,23 @@ final class AthenaLegacy17Decoder extends MessageToMessageDecoder<ByteBuf> {
+                 p.writeInt(in.readInt());
+                 p.writeInt(in.readInt());
+                 break;
++            case "REGISTER": { // Athena - a client with a UI of its own for the world border and titles
++                byte[] bytes = new byte[Math.min(length, in.readableBytes())];
++
++                in.readBytes(bytes);
++                p.writeBytes(bytes);
++                if (this.session.ui == null) {
++                    for (String registered : new String(bytes, StandardCharsets.UTF_8).split("\u0000")) {
++                        AthenaLegacy17Ui ui = AthenaLegacy17Ui.forChannel(registered);
++
++                        if (ui != null) {
++                            this.session.ui = ui; // the encoder starts it with its next packet
++                            break;
++                        }
++                    }
++                }
++                break;
++            }
+             default:
+                 p.writeBytes(in, Math.min(length, in.readableBytes()));
+         }
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+index 249d16dd335c27522de9547b0e90868a52265856..1fa3b68aae2c7b68cc88c64a086ccd52c71d04ca 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+@@ -67,6 +67,9 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+             int id = packet.readVarIntFromBuffer();
+ 
+             if (state == EnumProtocol.PLAY) {
++                if (this.session.ui != null && !this.session.uiStarted) { // Athena - the client just said it has a UI
++                    this.startUi(ctx, out);
++                }
+                 this.play(ctx, id, packet, out);
+             } else if (state == EnumProtocol.LOGIN) {
+                 this.login(ctx, id, packet, out);
+@@ -98,6 +101,110 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+         ctx.write(out.get(out.size() - 1), promise);
+     }
+ 
++    // Athena start - the world border and titles for a 1.7 client with a UI for them (AthenaLegacy17Ui)
++    private void startUi(ChannelHandlerContext ctx, List<ByteBuf> out) {
++        AthenaLegacy17.Session s = this.session;
++        AthenaLegacy17Ui.Messages to = this.messages(ctx, out);
++
++        s.uiStarted = true;
++        s.ui.start(to);
++        s.ui.world(worldName(s), to);
++        if (!Double.isNaN(s.borderSize)) {
++            s.ui.border(worldName(s), s.borderX, s.borderZ, s.borderSize, s.borderTarget, s.borderMillis, to);
++        }
++    }
++
++    private void newWorld(ChannelHandlerContext ctx, List<ByteBuf> out) {
++        AthenaLegacy17.Session s = this.session;
++
++        ++s.world;
++        s.borderSize = Double.NaN; // the server describes the new world's border next
++        if (s.uiStarted) {
++            s.ui.world(worldName(s), this.messages(ctx, out));
++        }
++    }
++
++    /** A name for the client's current world: the UI only needs it to change with the world. */
++    private static String worldName(AthenaLegacy17.Session s) {
++        return "athena-" + s.world;
++    }
++
++    private void worldBorder(ChannelHandlerContext ctx, PacketDataSerializer in, List<ByteBuf> out) {
++        AthenaLegacy17.Session s = this.session;
++
++        switch (in.readVarIntFromBuffer()) {
++            case 0: // set size
++                s.borderSize = s.borderTarget = in.readDouble();
++                s.borderMillis = 0L;
++                break;
++            case 1: // lerp size
++                s.borderSize = in.readDouble();
++                s.borderTarget = in.readDouble();
++                s.borderMillis = in.readVarLong();
++                break;
++            case 2: // set center
++                s.borderX = in.readDouble();
++                s.borderZ = in.readDouble();
++                break;
++            case 3: // initialize
++                s.borderX = in.readDouble();
++                s.borderZ = in.readDouble();
++                s.borderSize = in.readDouble();
++                s.borderTarget = in.readDouble();
++                s.borderMillis = in.readVarLong();
++                break;
++            default: // warning time and distance: the UI has none
++                return;
++        }
++        if (s.uiStarted && !Double.isNaN(s.borderSize)) {
++            s.ui.border(worldName(s), s.borderX, s.borderZ, s.borderSize, s.borderTarget, s.borderMillis, this.messages(ctx, out));
++        }
++    }
++
++    private void title(ChannelHandlerContext ctx, PacketDataSerializer in, List<ByteBuf> out) {
++        AthenaLegacy17.Session s = this.session;
++        int action = in.readVarIntFromBuffer();
++
++        switch (action) {
++            case 0: // title
++            case 1: // subtitle: 1.8 shows it with the title on screen, or with the next one
++                if (s.uiStarted) {
++                    s.ui.title(action == 1, in.readStringFromBuffer(32767), s.titleFadeIn, s.titleStay, s.titleFadeOut, this.messages(ctx, out));
++                }
++                break;
++            case 2: // times, for the titles after
++                s.titleFadeIn = in.readInt();
++                s.titleStay = in.readInt();
++                s.titleFadeOut = in.readInt();
++                break;
++            case 4: // reset: clear, and the default times again
++                s.titleFadeIn = 10;
++                s.titleStay = 70;
++                s.titleFadeOut = 20;
++                // fall through
++            case 3: // clear
++                if (s.uiStarted) {
++                    s.ui.clearTitles(this.messages(ctx, out));
++                }
++                break;
++        }
++    }
++
++    /** Plugin messages from the UI, as 1.7 packets (the data's length a short) added to {@code out}. */
++    private AthenaLegacy17Ui.Messages messages(final ChannelHandlerContext ctx, final List<ByteBuf> out) {
++        return new AthenaLegacy17Ui.Messages() {
++            @Override
++            public void send(String channel, byte[] data) {
++                PacketDataSerializer p = packet(ctx, 0x3F, out);
++
++                p.writeString(channel);
++                p.writeShort(data.length);
++                p.writeBytes(data);
++            }
++        };
++    }
++    // Athena end
++
+     private static PacketDataSerializer packet(ChannelHandlerContext ctx, int id, List<ByteBuf> out) {
+         ByteBuf buf = ctx.alloc().buffer();
+         PacketDataSerializer packet = new PacketDataSerializer(buf);
+@@ -151,6 +258,8 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                 int entityId = in.readInt();
+ 
+                 s.ownEntityId = entityId;
++                this.newWorld(ctx, out); // Athena
++                this.messages(ctx, out).send("REGISTER", AthenaLegacy17Ui.SERVER_CHANNELS); // Athena - so a client with a UI says so
+                 s.kinds.clear();
+                 s.hidden.clear();
+                 s.kinds.put(entityId, AthenaLegacy17Data.Kind.PLAYER);
+@@ -209,6 +318,7 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                 s.hidden.clear();
+                 s.kinds.put(s.ownEntityId, AthenaLegacy17Data.Kind.PLAYER);
+                 same(in, out);
++                this.newWorld(ctx, out); // Athena - after the respawn, so the client is in the world it is told of
+                 break;
+             case 0x08: { // position and look: 1.7 has no relative flags and takes the eye height
+                 double x = in.readDouble();
+@@ -575,8 +685,13 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+             case 0x41: // difficulty
+             case 0x42: // combat
+             case 0x43: // camera
+-            case 0x44: // world border
+-            case 0x45: // title
++                break;
++            case 0x44: // world border: shown only by a client with a UI for it (Athena)
++                this.worldBorder(ctx, in, out);
++                break;
++            case 0x45: // title: likewise (Athena)
++                this.title(ctx, in, out);
++                break;
+             case 0x46: // set compression
+             case 0x47: // tab list header and footer
+             case 0x49: // update entity NBT
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Ui.java b/src/main/java/net/minecraft/server/AthenaLegacy17Ui.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..96f3ba467e355228738a308a7f3175be4c21983a
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Ui.java
+@@ -0,0 +1,57 @@
++package net.minecraft.server;
++
++// Athena - what a 1.7 client shows of 1.8's world border and titles, through its own client's API.
++//
++// A vanilla 1.7 client has neither, so AthenaLegacy17Encoder drops those packets. Some 1.7
++// clients (Lunar Client, through Apollo) can draw them when the server asks over a plugin channel
++// of theirs. Such a client says so by registering that channel (forChannel); from then on the
++// encoder hands this connection's world border and titles to its AthenaLegacy17Ui instead of
++// dropping them. Plugins keep using the Bukkit world border and title API, and a 1.8 client's
++// connection never meets any of this.
++//
++// To support another client, implement this for its API and name its channel in forChannel.
++interface AthenaLegacy17Ui {
++
++    /**
++     * What the server registers with every 1.7 client on joining: the channels of each UI. Lunar
++     * Client takes Apollo messages only from a server that registered Apollo's channels, as the
++     * Apollo plugin does.
++     */
++    byte[] SERVER_CHANNELS = (AthenaLegacy17Apollo.DETECT_CHANNEL + "\u0000" + AthenaLegacy17Apollo.CHANNEL)
++            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
++
++    /** The UI of a client that registered {@code channel}, or null if no client of ours uses it. */
++    static AthenaLegacy17Ui forChannel(String channel) {
++        if (AthenaLegacy17Apollo.DETECT_CHANNEL.equalsIgnoreCase(channel)) {
++            return new AthenaLegacy17Apollo();
++        }
++        return null;
++    }
++
++    /** Plugin messages to the client, already in 1.7's format once written. */
++    interface Messages {
++        void send(String channel, byte[] data);
++    }
++
++    /**
++     * The client just turned out to have this UI: switch on what we use, forgetting anything a
++     * server before this one (behind the same proxy) left on screen.
++     */
++    void start(Messages to);
++
++    /** The client is in a new world (join or respawn), called {@code name}. */
++    void world(String name, Messages to);
++
++    /**
++     * Shows the world border of the client's world: centred on ({@code centerX}, {@code centerZ}),
++     * {@code size} blocks across, moving to {@code targetSize} over {@code millis} (0: it is there).
++     * A border as large as the vanilla default means none.
++     */
++    void border(String world, double centerX, double centerZ, double size, double targetSize, long millis, Messages to);
++
++    /** Shows a title ({@code subtitle} false) or a subtitle, as chat JSON, with these times in ticks. */
++    void title(boolean subtitle, String json, int fadeIn, int stay, int fadeOut, Messages to);
++
++    /** Takes every title off the screen. */
++    void clearTitles(Messages to);
++}
