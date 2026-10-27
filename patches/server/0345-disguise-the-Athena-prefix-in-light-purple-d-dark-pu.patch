@@ -1,0 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 08:09:28 +0900
+Subject: [PATCH] /disguise: the Athena prefix in light purple (&d); dark
+ purple is the VIP rank's
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index 2c26f177aab06b0429361aefa12eb4b11aacf556..2eec9d8066e7992e38525623f8527191227c283f 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -43,7 +43,7 @@ public final class DisguiseCommand extends Command {
+             "Badger", "Falcon", "Viper", "Moose", "Gecko", "Koala", "Bison", "Crow", "Owl", "Yeti"};
+     /** The skins to pick from: Mojang's signed textures properties. Read once, the first time someone disguises. */
+     private static List<Property> skins;
+-    private static final String PREFIX = "&8[&5Athena&8] ";
++    private static final String PREFIX = "&8[&dAthena&8] ";
+     /** Whether /disguise may be used now (Athena.setAllowDisguise). /undisguise always may. */
+     static volatile boolean allowed = true;
+ 
