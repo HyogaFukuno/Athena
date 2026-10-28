@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 14:32:08 +0900
+Subject: [PATCH] PlayerDisguiseEvent, PlayerMaskChangeEvent,
+ Athena.setDisguise / getDisguiseName / setMask: a plugin keeps the disguise
+ and the mask across servers
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 209b2161ca137e39b7d57e1ebf3e76fc1ed755df..c5041d329b966133cc44b2cf68843765748c8378 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -335,4 +335,39 @@ public final class Athena {
+     public static String getMask(Player player) {
+         return getServer().getMask(player);
+     }
++
++    /**
++     * Disguises {@code player} as {@code name} with the given skin, or undisguises them if
++     * {@code name} is null, without telling them or calling
++     * {@link athena.api.event.PlayerDisguiseEvent}: for a plugin giving back the disguise it saved.
++     * Called from {@link org.bukkit.event.player.PlayerLoginEvent}, before the player is in the tab
++     * list, nobody ever sees their real name; called later, everyone else gets the disguise as with
++     * {@code /disguise}. The disguise is logged with the player's real name.
++     *
++     * @param name the name everyone else sees, at most 16 letters, digits or {@code _}; if someone on
++     *             the server has it already (as their name or their disguise), a new random one is used
++     * @param skinValue Mojang's textures property value, or null for the default skin
++     * @param skinSignature Mojang's signature of {@code skinValue}, or null
++     * @return the name the player is now disguised as (which a plugin saving it should save), or null
++     * @throws IllegalArgumentException if {@code name} is not a Minecraft name
++     */
++    public static String setDisguise(Player player, String name, String skinValue, String skinSignature) {
++        return getServer().setDisguise(player, name, skinValue, skinSignature);
++    }
++
++    /** The name everyone else sees {@code player} as, or null if they are not disguised. */
++    public static String getDisguiseName(Player player) {
++        return getServer().getDisguiseName(player);
++    }
++
++    /**
++     * Masks {@code player} as {@code mask}, or takes their mask off if it is null, without telling them
++     * or calling {@link athena.api.event.PlayerMaskChangeEvent}: for a plugin giving back the mask it
++     * saved, after {@link #setMasks}.
++     *
++     * @return false, changing nothing, if {@code mask} is not one of the ranks given to {@link #setMasks}
++     */
++    public static boolean setMask(Player player, String mask) {
++        return getServer().setMask(player, mask);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 19ae679978fe467340f9af8fa4eca5fd41f90386..c1e2ea56f3e82e5e5509ab8a4fe16c9ce6c62c55 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -53,4 +53,10 @@ public interface AthenaServer {
+     void setMasks(Player player, java.util.Map<String, String> masks);
+ 
+     String getMask(Player player);
++
++    String setDisguise(Player player, String name, String skinValue, String skinSignature);
++
++    String getDisguiseName(Player player);
++
++    boolean setMask(Player player, String mask);
+ }
+diff --git a/src/main/java/athena/api/event/PlayerDisguiseEvent.java b/src/main/java/athena/api/event/PlayerDisguiseEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1ec63b85409660c18524c6b6fdd5156befb12e1
+--- /dev/null
++++ b/src/main/java/athena/api/event/PlayerDisguiseEvent.java
+@@ -0,0 +1,50 @@
++package athena.api.event;
++
++import org.bukkit.entity.Player;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.player.PlayerEvent;
++
++/**
++ * Athena - a player disguised with {@code /disguise} or took it off with {@code /undisguise}, already
++ * in effect when this is called. A plugin that keeps the disguise across servers saves it here and
++ * gives it back with {@link athena.api.Athena#setDisguise} when the player next logs in. Called on
++ * the server thread.
++ */
++public final class PlayerDisguiseEvent extends PlayerEvent {
++    private static final HandlerList HANDLERS = new HandlerList();
++
++    private final String disguiseName;
++    private final String skinValue;
++    private final String skinSignature;
++
++    public PlayerDisguiseEvent(Player player, String disguiseName, String skinValue, String skinSignature) {
++        super(player);
++        this.disguiseName = disguiseName;
++        this.skinValue = skinValue;
++        this.skinSignature = skinSignature;
++    }
++
++    /** The name everyone else now sees, or null when the player undisguised. */
++    public String getDisguiseName() {
++        return this.disguiseName;
++    }
++
++    /** The disguise's skin: Mojang's textures property value, or null for the default skin. */
++    public String getSkinValue() {
++        return this.skinValue;
++    }
++
++    /** Mojang's signature of {@link #getSkinValue()}, or null. */
++    public String getSkinSignature() {
++        return this.skinSignature;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}
+diff --git a/src/main/java/athena/api/event/PlayerMaskChangeEvent.java b/src/main/java/athena/api/event/PlayerMaskChangeEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..eb8b854a9ad98737677c6eb2223cbafa88975bf6
+--- /dev/null
++++ b/src/main/java/athena/api/event/PlayerMaskChangeEvent.java
+@@ -0,0 +1,36 @@
++package athena.api.event;
++
++import org.bukkit.entity.Player;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.player.PlayerEvent;
++
++/**
++ * Athena - a player put on a mask with {@code /mask <rank>} or took it off ({@code /unmask}, or
++ * {@code /disguise}, which starts a disguise without one), already in effect when this is called. A
++ * plugin that keeps the mask across servers saves it here and gives it back with
++ * {@link athena.api.Athena#setMask} when the player next joins. Called on the server thread.
++ */
++public final class PlayerMaskChangeEvent extends PlayerEvent {
++    private static final HandlerList HANDLERS = new HandlerList();
++
++    private final String mask;
++
++    public PlayerMaskChangeEvent(Player player, String mask) {
++        super(player);
++        this.mask = mask;
++    }
++
++    /** The rank masked as (a name given to {@link athena.api.Athena#setMasks}), or null when the mask came off. */
++    public String getMask() {
++        return this.mask;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}
