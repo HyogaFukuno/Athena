@@ -1,0 +1,165 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 23:53:32 +0900
+Subject: [PATCH] Boss bars: an invisible, silent wither only that player is
+ told about, kept 30 blocks ahead of their eyes and moved once a block off
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 73d6de4646c8ee7397d6050f2d897c258140465c..23b2b5e4dfa9e959333031ce68c28a3e66ece05d 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -275,6 +275,27 @@ public final class AthenaServerImpl implements AthenaServer {
+         return ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaMask;
+     }
+ 
++    @Override
++    public void setBossBar(Player player, String title, float progress) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena set a boss bar"); // Athena - server thread only; see the class comment
++        Validate.notNull(title, "title");
++        net.minecraft.server.EntityPlayer handle = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle();
++        if (handle.athenaBossBar == null) {
++            handle.athenaBossBar = net.minecraft.server.AthenaBossBar.create(handle);
++        }
++        handle.athenaBossBar.set(title, progress);
++    }
++
++    @Override
++    public void removeBossBar(Player player) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena remove a boss bar"); // Athena - server thread only; see the class comment
++        net.minecraft.server.EntityPlayer handle = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle();
++        if (handle.athenaBossBar != null) {
++            handle.athenaBossBar.remove();
++            handle.athenaBossBar = null;
++        }
++    }
++
+     private static void checkPerTick(int perTick) {
+         if (perTick < 1) {
+             throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
+diff --git a/src/main/java/net/minecraft/server/AthenaBossBar.java b/src/main/java/net/minecraft/server/AthenaBossBar.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..600862f1e3f86523548db3e0ffbe354f0758b098
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBossBar.java
+@@ -0,0 +1,100 @@
++package net.minecraft.server;
++
++/**
++ * Athena - a boss bar shown to one player (athena.api.Athena.setBossBar). Neither 1.7 nor 1.8 has a
++ * boss bar of its own: the client draws one for a boss it is rendering, with the boss's name and
++ * health. So this tells only this player about an invisible, silent wither that exists nowhere
++ * else (not in the world, not tracked), and keeps it {@value #DISTANCE} blocks ahead of their eyes:
++ * 1.8 renders entities by the chunk sections in view, so a wither behind the player or under the
++ * world would drop the bar. It is too far away to be hit, and 1.7 gets it through the usual
++ * translation (a wither, with its name).
++ */
++public final class AthenaBossBar {
++    /** How far ahead of the player's eyes the wither is kept. */
++    private static final double DISTANCE = 30.0D;
++    /** Boss bar names longer than this are cut (the name tag's limit). */
++    private static final int MAX_TITLE = 64;
++    /** The wither is moved once it is this far (1 block, in 1/32 blocks, squared) from where the client has it. */
++    private static final long MOVE_THRESHOLD_SQUARED = 32L * 32L;
++
++    private final EntityPlayer player;
++    private final EntityWither wither;
++    /** The world the client was told about the wither in; null until then. A new world forgets it. */
++    private World spawnedIn;
++    private int lastX, lastY, lastZ;
++
++    /** A bar for {@code player}, not shown until {@link #set}. */
++    public static AthenaBossBar create(EntityPlayer player) {
++        return new AthenaBossBar(player);
++    }
++
++    private AthenaBossBar(EntityPlayer player) {
++        this.player = player;
++        this.wither = new EntityWither(player.world);
++        this.wither.setInvisible(true);
++        this.wither.setSilent(true);
++    }
++
++    /** Shows {@code title} over a bar {@code progress} (0 to 1) full; sent at once. */
++    public void set(String title, float progress) {
++        this.wither.setCustomName(title.length() > MAX_TITLE ? title.substring(0, MAX_TITLE) : title);
++        // A boss at 0 health plays its death on the client; the emptiest bar is 1 point of health
++        float health = Math.max(0.0F, Math.min(1.0F, progress)) * this.wither.getMaxHealth();
++        this.wither.setHealth(Math.max(1.0F, health));
++        if (this.spawnedIn == this.player.world) {
++            this.player.playerConnection.sendPacket(new PacketPlayOutEntityMetadata(this.wither.getId(), this.wither.getDataWatcher(), true));
++        } else {
++            this.spawn();
++        }
++    }
++
++    /** Every tick, from the player's: spawn it again in a new world, else follow where they look. */
++    void tick() {
++        if (this.spawnedIn != this.player.world) {
++            this.spawn();
++            return;
++        }
++        double[] at = this.target();
++        int x = MathHelper.floor(at[0] * 32.0D);
++        int y = MathHelper.floor(at[1] * 32.0D);
++        int z = MathHelper.floor(at[2] * 32.0D);
++        // Moved only once it is a block from where the client has it: 30 blocks ahead that is about
++        // 2 degrees of looking around, and the wither stays in view, without a packet every tick
++        long dx = x - this.lastX, dy = y - this.lastY, dz = z - this.lastZ;
++        if (dx * dx + dy * dy + dz * dz >= MOVE_THRESHOLD_SQUARED) {
++            this.lastX = x;
++            this.lastY = y;
++            this.lastZ = z;
++            this.player.playerConnection.sendPacket(new PacketPlayOutEntityTeleport(this.wither.getId(), x, y, z, (byte) 0, (byte) 0, false));
++        }
++    }
++
++    /** Takes the bar away. */
++    public void remove() {
++        if (this.spawnedIn != null && this.spawnedIn == this.player.world) {
++            this.player.playerConnection.sendPacket(new PacketPlayOutEntityDestroy(this.wither.getId()));
++        }
++        this.spawnedIn = null;
++    }
++
++    private void spawn() {
++        double[] at = this.target();
++        this.wither.world = this.player.world;
++        this.wither.setPosition(at[0], at[1], at[2]);
++        this.lastX = MathHelper.floor(at[0] * 32.0D);
++        this.lastY = MathHelper.floor(at[1] * 32.0D);
++        this.lastZ = MathHelper.floor(at[2] * 32.0D);
++        this.player.playerConnection.sendPacket(new PacketPlayOutSpawnEntityLiving(this.wither));
++        this.spawnedIn = this.player.world;
++    }
++
++    /** {@value #DISTANCE} blocks ahead of the player's eyes, kept inside the world's height. */
++    private double[] target() {
++        Vec3D look = this.player.getLookVec();
++        double y = this.player.locY + this.player.getHeadHeight() + look.yCoord * DISTANCE;
++        return new double[] {
++                this.player.locX + look.xCoord * DISTANCE,
++                Math.max(1.0D, Math.min(254.0D, y)),
++                this.player.locZ + look.zCoord * DISTANCE };
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 617d98b038b7932fcbb8218fef4f2414461ca6c2..d04a256cd38186065fe3b2ef6fdc12d57c82aa2f 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -120,6 +120,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public org.bukkit.ChatColor athenaChatColor; // Athena - /chatcolor (athena.server.ChatColorCommand); null for the default
+     public java.util.Map<String, String> athenaMasks = java.util.Collections.emptyMap(); // Athena - /mask: rank name to colour (translated), lowest first; see athena.api.Athena.setMasks
+     public String athenaMask; // Athena - /mask: the rank masked as (a key of athenaMasks), or null
++    public AthenaBossBar athenaBossBar; // Athena - athena.api.Athena.setBossBar; null when none is shown
+     private IChatBaseComponent athenaListNameSource, athenaListNameDisguised;
+ 
+     /** The tab list name everyone else sees: the real list name with the real name swapped for the disguise's. */
+@@ -313,6 +314,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+ 
+     public void onUpdate() {
+         this.athenaRecordBox(); // Athena
++        if (this.athenaBossBar != null) this.athenaBossBar.tick(); // Athena - keep the boss bar's wither in view
+         // CraftBukkit start
+         if (this.joining) {
+             this.joining = false;

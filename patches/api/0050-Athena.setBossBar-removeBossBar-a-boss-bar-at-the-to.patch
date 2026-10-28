@@ -1,0 +1,48 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 23:53:32 +0900
+Subject: [PATCH] Athena.setBossBar / removeBossBar: a boss bar at the top of
+ one player's screen
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index c5041d329b966133cc44b2cf68843765748c8378..146ba0a7f27ff22da01e9e277155a4aeb94cf6d5 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -370,4 +370,23 @@ public final class Athena {
+     public static boolean setMask(Player player, String mask) {
+         return getServer().setMask(player, mask);
+     }
++
++    /**
++     * Shows {@code player} a boss bar at the top of the screen, or changes the one shown: {@code title}
++     * over a bar {@code progress} full. Only {@code player} sees it, on 1.7 and 1.8 alike, until
++     * {@link #removeBossBar}; it stays through teleports and changes of world, and goes when they leave.
++     * (Neither version has boss bars of its own: the bar is an invisible wither only they are told
++     * about, kept far ahead of where they look.)
++     *
++     * @param title the text over the bar, with {@code §} colour codes; at most 64 characters are shown
++     * @param progress how full the bar is, from 0 (empty) to 1 (full)
++     */
++    public static void setBossBar(Player player, String title, float progress) {
++        getServer().setBossBar(player, title, progress);
++    }
++
++    /** Takes away the boss bar {@link #setBossBar} gave {@code player}, if any. */
++    public static void removeBossBar(Player player) {
++        getServer().removeBossBar(player);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index c1e2ea56f3e82e5e5509ab8a4fe16c9ce6c62c55..5d508d7286bfd7d4a902ddb3cb8f9fc1bacf18ba 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -59,4 +59,8 @@ public interface AthenaServer {
+     String getDisguiseName(Player player);
+ 
+     boolean setMask(Player player, String mask);
++
++    void setBossBar(Player player, String title, float progress);
++
++    void removeBossBar(Player player);
+ }
