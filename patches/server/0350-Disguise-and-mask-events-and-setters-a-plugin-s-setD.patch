@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 14:32:08 +0900
+Subject: [PATCH] Disguise and mask events and setters; a plugin's
+ setDisplayName while masked or disguised changes the real display name
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index ffec406bc0549c3c6f21a5ffaf5b0b414fe135e7..73d6de4646c8ee7397d6050f2d897c258140465c 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -28,6 +28,7 @@ import org.bukkit.event.player.PlayerTeleportEvent;
+  */
+ public final class AthenaServerImpl implements AthenaServer {
+     /** A mask's colour: 1 to 4 colour or format codes, as a 1.8 team prefix leaves room for before a name. */
++    private static final java.util.regex.Pattern MINECRAFT_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9_]{1,16}");
+     private static final java.util.regex.Pattern MASK_COLOR = java.util.regex.Pattern.compile("(&[0-9a-fk-orA-FK-OR]){1,4}");
+ 
+ 
+@@ -210,6 +211,65 @@ public final class AthenaServerImpl implements AthenaServer {
+         craft.athenaUpdateDisplayName();
+     }
+ 
++    @Override
++    public String setDisguise(Player player, String name, String skinValue, String skinSignature) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena set a disguise"); // Athena - server thread only; see the class comment
++        org.bukkit.craftbukkit.entity.CraftPlayer craft = (org.bukkit.craftbukkit.entity.CraftPlayer) player;
++        net.minecraft.server.EntityPlayer handle = craft.getHandle();
++        boolean joined = net.minecraft.server.MinecraftServer.getServer().getPlayerList().players.contains(handle);
++        if (name == null) {
++            if (handle.athenaDisguise != null) {
++                net.minecraft.server.MinecraftServer.LOGGER.info("[Disguise] {} ({}) is no longer disguised as {} (by a plugin)", player.getName(), player.getUniqueId(), handle.athenaDisguise.getName());
++                if (joined) {
++                    craft.athenaDisguise(null);
++                } else {
++                    handle.athenaDisguise = null;
++                    craft.athenaUpdateDisplayName();
++                }
++            }
++            return null;
++        }
++        Validate.isTrue(MINECRAFT_NAME.matcher(name).matches(), "Not a Minecraft name: " + name);
++        if (DisguiseCommand.taken(name, handle)) {
++            name = DisguiseCommand.randomName(handle);
++        }
++        com.mojang.authlib.GameProfile disguise = new com.mojang.authlib.GameProfile(player.getUniqueId(), name);
++        if (skinValue != null) {
++            disguise.getProperties().put("textures", new com.mojang.authlib.properties.Property("textures", skinValue, skinSignature));
++        }
++        if (joined) {
++            craft.athenaDisguise(disguise);
++        } else {
++            // logging in: not in anyone's tab list yet, so the first entries everyone gets are the disguise's
++            handle.athenaDisguise = disguise;
++            craft.athenaUpdateDisplayName();
++        }
++        net.minecraft.server.MinecraftServer.LOGGER.info("[Disguise] {} ({}) disguised as {} (kept from before)", player.getName(), player.getUniqueId(), name);
++        return name;
++    }
++
++    @Override
++    public String getDisguiseName(Player player) {
++        com.mojang.authlib.GameProfile disguise = ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaDisguise;
++        return disguise == null ? null : disguise.getName();
++    }
++
++    @Override
++    public boolean setMask(Player player, String mask) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena set a mask"); // Athena - server thread only; see the class comment
++        org.bukkit.craftbukkit.entity.CraftPlayer craft = (org.bukkit.craftbukkit.entity.CraftPlayer) player;
++        net.minecraft.server.EntityPlayer handle = craft.getHandle();
++        if (mask != null && !handle.athenaMasks.containsKey(mask)) {
++            return false;
++        }
++        if (mask != null && !mask.equals(handle.athenaMask)) {
++            net.minecraft.server.MinecraftServer.LOGGER.info("[Mask] {} ({}) masked as {} (kept from before)", player.getName(), player.getUniqueId(), mask);
++        }
++        handle.athenaMask = mask;
++        craft.athenaUpdateDisplayName();
++        return true;
++    }
++
+     @Override
+     public String getMask(Player player) {
+         return ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaMask;
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index a4e6f02ff4769387f5d8754065daf9bcdc6967a7..b43d1657a2f591aaed8a093ec77ba556b03d35e8 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -75,6 +75,7 @@ public final class DisguiseCommand extends Command {
+             } else {
+                 player.athenaDisguise(null);
+                 MinecraftServer.LOGGER.info("[Disguise] {} ({}) is no longer disguised as {}", player.getName(), player.getUniqueId(), disguise.getName());
++                org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerDisguiseEvent(player, null, null, null));
+                 sender.sendMessage(AthenaMessages.format("&fYou are no longer disguised."));
+             }
+             return true;
+@@ -85,7 +86,7 @@ public final class DisguiseCommand extends Command {
+             return true;
+         }
+ 
+-        String name = randomName();
++        String name = randomName(player.getHandle());
+         GameProfile disguise = new GameProfile(player.getUniqueId(), name); // the same UUID: the entity is still this player's
+         List<Property> skins = skins();
+         if (!skins.isEmpty()) {
+@@ -96,9 +97,13 @@ public final class DisguiseCommand extends Command {
+         if (player.getHandle().athenaMask != null) {
+             player.getHandle().athenaMask = null;
+             MinecraftServer.LOGGER.info("[Mask] {} ({}) is no longer masked (disguised)", player.getName(), player.getUniqueId());
++            org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerMaskChangeEvent(player, null));
+         }
+         player.athenaDisguise(disguise);
+         MinecraftServer.LOGGER.info("[Disguise] {} ({}) disguised as {}", player.getName(), player.getUniqueId(), name);
++        Property skin = skin(disguise);
++        org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerDisguiseEvent(player, name,
++                skin == null ? null : skin.getValue(), skin == null ? null : skin.getSignature()));
+         sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged."));
+         sender.sendMessage(AthenaMessages.format("&cStaff can see your true username while using this command."));
+         sender.sendMessage(AthenaMessages.format("&fYou now appear as &a" + name + "&f."));
+@@ -110,18 +115,22 @@ public final class DisguiseCommand extends Command {
+      * A name like SwiftFox482 that no one on the server has, real or disguised: two tab list
+      * entries of one name confuse the clients' teams and name tags.
+      */
+-    private static String randomName() {
++    static String randomName(EntityPlayer self) {
+         ThreadLocalRandom random = ThreadLocalRandom.current();
+         while (true) {
+             String name = FIRST[random.nextInt(FIRST.length)] + SECOND[random.nextInt(SECOND.length)] + random.nextInt(1000);
+-            if (!taken(name)) {
++            if (!taken(name, self)) {
+                 return name; // at most 16 characters: 6 + 6 + 3
+             }
+         }
+     }
+ 
+-    private static boolean taken(String name) {
++    /** Whether someone on the server other than {@code self} has {@code name}, as their name or their disguise. */
++    static boolean taken(String name, EntityPlayer self) {
+         for (EntityPlayer player : MinecraftServer.getServer().getPlayerList().players) {
++            if (player == self) {
++                continue;
++            }
+             if (player.getName().equalsIgnoreCase(name)
+                     || player.athenaDisguise != null && player.athenaDisguise.getName().equalsIgnoreCase(name)) {
+                 return true;
+@@ -130,6 +139,12 @@ public final class DisguiseCommand extends Command {
+         return false;
+     }
+ 
++    /** The disguise's skin (its textures property), or null for the default skin. */
++    static Property skin(GameProfile disguise) {
++        java.util.Iterator<Property> textures = disguise.getProperties().get("textures").iterator();
++        return textures.hasNext() ? textures.next() : null;
++    }
++
+     private static synchronized List<Property> skins() {
+         if (skins == null) {
+             List<Property> read = new ArrayList<>();
+diff --git a/src/main/java/athena/server/MaskCommand.java b/src/main/java/athena/server/MaskCommand.java
+index 2eb62443316cd1cad08bf9a5732a14a9524304a5..ea1da671aaac359cb11cb58b995ac6f3c220baed 100644
+--- a/src/main/java/athena/server/MaskCommand.java
++++ b/src/main/java/athena/server/MaskCommand.java
+@@ -53,6 +53,7 @@ public final class MaskCommand extends Command {
+             handle.athenaMask = null;
+             player.athenaUpdateDisplayName();
+             MinecraftServer.LOGGER.info("[Mask] {} ({}) is no longer masked", player.getName(), player.getUniqueId());
++            org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerMaskChangeEvent(player, null));
+             sender.sendMessage(AthenaMessages.format("&rYou have been unmasked&8."));
+             return true;
+         }
+@@ -71,6 +72,7 @@ public final class MaskCommand extends Command {
+         handle.athenaMask = mask;
+         player.athenaUpdateDisplayName();
+         MinecraftServer.LOGGER.info("[Mask] {} ({}) masked as {}", player.getName(), player.getUniqueId(), mask);
++        org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerMaskChangeEvent(player, mask));
+         sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RESET + "You have been masked as " + describe(handle, mask) + ChatColor.DARK_GRAY + "."));
+         return true;
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 08cd18f3add9792363f7ff926c46b7e26fb609d4..4fecd243e7b58ded532d7a505f26692b1d354616 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -319,6 +319,16 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+ 
+     @Override
+     public void setDisplayName(final String name) {
++        // Athena start - masked or disguised: a plugin's display name is the real one, shown when both come off
++        if (this.athenaRealDisplayName != null) {
++            this.athenaRealDisplayName = name == null ? getName() : name;
++            return;
++        }
++        this.athenaSetDisplayName(name);
++    }
++
++    private void athenaSetDisplayName(final String name) {
++        // Athena end
+         getHandle().displayName = name == null ? getName() : name;
+         getHandle().adventure$displayName = name == null ? net.kyori.adventure.text.Component.text(getName()) : net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer.legacySection().deserialize(name); // PandaSpigot - Adventure
+     }
+@@ -1139,7 +1149,8 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+      * The display name (chat, plugins' messages) for the mask and disguise: the name everyone sees
+      * (the disguise's or the real one) in the mask's colour, or in the Regular rank's green when
+      * disguised without a mask. With neither, the real display name comes back. The real one is kept
+-     * from when the first of them went on, so changing the mask or picking a new disguise keeps it.
++     * from when the first of them went on, so changing the mask or picking a new disguise keeps it;
++     * a plugin's setDisplayName meanwhile changes the real one.
+      */
+     public void athenaUpdateDisplayName() {
+         EntityPlayer self = getHandle();
+@@ -1147,15 +1158,16 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+                 : self.athenaDisguise != null ? org.bukkit.ChatColor.DARK_GREEN.toString() : null;
+         if (color == null) {
+             if (this.athenaRealDisplayName != null) {
+-                setDisplayName(this.athenaRealDisplayName);
++                String real = this.athenaRealDisplayName;
+                 this.athenaRealDisplayName = null;
++                this.athenaSetDisplayName(real);
+             }
+             return;
+         }
+         if (this.athenaRealDisplayName == null) {
+             this.athenaRealDisplayName = getDisplayName();
+         }
+-        setDisplayName(color + (self.athenaDisguise != null ? self.athenaDisguise.getName() : getName()) + org.bukkit.ChatColor.RESET);
++        this.athenaSetDisplayName(color + (self.athenaDisguise != null ? self.athenaDisguise.getName() : getName()) + org.bukkit.ChatColor.RESET);
+     }
+     // Athena end
+ 
