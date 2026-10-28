@@ -1,0 +1,23 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 13:51:29 +0900
+Subject: [PATCH] Athena.CHAT_COLORS: red, green, yellow, aqua and blue, in the
+ order /chatcolor lists them
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index ddf7aa6841b7e8da77a655b4dcd498ae8191ca7e..209b2161ca137e39b7d57e1ebf3e76fc1ed755df 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -290,9 +290,9 @@ public final class Athena {
+ 
+     // ---- chat colour ----
+ 
+-    /** The colours {@code /chatcolor} offers. */
++    /** The colours {@code /chatcolor} offers, in the order it lists them. */
+     public static final List<ChatColor> CHAT_COLORS = java.util.Collections.unmodifiableList(
+-            java.util.Arrays.asList(ChatColor.BLUE, ChatColor.GREEN, ChatColor.AQUA, ChatColor.YELLOW));
++            java.util.Arrays.asList(ChatColor.RED, ChatColor.GREEN, ChatColor.YELLOW, ChatColor.AQUA, ChatColor.BLUE));
+ 
+     /**
+      * The colour to show {@code player}'s chat messages in: the one they picked with
