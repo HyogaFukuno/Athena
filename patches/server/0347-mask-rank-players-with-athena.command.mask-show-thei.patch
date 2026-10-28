@@ -52,7 +52,7 @@ index 7439aa1bfbf9f50c1d790e75533b544992db2f7a..ffec406bc0549c3c6f21a5ffaf5b0b41
              throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
 diff --git a/src/main/java/athena/server/MaskCommand.java b/src/main/java/athena/server/MaskCommand.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..e0cf9929c76cbb58d0d236bc136fa317d7fe864e
+index 0000000000000000000000000000000000000000..2e777386516062018119611561fc90444dc4d781
 --- /dev/null
 +++ b/src/main/java/athena/server/MaskCommand.java
 @@ -0,0 +1,113 @@
@@ -117,7 +117,7 @@ index 0000000000000000000000000000000000000000..e0cf9929c76cbb58d0d236bc136fa317
 +            handle.athenaMask = null;
 +            player.athenaUpdateDisplayName();
 +            MinecraftServer.LOGGER.info("[Mask] {} ({}) is no longer masked", player.getName(), player.getUniqueId());
-+            sender.sendMessage(AthenaMessages.format("&fYour name is in your own rank's colour again."));
++            sender.sendMessage(AthenaMessages.format("&rYou have been unmasked&8."));
 +            return true;
 +        }
 +        String mask = find(masks, args[0]);
@@ -129,7 +129,7 @@ index 0000000000000000000000000000000000000000..e0cf9929c76cbb58d0d236bc136fa317
 +        handle.athenaMask = mask;
 +        player.athenaUpdateDisplayName();
 +        MinecraftServer.LOGGER.info("[Mask] {} ({}) masked as {}", player.getName(), player.getUniqueId(), mask);
-+        sender.sendMessage(AthenaMessages.formatRaw(ChatColor.WHITE + "You are now masked as " + describe(handle, mask) + ChatColor.WHITE + "."));
++        sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RESET + "You have been masked as " + describe(handle, mask) + ChatColor.DARK_GRAY + "."));
 +        return true;
 +    }
 +
