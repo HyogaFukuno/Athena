@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 11:11:37 +0900
+Subject: [PATCH] Athena.setMasks / getMask: the ranks a player may mask as
+ with /mask, given by the rank plugin
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 0d9e1aa744d8bee81715df9bb41ae3737ea17b52..ddf7aa6841b7e8da77a655b4dcd498ae8191ca7e 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -315,4 +315,24 @@ public final class Athena {
+     public static void setChatColor(Player player, ChatColor color) {
+         getServer().setChatColor(player, color);
+     }
++
++    /**
++     * Sets the ranks {@code player} may mask as with {@code /mask <rank>} (permission
++     * {@code athena.command.mask}): their name then shows in that rank's colour, in chat and in the
++     * plugins' messages (the display name), disguised or not. Athena knows no ranks: the rank plugin
++     * gives each player theirs when they join, lowest first, as rank name to {@code &} colour codes
++     * ({@code "Gold" -> "&6"}). A mask that is no longer among them is taken off. The mask lasts
++     * until the player leaves this server.
++     *
++     * @param masks rank names to colours; empty when the player may mask as none
++     * @throws IllegalArgumentException if a colour is not 1 to 4 {@code &} colour or format codes
++     */
++    public static void setMasks(Player player, java.util.Map<String, String> masks) {
++        getServer().setMasks(player, masks);
++    }
++
++    /** The rank {@code player} is masked as (a name given to {@link #setMasks}), or null. */
++    public static String getMask(Player player) {
++        return getServer().getMask(player);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 69d56c031adbeb09a89f20c7a96f3ae8643b3526..19ae679978fe467340f9af8fa4eca5fd41f90386 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -49,4 +49,8 @@ public interface AthenaServer {
+     org.bukkit.ChatColor getChatColor(Player player);
+ 
+     void setChatColor(Player player, org.bukkit.ChatColor color);
++
++    void setMasks(Player player, java.util.Map<String, String> masks);
++
++    String getMask(Player player);
+ }
