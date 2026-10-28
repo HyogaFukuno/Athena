@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 13:51:29 +0900
+Subject: [PATCH] /unmask takes the mask off; /chatcolor lists its colours as
+ "ChatColors:" and a line of names
+
+
+diff --git a/src/main/java/athena/server/ChatColorCommand.java b/src/main/java/athena/server/ChatColorCommand.java
+index 5268a4ae2852e823f7e84a4d191f0c5fcc514b79..10dc02016ea1b044288c35b7880c55a95e36631e 100644
+--- a/src/main/java/athena/server/ChatColorCommand.java
++++ b/src/main/java/athena/server/ChatColorCommand.java
+@@ -16,19 +16,19 @@ import org.bukkit.entity.Player;
+ /**
+  * Athena - {@code /chatcolor <colour>} ({@code /cc}): the colour the player's chat messages are
+  * shown in. The colour is given by name ({@code blue}) or code ({@code &9} or {@code 9}), out of
+- * {@link Athena#CHAT_COLORS}; {@code reset} goes back to the default. Athena only keeps it while the
++ * {@link Athena#CHAT_COLORS}; {@code default} (or {@code reset}) goes back to the default. Athena only keeps it while the
+  * player is on this server and does not format chat itself: the chat plugin reads it with
+  * {@link Athena#getChatColor}, and saves it on {@link PlayerChatColorChangeEvent} to give it back
+  * on the next server.
+  */
+ public final class ChatColorCommand extends Command {
+     static final String PERMISSION = "athena.command.chatcolor";
+-    private static final String RESET = "reset";
++    private static final String DEFAULT = "default", RESET = "reset";
+ 
+     public ChatColorCommand(String name) {
+         super(name);
+         this.description = "Changes the colour of your chat messages";
+-        this.usageMessage = "/chatcolor <blue|green|aqua|yellow|reset>";
++        this.usageMessage = "/chatcolor <red|green|yellow|aqua|blue|default>";
+         this.setAliases(Collections.singletonList("cc"));
+         this.setPermission(PERMISSION);
+     }
+@@ -44,19 +44,17 @@ public final class ChatColorCommand extends Command {
+         }
+         Player player = (Player) sender;
+         if (args.length != 1) {
+-            ChatColor current = Athena.getChatColor(player);
+-            sender.sendMessage(AthenaMessages.format("&fYour chat colour is " + describe(current) + "&f."));
+-            sender.sendMessage(AthenaMessages.formatRaw(ChatColor.WHITE + "Colours: " + choices() + ChatColor.WHITE + ". Use "
+-                    + ChatColor.DARK_GRAY + "[" + ChatColor.GRAY + "/" + currentAlias + " <colour>" + ChatColor.DARK_GRAY + "]" + ChatColor.WHITE + "."));
++            sendChoices(sender);
+             return true;
+         }
+ 
+         String arg = args[0].toLowerCase(Locale.ROOT);
+         ChatColor color = null;
+-        if (!arg.equals(RESET)) {
++        if (!arg.equals(DEFAULT) && !arg.equals(RESET)) {
+             color = parse(arg);
+             if (color == null) {
+-                sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RED + "Unknown colour: " + args[0] + ". Colours: " + choices() + ChatColor.RED + "."));
++                sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RED + "Unknown colour: " + args[0] + ChatColor.DARK_GRAY + "."));
++                sendChoices(sender);
+                 return true;
+             }
+         }
+@@ -73,7 +71,7 @@ public final class ChatColorCommand extends Command {
+             for (ChatColor color : Athena.CHAT_COLORS) {
+                 names.add(name(color));
+             }
+-            names.add(RESET);
++            names.add(DEFAULT);
+             names.removeIf(name -> !name.startsWith(args[0].toLowerCase(Locale.ROOT)));
+         }
+         return names;
+@@ -98,13 +96,14 @@ public final class ChatColorCommand extends Command {
+         return color == null ? "&fthe default" : "&" + color.getChar() + Character.toUpperCase(name(color).charAt(0)) + name(color).substring(1);
+     }
+ 
+-    /** {@code blue (&9), green (&a), ..., reset}, each in its colour: already coloured, for {@link AthenaMessages#formatRaw}. */
+-    private static String choices() {
++    /** {@code ChatColors:} and the colours, each in its own, then {@code Default} in white. */
++    private static void sendChoices(CommandSender sender) {
+         StringBuilder text = new StringBuilder();
+         for (ChatColor color : Athena.CHAT_COLORS) {
+-            text.append(text.length() == 0 ? "" : ChatColor.WHITE + ", ").append(color).append(name(color))
+-                    .append(ChatColor.GRAY).append(" (&").append(color.getChar()).append(")");
++            text.append(color).append(Character.toUpperCase(name(color).charAt(0))).append(name(color).substring(1))
++                    .append(ChatColor.DARK_GRAY).append(", ");
+         }
+-        return text + "" + ChatColor.WHITE + ", " + ChatColor.GRAY + RESET;
++        sender.sendMessage(AthenaMessages.format("&rChatColors&8:"));
++        sender.sendMessage(AthenaMessages.formatRaw(text + "" + ChatColor.WHITE + "Default"));
+     }
+ }
+diff --git a/src/main/java/athena/server/MaskCommand.java b/src/main/java/athena/server/MaskCommand.java
+index 50cf4ff9121bffe28f1a5c5587f1d4edfe9f7251..2eb62443316cd1cad08bf9a5732a14a9524304a5 100644
+--- a/src/main/java/athena/server/MaskCommand.java
++++ b/src/main/java/athena/server/MaskCommand.java
+@@ -17,16 +17,19 @@ import org.bukkit.entity.Player;
+  * chat and the plugins' messages), and so does their disguise's, so that together with
+  * {@code /disguise} they pass for another player of that rank. Athena knows no ranks: the ranks a
+  * player may mask as, and their colours, come from the rank plugin (athena.api.Athena.setMasks).
+- * {@code reset} takes the mask off; it also comes off when the player leaves the server. Every mask
++ * {@code /unmask} (or {@code /mask reset}) takes the mask off; it also comes off when the player leaves the server. Every mask
+  * goes to the server log with the player's real name, as disguises do.
+  */
+ public final class MaskCommand extends Command {
+     private static final String RESET = "reset";
+ 
+-    public MaskCommand(String name) {
++    private final boolean unmask;
++
++    public MaskCommand(String name, boolean unmask) {
+         super(name);
+-        this.description = "Shows your name in a lower rank's colour";
+-        this.usageMessage = "/mask <rank|reset>";
++        this.unmask = unmask;
++        this.description = unmask ? "Shows your name in your own rank's colour again" : "Shows your name in a lower rank's colour";
++        this.usageMessage = unmask ? "/unmask" : "/mask <rank|reset>";
+         this.setPermission("athena.command.mask");
+     }
+ 
+@@ -42,12 +45,7 @@ public final class MaskCommand extends Command {
+         CraftPlayer player = (CraftPlayer) sender;
+         EntityPlayer handle = player.getHandle();
+         Map<String, String> masks = handle.athenaMasks;
+-        if (args.length != 1) {
+-            sendMasks(sender, handle);
+-            return true;
+-        }
+-
+-        if (args[0].equalsIgnoreCase(RESET)) {
++        if (this.unmask || args.length == 1 && args[0].equalsIgnoreCase(RESET)) {
+             if (handle.athenaMask == null) {
+                 sender.sendMessage(AthenaMessages.format("&cYou are not masked."));
+                 return true;
+@@ -58,6 +56,10 @@ public final class MaskCommand extends Command {
+             sender.sendMessage(AthenaMessages.format("&rYou have been unmasked&8."));
+             return true;
+         }
++        if (args.length != 1) {
++            sendMasks(sender, handle);
++            return true;
++        }
+         String mask = find(masks, args[0]);
+         if (mask == null) {
+             if (!masks.isEmpty()) {
+@@ -76,7 +78,7 @@ public final class MaskCommand extends Command {
+     @Override
+     public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
+         List<String> names = new ArrayList<>();
+-        if (args.length == 1 && sender instanceof CraftPlayer) {
++        if (!this.unmask && args.length == 1 && sender instanceof CraftPlayer) {
+             for (String mask : ((CraftPlayer) sender).getHandle().athenaMasks.keySet()) {
+                 names.add(mask.toLowerCase(Locale.ROOT));
+             }
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index e7d0d4883a96d6c90f75401b7b44f4355b7ff79c..f6304ca4c3ac1bc6afd89c28967c757572a58d23 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -227,7 +227,8 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             this.server.getCommandMap().register("disguise", "Athena", new athena.server.DisguiseCommand("disguise", false)); // Athena
+             this.server.getCommandMap().register("undisguise", "Athena", new athena.server.DisguiseCommand("undisguise", true)); // Athena
+             this.server.getCommandMap().register("chatcolor", "Athena", new athena.server.ChatColorCommand("chatcolor")); // Athena
+-            this.server.getCommandMap().register("mask", "Athena", new athena.server.MaskCommand("mask")); // Athena
++            this.server.getCommandMap().register("mask", "Athena", new athena.server.MaskCommand("mask", false)); // Athena
++            this.server.getCommandMap().register("unmask", "Athena", new athena.server.MaskCommand("unmask", true)); // Athena
+ 
+             DedicatedServer.LOGGER.info("Generating keypair");
+             this.a(MinecraftEncryption.generateKeyPair());
