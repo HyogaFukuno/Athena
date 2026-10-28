@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 15:31:39 +0900
+Subject: [PATCH] /disguise: the messages as MCGamer showed them, in yellow
+ with dark grey punctuation, and "Generating random username..."
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index 3959593b35cd7e2f2c1a79885c35facea99f2c7a..ea64252bcdba49b51c58bd5f11dd512d37ad5679 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -105,10 +105,11 @@ public final class DisguiseCommand extends Command {
+         Property skin = skin(disguise);
+         org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.PlayerDisguiseEvent(player, name,
+                 skin == null ? null : skin.getValue(), skin == null ? null : skin.getSignature()));
+-        sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged."));
+-        sender.sendMessage(AthenaMessages.format("&cStaff can see your true username while using this command."));
+-        sender.sendMessage(AthenaMessages.format("&fYou now appear as &2" + name + "&f."));
+-        sender.sendMessage(AthenaMessages.format("&fTo undisguise, use &8[&7/undisguise&8]&f."));
++        sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged&8."));
++        sender.sendMessage(AthenaMessages.format("&cStaff can still see your real username&8!"));
++        sender.sendMessage(AthenaMessages.format("&eGenerating random username&8..."));
++        sender.sendMessage(AthenaMessages.format("&eYou now appear as &2" + name + "&8."));
++        sender.sendMessage(AthenaMessages.format("&eTo undisguise, use &8[&e/undisguise&8]."));
+         return true;
+     }
+ 
