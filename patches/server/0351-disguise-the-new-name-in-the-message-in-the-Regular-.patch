@@ -1,0 +1,20 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 14:59:18 +0900
+Subject: [PATCH] /disguise: the new name in the message in the Regular rank's
+ dark green (&2), as it shows in chat
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index b43d1657a2f591aaed8a093ec77ba556b03d35e8..182f7b2cb4bb0f10426b90c63ee3327f2dc0daa5 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -106,7 +106,7 @@ public final class DisguiseCommand extends Command {
+                 skin == null ? null : skin.getValue(), skin == null ? null : skin.getSignature()));
+         sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged."));
+         sender.sendMessage(AthenaMessages.format("&cStaff can see your true username while using this command."));
+-        sender.sendMessage(AthenaMessages.format("&fYou now appear as &a" + name + "&f."));
++        sender.sendMessage(AthenaMessages.format("&fYou now appear as &2" + name + "&f."));
+         sender.sendMessage(AthenaMessages.format("&fTo undisguise, use &8[&7/undisguise&8]&f."));
+         return true;
+     }

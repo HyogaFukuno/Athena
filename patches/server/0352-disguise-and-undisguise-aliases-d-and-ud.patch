@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 15:02:30 +0900
+Subject: [PATCH] /disguise and /undisguise: aliases /d and /ud
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index 182f7b2cb4bb0f10426b90c63ee3327f2dc0daa5..3959593b35cd7e2f2c1a79885c35facea99f2c7a 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -18,7 +18,7 @@ import org.bukkit.craftbukkit.entity.CraftPlayer;
+ import org.bukkit.entity.Player;
+ 
+ /**
+- * Athena - {@code /disguise} and {@code /undisguise}: everyone else sees the player under a random
++ * Athena - {@code /disguise} ({@code /d}) and {@code /undisguise} ({@code /ud}): everyone else sees the player under a random
+  * name (over the head and in the tab list) and with one of the skins in
+  * {@code athena/disguise-skins.txt}; the player still sees their own. {@code /disguise} again picks
+  * a new name and skin. Lasts until {@code /undisguise} or until the player leaves the server.
+@@ -54,6 +54,7 @@ public final class DisguiseCommand extends Command {
+         this.undisguise = undisguise;
+         this.description = undisguise ? "Shows your own name and skin to everyone again" : "Shows everyone else a random name and skin";
+         this.usageMessage = undisguise ? "/undisguise" : "/disguise";
++        this.setAliases(java.util.Collections.singletonList(undisguise ? "ud" : "d"));
+         this.setPermission("athena.command.disguise");
+     }
+ 
