@@ -1,0 +1,351 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 08:21:52 +0900
+Subject: [PATCH] /chatcolor (/cc): players with athena.command.chatcolor pick
+ the colour of their chat; Athena's messages share the [Athena] prefix
+
+
+diff --git a/src/main/java/athena/server/AthenaMessages.java b/src/main/java/athena/server/AthenaMessages.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ef1cc8fa08fc589369a7e1ca9b96946312c3669
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaMessages.java
+@@ -0,0 +1,23 @@
++package athena.server;
++
++import org.bukkit.ChatColor;
++
++/**
++ * Athena - what Athena tells players in chat starts with {@code [Athena]} in light purple, so it is
++ * told apart from the plugins' messages (and from the VIP rank's dark purple).
++ */
++final class AthenaMessages {
++    private static final String PREFIX = "&8[&dAthena&8] ";
++
++    private AthenaMessages() {}
++
++    /** {@code text} with {@code &} colour codes, after the prefix. */
++    static String format(String text) {
++        return ChatColor.translateAlternateColorCodes('&', PREFIX + text);
++    }
++
++    /** {@code text} as it is (its {@code &} stays a {@code &}: what a player typed, a colour code to show), after the prefix. */
++    static String formatRaw(String text) {
++        return ChatColor.translateAlternateColorCodes('&', PREFIX) + text;
++    }
++}
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index ac23d0e70a10996b9c42d1c88925ebf39f4cbede..7439aa1bfbf9f50c1d790e75533b544992db2f7a 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -177,6 +177,17 @@ public final class AthenaServerImpl implements AthenaServer {
+         return DisguiseCommand.allowed;
+     }
+ 
++    @Override
++    public org.bukkit.ChatColor getChatColor(Player player) {
++        return player.hasPermission(ChatColorCommand.PERMISSION) ? ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaChatColor : null;
++    }
++
++    @Override
++    public void setChatColor(Player player, org.bukkit.ChatColor color) {
++        Validate.isTrue(color == null || athena.api.Athena.CHAT_COLORS.contains(color), "Not a chat colour /chatcolor offers: " + color);
++        ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaChatColor = color;
++    }
++
+     private static void checkPerTick(int perTick) {
+         if (perTick < 1) {
+             throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
+diff --git a/src/main/java/athena/server/ChatColorCommand.java b/src/main/java/athena/server/ChatColorCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5268a4ae2852e823f7e84a4d191f0c5fcc514b79
+--- /dev/null
++++ b/src/main/java/athena/server/ChatColorCommand.java
+@@ -0,0 +1,110 @@
++package athena.server;
++
++import athena.api.Athena;
++import athena.api.event.PlayerChatColorChangeEvent;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++import java.util.Locale;
++import org.bukkit.Bukkit;
++import org.bukkit.ChatColor;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - {@code /chatcolor <colour>} ({@code /cc}): the colour the player's chat messages are
++ * shown in. The colour is given by name ({@code blue}) or code ({@code &9} or {@code 9}), out of
++ * {@link Athena#CHAT_COLORS}; {@code reset} goes back to the default. Athena only keeps it while the
++ * player is on this server and does not format chat itself: the chat plugin reads it with
++ * {@link Athena#getChatColor}, and saves it on {@link PlayerChatColorChangeEvent} to give it back
++ * on the next server.
++ */
++public final class ChatColorCommand extends Command {
++    static final String PERMISSION = "athena.command.chatcolor";
++    private static final String RESET = "reset";
++
++    public ChatColorCommand(String name) {
++        super(name);
++        this.description = "Changes the colour of your chat messages";
++        this.usageMessage = "/chatcolor <blue|green|aqua|yellow|reset>";
++        this.setAliases(Collections.singletonList("cc"));
++        this.setPermission(PERMISSION);
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String currentAlias, String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++        if (!(sender instanceof Player)) {
++            sender.sendMessage(AthenaMessages.format("&cOnly a player can change their chat colour."));
++            return true;
++        }
++        Player player = (Player) sender;
++        if (args.length != 1) {
++            ChatColor current = Athena.getChatColor(player);
++            sender.sendMessage(AthenaMessages.format("&fYour chat colour is " + describe(current) + "&f."));
++            sender.sendMessage(AthenaMessages.formatRaw(ChatColor.WHITE + "Colours: " + choices() + ChatColor.WHITE + ". Use "
++                    + ChatColor.DARK_GRAY + "[" + ChatColor.GRAY + "/" + currentAlias + " <colour>" + ChatColor.DARK_GRAY + "]" + ChatColor.WHITE + "."));
++            return true;
++        }
++
++        String arg = args[0].toLowerCase(Locale.ROOT);
++        ChatColor color = null;
++        if (!arg.equals(RESET)) {
++            color = parse(arg);
++            if (color == null) {
++                sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RED + "Unknown colour: " + args[0] + ". Colours: " + choices() + ChatColor.RED + "."));
++                return true;
++            }
++        }
++        ((CraftPlayer) player).getHandle().athenaChatColor = color;
++        Bukkit.getPluginManager().callEvent(new PlayerChatColorChangeEvent(player, color));
++        sender.sendMessage(AthenaMessages.format("&fYour chat colour is now " + describe(color) + "&f."));
++        return true;
++    }
++
++    @Override
++    public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
++        List<String> names = new ArrayList<>();
++        if (args.length == 1) {
++            for (ChatColor color : Athena.CHAT_COLORS) {
++                names.add(name(color));
++            }
++            names.add(RESET);
++            names.removeIf(name -> !name.startsWith(args[0].toLowerCase(Locale.ROOT)));
++        }
++        return names;
++    }
++
++    /** {@code blue}, {@code &9} or {@code 9}: one of {@link Athena#CHAT_COLORS}, or null. */
++    static ChatColor parse(String text) {
++        String code = text.startsWith("&") ? text.substring(1) : text;
++        for (ChatColor color : Athena.CHAT_COLORS) {
++            if (name(color).equals(text) || code.length() == 1 && color.getChar() == code.charAt(0)) {
++                return color;
++            }
++        }
++        return null;
++    }
++
++    private static String name(ChatColor color) {
++        return color.name().toLowerCase(Locale.ROOT);
++    }
++
++    private static String describe(ChatColor color) {
++        return color == null ? "&fthe default" : "&" + color.getChar() + Character.toUpperCase(name(color).charAt(0)) + name(color).substring(1);
++    }
++
++    /** {@code blue (&9), green (&a), ..., reset}, each in its colour: already coloured, for {@link AthenaMessages#formatRaw}. */
++    private static String choices() {
++        StringBuilder text = new StringBuilder();
++        for (ChatColor color : Athena.CHAT_COLORS) {
++            text.append(text.length() == 0 ? "" : ChatColor.WHITE + ", ").append(color).append(name(color))
++                    .append(ChatColor.GRAY).append(" (&").append(color.getChar()).append(")");
++        }
++        return text + "" + ChatColor.WHITE + ", " + ChatColor.GRAY + RESET;
++    }
++}
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index 2eec9d8066e7992e38525623f8527191227c283f..09405e5f7a9b8f862464c9b1a15bedc12a472103 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -12,7 +12,6 @@ import java.util.List;
+ import java.util.concurrent.ThreadLocalRandom;
+ import net.minecraft.server.EntityPlayer;
+ import net.minecraft.server.MinecraftServer;
+-import org.bukkit.ChatColor;
+ import org.bukkit.command.Command;
+ import org.bukkit.command.CommandSender;
+ import org.bukkit.craftbukkit.entity.CraftPlayer;
+@@ -43,7 +42,6 @@ public final class DisguiseCommand extends Command {
+             "Badger", "Falcon", "Viper", "Moose", "Gecko", "Koala", "Bison", "Crow", "Owl", "Yeti"};
+     /** The skins to pick from: Mojang's signed textures properties. Read once, the first time someone disguises. */
+     private static List<Property> skins;
+-    private static final String PREFIX = "&8[&dAthena&8] ";
+     /** Whether /disguise may be used now (Athena.setAllowDisguise). /undisguise always may. */
+     static volatile boolean allowed = true;
+ 
+@@ -63,7 +61,7 @@ public final class DisguiseCommand extends Command {
+             return true;
+         }
+         if (!(sender instanceof Player)) {
+-            sender.sendMessage(message("&cOnly a player can disguise."));
++            sender.sendMessage(AthenaMessages.format("&cOnly a player can disguise."));
+             return true;
+         }
+         CraftPlayer player = (CraftPlayer) sender;
+@@ -71,17 +69,17 @@ public final class DisguiseCommand extends Command {
+         if (this.undisguise) {
+             GameProfile disguise = player.getHandle().athenaDisguise;
+             if (disguise == null) {
+-                sender.sendMessage(message("&cYou are not disguised."));
++                sender.sendMessage(AthenaMessages.format("&cYou are not disguised."));
+             } else {
+                 player.athenaDisguise(null);
+                 MinecraftServer.LOGGER.info("[Disguise] {} ({}) is no longer disguised as {}", player.getName(), player.getUniqueId(), disguise.getName());
+-                sender.sendMessage(message("&fYou are no longer disguised."));
++                sender.sendMessage(AthenaMessages.format("&fYou are no longer disguised."));
+             }
+             return true;
+         }
+ 
+         if (!allowed) {
+-            sender.sendMessage(message("&cYou cannot disguise right now."));
++            sender.sendMessage(AthenaMessages.format("&cYou cannot disguise right now."));
+             return true;
+         }
+ 
+@@ -93,17 +91,13 @@ public final class DisguiseCommand extends Command {
+         }
+         player.athenaDisguise(disguise);
+         MinecraftServer.LOGGER.info("[Disguise] {} ({}) disguised as {}", player.getName(), player.getUniqueId(), name);
+-        sender.sendMessage(message("&c&lWarning! &cThis command is logged."));
+-        sender.sendMessage(message("&cStaff can see your true username while using this command."));
+-        sender.sendMessage(message("&fYou now appear as &a" + name + "&f."));
+-        sender.sendMessage(message("&fTo undisguise, use &8[&7/undisguise&8]&f."));
++        sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged."));
++        sender.sendMessage(AthenaMessages.format("&cStaff can see your true username while using this command."));
++        sender.sendMessage(AthenaMessages.format("&fYou now appear as &a" + name + "&f."));
++        sender.sendMessage(AthenaMessages.format("&fTo undisguise, use &8[&7/undisguise&8]&f."));
+         return true;
+     }
+ 
+-    private static String message(String text) {
+-        return ChatColor.translateAlternateColorCodes('&', PREFIX + text);
+-    }
+-
+     /**
+      * A name like SwiftFox482 that no one on the server has, real or disguised: two tab list
+      * entries of one name confuse the clients' teams and name tags.
+diff --git a/src/main/java/athena/server/TempTpCommand.java b/src/main/java/athena/server/TempTpCommand.java
+index 78e0eb7fd3851ad54ec73ffc2fca4988f4ca0f0f..ceae41412bc553bee9b199126dbf933e1a62cd40 100644
+--- a/src/main/java/athena/server/TempTpCommand.java
++++ b/src/main/java/athena/server/TempTpCommand.java
+@@ -4,7 +4,6 @@ import athena.api.Athena;
+ import java.io.File;
+ import java.util.concurrent.atomic.AtomicInteger;
+ import org.bukkit.Bukkit;
+-import org.bukkit.ChatColor;
+ import org.bukkit.Location;
+ import org.bukkit.World;
+ import org.bukkit.block.Block;
+@@ -33,15 +32,15 @@ public final class TempTpCommand extends Command {
+     @Override
+     public boolean execute(CommandSender sender, String currentAlias, String[] args) {
+         if (!(sender instanceof Player)) {
+-            sender.sendMessage(ChatColor.RED + "Only a player can use /temptp: it teleports whoever runs it.");
++            sender.sendMessage(AthenaMessages.format("&cOnly a player can use /temptp: it teleports whoever runs it."));
+             return true;
+         }
+         if (!sender.isOp()) {
+-            sender.sendMessage(ChatColor.RED + "You must be an operator to use /temptp.");
++            sender.sendMessage(AthenaMessages.format("&cYou must be an operator to use /temptp."));
+             return true;
+         }
+         if (args.length < 2) {
+-            sender.sendMessage(ChatColor.RED + "Usage: " + this.usageMessage);
++            sender.sendMessage(AthenaMessages.format("&cUsage: " + this.usageMessage));
+             return true;
+         }
+ 
+@@ -63,20 +62,20 @@ public final class TempTpCommand extends Command {
+                 world = Athena.loadTemplateWorld(name, folder);
+             } catch (IllegalArgumentException e) {
+                 // not e.getMessage(): chat turns a file name like level.dat into a link
+-                sender.sendMessage(ChatColor.RED + "There is no world folder at " + folder.getAbsolutePath() + ".");
++                sender.sendMessage(AthenaMessages.format("&cThere is no world folder at " + folder.getAbsolutePath() + "."));
+                 return true;
+             }
+             if (world == null) {
+-                sender.sendMessage(ChatColor.RED + "Loading '" + name + "' from " + folder.getPath() + " failed; see the console.");
++                sender.sendMessage(AthenaMessages.format("&cLoading '" + name + "' from " + folder.getPath() + " failed; see the console."));
+                 return true;
+             }
+-            sender.sendMessage(ChatColor.GRAY + "[Athena] Loaded template world '" + name + "' from " + folder.getAbsolutePath()
+-                    + " in " + ms(start) + " ms.");
++            sender.sendMessage(AthenaMessages.format("&7Loaded template world '" + name + "' from " + folder.getAbsolutePath()
++                    + " in " + ms(start) + " ms."));
+         } else if (!Athena.isTemplateWorld(world)) {
+-            sender.sendMessage(ChatColor.RED + "A world named '" + name + "' is already loaded, and it is not a template world.");
++            sender.sendMessage(AthenaMessages.format("&cA world named '" + name + "' is already loaded, and it is not a template world."));
+             return true;
+         } else {
+-            sender.sendMessage(ChatColor.GRAY + "[Athena] Template world '" + name + "' is already loaded.");
++            sender.sendMessage(AthenaMessages.format("&7Template world '" + name + "' is already loaded."));
+         }
+ 
+         final World target = world;
+@@ -88,7 +87,7 @@ public final class TempTpCommand extends Command {
+         final AtomicInteger left = new AtomicInteger(total);
+         final long preloadStart = System.nanoTime();
+ 
+-        sender.sendMessage(ChatColor.GRAY + "[Athena] Preloading " + total + " chunks around the spawn...");
++        sender.sendMessage(AthenaMessages.format("&7Preloading " + total + " chunks around the spawn..."));
+         for (int dx = -radius; dx <= radius; ++dx) {
+             for (int dz = -radius; dz <= radius; ++dz) {
+                 target.getChunkAtAsync(centreX + dx, centreZ + dz, chunk -> {
+@@ -112,10 +111,10 @@ public final class TempTpCommand extends Command {
+         // through the API, so trying the command also tries Athena.teleportAsync
+         Athena.teleportAsync(player, to).thenAccept(teleported -> {
+             if (teleported) {
+-                player.sendMessage(ChatColor.GRAY + "[Athena] Preloaded " + chunks + " chunks in " + preloadMs + " ms; teleported to "
+-                        + world.getName() + " " + to.getBlockX() + ", " + to.getBlockY() + ", " + to.getBlockZ() + ".");
++                player.sendMessage(AthenaMessages.format("&7Preloaded " + chunks + " chunks in " + preloadMs + " ms; teleported to "
++                        + world.getName() + " " + to.getBlockX() + ", " + to.getBlockY() + ", " + to.getBlockZ() + "."));
+             } else if (player.isOnline()) {
+-                player.sendMessage(ChatColor.RED + "The teleport to '" + world.getName() + "' was cancelled.");
++                player.sendMessage(AthenaMessages.format("&cThe teleport to '" + world.getName() + "' was cancelled."));
+             }
+         });
+     }
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index ea57af36eadaa89d42537a21a4600a9c95f773ea..89b32d66f8af6cc5e89e466a2f0ed60810ea4875 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -226,6 +226,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             this.server.getCommandMap().register("temptp", "Athena", new athena.server.TempTpCommand("temptp")); // Athena
+             this.server.getCommandMap().register("disguise", "Athena", new athena.server.DisguiseCommand("disguise", false)); // Athena
+             this.server.getCommandMap().register("undisguise", "Athena", new athena.server.DisguiseCommand("undisguise", true)); // Athena
++            this.server.getCommandMap().register("chatcolor", "Athena", new athena.server.ChatColorCommand("chatcolor")); // Athena
+ 
+             DedicatedServer.LOGGER.info("Generating keypair");
+             this.a(MinecraftEncryption.generateKeyPair());
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 094c580223d549c013b4cdd7b654033dd0f3f68c..ce097176583222d6edcaf5220bdf6391bd94ddd4 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -117,6 +117,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public IChatBaseComponent listName;
+     // Athena start - /disguise: the profile everyone else sees (name and skin, same UUID); null = not disguised
+     public GameProfile athenaDisguise;
++    public org.bukkit.ChatColor athenaChatColor; // Athena - /chatcolor (athena.server.ChatColorCommand); null for the default
+     private IChatBaseComponent athenaListNameSource, athenaListNameDisguised;
+ 
+     /** The tab list name everyone else sees: the real list name with the real name swapped for the disguise's. */

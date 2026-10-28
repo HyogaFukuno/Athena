@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 08:21:52 +0900
+Subject: [PATCH] Athena.getChatColor / setChatColor and
+ PlayerChatColorChangeEvent: the colour players pick with /chatcolor
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index ac5af64d98285958ed60cfe7e2e76b0646ea03ec..0d9e1aa744d8bee81715df9bb41ae3737ea17b52 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -5,6 +5,7 @@ import java.util.Collection;
+ import java.util.List;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.function.Function;
++import org.bukkit.ChatColor;
+ import org.bukkit.Chunk;
+ import org.bukkit.block.Block;
+ import org.bukkit.Location;
+@@ -286,4 +287,32 @@ public final class Athena {
+     public static boolean isDisguiseAllowed() {
+         return getServer().isDisguiseAllowed();
+     }
++
++    // ---- chat colour ----
++
++    /** The colours {@code /chatcolor} offers. */
++    public static final List<ChatColor> CHAT_COLORS = java.util.Collections.unmodifiableList(
++            java.util.Arrays.asList(ChatColor.BLUE, ChatColor.GREEN, ChatColor.AQUA, ChatColor.YELLOW));
++
++    /**
++     * The colour to show {@code player}'s chat messages in: the one they picked with
++     * {@code /chatcolor} (permission {@code athena.command.chatcolor}), or null for the chat's
++     * default. Null too while the player lacks the permission, so a colour kept from a rank they no
++     * longer have does not show. Athena does not format chat; the plugin that does asks here.
++     */
++    public static ChatColor getChatColor(Player player) {
++        return getServer().getChatColor(player);
++    }
++
++    /**
++     * Sets {@code player}'s chat colour without telling them or calling
++     * {@link athena.api.event.PlayerChatColorChangeEvent}: for a plugin giving back the colour it
++     * saved when the player joins. It lasts until the player leaves this server.
++     *
++     * @param color one of {@link #CHAT_COLORS}, or null for the default
++     * @throws IllegalArgumentException if {@code color} is not one of {@link #CHAT_COLORS}
++     */
++    public static void setChatColor(Player player, ChatColor color) {
++        getServer().setChatColor(player, color);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 9431dce5a58eedb280963dcad99bb8c01b33df45..69d56c031adbeb09a89f20c7a96f3ae8643b3526 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -45,4 +45,8 @@ public interface AthenaServer {
+     void setAllowDisguise(boolean allow);
+ 
+     boolean isDisguiseAllowed();
++
++    org.bukkit.ChatColor getChatColor(Player player);
++
++    void setChatColor(Player player, org.bukkit.ChatColor color);
+ }
+diff --git a/src/main/java/athena/api/event/PlayerChatColorChangeEvent.java b/src/main/java/athena/api/event/PlayerChatColorChangeEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..43c0a2e085a19238851cc7aeca45d9eee269a641
+--- /dev/null
++++ b/src/main/java/athena/api/event/PlayerChatColorChangeEvent.java
+@@ -0,0 +1,36 @@
++package athena.api.event;
++
++import org.bukkit.ChatColor;
++import org.bukkit.entity.Player;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.player.PlayerEvent;
++
++/**
++ * Athena - a player picked a new chat colour with {@code /chatcolor}, already in effect when this
++ * is called. A plugin that keeps the colour across servers saves it here and gives it back with
++ * {@link athena.api.Athena#setChatColor} when the player next joins. Called on the server thread.
++ */
++public final class PlayerChatColorChangeEvent extends PlayerEvent {
++    private static final HandlerList HANDLERS = new HandlerList();
++
++    private final ChatColor color;
++
++    public PlayerChatColorChangeEvent(Player player, ChatColor color) {
++        super(player);
++        this.color = color;
++    }
++
++    /** The new colour, or null when the player went back to the default. */
++    public ChatColor getColor() {
++        return this.color;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}
