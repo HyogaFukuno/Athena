@@ -1,0 +1,263 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 11:11:37 +0900
+Subject: [PATCH] /mask <rank>: players with athena.command.mask show their
+ name, and their disguise's, in a lower rank's colour
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 7439aa1bfbf9f50c1d790e75533b544992db2f7a..ffec406bc0549c3c6f21a5ffaf5b0b414fe135e7 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -27,6 +27,9 @@ import org.bukkit.event.player.PlayerTeleportEvent;
+  * createWorld's second half); gradual teleports are AthenaTeleportQueue's, drained in the tick loop.
+  */
+ public final class AthenaServerImpl implements AthenaServer {
++    /** A mask's colour: 1 to 4 colour or format codes, as a 1.8 team prefix leaves room for before a name. */
++    private static final java.util.regex.Pattern MASK_COLOR = java.util.regex.Pattern.compile("(&[0-9a-fk-orA-FK-OR]){1,4}");
++
+ 
+     // Athena - every method here works on the chunk map, the preload and teleport queues or a
+     // player, none of which is safe off the server thread: each checks the thread the way Bukkit's
+@@ -188,6 +191,30 @@ public final class AthenaServerImpl implements AthenaServer {
+         ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaChatColor = color;
+     }
+ 
++    @Override
++    public void setMasks(Player player, java.util.Map<String, String> masks) {
++        org.spigotmc.AsyncCatcher.catchOp("Athena set masks"); // Athena - server thread only; see the class comment
++        Validate.notNull(masks, "Masks may not be null");
++        java.util.Map<String, String> colors = new java.util.LinkedHashMap<String, String>();
++        for (java.util.Map.Entry<String, String> mask : masks.entrySet()) {
++            Validate.notNull(mask.getKey(), "A mask's name may not be null");
++            Validate.isTrue(mask.getValue() != null && MASK_COLOR.matcher(mask.getValue()).matches(), "Not 1 to 4 & colour codes: " + mask.getValue());
++            colors.put(mask.getKey(), org.bukkit.ChatColor.translateAlternateColorCodes('&', mask.getValue()));
++        }
++        org.bukkit.craftbukkit.entity.CraftPlayer craft = (org.bukkit.craftbukkit.entity.CraftPlayer) player;
++        net.minecraft.server.EntityPlayer handle = craft.getHandle();
++        handle.athenaMasks = java.util.Collections.unmodifiableMap(colors);
++        if (handle.athenaMask != null && !colors.containsKey(handle.athenaMask)) {
++            handle.athenaMask = null;
++        }
++        craft.athenaUpdateDisplayName();
++    }
++
++    @Override
++    public String getMask(Player player) {
++        return ((org.bukkit.craftbukkit.entity.CraftPlayer) player).getHandle().athenaMask;
++    }
++
+     private static void checkPerTick(int perTick) {
+         if (perTick < 1) {
+             throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
+diff --git a/src/main/java/athena/server/MaskCommand.java b/src/main/java/athena/server/MaskCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..50cf4ff9121bffe28f1a5c5587f1d4edfe9f7251
+--- /dev/null
++++ b/src/main/java/athena/server/MaskCommand.java
+@@ -0,0 +1,116 @@
++package athena.server;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Locale;
++import java.util.Map;
++import net.minecraft.server.EntityPlayer;
++import net.minecraft.server.MinecraftServer;
++import org.bukkit.ChatColor;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - {@code /mask <rank>}: the player's name shows in a lower rank's colour (the display name:
++ * chat and the plugins' messages), and so does their disguise's, so that together with
++ * {@code /disguise} they pass for another player of that rank. Athena knows no ranks: the ranks a
++ * player may mask as, and their colours, come from the rank plugin (athena.api.Athena.setMasks).
++ * {@code reset} takes the mask off; it also comes off when the player leaves the server. Every mask
++ * goes to the server log with the player's real name, as disguises do.
++ */
++public final class MaskCommand extends Command {
++    private static final String RESET = "reset";
++
++    public MaskCommand(String name) {
++        super(name);
++        this.description = "Shows your name in a lower rank's colour";
++        this.usageMessage = "/mask <rank|reset>";
++        this.setPermission("athena.command.mask");
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String currentAlias, String[] args) {
++        if (!this.testPermission(sender)) {
++            return true;
++        }
++        if (!(sender instanceof Player)) {
++            sender.sendMessage(AthenaMessages.format("&cOnly a player can mask."));
++            return true;
++        }
++        CraftPlayer player = (CraftPlayer) sender;
++        EntityPlayer handle = player.getHandle();
++        Map<String, String> masks = handle.athenaMasks;
++        if (args.length != 1) {
++            sendMasks(sender, handle);
++            return true;
++        }
++
++        if (args[0].equalsIgnoreCase(RESET)) {
++            if (handle.athenaMask == null) {
++                sender.sendMessage(AthenaMessages.format("&cYou are not masked."));
++                return true;
++            }
++            handle.athenaMask = null;
++            player.athenaUpdateDisplayName();
++            MinecraftServer.LOGGER.info("[Mask] {} ({}) is no longer masked", player.getName(), player.getUniqueId());
++            sender.sendMessage(AthenaMessages.format("&rYou have been unmasked&8."));
++            return true;
++        }
++        String mask = find(masks, args[0]);
++        if (mask == null) {
++            if (!masks.isEmpty()) {
++                sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RED + "You cannot mask as " + args[0] + ChatColor.DARK_GRAY + "."));
++            }
++            sendMasks(sender, handle);
++            return true;
++        }
++        handle.athenaMask = mask;
++        player.athenaUpdateDisplayName();
++        MinecraftServer.LOGGER.info("[Mask] {} ({}) masked as {}", player.getName(), player.getUniqueId(), mask);
++        sender.sendMessage(AthenaMessages.formatRaw(ChatColor.RESET + "You have been masked as " + describe(handle, mask) + ChatColor.DARK_GRAY + "."));
++        return true;
++    }
++
++    @Override
++    public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
++        List<String> names = new ArrayList<>();
++        if (args.length == 1 && sender instanceof CraftPlayer) {
++            for (String mask : ((CraftPlayer) sender).getHandle().athenaMasks.keySet()) {
++                names.add(mask.toLowerCase(Locale.ROOT));
++            }
++            names.add(RESET);
++            names.removeIf(name -> !name.startsWith(args[0].toLowerCase(Locale.ROOT)));
++        }
++        return names;
++    }
++
++    /** The mask named {@code name}, ignoring case, or null. */
++    private static String find(Map<String, String> masks, String name) {
++        for (String mask : masks.keySet()) {
++            if (mask.equalsIgnoreCase(name)) {
++                return mask;
++            }
++        }
++        return null;
++    }
++
++    private static String describe(EntityPlayer handle, String mask) {
++        return handle.athenaMasks.get(mask) + mask + ChatColor.RESET;
++    }
++
++    /** {@code Masks:} and the ranks the player may mask as, lowest first, each in its colour. */
++    private static void sendMasks(CommandSender sender, EntityPlayer handle) {
++        if (handle.athenaMasks.isEmpty()) {
++            sender.sendMessage(AthenaMessages.format("&cThere are no ranks you can mask as."));
++            return;
++        }
++        StringBuilder text = new StringBuilder();
++        for (Map.Entry<String, String> mask : handle.athenaMasks.entrySet()) {
++            text.append(text.length() == 0 ? "" : ChatColor.DARK_GRAY + ", ").append(mask.getValue()).append(mask.getKey());
++        }
++        sender.sendMessage(AthenaMessages.format("&rMasks&8:"));
++        sender.sendMessage(AthenaMessages.formatRaw(text.toString()));
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index 89b32d66f8af6cc5e89e466a2f0ed60810ea4875..e7d0d4883a96d6c90f75401b7b44f4355b7ff79c 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -227,6 +227,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             this.server.getCommandMap().register("disguise", "Athena", new athena.server.DisguiseCommand("disguise", false)); // Athena
+             this.server.getCommandMap().register("undisguise", "Athena", new athena.server.DisguiseCommand("undisguise", true)); // Athena
+             this.server.getCommandMap().register("chatcolor", "Athena", new athena.server.ChatColorCommand("chatcolor")); // Athena
++            this.server.getCommandMap().register("mask", "Athena", new athena.server.MaskCommand("mask")); // Athena
+ 
+             DedicatedServer.LOGGER.info("Generating keypair");
+             this.a(MinecraftEncryption.generateKeyPair());
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index ce097176583222d6edcaf5220bdf6391bd94ddd4..617d98b038b7932fcbb8218fef4f2414461ca6c2 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -118,6 +118,8 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     // Athena start - /disguise: the profile everyone else sees (name and skin, same UUID); null = not disguised
+     public GameProfile athenaDisguise;
+     public org.bukkit.ChatColor athenaChatColor; // Athena - /chatcolor (athena.server.ChatColorCommand); null for the default
++    public java.util.Map<String, String> athenaMasks = java.util.Collections.emptyMap(); // Athena - /mask: rank name to colour (translated), lowest first; see athena.api.Athena.setMasks
++    public String athenaMask; // Athena - /mask: the rank masked as (a key of athenaMasks), or null
+     private IChatBaseComponent athenaListNameSource, athenaListNameDisguised;
+ 
+     /** The tab list name everyone else sees: the real list name with the real name swapped for the disguise's. */
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index f86aa63825f3ab4d881638d411e5531ce3de3dab..08cd18f3add9792363f7ff926c46b7e26fb609d4 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1114,8 +1114,8 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+         }
+     }
+ 
+-    // Athena start - /disguise
+-    private String athenaRealDisplayName; // the display name to give back on undisguise
++    // Athena start - /disguise and /mask
++    private String athenaRealDisplayName; // the display name to give back when neither masked nor disguised
+ 
+     /**
+      * Shows everyone else {@code disguise} (a profile with this player's UUID) in place of this player's
+@@ -1126,24 +1126,37 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+      */
+     public void athenaDisguise(GameProfile disguise) {
+         EntityPlayer self = getHandle();
+-        // the display name (chat, plugins' messages) goes with the disguise, in the Regular rank's green;
+-        // the real one comes back on undisguise. Kept from the first disguise: picking a new one keeps it
+-        if (disguise != null) {
+-            if (self.athenaDisguise == null) {
+-                this.athenaRealDisplayName = getDisplayName();
+-            }
+-            setDisplayName(org.bukkit.ChatColor.DARK_GREEN + disguise.getName() + org.bukkit.ChatColor.RESET);
+-        } else if (self.athenaDisguise != null) {
+-            setDisplayName(this.athenaRealDisplayName);
+-            this.athenaRealDisplayName = null;
+-        }
+         self.athenaDisguise = disguise;
++        this.athenaUpdateDisplayName();
+         for (EntityPlayer player : server.getServer().getPlayerList().players) {
+             if (player != self) {
+                 player.getBukkitEntity().reregisterPlayer(self);
+             }
+         }
+     }
++
++    /**
++     * The display name (chat, plugins' messages) for the mask and disguise: the name everyone sees
++     * (the disguise's or the real one) in the mask's colour, or in the Regular rank's green when
++     * disguised without a mask. With neither, the real display name comes back. The real one is kept
++     * from when the first of them went on, so changing the mask or picking a new disguise keeps it.
++     */
++    public void athenaUpdateDisplayName() {
++        EntityPlayer self = getHandle();
++        String color = self.athenaMask != null ? self.athenaMasks.get(self.athenaMask)
++                : self.athenaDisguise != null ? org.bukkit.ChatColor.DARK_GREEN.toString() : null;
++        if (color == null) {
++            if (this.athenaRealDisplayName != null) {
++                setDisplayName(this.athenaRealDisplayName);
++                this.athenaRealDisplayName = null;
++            }
++            return;
++        }
++        if (this.athenaRealDisplayName == null) {
++            this.athenaRealDisplayName = getDisplayName();
++        }
++        setDisplayName(color + (self.athenaDisguise != null ? self.athenaDisguise.getName() : getName()) + org.bukkit.ChatColor.RESET);
++    }
+     // Athena end
+ 
+     public void setPlayerProfile(com.destroystokyo.paper.profile.PlayerProfile profile) {
