@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 28 Oct 2026 14:15:36 +0900
+Subject: [PATCH] /disguise takes off a mask put on before it: a new disguise
+ starts in the Regular rank's green
+
+
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index 09405e5f7a9b8f862464c9b1a15bedc12a472103..a4e6f02ff4769387f5d8754065daf9bcdc6967a7 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -25,6 +25,8 @@ import org.bukkit.entity.Player;
+  * Every disguise goes to the server log with the player's real name, as the player is warned.
+  * A plugin can stop players from disguising for a while with Athena.setAllowDisguise(false);
+  * that leaves existing disguises alone.
++ * Disguising takes off a /mask put on before, so a new disguise starts in the Regular rank's green;
++ * /mask after it colours the disguised name.
+  *
+  * <p>Nothing about it runs per packet: the server picks which tab list entry to build when it
+  * builds one (PacketPlayOutPlayerInfo.athenaSeenBy), which only happens when a player joins,
+@@ -89,6 +91,12 @@ public final class DisguiseCommand extends Command {
+         if (!skins.isEmpty()) {
+             disguise.getProperties().put("textures", skins.get(ThreadLocalRandom.current().nextInt(skins.size())));
+         }
++        // a new disguise starts in the Regular rank's green: a mask from before it comes off
++        // (/mask after /disguise colours the disguise)
++        if (player.getHandle().athenaMask != null) {
++            player.getHandle().athenaMask = null;
++            MinecraftServer.LOGGER.info("[Mask] {} ({}) is no longer masked (disguised)", player.getName(), player.getUniqueId());
++        }
+         player.athenaDisguise(disguise);
+         MinecraftServer.LOGGER.info("[Disguise] {} ({}) disguised as {}", player.getName(), player.getUniqueId(), name);
+         sender.sendMessage(AthenaMessages.format("&c&lWarning! &cThis command is logged."));
