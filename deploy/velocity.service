@@ -1,0 +1,23 @@
+# Velocity (Arcana のプロキシ)。tmux のセッション "velocity" の中で動かし、コンソールは
+#   sudo -u velocity tmux attach -t velocity   (抜けるときは Ctrl-b d)
+# で開く。止める・再起動するときは systemctl stop / restart velocity
+# (コンソールで end と打っても止まるが、Restart=always なので 5 秒後に立ち上がり直す)
+[Unit]
+Description=Velocity proxy (tmux session velocity)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=velocity
+WorkingDirectory=/opt/velocity
+ExecStart=/usr/bin/tmux new-session -d -s velocity /opt/velocity/start.sh
+ExecStop=/usr/bin/tmux send-keys -t velocity end Enter
+ExecStop=/bin/sh -c "while /usr/bin/tmux has-session -t velocity 2>/dev/null; do sleep 1; done"
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+MemoryMax=320M
+
+[Install]
+WantedBy=multi-user.target
