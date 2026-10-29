@@ -1,0 +1,49 @@
+> Task :build-logic:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :build-logic:generateExternalPluginSpecBuilders UP-TO-DATE
+> Task :build-logic:extractPrecompiledScriptPluginPlugins UP-TO-DATE
+> Task :build-logic:compilePluginsBlocks UP-TO-DATE
+> Task :build-logic:generatePrecompiledScriptPluginAccessors UP-TO-DATE
+> Task :build-logic:generateScriptPluginAdapters UP-TO-DATE
+> Task :build-logic:compileKotlin UP-TO-DATE
+> Task :build-logic:compileJava NO-SOURCE
+> Task :build-logic:pluginDescriptors UP-TO-DATE
+> Task :build-logic:processResources UP-TO-DATE
+> Task :build-logic:classes UP-TO-DATE
+> Task :build-logic:jar UP-TO-DATE
+> Task :pandaspigot-server:processResources UP-TO-DATE
+> Task :pandaspigot-server:prepareTestServerDir
+> Task :pandaspigot-server:processTestResources NO-SOURCE
+> Task :pandaspigot-api:compileJava UP-TO-DATE
+> Task :pandaspigot-api:processResources NO-SOURCE
+> Task :pandaspigot-api:classes UP-TO-DATE
+> Task :pandaspigot-api:generateApiVersioningFile UP-TO-DATE
+> Task :pandaspigot-api:jar UP-TO-DATE
+> Task :pandaspigot-server:compileJava UP-TO-DATE
+> Task :pandaspigot-server:classes UP-TO-DATE
+> Task :pandaspigot-server:compileTestJava
+> Task :pandaspigot-server:testClasses
+
+> Task :pandaspigot-server:test FAILED
+
+AthenaPaperChunkMapTransitionTest > [section=1] > absentPresentAndAbsentAgainRebuildTheEnabledPaperCache[section=1] FAILED
+    java.lang.AssertionError at AthenaPaperChunkMapTransitionTest.java:45
+
+AthenaPaperChunkMapTransitionTest > [section=7] > absentPresentAndAbsentAgainRebuildTheEnabledPaperCache[section=7] FAILED
+    java.lang.AssertionError at AthenaPaperChunkMapTransitionTest.java:45
+
+AthenaPaperChunkMapTransitionTest > [section=15] > absentPresentAndAbsentAgainRebuildTheEnabledPaperCache[section=15] FAILED
+    java.lang.AssertionError at AthenaPaperChunkMapTransitionTest.java:45
+
+4 tests completed, 3 failed
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':pandaspigot-server:test'.
+> There were failing tests. See the report at: file:///Users/glacier/Documents/Minecraft/developments/sandbox/Athena/PandaSpigot-Server/build/reports/tests/test/index.html
+
+* Try:
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+
+BUILD FAILED in 2s
+17 actionable tasks: 3 executed, 14 up-to-date

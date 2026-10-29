@@ -1,0 +1,143 @@
+maps baseline process=1
+RESULT,maps,1,1.442,6609616
+RESULT,maps,2,4.775,6609616
+RESULT,maps,3,0.567,6609616
+RESULT,maps,4,0.505,6609616
+RESULT,maps,5,0.523,6609616
+
+maps fixed process=1
+RESULT,maps,1,0.647,5889672
+RESULT,maps,2,0.625,5889616
+RESULT,maps,3,4.854,5889616
+RESULT,maps,4,0.703,5889616
+RESULT,maps,5,0.625,5889616
+
+maps fixed process=2
+RESULT,maps,1,0.520,5889616
+RESULT,maps,2,0.534,5889616
+RESULT,maps,3,4.242,5889616
+RESULT,maps,4,0.552,5889712
+RESULT,maps,5,0.535,5889616
+
+maps baseline process=2
+RESULT,maps,1,0.630,6609672
+RESULT,maps,2,5.059,6609616
+RESULT,maps,3,0.685,6609616
+RESULT,maps,4,0.726,6609616
+RESULT,maps,5,0.656,6609616
+
+maps baseline process=3
+RESULT,maps,1,0.553,6609616
+RESULT,maps,2,4.844,6609616
+RESULT,maps,3,0.496,6609712
+RESULT,maps,4,0.464,6609616
+RESULT,maps,5,0.482,6609616
+
+maps fixed process=3
+RESULT,maps,1,0.570,5889616
+RESULT,maps,2,0.568,5889616
+RESULT,maps,3,4.583,5889616
+RESULT,maps,4,0.556,5889616
+RESULT,maps,5,0.541,5889616
+
+compress baseline process=1
+META,chunks=1200,ownedSnapshot=false
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,404.499,85607496
+RESULT,compress,2,404.630,85597648
+RESULT,compress,3,404.826,85565480
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+compress fixed process=1
+META,chunks=1200,ownedSnapshot=true
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,395.412,18453560
+RESULT,compress,2,382.070,18443728
+RESULT,compress,3,394.774,18411912
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+compress fixed process=2
+META,chunks=1200,ownedSnapshot=true
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,392.870,18453512
+RESULT,compress,2,382.611,18443728
+RESULT,compress,3,396.762,18411976
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+compress baseline process=2
+META,chunks=1200,ownedSnapshot=false
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,404.446,85607432
+RESULT,compress,2,406.907,85607432
+RESULT,compress,3,404.941,85594880
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+compress baseline process=3
+META,chunks=1200,ownedSnapshot=false
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,415.078,85607432
+RESULT,compress,2,411.588,85597960
+RESULT,compress,3,412.364,85565272
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+compress fixed process=3
+META,chunks=1200,ownedSnapshot=true
+META,compressedCRC32=db27b2b2
+RESULT,compress,1,392.159,18453512
+RESULT,compress,2,384.216,18443728
+RESULT,compress,3,392.925,18411880
+WARNING: A terminally deprecated method in sun.misc.Unsafe has been called
+WARNING: sun.misc.Unsafe::allocateMemory has been called by io.netty.util.internal.PlatformDependent0$2 (file:/Users/glacier/.gradle/caches/modules-2/files-2.1/io.netty/netty-common/4.1.132.Final/14b8a487c8b9a105c718a44e3805cc538a08e523/netty-common-4.1.132.Final.jar)
+WARNING: Please consider reporting this to the maintainers of class io.netty.util.internal.PlatformDependent0$2
+WARNING: sun.misc.Unsafe::allocateMemory will be removed in a future release
+
+save baseline process=1
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.699,86953848
+RESULT,save,2,19.508,86953848
+RESULT,save,3,19.763,86953848
+
+save fixed process=1
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,17.884,48860520
+RESULT,save,2,18.251,48860520
+RESULT,save,3,17.820,48860520
+
+save fixed process=2
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,18.193,48860520
+RESULT,save,2,18.273,48860520
+RESULT,save,3,17.631,48860520
+
+save baseline process=2
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.255,86953848
+RESULT,save,2,19.345,86953848
+RESULT,save,3,19.532,86953848
+
+save baseline process=3
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.733,86953848
+RESULT,save,2,19.794,86953848
+RESULT,save,3,19.586,86953848
+
+save fixed process=3
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,17.817,48860520
+RESULT,save,2,18.168,48860520
+RESULT,save,3,18.556,48860520
