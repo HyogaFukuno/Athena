@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 22:53:53 +0900
+Subject: [PATCH] Close template region channels when initialization fails
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateRegion.java b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+index 2e1bbd36b802017530b7e53394bb223b9300ab51..b75de345729ce65d0384828067b3ce86b98b391c 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+@@ -51,7 +51,22 @@ final class AthenaTemplateRegion implements Closeable {
+         if (!file.isFile()) {
+             return null;
+         }
+-        return new AthenaTemplateRegion(FileChannel.open(file.toPath(), StandardOpenOption.READ));
++        return open(FileChannel.open(file.toPath(), StandardOpenOption.READ));
++    }
++
++    static AthenaTemplateRegion open(FileChannel channel) throws IOException {
++        // Athena - ownership transfers only after the header has been read successfully.
++        // Failed regions are not cached, so repeated attempts must not accumulate open channels.
++        try {
++            return new AthenaTemplateRegion(channel);
++        } catch (IOException | RuntimeException | Error failure) {
++            try {
++                channel.close();
++            } catch (IOException | RuntimeException | Error closeFailure) {
++                if (closeFailure != failure) failure.addSuppressed(closeFailure);
++            }
++            throw failure;
++        }
+     }
+ 
+     /**
+diff --git a/src/test/java/net/minecraft/server/AthenaTemplateOpenTest.java b/src/test/java/net/minecraft/server/AthenaTemplateOpenTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..21bcf473b74c23ed2dae49b88cfb62efa4d1cd81
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaTemplateOpenTest.java
+@@ -0,0 +1,124 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.io.IOException;
++import java.nio.ByteBuffer;
++import java.nio.MappedByteBuffer;
++import java.nio.channels.*;
++import java.nio.file.Files;
++import org.junit.Test;
++
++public class AthenaTemplateOpenTest {
++    @Test
++    public void sizeFailureClosesTheChannelAndPreservesTheException() {
++        FailingChannel channel = new FailingChannel();
++        channel.sizeFailure = new IOException("size");
++        assertFailedOpen(channel, channel.sizeFailure);
++    }
++
++    @Test
++    public void readFailureClosesTheChannelAndPreservesTheException() {
++        FailingChannel channel = new FailingChannel();
++        channel.readFailure = new IOException("read");
++        assertFailedOpen(channel, channel.readFailure);
++    }
++
++    @Test
++    public void closeFailureIsSuppressedOnTheOriginalFailure() {
++        FailingChannel channel = new FailingChannel();
++        channel.readFailure = new IOException("read");
++        channel.closeFailure = new IOException("close");
++        assertFailedOpen(channel, channel.readFailure);
++        assertArrayEquals(new Throwable[] {channel.closeFailure}, channel.readFailure.getSuppressed());
++    }
++
++    @Test
++    public void runtimeReadFailureAlsoClosesTheChannel() {
++        FailingChannel channel = new FailingChannel();
++        channel.readFailure = new IllegalStateException("read");
++        assertFailedOpen(channel, channel.readFailure);
++    }
++
++    @Test
++    public void readErrorIsRethrownAfterClosingTheChannel() {
++        FailingChannel channel = new FailingChannel();
++        channel.readFailure = new AssertionError("read");
++        assertFailedOpen(channel, channel.readFailure);
++    }
++
++    @Test
++    public void successfulOpenTransfersOwnershipUntilRegionClose() throws Exception {
++        FailingChannel channel = new FailingChannel();
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(channel);
++        try {
++            assertTrue(channel.isOpen());
++            assertEquals(0, channel.closeCalls);
++            assertFalse(region.has(0, 0));
++            assertNull(region.read(0, 0));
++        } finally {
++            region.close();
++        }
++        assertFalse(channel.isOpen());
++        assertEquals(1, channel.closeCalls);
++    }
++
++    @Test
++    public void aMissingRegionStillReturnsNull() throws Exception {
++        java.nio.file.Path directory = Files.createTempDirectory("athena-missing-region");
++        try {
++            assertNull(AthenaTemplateRegion.open(directory.resolve("missing.mca").toFile()));
++        } finally {
++            Files.delete(directory);
++        }
++    }
++
++    private static void assertFailedOpen(FailingChannel channel, Throwable expected) {
++        try {
++            AthenaTemplateRegion.open(channel);
++            fail("initialization should fail");
++        } catch (IOException | RuntimeException | Error actual) {
++            assertSame(expected, actual);
++        }
++        assertFalse(channel.isOpen());
++        assertEquals(1, channel.closeCalls);
++    }
++
++    private static final class FailingChannel extends FileChannel {
++        Throwable sizeFailure, readFailure;
++        IOException closeFailure;
++        int closeCalls;
++
++        private static void throwFailure(Throwable failure) throws IOException {
++            if (failure instanceof IOException) throw (IOException) failure;
++            if (failure instanceof RuntimeException) throw (RuntimeException) failure;
++            if (failure instanceof Error) throw (Error) failure;
++        }
++
++        @Override public long size() throws IOException { throwFailure(sizeFailure); return 4096; }
++        @Override public int read(ByteBuffer dst, long position) throws IOException {
++            throwFailure(readFailure);
++            int count = dst.remaining();
++            while (dst.hasRemaining()) dst.put((byte) 0);
++            return count;
++        }
++        @Override protected void implCloseChannel() throws IOException {
++            ++closeCalls;
++            if (closeFailure != null) throw closeFailure;
++        }
++        @Override public int read(ByteBuffer dst) { throw new UnsupportedOperationException(); }
++        @Override public long read(ByteBuffer[] d, int o, int n) { throw new UnsupportedOperationException(); }
++        @Override public int write(ByteBuffer src) { throw new UnsupportedOperationException(); }
++        @Override public long write(ByteBuffer[] s, int o, int n) { throw new UnsupportedOperationException(); }
++        @Override public int write(ByteBuffer src, long pos) { throw new UnsupportedOperationException(); }
++        @Override public long position() { throw new UnsupportedOperationException(); }
++        @Override public FileChannel position(long p) { throw new UnsupportedOperationException(); }
++        @Override public FileChannel truncate(long s) { throw new UnsupportedOperationException(); }
++        @Override public void force(boolean metadata) { throw new UnsupportedOperationException(); }
++        @Override public long transferTo(long p, long n, WritableByteChannel c) { throw new UnsupportedOperationException(); }
++        @Override public long transferFrom(ReadableByteChannel c, long p, long n) { throw new UnsupportedOperationException(); }
++        @Override public MappedByteBuffer map(MapMode m, long p, long n) { throw new UnsupportedOperationException(); }
++        @Override public FileLock lock(long p, long n, boolean shared) { throw new UnsupportedOperationException(); }
++        @Override public FileLock tryLock(long p, long n, boolean shared) { throw new UnsupportedOperationException(); }
++    }
++}
