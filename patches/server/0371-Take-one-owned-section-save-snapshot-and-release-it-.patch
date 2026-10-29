@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 08:44:06 +0900
+Subject: [PATCH] Take one owned section save snapshot and release it after
+ packing
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+index bcc26d366b1c4f7cc77e5131d31803fa6601c87b..049266f73e1fb211a1eb2045871975c706a64c37 100644
+--- a/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
++++ b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+@@ -27,7 +27,7 @@ final class AthenaDeferredSectionData {
+     static final int DATA = 1;
+     static final int ADD = 2;
+ 
+-    private final char[] ids;
++    private char[] ids; // Athena - guarded by pack's monitor; released after packing
+     private final boolean needsAdd;
+     // Athena - get() reads outside pack's monitor: publishing blocks must also publish data/add.
+     private volatile byte[] blocks;
+@@ -46,6 +46,15 @@ final class AthenaDeferredSectionData {
+ 
+         System.arraycopy(live, 0, ids, 0, live.length);
+ 
++        attachSnapshot(nbttagcompound, ids);
++    }
++
++    static void attach(NBTTagCompound compound, ChunkSection section) {
++        attachSnapshot(compound, section.athenaSnapshotIds());
++    }
++
++    private static void attachSnapshot(NBTTagCompound nbttagcompound, char[] ids) {
++
+         char acc = 0;
+ 
+         for (int i = 0; i < ids.length; ++i) {
+@@ -72,6 +81,7 @@ final class AthenaDeferredSectionData {
+ 
+         this.data = data.getData();
+         this.add = add == null ? new byte[this.data.length] : add.getData();
++        this.ids = null; // Athena - the packed arrays now own all data needed by these tags
+         this.blocks = blocks; // published last: it is what pack() tests to decide it has run
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index dff1f9355f17e25227b967d633d79efad9040bc8..1221ec2d909169bcc506931ceb062bbebb3fe735 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -245,7 +245,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             if (chunksection != null) {
+                 nbttagcompound1 = new NBTTagCompound();
+                 nbttagcompound1.setByte("Y", (byte) (chunksection.getYPosition() >> 4 & 255));
+-                AthenaDeferredSectionData.attach(nbttagcompound1, chunksection.getIdArray()); // Athena - snapshot now, pack on the IO thread
++                AthenaDeferredSectionData.attach(nbttagcompound1, chunksection); // Athena - one owned snapshot now, pack on the IO thread
+ 
+                 nbttagcompound1.setByteArray("BlockLight", chunksection.getEmittedLightArray().getData());
+                 if (flag) {
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index dad291b89c702807fcc936cdf524fb7df1afdf7a..49ab45090bc961d6f0cf891aa7ad4ab3ab98c1be 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -498,6 +498,13 @@ public class ChunkSection {
+         return ids != null ? ids : this.unpackedIds();
+     }
+ 
++    // Athena - an owned save snapshot: packed/mapped ids already unpack into a new array.
++    // Plain and uniform arrays remain live/shared and must be cloned at the save boundary.
++    char[] athenaSnapshotIds() {
++        char[] ids = this.blockIds;
++        return ids == null ? this.unpackedIds() : ids.clone();
++    }
++
+     public void setData(char[] achar) {
+         this.blockIds = achar;
+         this.idsShared = false; // Athena
+diff --git a/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java b/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..e13739d0437167b898dfdaaa08a0c4d784494027
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java
+@@ -0,0 +1,53 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.lang.foreign.MemorySegment;
++import java.lang.reflect.Field;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.util.Arrays;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaSaveSnapshotTest extends AbstractTestingBase {
++    @Test
++    public void plainSnapshotSurvivesSubsequentWrites() throws Exception { check("plain"); }
++    @Test
++    public void uniformSnapshotSurvivesSubsequentWrites() throws Exception { check("uniform"); }
++    @Test
++    public void packedSnapshotSurvivesSubsequentWrites() throws Exception { check("packed"); }
++    @Test
++    public void mappedSnapshotSurvivesSubsequentWrites() throws Exception { check("mapped"); }
++
++    private static void check(String storage) throws Exception {
++        char[] ids = new char[4096];
++        for (int i = 0; i < ids.length; ++i) ids[i] = (char) (storage.equals("uniform") ? 16 : (i % 2 == 0 ? 16 : 0x1234));
++        char[] expected = ids.clone();
++        ChunkSection section = new ChunkSection(0, true);
++        if (storage.equals("mapped")) {
++            byte[] bytes = new byte[8192];
++            ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().put(ids);
++            section.athenaMapRawIds(MemorySegment.ofArray(bytes), 0);
++        } else if (storage.equals("plain")) section.setData(ids);
++        else section.setDataSharingUniform(ids);
++        NBTTagCompound snapshot = new NBTTagCompound();
++        AthenaDeferredSectionData.attach(snapshot, section);
++        Arrays.fill(ids, (char) 0);
++        section.setData(new char[4096]);
++        byte[] blocks = new byte[4096];
++        NibbleArray data = new NibbleArray();
++        NibbleArray add = ChunkRegionLoader.packSectionIds(expected, blocks, data);
++        assertArrayEquals(blocks, snapshot.getByteArray("Blocks"));
++        assertArrayEquals(data.getData(), snapshot.getByteArray("Data"));
++        if (add == null) assertFalse(snapshot.hasKey("Add"));
++        else assertArrayEquals(add.getData(), snapshot.getByteArray("Add"));
++        Field owner = snapshot.get("Blocks").getClass().getDeclaredField("owner");
++        owner.setAccessible(true);
++        Object deferred = owner.get(snapshot.get("Blocks"));
++        Field snapshotIds = AthenaDeferredSectionData.class.getDeclaredField("ids");
++        snapshotIds.setAccessible(true);
++        assertNull("packed tags must release their char snapshot", snapshotIds.get(deferred));
++        assertArrayEquals(blocks, snapshot.getByteArray("Blocks"));
++    }
++}
