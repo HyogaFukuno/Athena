@@ -1,0 +1,53 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 08:23:41 +0900
+Subject: [PATCH] Keep the chunk cache's deflate output buffer per thread
+
+PacketCompressor and AthenaLegacy17Encoder already keep theirs; the cached
+frame allocated 8 KB for each one it compressed.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index 92b5b8fd081bc550c8ddd776d0166f113b276949..4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -33,6 +33,9 @@ final class AthenaChunkPacketCache {
+     // cached frame stood in for what PacketCompressor would have sent, yet was always made at the
+     // default level 6
+     private static final ThreadLocal<Deflater> DEFLATER = ThreadLocal.withInitial(() -> new Deflater(PacketCompressor.level()));
++    // Athena - the deflate output buffer, one per compressing thread like the deflater, as
++    // PacketCompressor and AthenaLegacy17Encoder keep theirs; not 8 KB per frame
++    private static final ThreadLocal<byte[]> DEFLATE_BUFFER = ThreadLocal.withInitial(() -> new byte[8192]);
+ 
+     // Athena - one low-priority thread that compresses caches built ahead of their first send; see
+     // Chunk.athenaWarmPacketCache
+@@ -191,7 +194,7 @@ final class AthenaChunkPacketCache {
+             Deflater deflater = DEFLATER.get();
+             ByteBuf out = Unpooled.buffer(rawLength / 4 + 64);
+             PacketDataSerializer outSerializer = new PacketDataSerializer(out);
+-            byte[] chunk = new byte[8192];
++            byte[] chunk = DEFLATE_BUFFER.get();
+ 
+             outSerializer.writeVarIntToBuffer(rawLength);
+             try {
+diff --git a/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+index 2b13399acc59ed8e861107f1b24c1dcf2690d18b..b5df6cbd68629f051d232e639b349d438c70506c 100644
+--- a/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
++++ b/src/test/java/net/minecraft/server/AthenaChunkPacketCacheTest.java
+@@ -100,6 +100,17 @@ public class AthenaChunkPacketCacheTest extends AbstractTestingBase {
+         assertNull("the uncompressed data is dropped once compressed", cache.map());
+     }
+ 
++    @Test
++    public void frameAfterFrameOnOneThreadEachMatchesItsOwnChunk() throws Exception {
++        // the deflate output buffer is kept per thread: nothing of one frame may reach the next
++        for (long seed = 2L; seed < 7L; ++seed) {
++            byte[] expected = written(pipeline(), uncached(chunkData(seed)));
++            byte[] cached = written(pipeline(), new PacketPlayOutMapChunk(new AthenaChunkPacketCache(3, -7, chunkData(seed))));
++
++            assertArrayEquals("frame for seed " + seed, expected, cached);
++        }
++    }
++
+     @Test
+     public void thePassThroughCoversOnlyTheCachedPacket() throws Exception {
+         EmbeddedChannel ordinary = pipeline();
