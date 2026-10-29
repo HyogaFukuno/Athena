@@ -2,18 +2,18 @@
 
 ## 対象と結論
 
-PR #26のマージ報告後、次に着手できる項目として、前回監査の保留事項と関連する現行コードを再確認しました。参照したローカルのルートcommitは `24ece42`、生成Server commitは `fd21ca413` です。リモートのマージcommit自体の検証ではありません。
+PR #26のマージ報告後、次に着手できる項目として、前回監査の保留事項と関連する現行コードを再確認しました。参照したローカルのルートcommitは `24ece42`、生成Server commitは `fd21ca413` です。その後、master `341552d` を起点に `fix/next-steps-2026-10-29` を作成し、N01・N04・N02を実装しました。結果は [NEXT-STEPS-FIXES.md](NEXT-STEPS-FIXES.md) に記録しています。
 
 今回の対象は下記4項目の確認です。新たに全ソースを監査した結果ではなく、SurvivalGamesの全ソース監査もまだ実施していません。正確性の問題1件と、性能改善候補3件を分けて扱います。
 
 | 順序 | 項目 | 分類 | 確認状況 |
 |---|---|---|---|
-| 1 | region初期化失敗時のFileChannelの後始末 | 異常系の不具合 | コード確認とエラー注入でFD増加を確認 |
-| 2 | mapped光データの二重コピー | allocation削減候補 | コピー経路を確認。速度・GCへの効果は未測定 |
-| 3 | slim storeが利用可能な場合のregionアクセス省略 | IO・FD削減候補 | chunkExistsの経路を確認。削減量は未測定 |
-| 4 | RegistryIDの配列拡張方式 | 起動時の改善候補 | 拡張ごとの配列コピーを確認。実起動への効果は未測定 |
+| 1 | region初期化失敗時のFileChannelの後始末 | 異常系の不具合 | コード確認とエラー注入でFD増加を確認、0364で修正 |
+| 2 | RegistryIDの配列拡張方式（N04） | Athena由来の起動時退行 | 0365で修正、実bootstrapを比較測定 |
+| 3 | mapped光データの二重コピー（N02） | allocation削減 | 0366で修正、実マップで比較測定 |
+| 見送り | slim storeによるregionアクセス省略（N03） | IO・FD削減候補 | 効果に対してfallback・lockの分岐追加が割に合わない |
 
-この文書は調査と修正予定の記録です。本体の修正はまだ行っていません。
+この文書の調査欄は修正前の挙動を説明します。N01・N04・N02は実装済み、N03はレビューに従って見送りです。以下の修正予定・合格条件は当初の計画として残し、実際の結果は修正記録にまとめています。
 
 ## N01 — region初期化失敗時にチャネルを閉じない
 
@@ -24,6 +24,10 @@ PR #26のマージ報告後、次に着手できる項目として、前回監�
 `open()` は `FileChannel.open()` の結果を直接コンストラクタへ渡します。コンストラクタの `channel.size()` やヘッダ読込が例外で終了すると、生成したオブジェクトを呼出元は受け取れず、チャネルを明示的に閉じる処理もありません。
 
 正常に開いたregionにはclose処理があります。問題になるのはチャネル取得後、regionの初期化完了前に失敗する経路です。GCによる後始末を待つ間にFDが増える可能性があります。恒久的に回収されないとまでは断定していません。
+
+失敗したregionはloaderのregionsへキャッシュされません。chunkExistsOpenはIOExceptionをfalseにするため、同じregionに対する次のchunkExistsでもopenを再試行します。preloaderのchunkExistsInStorageとChunkProviderServerのgetChunkAtが呼出元です。1regionは最大1,024チャンクなので、対象範囲とGC回収のタイミング次第では、1回のpreloadで多数のFDが増える経路です。単に試合ごとに1個増えるという規模ではありません。
+
+別の残存課題として、読込失敗時のfalseは「保存されていない」扱いとなり、生成経路へ進みます。今回のN01では、この既存のエラー扱いは変更しません。
 
 ### 再現方法と結果
 
@@ -61,6 +65,8 @@ injectedReadFailures=100 fdBefore=11 fdAfter=111 fdDelta=100
 
 対象: [NibbleArray.java:145](../../PandaSpigot-Server/src/main/java/net/minecraft/server/NibbleArray.java#L145)、[PacketPlayOutMapChunk.java:144](../../PandaSpigot-Server/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java#L144)。
 
+mappedになるのはstoreのKIND_LIGHT、すなわち光が一様でない配列です。主に地表付近のsky lightなどが対象で、uniformの全配列に中間コピーが生じるわけではありません。
+
 mapped状態の `NibbleArray.getData()` は、mapped領域を新しい2,048byte配列へコピーします。パケット抽出処理は、その配列をさらにパケットの出力配列へ `System.arraycopy()` します。
 
 この経路では光配列ごとに中間配列1個とコピー1回を省ける可能性があります。16sectionのblock light・sky lightがすべてmappedで送信対象なら、中間配列のデータ部分は合計64KiBです。これは条件付きの理論値であり、実マップの割り当て量ではありません。uniformや通常のheap配列では同じ中間配列は作られません。
@@ -90,25 +96,17 @@ SGのpreload時やチャンク送信用キャッシュの構築・再構築に�
 
 regionはloader内でキャッシュされるため、chunkExistsの呼出しごとにファイルを開き直す問題ではありません。試合ごとに生成するWorldのloaderで、不要な初回open・ヘッダread・FD保持を省ける可能性があります。
 
-### 修正予定
+### 判断: 見送り
 
-- storeが有効で、対象座標のslimデータが利用可能だと判定できる場合は、regionを開かず存在すると返す経路を検討する。
-- slimを持たないチャンク、store無効化後、監査モードなどでは従来のregion判定を使う。
-- 「storeにslimがない」ことから「元regionにもチャンクがない」とは判断しない。storeに全チャンクのslimがあるとは限らない。
-- slimが破損していた場合のロード時の無効化・元region再読込と、World破棄時のlock保護を維持する。
-
-### 合格条件
-
-- 有効slimがある場合、存在判定でregionを開かない。
-- slimがないチャンクと無効storeでは元regionを確認し、読み込めるチャンクを欠落扱いしない。
-- 存在判定後のstore無効化・破損・closeでも、既存のfallbackと破棄処理が成立する。
-- 同一のpreload範囲で、ファイルopen/read回数、FD数、preload所要時間を変更前後で比較する。
+レビューに従い実装しません。省けるのは1試合・1regionにつきopen 1回、ヘッダ4KiBのread 1回と、試合中の数個のFDです。SGではregionファイルは少数で、効果は限定的です。一方で、存在判定をstoreへ委ねると、破損storeのfallbackとclose時のlock保護に新たな分岐が必要になります。今回のN01・N04・N02を優先し、この経路の実装・IO測定は行いません。
 
 ## N04 — RegistryIDの拡張が必要サイズちょうどになっている
 
 ### 調査結果
 
 対象: [RegistryID.java:22](../../PandaSpigot-Server/src/main/java/net/minecraft/server/RegistryID.java#L22)。
+
+元のvanillaはArrayListへnullを追加する方式で、内部の容量拡張は幾何成長でした。Athenaが配列へ置き換えた際に必要サイズちょうどへ拡張するようにした退行です。空き容量がnullならgetByValueはnullを返し、iteratorもnullを除外するため、外部の挙動を維持するのに配列長を厳密に合わせる必要はありません。
 
 IDが現在の配列容量を超えるたびに `Arrays.copyOf(objects, i + 1)` を実行します。例えば連番でN件登録すると、コピーする要素数の合計はO(N²)になります。
 
@@ -124,15 +122,15 @@ IDが現在の配列容量を超えるたびに `Arrays.copyOf(objects, i + 1)` 
 ### 合格条件
 
 - 連番・疎なID・上書きで、検索とiterationの結果が一致する。
-- 合成した連番登録でallocation削減を確認する。
+- 連番登録の挙動を旧実装と比較する。allocationは実bootstrapで確認する。
 - 実サーバーのbootstrapで時間とallocationを比較し、小ヒープでの余剰容量も確認する。
 
 ## 実装の進め方
 
 1. N01を独立した修正として実装・回帰テストする。
-2. N02を独立した変更として実装し、byte一致とallocationを確認する。
-3. N03をfallbackの回帰テストとIO測定付きで進める。
-4. N04は起動時の比較結果を踏まえて採用する。
+2. N04を独立した変更として実装し、旧実装との挙動一致とbootstrapの時間・allocationを確認する。
+3. N02を独立した変更として実装し、byte一致とallocationを確認する。
+4. N03は見送る。
 
 実装時は新しい作業ブランチを作成し、生成Serverで話題別にコミットしてから `./panda rb` でパッチを生成し、ルートにもコミットします。既存0355〜0363は書き換えず、追加番号は作業開始時の最新パッチを確認して決めます。
 
