@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 21:48:52 +0900
+Subject: [PATCH] Preserve existing POSIX permissions when atomically saving
+ settings
+
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+index c1e65d0cb839372aad48694b77798d87aa06f786..f42d2a762158f107feaa13462b9f893f216d0a9d 100644
+--- a/src/main/java/athena/server/AthenaConfig.java
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -7,10 +7,13 @@ import java.io.IOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.StandardCopyOption;
++import java.nio.file.attribute.PosixFileAttributeView;
++import java.nio.file.attribute.PosixFilePermission;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ import net.minecraft.server.World;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+@@ -126,9 +129,15 @@ public class AthenaConfig {
+     // the old file in place; a filesystem without atomic rename fails safely instead of truncating it.
+     private static void saveAtomically(File file, CommentedConfigurationNode root, String header) throws IOException {
+         Path destination = file.toPath().toAbsolutePath();
++        // Athena - atomic replacement must retain administrator-selected group/read permissions.
++        // New files keep createTempFile's private default; non-POSIX filesystems need no change.
++        Set<PosixFilePermission> permissions = Files.exists(destination)
++                && Files.getFileStore(destination).supportsFileAttributeView(PosixFileAttributeView.class)
++                ? Files.getPosixFilePermissions(destination) : null;
+         Path temporary = Files.createTempFile(destination.getParent(), file.getName() + ".", ".tmp");
+         try {
+             loader(temporary.toFile(), header).save(root);
++            if (permissions != null) Files.setPosixFilePermissions(temporary, permissions);
+             Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+         } finally {
+             Files.deleteIfExists(temporary);
+diff --git a/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+index d9cc0b147840e2064d917f5c5e5a86ba40fe1df6..61751b2d9b55feac6e97381853854fc404286b39 100644
+--- a/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
++++ b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+@@ -5,8 +5,13 @@ import static org.junit.Assert.*;
+ import athena.server.AthenaConfig;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
++import java.nio.file.attribute.PosixFileAttributeView;
++import java.nio.file.attribute.PosixFilePermission;
++import java.nio.file.attribute.PosixFilePermissions;
++import java.util.Set;
+ import org.junit.After;
+ import org.junit.Test;
++import org.junit.Assume;
+ 
+ public class AthenaConfigSafetyTest {
+     @After
+@@ -59,4 +64,31 @@ public class AthenaConfigSafetyTest {
+         assertFalse(Files.readString(source).contains("networkCompressionLevel"));
+         assertEquals(6, AthenaConfig.get().networkCompressionLevel);
+     }
++
++    @Test
++    public void existingPermissionsSurviveMigrationAndReload() throws Exception {
++        Path dir = Files.createTempDirectory("athena-config-mode");
++        Assume.assumeTrue(Files.getFileStore(dir).supportsFileAttributeView(PosixFileAttributeView.class));
++        Set<PosixFilePermission> mode = PosixFilePermissions.fromString("rw-r-----");
++        Path source = dir.resolve("pandaspigot.yml"), destination = dir.resolve("athena.yml");
++        Files.writeString(source, "bungeeGuardTokens:\n  - audit-dummy-secret\n");
++        Files.writeString(destination, "networkCompressionLevel: 6\n");
++        Files.setPosixFilePermissions(source, mode);
++        Files.setPosixFilePermissions(destination, mode);
++        AthenaConfig.init(destination.toFile(), source.toFile());
++        assertEquals(mode, Files.getPosixFilePermissions(destination));
++        assertEquals(mode, Files.getPosixFilePermissions(source));
++        AthenaConfig.init(destination.toFile(), source.toFile());
++        assertEquals(mode, Files.getPosixFilePermissions(destination));
++        assertEquals(mode, Files.getPosixFilePermissions(source));
++    }
++
++    @Test
++    public void newConfigurationsKeepPrivateDefaultPermissions() throws Exception {
++        Path dir = Files.createTempDirectory("athena-config-private");
++        Assume.assumeTrue(Files.getFileStore(dir).supportsFileAttributeView(PosixFileAttributeView.class));
++        Path destination = dir.resolve("athena.yml");
++        AthenaConfig.init(destination.toFile(), null);
++        assertEquals(PosixFilePermissions.fromString("rw-------"), Files.getPosixFilePermissions(destination));
++    }
+ }
