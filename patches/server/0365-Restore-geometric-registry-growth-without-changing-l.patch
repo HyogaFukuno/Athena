@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 22:54:39 +0900
+Subject: [PATCH] Restore geometric registry growth without changing lookups
+
+
+diff --git a/src/main/java/net/minecraft/server/RegistryID.java b/src/main/java/net/minecraft/server/RegistryID.java
+index 1649718a538d10c43343da687341a880e0c13219..bf903436c702c12f4080c6901aae6a4c65cb5205 100644
+--- a/src/main/java/net/minecraft/server/RegistryID.java
++++ b/src/main/java/net/minecraft/server/RegistryID.java
+@@ -22,10 +22,15 @@ public class RegistryID<T> implements Registry<T> {
+     public void put(T t0, int i) {
+         this.identityMap.put(t0, i);
+ 
+-        // Athena - grow to exactly i + 1, the length the ArrayList's padding loop produced, so
+-        // getByValue's range check keeps answering the same way for ids past the end.
++        // Athena - restore the geometric growth the former ArrayList provided. Spare slots are
++        // null, so lookup and the null-filtering iterator retain their observable behavior.
+         if (i >= this.objects.length) {
+-            this.objects = Arrays.copyOf(this.objects, i + 1);
++            long required = (long) i + 1L;
++            int maximum = Integer.MAX_VALUE - 8;
++            if (required > maximum) throw new OutOfMemoryError("Required registry array size too large");
++            long grown = (long) this.objects.length + (this.objects.length >> 1);
++            int capacity = (int) Math.min(maximum, Math.max(required, grown));
++            this.objects = Arrays.copyOf(this.objects, capacity);
+         }
+ 
+         this.objects[i] = t0;
+diff --git a/src/test/java/net/minecraft/server/AthenaRegistryGrowthTest.java b/src/test/java/net/minecraft/server/AthenaRegistryGrowthTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4e34faabb0c524eb87de7337a6ced2f1643e5dff
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaRegistryGrowthTest.java
+@@ -0,0 +1,77 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.IdentityHashMap;
++import java.util.Iterator;
++import java.util.List;
++import org.junit.Test;
++
++public class AthenaRegistryGrowthTest {
++    @Test
++    public void sequentialIdsKeepLookupAndIterationIdentical() {
++        compareOperations(new int[] {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
++    }
++
++    @Test
++    public void sparseIdsAndOverwritesKeepIdentityAndIterationOrder() {
++        compareOperations(new int[] {20, 2, 100, 2, 21, 0, 7, 99, 100, 140});
++    }
++
++    @Test
++    public void negativeIdsAndNullEntriesRetainTheirExistingBehavior() {
++        compareOperations(new int[] {-1, 3, -7, 0, 8, -1, 20, 9});
++    }
++
++    private static void compareOperations(int[] ids) {
++        RegistryID<Object> actual = new RegistryID<>();
++        PreviousRegistry expected = new PreviousRegistry();
++        // Equal but distinct instances must remain separate identity keys; include repeated keys and null.
++        Object[] values = {new String("equal"), new String("equal"), new Object(), null};
++        for (int step = 0; step < ids.length; ++step) {
++            Object value = values[step % values.length];
++            int id = ids[step];
++            Class<?> expectedFailure = putFailure(() -> expected.put(value, id));
++            assertEquals(expectedFailure, putFailure(() -> actual.put(value, id)));
++            for (Object key : values) assertEquals(expected.get(key), actual.get(key));
++            assertEquals(-1, actual.get(new Object()));
++            for (int index = -10; index <= 220; ++index) {
++                assertSame("id " + index + " after step " + step, expected.byId(index), actual.getByValue(index));
++            }
++            assertNull(actual.getByValue(Integer.MIN_VALUE));
++            assertNull(actual.getByValue(Integer.MAX_VALUE));
++            List<Object> expectedItems = expected.items();
++            Iterator<Object> iterator = actual.iterator();
++            for (Object item : expectedItems) {
++                assertTrue(iterator.hasNext());
++                assertSame(item, iterator.next());
++            }
++            assertFalse(iterator.hasNext());
++        }
++    }
++
++    private static Class<?> putFailure(Runnable operation) {
++        try { operation.run(); return null; }
++        catch (RuntimeException failure) { return failure.getClass(); }
++    }
++
++    /** The pre-change implementation, including updating the reverse map before a negative id fails. */
++    private static final class PreviousRegistry {
++        final IdentityHashMap<Object, Integer> reverse = new IdentityHashMap<>(512);
++        Object[] objects = new Object[0];
++        void put(Object value, int id) {
++            reverse.put(value, id);
++            if (id >= objects.length) objects = Arrays.copyOf(objects, id + 1);
++            objects[id] = value;
++        }
++        int get(Object value) { return reverse.getOrDefault(value, -1); }
++        Object byId(int id) { return id >= 0 && id < objects.length ? objects[id] : null; }
++        List<Object> items() {
++            List<Object> result = new ArrayList<>();
++            for (Object object : objects) if (object != null) result.add(object);
++            return result;
++        }
++    }
++}
