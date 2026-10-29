@@ -1,0 +1,269 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:48:10 +0900
+Subject: [PATCH] Fix audited entity, throttle, NBT, limiter and cache policy
+ regressions
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
+index abbe6a573659898e0d476b641c227ed06b6467ab..e5648195bda5aebc29c2fdda077ee7080443ac46 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
+@@ -124,8 +124,9 @@ public class PacketLimiterConfig {
+                 ConfigurationNode node = limitsNode.node(entry.getKey().getSimpleName());
+                 PacketLimit limit = entry.getValue();
+ 
+-                node.node("interval", limit.packetLimitInterval);
+-                node.node("maxPacketRate", limit.maxPacketRate);
++                // Athena - serialize values, not a path containing the numeric value.
++                node.node("interval").set(limit.packetLimitInterval);
++                node.node("maxPacketRate").set(limit.maxPacketRate);
+                 node.node("action").set(limit.violateAction);
+             }
+         }
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index d194ae814deff4f532683fbc898d896afa3d774d..cb47cdff284df317d1317948710eab39f0de986d 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -175,8 +175,8 @@ public class Chunk {
+         MinecraftServer server = MinecraftServer.getServer();
+         int threshold = server == null ? -1 : server.aK();
+ 
+-        if (threshold < 0) {
+-            return; // no compression: packets are never served from the cache
++        if (!this.world.athenaUsesChunkPacketCache(threshold)) {
++            return; // Athena - do not build or retain caches the sending path cannot use
+         }
+         if (AthenaChunkPacketCache.aheadQueued() >= AthenaChunkPacketCache.AHEAD_LIMIT) {
+             return; // Athena - the compressor is behind: compress this one when it is first sent (see AHEAD_LIMIT)
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index f7396da4059709f28ec8e024fbcbca8b9ad7d30e..bac0be0ed5ed23b046ec528922258d621cb55ebe 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -141,7 +141,8 @@ public abstract class Entity implements ICommandListener {
+         int chunkY = MathHelper.floor(locY / 16.0D);
+         int chunkZ = MathHelper.floor(locZ / 16.0D);
+ 
+-        return addedToChunk && getChunkX() == chunkX && getChunkY() == chunkY || getChunkZ() == chunkZ;
++        // Athena - fix upstream precedence: matching Z alone does not mean it is registered.
++        return addedToChunk && getChunkX() == chunkX && getChunkY() == chunkY && getChunkZ() == chunkZ;
+     }
+     public int chunkCoordX; public int getChunkX() { return chunkCoordX; } // PAIL
+     public int chunkCoordY; public int getChunkY() { return chunkCoordY; } // PAIL
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index d04a256cd38186065fe3b2ef6fdc12d57c82aa2f..9553774bc19c437f2432744dca95a18ca549c57b 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -65,8 +65,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+      * does not compress, where there is nothing to cache.
+      */
+     private boolean useChunkPacketCache() {
+-        return this.world.athenaConfig.cacheChunkPackets && !this.world.spigotConfig.antiXray
+-                && this.server.aK() >= 0;
++        return this.world.athenaUsesChunkPacketCache(this.server.aK()); // Athena - also gates preload warming
+     }
+     // Athena end
+     // Athena start - hash index over chunkCoordIntPairQueue; see ChunkCoordQueueIndex for why.
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index 40af58a94a1231ee64df9fd33c2bd859d09e7783..36660745446715ab29a683f61722b34f6e407d89 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -22,6 +22,16 @@ public class HandshakeListener implements PacketHandshakingInListener {
+         this.networkManager = networkmanager;
+     }
+ 
++    // Athena - fix upstream's timestamp-versus-duration comparison; keep recent attempts.
++    static void expireThrottleEntries(java.util.Map<InetAddress, Long> entries, long now, long throttle) {
++        java.util.Iterator<java.util.Map.Entry<InetAddress, Long>> iterator = entries.entrySet().iterator();
++        while (iterator.hasNext()) {
++            if (now - iterator.next().getValue() > throttle) {
++                iterator.remove();
++            }
++        }
++    }
++
+     public void processHandshake(PacketHandshakingInSetProtocol packethandshakinginsetprotocol) {
+         switch (HandshakeListener.SyntheticClass_1.a[packethandshakinginsetprotocol.getRequestedState().ordinal()]) {
+         case 1:
+@@ -49,14 +59,7 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                     if (throttleCounter > 200) {
+                         throttleCounter = 0;
+ 
+-                        // Cleanup stale entries
+-                        java.util.Iterator iter = throttleTracker.entrySet().iterator();
+-                        while (iter.hasNext()) {
+-                            java.util.Map.Entry<InetAddress, Long> entry = (java.util.Map.Entry) iter.next();
+-                            if (entry.getValue() > connectionThrottle) {
+-                                iter.remove();
+-                            }
+-                        }
++                        expireThrottleEntries(throttleTracker, currentTime, connectionThrottle);
+                     }
+                 }
+                 } // PandaSpigot - add closing bracket for if check above
+diff --git a/src/main/java/net/minecraft/server/LoginListener.java b/src/main/java/net/minecraft/server/LoginListener.java
+index e9d9d79aff81390fdd9343546ab47b1cacd553c9..c0eaaeff2f8415d02b7e31d7428e37e5edc3c2da 100644
+--- a/src/main/java/net/minecraft/server/LoginListener.java
++++ b/src/main/java/net/minecraft/server/LoginListener.java
+@@ -176,6 +176,8 @@ public class LoginListener implements PacketLoginInListener, IUpdatePlayerListBo
+             this.networkManager.handle(new PacketLoginOutEncryptionBegin(this.serverId, this.server.Q().getPublic(), this.verifyToken));
+         } else {
+             // Spigot start
++            // Athena - claim the offline/proxy login before another LoginStart can enqueue it.
++            this.currentLoginState = LoginListener.EnumProtocolState.AUTHENTICATING;
+             initUUID();
+             authenticatorPool.execute(new Runnable() { // PandaSpigot - Cache authenticator threads
+ 
+diff --git a/src/main/java/net/minecraft/server/NBTTagByteArray.java b/src/main/java/net/minecraft/server/NBTTagByteArray.java
+index 9e106cb3a541dce84850ed2866308cf38d759a7a..6f3b8cca092695fd3ca136e9a93680c2991c1a67 100644
+--- a/src/main/java/net/minecraft/server/NBTTagByteArray.java
++++ b/src/main/java/net/minecraft/server/NBTTagByteArray.java
+@@ -46,12 +46,13 @@ public class NBTTagByteArray extends NBTBase {
+         return new NBTTagByteArray(abyte);
+     }
+ 
++    // Athena - deferred byte-array tags expose their content through the getter, too.
+     public boolean equals(Object object) {
+-        return super.equals(object) ? Arrays.equals(this.data, ((NBTTagByteArray) object).data) : false;
++        return super.equals(object) ? Arrays.equals(this.getByteArray(), ((NBTTagByteArray) object).getByteArray()) : false;
+     }
+ 
+     public int hashCode() {
+-        return super.hashCode() ^ Arrays.hashCode(this.data);
++        return super.hashCode() ^ Arrays.hashCode(this.getByteArray());
+     }
+ 
+     public byte[] getByteArray() {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 73ef85952e77665ca848a650b1ee1298d153ad3f..102324887f0dc981d6f228ec95307ebe2f74ef53 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -143,6 +143,11 @@ public abstract class World implements IBlockAccess {
+     */
+     // PandaSpigot end
+     private int tileTickPosition;
++    // Athena - sending and preloading must agree: anti-xray data cannot use this shared cache.
++    public boolean athenaUsesChunkPacketCache(int threshold) {
++        return this.athenaConfig.cacheChunkPackets && !this.spigotConfig.antiXray && threshold >= 0;
++    }
++
+     public ExecutorService lightingExecutor = Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setNameFormat("PaperSpigot - Lighting Thread").build()); // PaperSpigot - Asynchronous lighting updates
+     public final Map<Explosion.CacheKey, Float> explosionDensityCache = new HashMap<Explosion.CacheKey, Float>(); // PaperSpigot - Optimize explosions
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaAuditRegressionTest.java b/src/test/java/net/minecraft/server/AthenaAuditRegressionTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..739f64729d8223b93470d5a28c5f451dca7629f7
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaAuditRegressionTest.java
+@@ -0,0 +1,111 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import com.hpfxd.pandaspigot.config.PacketLimiterConfig;
++import com.mojang.authlib.GameProfile;
++import java.net.InetAddress;
++import java.util.HashMap;
++import java.util.Map;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++import org.spongepowered.configurate.CommentedConfigurationNode;
++
++public class AthenaAuditRegressionTest extends AbstractTestingBase {
++    @Test
++    public void anUnregisteredOrDisplacedEntityIsNotAddedToItsChunk() {
++        EntityItem entity = new EntityItem(null);
++        entity.addedToChunk = false;
++        assertFalse(entity.isAddedToChunk());
++        entity.addedToChunk = true;
++        assertTrue(entity.isAddedToChunk());
++        entity.locX = 16;
++        assertFalse(entity.isAddedToChunk());
++        entity.locX = 0;
++        entity.locY = 16;
++        assertFalse(entity.isAddedToChunk());
++        entity.locY = 0;
++        entity.locZ = 16;
++        assertFalse(entity.isAddedToChunk());
++    }
++
++    @Test
++    public void throttleCleanupKeepsRecentAndBoundaryEntries() throws Exception {
++        InetAddress expired = InetAddress.getByName("192.0.2.1");
++        InetAddress recent = InetAddress.getByName("192.0.2.2");
++        InetAddress boundary = InetAddress.getByName("192.0.2.3");
++        Map<InetAddress, Long> entries = new HashMap<>();
++        long now = 1_800_000_000_000L;
++        entries.put(expired, now - 1001);
++        entries.put(recent, now - 1);
++        entries.put(boundary, now - 1000);
++        HandshakeListener.expireThrottleEntries(entries, now, 1000);
++        assertFalse(entries.containsKey(expired));
++        assertTrue(entries.containsKey(recent));
++        assertTrue(entries.containsKey(boundary));
++    }
++
++    @Test
++    public void packetLimitsSurviveSerializationIntoANewNode() throws Exception {
++        PacketLimiterConfig original = new PacketLimiterConfig("kick", null, Map.of(PacketPlayInChat.class,
++                new PacketLimiterConfig.PacketLimit(2, 10, PacketLimiterConfig.PacketLimit.ViolateAction.DROP)));
++        PacketLimiterConfig.Serializer serializer = new PacketLimiterConfig.Serializer();
++        CommentedConfigurationNode node = CommentedConfigurationNode.root();
++        serializer.serialize(PacketLimiterConfig.class, original, node);
++        PacketLimiterConfig copy = serializer.deserialize(PacketLimiterConfig.class, node);
++        assertEquals(1, copy.getPacketSpecificLimits().size());
++        PacketLimiterConfig.PacketLimit limit = copy.getPacketSpecificLimits().get(PacketPlayInChat.class);
++        assertEquals(2, limit.packetLimitInterval, 0);
++        assertEquals(10, limit.maxPacketRate, 0);
++        assertEquals(PacketLimiterConfig.PacketLimit.ViolateAction.DROP, limit.violateAction);
++    }
++
++    @Test
++    public void deferredNbtHasSymmetricEqualityAndHashing() {
++        NBTTagCompound compound = new NBTTagCompound();
++        AthenaDeferredSectionData.attach(compound, new char[4096]);
++        NBTBase deferred = compound.get("Blocks");
++        NBTBase copy = deferred.clone();
++        assertEquals(deferred, copy);
++        assertEquals(copy, deferred);
++        assertEquals(copy.hashCode(), deferred.hashCode());
++        assertEquals(compound, compound.clone());
++        assertEquals(compound.clone(), compound);
++    }
++
++    @Test
++    public void cachePolicyRejectsDisabledAntiXrayAndUncompressedWorlds() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        athena.server.AthenaWorldConfig config = new athena.server.AthenaWorldConfig();
++        org.spigotmc.SpigotWorldConfig spigot = AthenaAuditFixtures.allocate(org.spigotmc.SpigotWorldConfig.class);
++        AthenaAuditFixtures.set(world, World.class, "athenaConfig", config);
++        AthenaAuditFixtures.set(world, World.class, "spigotConfig", spigot);
++        assertTrue(world.athenaUsesChunkPacketCache(256));
++        config.cacheChunkPackets = false;
++        assertFalse(world.athenaUsesChunkPacketCache(256));
++        config.cacheChunkPackets = true;
++        spigot.antiXray = true;
++        assertFalse(world.athenaUsesChunkPacketCache(256));
++        spigot.antiXray = false;
++        assertFalse(world.athenaUsesChunkPacketCache(-1));
++    }
++
++    private static final class OfflineServer extends DedicatedServer {
++        private OfflineServer() { super((joptsimple.OptionSet) null); }
++        @Override public boolean getOnlineMode() { return false; }
++    }
++
++    @Test
++    public void offlineLoginLeavesHelloBeforeSchedulingAuthentication() throws Exception {
++        DedicatedServer server = AthenaAuditFixtures.allocate(OfflineServer.class);
++        RuntimeException reachedAuthentication = new RuntimeException("stop before starting background services");
++        LoginListener listener = new LoginListener(server, null) {
++            @Override public void initUUID() { throw reachedAuthentication; }
++        };
++        PacketLoginInStart start = new PacketLoginInStart(new GameProfile(null, "audit"));
++        try { listener.processLoginStart(start); fail("test must stop before enqueue"); }
++        catch (RuntimeException ex) { assertSame(reachedAuthentication, ex); }
++        try { listener.processLoginStart(start); fail("second LoginStart was accepted"); }
++        catch (IllegalStateException expected) { assertTrue(expected.getMessage().contains("Unexpected hello")); }
++    }
++}
