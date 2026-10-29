@@ -1,0 +1,205 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:49:50 +0900
+Subject: [PATCH] Bound preload dimensions and charge skipped chunks to the
+ tick scan budget
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 23b2b5e4dfa9e959333031ce68c28a3e66ece05d..3b70074c79cc30b253d6696ba2b3160646530e7b 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -106,6 +106,10 @@ public final class AthenaServerImpl implements AthenaServer {
+         Validate.notNull(center.getWorld(), "Center has no world");
+         Validate.isTrue(radius >= 0, "Radius may not be negative");
+         double x = center.getX(), z = center.getZ();
++        // Athena - reject non-finite or overflowing coordinates instead of saturating the int cast.
++        Validate.isTrue(Double.isFinite(x) && Double.isFinite(center.getY()) && Double.isFinite(z), "Center must be finite");
++        Validate.isTrue(x - radius >= Integer.MIN_VALUE && x + radius <= Integer.MAX_VALUE
++                && z - radius >= Integer.MIN_VALUE && z + radius <= Integer.MAX_VALUE, "Chunk square exceeds block coordinate range");
+ 
+         return new int[] {
+                 (int) Math.floor(x - radius) >> 4, (int) Math.floor(z - radius) >> 4,
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+index e56292f1c4bae7a947afb9d0e67ed2c2a1c1caf4..c1ee08a44f596d6b06a148871d42f355d631077d 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+@@ -13,6 +13,9 @@ public final class AthenaChunkPreloader {
+ 
+     public static final AthenaChunkPreloader INSTANCE = new AthenaChunkPreloader();
+ 
++    // Athena - the two ordering arrays cost at most 1 MiB per request on small-heap servers.
++    static final int MAX_CHUNKS = 65536;
++
+     private final List<Batch> batches = new ArrayList<Batch>();
+ 
+     private AthenaChunkPreloader() {}
+@@ -39,24 +42,33 @@ public final class AthenaChunkPreloader {
+      * world's storage holds; requests start on the next tick.
+      */
+     public CompletableFuture<Integer> preload(WorldServer world, int minX, int minZ, int maxX, int maxZ, int perTick) {
+-        final double centreX = (minX + maxX) / 2.0;
+-        final double centreZ = (minZ + maxZ) / 2.0;
+-        int width = maxX - minX + 1;
+-        long[] keyed = new long[width * (maxZ - minZ + 1)];
++        // Athena - validate before allocation and before narrowing any dimension to int.
++        long wide = (long) maxX - minX + 1L, high = (long) maxZ - minZ + 1L;
++        if (wide <= 0 || high <= 0 || wide > MAX_CHUNKS || high > MAX_CHUNKS || wide * high > MAX_CHUNKS) {
++            throw new IllegalArgumentException("Preload must contain between 1 and " + MAX_CHUNKS + " chunks");
++        }
++        if (perTick < 1) {
++            throw new IllegalArgumentException("perTick must be at least 1");
++        }
++        final double centreX = ((long) minX + maxX) / 2.0;
++        final double centreZ = ((long) minZ + maxZ) / 2.0;
++        int width = (int) wide, height = (int) high;
++        long[] keyed = new long[(int) (wide * high)];
+         int n = 0;
+ 
+-        for (int x = minX; x <= maxX; ++x) {
+-            for (int z = minZ; z <= maxZ; ++z) {
++        for (int ix = 0; ix < width; ++ix) {
++            for (int iz = 0; iz < height; ++iz) {
++                int x = minX + ix, z = minZ + iz;
+                 double dx = x - centreX, dz = z - centreZ;
+-                // sort key: squared distance from the centre (in quarter chunks), then the index
+-                long distance = (long) ((dx * dx + dz * dz) * 16.0);
+-                keyed[n++] = distance << 32 | (long) ((x - minX) * (maxZ - minZ + 1) + (z - minZ));
++                // Every squared distance has the same fractional part on this grid. Dropping it
++                // preserves order, and even a 65536-by-1 strip fits the signed high 32 bits.
++                long distance = (long) (dx * dx + dz * dz);
++                keyed[n++] = distance << 32 | ((long) ix * height + iz) & 0xFFFFFFFFL;
+             }
+         }
+         Arrays.sort(keyed);
+ 
+         long[] chunks = new long[n];
+-        int height = maxZ - minZ + 1;
+         for (int k = 0; k < n; ++k) {
+             int index = (int) keyed[k];
+             chunks[k] = ChunkCoordIntPair.chunkXZ2Int(minX + index / height, minZ + index % height);
+@@ -85,13 +97,15 @@ public final class AthenaChunkPreloader {
+         }
+ 
+         for (Batch batch : this.batches.toArray(new Batch[0])) {
+-            boolean worldGone = !MinecraftServer.getServer().worlds.contains(batch.world);
++            boolean worldGone = batch.world.athenaUnloaded; // Athena - the lifecycle flag also covers late callbacks
+ 
+             if (!worldGone) {
+                 ChunkProviderServer provider = batch.world.chunkProviderServer;
+                 int sent = 0;
++                long scanned = 0, scanLimit = (long) batch.perTick * 16L;
+ 
+-                while (sent < batch.perTick && batch.next < batch.chunks.length && inFlight < AthenaChunkPacketCache.AHEAD_LIMIT) {
++                // Athena - skips still consume work; a loaded square cannot monopolize the tick.
++                while (scanned++ < scanLimit && sent < batch.perTick && batch.next < batch.chunks.length && inFlight < AthenaChunkPacketCache.AHEAD_LIMIT) {
+                     long key = batch.chunks[batch.next++];
+                     int x = (int) key, z = (int) (key >>> 32);
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaPreloadBoundsTest.java b/src/test/java/net/minecraft/server/AthenaPreloadBoundsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c14cc84e9141805af6a765227a9d30ec3de521c3
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaPreloadBoundsTest.java
+@@ -0,0 +1,101 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.util.List;
++import java.util.concurrent.CompletableFuture;
++import org.bukkit.Location;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaPreloadBoundsTest extends AbstractTestingBase {
++    private static AthenaChunkPreloader preloader() throws Exception {
++        Constructor<AthenaChunkPreloader> constructor = AthenaChunkPreloader.class.getDeclaredConstructor();
++        constructor.setAccessible(true);
++        return constructor.newInstance();
++    }
++
++    @Test
++    public void rejectsOverflowAndReversedAndOversizedRangesBeforeAllocation() throws Exception {
++        AthenaChunkPreloader queue = preloader();
++        for (int[] range : new int[][] {{0, 0, 65535, 65535}, {1, 0, 0, 0},
++                {Integer.MIN_VALUE, 0, Integer.MAX_VALUE, 0}, {0, 0, 256, 256}}) {
++            try { queue.preload(null, range[0], range[1], range[2], range[3], 1); fail("invalid bounds accepted"); }
++            catch (IllegalArgumentException expected) {}
++        }
++    }
++
++    @Test
++    public void loadedAndMissingChunksConsumeTheScanBudget() throws Exception {
++        for (boolean loaded : new boolean[] {true, false}) {
++            WorldServer world = AthenaAuditFixtures.world();
++            int[] scans = {0};
++            world.chunkProviderServer = new ChunkProviderServer(world, null, null) {
++                @Override public boolean isChunkLoaded(int x, int z) { ++scans[0]; return loaded; }
++                @Override public boolean chunkExistsInStorage(int x, int z) { return false; }
++            };
++            AthenaChunkPreloader queue = preloader();
++            CompletableFuture<Integer> done = queue.preload(world, 0, 0, 31, 31, 1);
++            queue.tick();
++            assertEquals(16, scans[0]);
++            assertFalse(done.isDone());
++            for (int i = 1; i < 64; ++i) queue.tick();
++            assertEquals(1024, scans[0]);
++            assertEquals(Integer.valueOf(0), done.join());
++        }
++    }
++
++    @Test
++    public void aMissingOrDiscardedLoadDoesNotCountAsLoaded() throws Exception {
++        for (boolean unload : new boolean[] {false, true}) {
++            WorldServer world = AthenaAuditFixtures.world();
++            world.chunkProviderServer = new ChunkProviderServer(world, null, null) {
++                @Override public boolean isChunkLoaded(int x, int z) { return false; }
++                @Override public boolean chunkExistsInStorage(int x, int z) { return true; }
++                @Override public Chunk getChunkAt(int x, int z, Runnable callback) {
++                    world.athenaUnloaded = unload;
++                    callback.run();
++                    return null;
++                }
++            };
++            AthenaChunkPreloader queue = preloader();
++            CompletableFuture<Integer> done = queue.preload(world, 0, 0, 0, 0, 1);
++            queue.tick();
++            assertEquals(Integer.valueOf(0), done.join());
++        }
++    }
++
++    @Test
++    public void longStripsRemainNearestFirstAndMaxIntDoesNotLoop() throws Exception {
++        AthenaChunkPreloader queue = preloader();
++        queue.preload(null, 0, 0, 65535, 0, 1);
++        Field batches = AthenaChunkPreloader.class.getDeclaredField("batches");
++        batches.setAccessible(true);
++        Object batch = ((List<?>) batches.get(queue)).get(0);
++        Field chunks = batch.getClass().getDeclaredField("chunks");
++        chunks.setAccessible(true);
++        long[] ordered = (long[]) chunks.get(batch);
++        assertEquals(32767, (int) ordered[0]);
++        assertEquals(32768, (int) ordered[1]);
++        queue.preload(null, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE, 1);
++    }
++
++    @Test
++    public void chunkSquaresRejectNonFiniteCoordinates() throws Exception {
++        Method square = athena.server.AthenaServerImpl.class.getDeclaredMethod("chunkSquare", Location.class, int.class);
++        square.setAccessible(true);
++        org.bukkit.World world = (org.bukkit.World) Proxy.newProxyInstance(getClass().getClassLoader(),
++                new Class<?>[] {org.bukkit.World.class}, (p, method, args) -> { throw new UnsupportedOperationException(); });
++        for (double invalid : new double[] {Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
++            for (Location location : new Location[] {new Location(world, invalid, 64, 0), new Location(world, 0, invalid, 0), new Location(world, 0, 64, invalid)}) {
++                try { square.invoke(null, location, 0); fail("non-finite center accepted"); }
++                catch (InvocationTargetException ex) { assertTrue(ex.getCause() instanceof IllegalArgumentException); }
++            }
++        }
++    }
++}

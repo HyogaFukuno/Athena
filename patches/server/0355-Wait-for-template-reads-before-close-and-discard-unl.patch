@@ -1,0 +1,491 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:45:14 +0900
+Subject: [PATCH] Wait for template reads before close and discard unloaded
+ chunk results
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+index 0669c9e03104ee7e864dd1ae6c8879ff2cfca33d..e56292f1c4bae7a947afb9d0e67ed2c2a1c1caf4 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPreloader.java
+@@ -107,11 +107,14 @@ public final class AthenaChunkPreloader {
+                         @Override
+                         public void run() {
+                             --owner.pending;
+-                            ++owner.loaded;
++                            if (owner.world.athenaUnloaded) {
++                                return; // Athena - a discarded Stage2 load is not a loaded chunk
++                            }
+                             // the players this preload is for will be sent it: build its packet now,
+                             // spread over the preload, rather than all at once when they arrive
+                             Chunk chunk = owner.world.chunkProviderServer.getChunkIfLoaded(chunkX, chunkZ);
+                             if (chunk != null) {
++                                ++owner.loaded;
+                                 chunk.athenaWarmPacketCache();
+                             }
+                         }
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index 9d237246c1ef9bc97722ad1942e232130e190d29..aafa07f69b8b144f0a013e20cc8aff70f25e6690 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -2,6 +2,7 @@ package net.minecraft.server;
+ 
+ import java.io.File;
+ import java.io.IOException;
++import java.util.concurrent.locks.ReentrantReadWriteLock;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+@@ -17,6 +18,8 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     private static final AthenaTemplateRegion MISSING = null;
+ 
++    // Athena - closing waits for readers; a reader starting after close sees no data.
++    private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock(true);
+     private final File directory;
+     // region coordinates -> the open region, or a stored null for a region file that is not there
+     private final Map<Long, AthenaTemplateRegion> regions = new HashMap<Long, AthenaTemplateRegion>();
+@@ -57,6 +60,15 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     @Override
+     public boolean chunkExists(World world, int i, int j) {
++        this.lifecycle.readLock().lock();
++        try {
++            return this.closed ? false : this.chunkExistsOpen(world, i, j);
++        } finally {
++            this.lifecycle.readLock().unlock();
++        }
++    }
++
++    private boolean chunkExistsOpen(World world, int i, int j) {
+         try {
+             AthenaTemplateRegion region = this.region(i, j);
+ 
+@@ -68,6 +80,15 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     @Override
+     public Object[] loadChunk(World world, int i, int j) throws IOException {
++        this.lifecycle.readLock().lock();
++        try {
++            return this.closed ? null : this.loadChunkOpen(world, i, j);
++        } finally {
++            this.lifecycle.readLock().unlock();
++        }
++    }
++
++    private Object[] loadChunkOpen(World world, int i, int j) throws IOException {
+         // Athena - the slim NBT from the store when it has one: the section arrays it leaves out come
+         // from the store anyway (see AthenaSectionStore). Not while the audit runs, which compares
+         // each stored section with the region file's.
+@@ -90,16 +111,21 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+     public void saveExtraData() {}
+ 
+     /** Closes the template's region files. Called when the world unloads. */
+-    synchronized void close() {
+-        this.closed = true;
+-        for (AthenaTemplateRegion region : this.regions.values()) {
+-            if (region != null) {
+-                try {
+-                    region.close();
+-                } catch (IOException ignored) {
++    void close() {
++        this.lifecycle.writeLock().lock();
++        try {
++            this.closed = true;
++            for (AthenaTemplateRegion region : this.regions.values()) {
++                if (region != null) {
++                    try {
++                        region.close();
++                    } catch (IOException ignored) {
++                    }
+                 }
+             }
++            this.regions.clear();
++        } finally {
++            this.lifecycle.writeLock().unlock();
+         }
+-        this.regions.clear();
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateRegion.java b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+index 798501fcf4c8a12df6063597de07b8562130b67f..2e1bbd36b802017530b7e53394bb223b9300ab51 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateRegion.java
+@@ -7,6 +7,7 @@ import java.io.DataInputStream;
+ import java.io.EOFException;
+ import java.io.File;
+ import java.io.IOException;
++import java.util.concurrent.locks.ReentrantReadWriteLock;
+ import java.io.InputStream;
+ import java.nio.ByteBuffer;
+ import java.nio.channels.FileChannel;
+@@ -25,9 +26,12 @@ final class AthenaTemplateRegion implements Closeable {
+ 
+     private static final int SECTOR = 4096;
+ 
++    // Athena - closing waits for readers; a reader starting after close sees no data.
++    private final ReentrantReadWriteLock lifecycle = new ReentrantReadWriteLock(true);
+     private final FileChannel channel;
+     private final int[] offsets = new int[1024];
+     private final long size;
++    private boolean closed;
+ 
+     private AthenaTemplateRegion(FileChannel channel) throws IOException {
+         this.channel = channel;
+@@ -59,6 +63,15 @@ final class AthenaTemplateRegion implements Closeable {
+      * the server generates the chunk instead, as it does for one that is not there.
+      */
+     boolean has(int x, int z) {
++        this.lifecycle.readLock().lock();
++        try {
++            return this.closed ? false : this.hasOpen(x, z);
++        } finally {
++            this.lifecycle.readLock().unlock();
++        }
++    }
++
++    private boolean hasOpen(int x, int z) {
+         if ((x | z) < 0 || x >= 32 || z >= 32) {
+             return false;
+         }
+@@ -70,6 +83,15 @@ final class AthenaTemplateRegion implements Closeable {
+ 
+     /** The chunk's NBT, or null if it is not stored. */
+     NBTTagCompound read(int x, int z) throws IOException {
++        this.lifecycle.readLock().lock();
++        try {
++            return this.closed ? null : this.readOpen(x, z);
++        } finally {
++            this.lifecycle.readLock().unlock();
++        }
++    }
++
++    private NBTTagCompound readOpen(int x, int z) throws IOException {
+         int[] header = this.header(x, z);
+ 
+         if (header == null) {
+@@ -142,6 +164,12 @@ final class AthenaTemplateRegion implements Closeable {
+ 
+     @Override
+     public void close() throws IOException {
+-        this.channel.close();
++        this.lifecycle.writeLock().lock();
++        try {
++            this.closed = true;
++            this.channel.close();
++        } finally {
++            this.lifecycle.writeLock().unlock();
++        }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index a34fa936824f4c10e24497320eec77c45872e260..deb7a778f9a727107aa91f4c69a212f1e06a1e8a 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -42,7 +42,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     public boolean savingDisabled;
+     // Athena - set once CraftServer.unloadWorld has taken the world out: a chunk load finished after
+     // that (they can wait a few ticks, see ChunkIOExecutor) must not put its chunk back
+-    public boolean athenaUnloaded;
++    public volatile boolean athenaUnloaded; // Athena - chunk IO observes unload on worker threads
+     private boolean allPlayersSleeping;
+     private int emptyTime;
+     private final PortalTravelAgent worldTeleporter;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index d034b56715850f73d00d8b078d5efae88a01025a..2138ca61be8bed0d805769daa02e0092eda9c1f1 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -130,7 +130,11 @@ public class CraftWorld implements World {
+         cps.getChunkAt(x, z, new Runnable() {
+             @Override
+             public void run() {
+-                callback.onLoad(cps.getChunkAt(x, z).bukkitChunk);
++                // Athena - an unloaded world cannot answer this request; in particular, do not
++                // re-enter synchronous generation from its discarded Stage2 callback.
++                if (!CraftWorld.this.world.athenaUnloaded) {
++                    callback.onLoad(CraftWorld.this.getChunkAt(x, z));
++                }
+             }
+         });
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java
+index a5965ecc7ea939719814ece906aa54d796278d7a..049e37ce558cd54f3d005accae21e09ed94d4472 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkgen/ChunkGenProvider.java
+@@ -25,7 +25,10 @@ class ChunkGenProvider implements AsynchronousExecutor.CallBackProvider<QueuedGe
+ 
+     // sync
+     public void callStage2(QueuedGen queuedGen, ChunkShape chunkShape) throws RuntimeException {
+-        queuedGen.provider.finishGeneratedChunk(queuedGen.x, queuedGen.z, chunkShape);
++        // Athena - a completed shape must not resurrect a world removed while it was queued.
++        if (!queuedGen.provider.world.athenaUnloaded) {
++            queuedGen.provider.finishGeneratedChunk(queuedGen.x, queuedGen.z, chunkShape);
++        }
+     }
+ 
+     public void callStage3(QueuedGen queuedGen, ChunkShape chunkShape, Runnable runnable) throws RuntimeException {
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+index b263818b2fa0b7fe1c6da6c2f2a90489df6b3cd2..95b9dcb3c001aad7ab41110374a590303be0568b 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOProvider.java
+@@ -32,6 +32,11 @@ class ChunkIOProvider implements AsynchronousExecutor.CallBackProvider<QueuedChu
+ 
+             return null;
+         } catch (IOException ex) {
++            // Athena - only an unloaded world may abandon a failed read; never regenerate a live
++            // world silently after an IO error. Errors still propagate through the executor.
++            if (queuedChunk.provider.world.athenaUnloaded) {
++                return null;
++            }
+             throw new RuntimeException(ex);
+         }
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaAuditFixtures.java b/src/test/java/net/minecraft/server/AthenaAuditFixtures.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1bc6ed61342cf25d55db25e294ad736e0cd7d325
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaAuditFixtures.java
+@@ -0,0 +1,26 @@
++package net.minecraft.server;
++
++import java.lang.reflect.Field;
++
++/** Small lifecycle fixtures without starting a MinecraftServer or its background services. */
++public final class AthenaAuditFixtures {
++    private AthenaAuditFixtures() {}
++
++    public static <T> T allocate(Class<T> type) throws Exception {
++        Field field = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
++        field.setAccessible(true);
++        return type.cast(((sun.misc.Unsafe) field.get(null)).allocateInstance(type));
++    }
++
++    public static void set(Object object, Class<?> owner, String name, Object value) throws Exception {
++        Field field = owner.getDeclaredField(name);
++        field.setAccessible(true);
++        field.set(object, value);
++    }
++
++    public static WorldServer world() throws Exception {
++        WorldServer world = allocate(WorldServer.class);
++        world.chunkProviderServer = new ChunkProviderServer(world, null, null);
++        return world;
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaChunkLifecycleTest.java b/src/test/java/net/minecraft/server/AthenaChunkLifecycleTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1468198c2809cb98db0ecfa09559abf0b1e1c632
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaChunkLifecycleTest.java
+@@ -0,0 +1,118 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.io.File;
++import java.io.IOException;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ThreadPoolExecutor;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.craftbukkit.util.AsynchronousExecutor;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaChunkLifecycleTest extends AbstractTestingBase {
++    @SuppressWarnings("unchecked")
++    private static AsynchronousExecutor<Object, Chunk, Runnable, RuntimeException> executor() throws Exception {
++        Constructor<?> constructor = Class.forName("org.bukkit.craftbukkit.chunkio.ChunkIOProvider").getDeclaredConstructor();
++        constructor.setAccessible(true);
++        return new AsynchronousExecutor<>((AsynchronousExecutor.CallBackProvider<Object, Chunk, Runnable, RuntimeException>) constructor.newInstance(), 1);
++    }
++
++    private static Object request(WorldServer world, ChunkRegionLoader loader) throws Exception {
++        Constructor<?> constructor = Class.forName("org.bukkit.craftbukkit.chunkio.QueuedChunk").getDeclaredConstructors()[0];
++        constructor.setAccessible(true);
++        return constructor.newInstance(0, 0, loader, world, world.chunkProviderServer);
++    }
++
++    private static void stop(AsynchronousExecutor<?, ?, ?, ?> executor) throws Exception {
++        Field field = AsynchronousExecutor.class.getDeclaredField("pool");
++        field.setAccessible(true);
++        ((ThreadPoolExecutor) field.get(executor)).shutdownNow();
++    }
++
++    @Test(timeout = 10000)
++    public void anIoFailureDuringUnloadFinishesWithoutThrowing() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        CountDownLatch reading = new CountDownLatch(1), release = new CountDownLatch(1);
++        ChunkRegionLoader loader = new ChunkRegionLoader(new File("unused-audit-world")) {
++            @Override public Object[] loadChunk(World ignored, int x, int z) throws IOException {
++                reading.countDown();
++                try { assertTrue(release.await(5, TimeUnit.SECONDS)); }
++                catch (InterruptedException ex) { throw new IOException(ex); }
++                throw new IOException("closed while unloading");
++            }
++        };
++        AsynchronousExecutor<Object, Chunk, Runnable, RuntimeException> executor = executor();
++        AtomicInteger callbacks = new AtomicInteger();
++        Object request = request(world, loader);
++        try {
++            executor.add(request, callbacks::incrementAndGet);
++            assertTrue(reading.await(5, TimeUnit.SECONDS));
++            world.athenaUnloaded = true;
++            release.countDown();
++            assertNull(executor.get(request)); // finish() of the queued task, not a direct loader call
++            executor.finishActive();
++            assertEquals(1, callbacks.get());
++            assertTrue(world.chunkProviderServer.chunks.isEmpty());
++        } finally {
++            release.countDown();
++            stop(executor);
++        }
++    }
++
++    @Test(timeout = 10000)
++    public void aLiveWorldIoFailureStillPropagates() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        IOException failure = new IOException("broken live region");
++        ChunkRegionLoader loader = new ChunkRegionLoader(new File("unused-audit-world")) {
++            @Override public Object[] loadChunk(World ignored, int x, int z) throws IOException { throw failure; }
++        };
++        AsynchronousExecutor<Object, Chunk, Runnable, RuntimeException> executor = executor();
++        Object request = request(world, loader);
++        try {
++            executor.add(request, () -> fail("failed reads must not report success"));
++            try { executor.get(request); fail("live IO failure was hidden"); }
++            catch (RuntimeException ex) { assertSame(failure, ex.getCause()); }
++        } finally { stop(executor); }
++    }
++
++    @Test(timeout = 10000)
++    public void vmErrorsAreNeverHiddenEvenAfterUnload() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        world.athenaUnloaded = true;
++        Error failure = new AssertionError("simulated VM failure");
++        ChunkRegionLoader loader = new ChunkRegionLoader(new File("unused-audit-world")) {
++            @Override public Object[] loadChunk(World ignored, int x, int z) { throw failure; }
++        };
++        AsynchronousExecutor<Object, Chunk, Runnable, RuntimeException> executor = executor();
++        Object request = request(world, loader);
++        try {
++            executor.add(request, () -> fail("Error must propagate"));
++            try { executor.get(request); fail("Error was hidden"); }
++            catch (Error ex) { assertSame(failure, ex); }
++        } finally { stop(executor); }
++    }
++
++    @Test
++    public void asyncPinnedChunksHaveCoordinatesAndUnloadedWorldsDoNotCallback() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        world.chunkProviderServer.pin(0, 0, 0, 0);
++        CraftWorld craft = AthenaAuditFixtures.allocate(CraftWorld.class);
++        AthenaAuditFixtures.set(craft, CraftWorld.class, "world", world);
++        AtomicInteger calls = new AtomicInteger();
++        craft.getChunkAtAsync(7, -9, chunk -> {
++            assertNotNull(chunk);
++            assertEquals(7, chunk.getX());
++            assertEquals(-9, chunk.getZ());
++            calls.incrementAndGet();
++        });
++        assertEquals(1, calls.get());
++        world.athenaUnloaded = true;
++        craft.getChunkAtAsync(7, -9, chunk -> fail("unloaded world called back"));
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaTemplateCloseTest.java b/src/test/java/net/minecraft/server/AthenaTemplateCloseTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf3b22e3c91cbe42c8f47fb91c0b4d59803dbcf8
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaTemplateCloseTest.java
+@@ -0,0 +1,86 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.io.DataOutputStream;
++import java.io.IOException;
++import java.lang.reflect.Constructor;
++import java.nio.ByteBuffer;
++import java.nio.MappedByteBuffer;
++import java.nio.channels.*;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Random;
++import java.util.concurrent.*;
++import org.junit.Test;
++
++public class AthenaTemplateCloseTest {
++    @Test(timeout = 10000)
++    public void closeWaitsUntilTheActiveReadFinishes() throws Exception {
++        Path dir = Files.createTempDirectory("athena-close-test");
++        Path file = dir.resolve("r.0.0.mca");
++        NBTTagCompound nbt = new NBTTagCompound();
++        byte[] bytes = new byte[512 * 1024];
++        new Random(7).nextBytes(bytes);
++        nbt.setByteArray("payload", bytes);
++        RegionFile writer = new RegionFile(file.toFile());
++        try (DataOutputStream stream = writer.getChunkDataOutputStream(0, 0)) {
++            NBTCompressedStreamTools.write(nbt, (java.io.DataOutput) stream);
++        } finally { writer.close(); }
++        BlockingChannel channel = new BlockingChannel(FileChannel.open(file));
++        Constructor<AthenaTemplateRegion> constructor = AthenaTemplateRegion.class.getDeclaredConstructor(FileChannel.class);
++        constructor.setAccessible(true);
++        AthenaTemplateRegion region = constructor.newInstance(channel);
++        ExecutorService pool = Executors.newFixedThreadPool(2);
++        try {
++            channel.armed = true;
++            Future<NBTTagCompound> read = pool.submit(() -> region.read(0, 0));
++            assertTrue(channel.reading.await(5, TimeUnit.SECONDS));
++            CountDownLatch closing = new CountDownLatch(1);
++            Future<?> close = pool.submit(() -> { closing.countDown(); region.close(); return null; });
++            assertTrue(closing.await(5, TimeUnit.SECONDS));
++            try { close.get(100, TimeUnit.MILLISECONDS); fail("close interrupted an active read"); }
++            catch (TimeoutException expected) {}
++            channel.release.countDown();
++            assertEquals(nbt, read.get(5, TimeUnit.SECONDS));
++            close.get(5, TimeUnit.SECONDS);
++            assertNull(region.read(0, 0));
++            assertFalse(region.has(0, 0));
++        } finally {
++            channel.release.countDown();
++            pool.shutdownNow();
++            region.close();
++        }
++    }
++
++    private static final class BlockingChannel extends FileChannel {
++        final FileChannel delegate;
++        final CountDownLatch reading = new CountDownLatch(1), release = new CountDownLatch(1);
++        volatile boolean armed;
++        BlockingChannel(FileChannel delegate) { this.delegate = delegate; }
++        @Override public int read(ByteBuffer dst, long position) throws IOException {
++            if (armed) {
++                reading.countDown();
++                try { if (!release.await(5, TimeUnit.SECONDS)) throw new IOException("test read timeout"); }
++                catch (InterruptedException ex) { Thread.currentThread().interrupt(); throw new IOException(ex); }
++            }
++            return delegate.read(dst, position);
++        }
++        @Override public long size() throws IOException { return delegate.size(); }
++        @Override protected void implCloseChannel() throws IOException { delegate.close(); }
++        @Override public int read(ByteBuffer dst) { throw new UnsupportedOperationException(); }
++        @Override public long read(ByteBuffer[] d, int o, int n) { throw new UnsupportedOperationException(); }
++        @Override public int write(ByteBuffer src) { throw new UnsupportedOperationException(); }
++        @Override public long write(ByteBuffer[] s, int o, int n) { throw new UnsupportedOperationException(); }
++        @Override public int write(ByteBuffer src, long pos) { throw new UnsupportedOperationException(); }
++        @Override public long position() { throw new UnsupportedOperationException(); }
++        @Override public FileChannel position(long p) { throw new UnsupportedOperationException(); }
++        @Override public FileChannel truncate(long s) { throw new UnsupportedOperationException(); }
++        @Override public void force(boolean metadata) { throw new UnsupportedOperationException(); }
++        @Override public long transferTo(long p, long n, WritableByteChannel c) { throw new UnsupportedOperationException(); }
++        @Override public long transferFrom(ReadableByteChannel c, long p, long n) { throw new UnsupportedOperationException(); }
++        @Override public MappedByteBuffer map(MapMode m, long p, long n) { throw new UnsupportedOperationException(); }
++        @Override public FileLock lock(long p, long n, boolean shared) { throw new UnsupportedOperationException(); }
++        @Override public FileLock tryLock(long p, long n, boolean shared) { throw new UnsupportedOperationException(); }
++    }
++}

@@ -1,0 +1,489 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:55:10 +0900
+Subject: [PATCH] Release decoration holds and restore physics state when
+ population fails
+
+
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+index 37f6ea31d2add19b222ea0235307f5ab41c62dab..a7b72dd82ebc03ab76cfc81c1b43a898e23d85c1 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -2,6 +2,9 @@ package net.minecraft.server;
+ 
+ import java.util.ArrayDeque;
+ import java.util.Queue;
++import java.util.Map;
++import java.util.IdentityHashMap;
++import java.util.Iterator;
+ import java.util.concurrent.ConcurrentLinkedQueue;
+ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.BlockingQueue;
+@@ -33,6 +36,8 @@ public final class ChunkDecorationExecutor {
+     private static final Object DECORATING = new Object();
+     /** Jobs handed to the worker but not yet drained. Read on the server thread only. */
+     private static int inFlight;
++    // Athena - unload without saving waits only for this world, not unrelated decoration.
++    private static final Map<WorldServer, Integer> inFlightByWorld = new IdentityHashMap<WorldServer, Integer>();
+ 
+     private ChunkDecorationExecutor() {}
+ 
+@@ -62,10 +67,13 @@ public final class ChunkDecorationExecutor {
+                 return;
+             }
+ 
+-            synchronized (ChunkDecorationExecutor.DECORATING) {
+-                run(job);
++            try {
++                synchronized (ChunkDecorationExecutor.DECORATING) {
++                    run(job);
++                }
++            } catch (Error failure) {
++                job.failure = failure; // Athena - hand fatal failures to tick; never silently retry them
+             }
+-
+             ChunkDecorationExecutor.finished.add(job);
+         }
+     }
+@@ -86,7 +94,7 @@ public final class ChunkDecorationExecutor {
+ 
+         try {
+             job.generator.decorate(job);
+-        } catch (Throwable throwable) {
++        } catch (Exception throwable) {
+             job.buffer.escape();
+             ChunkDecorationExecutor.logger.warn("[Athena] Chunk " + job.chunkX + ", " + job.chunkZ + " will be decorated on the server thread instead", throwable);
+         } finally {
+@@ -99,6 +107,7 @@ public final class ChunkDecorationExecutor {
+     public static void queue(ChunkPopulateJob job) {
+         ChunkDecorationExecutor.start();
+         ++ChunkDecorationExecutor.inFlight;
++        inFlightByWorld.merge(job.world, 1, Integer::sum);
+         ChunkDecorationExecutor.pending.add(job);
+     }
+ 
+@@ -107,8 +116,7 @@ public final class ChunkDecorationExecutor {
+         ChunkPopulateJob job;
+ 
+         while ((job = ChunkDecorationExecutor.finished.poll()) != null) {
+-            --ChunkDecorationExecutor.inFlight;
+-            complete(job);
++            finish(job);
+         }
+     }
+ 
+@@ -121,43 +129,92 @@ public final class ChunkDecorationExecutor {
+             ChunkPopulateJob job = ChunkDecorationExecutor.finished.poll();
+ 
+             if (job != null) {
+-                --ChunkDecorationExecutor.inFlight;
+-                complete(job);
++                finish(job);
+             } else {
+                 Thread.yield();
+             }
+         }
+     }
+ 
+-    private static void complete(ChunkPopulateJob job) {
+-        if (job.buffer.hasEscaped()) {
+-            // Decoration is single threaded on purpose - BiomeDecorator, WorldGenBigTree and the
+-            // flower generator all keep state on the biome singleton while they run. Doing one here
+-            // means holding the lock the worker holds for each of its own.
+-            synchronized (ChunkDecorationExecutor.DECORATING) {
+-                // The sandbox could not finish it; do the whole decoration here, against the real
+-                // world. The abandoned attempt drew from the sequence, so put it back first.
+-                job.buffer.reset();
+-                job.random.restore(job.randomAtDecoration);
+-                job.generator.decorate(job);
++    /** Athena - finish only jobs belonging to a world being unloaded without a save. */
++    public static void flush(WorldServer world) {
++        while (inFlightByWorld.containsKey(world)) {
++            ChunkPopulateJob ready = null;
++            Iterator<ChunkPopulateJob> iterator = finished.iterator();
++            while (iterator.hasNext()) {
++                ChunkPopulateJob job = iterator.next();
++                if (job.world == world) {
++                    iterator.remove();
++                    ready = job;
++                    break;
++                }
++            }
++            if (ready != null) {
++                finish(ready);
++            } else {
++                Thread.yield();
+             }
++        }
++    }
++
++    private static void finish(ChunkPopulateJob job) {
++        --inFlight;
++        int remaining = inFlightByWorld.get(job.world) - 1;
++        if (remaining == 0) {
++            inFlightByWorld.remove(job.world);
+         } else {
+-            BlockFalling.instaFall = true; // vanilla held this across the whole of populate
++            inFlightByWorld.put(job.world, remaining);
++        }
++        complete(job);
++    }
++
++    private static void complete(ChunkPopulateJob job) {
++        Throwable failure = null;
++        try {
++            if (job.failure != null) {
++                throw job.failure;
++            }
++            if (job.buffer.hasEscaped()) {
++                // Decoration is single threaded on purpose - BiomeDecorator, WorldGenBigTree and the
++                // flower generator all keep state on the biome singleton while they run. Doing one here
++                // means holding the lock the worker holds for each of its own.
++                synchronized (ChunkDecorationExecutor.DECORATING) {
++                    // The sandbox could not finish it; do the whole decoration here, against the real
++                    // world. The abandoned attempt drew from the sequence, so put it back first.
++                    job.buffer.reset();
++                    job.random.restore(job.randomAtDecoration);
++                    job.generator.decorate(job);
++                }
++            } else {
++                boolean previousInstaFall = BlockFalling.instaFall;
++                BlockFalling.instaFall = true; // vanilla held this across the whole of populate
++
++                try {
++                    job.buffer.apply();
++                } catch (Exception throwable) {
++                    // The replay runs inside the tick loop, so a single bad entry must not take the
++                    // server down with it. The chunk is left part decorated, which is visible and
++                    // reported, rather than the world being lost.
++                    ChunkDecorationExecutor.logger.error("[Athena] Replaying the decoration of chunk " + job.chunkX + ", " + job.chunkZ + " failed; that chunk is partly decorated", throwable);
++                } finally {
++                    BlockFalling.instaFall = previousInstaFall;
++                }
++            }
+ 
++            job.generator.finishPopulate(job);
++        } catch (RuntimeException | Error ex) {
++            failure = ex;
++            throw ex;
++        } finally {
+             try {
+-                job.buffer.apply();
+-            } catch (Throwable throwable) {
+-                // The replay runs inside the tick loop, so a single bad entry must not take the
+-                // server down with it. The chunk is left part decorated, which is visible and
+-                // reported, rather than the world being lost.
+-                ChunkDecorationExecutor.logger.error("[Athena] Replaying the decoration of chunk " + job.chunkX + ", " + job.chunkZ + " failed; that chunk is partly decorated", throwable);
+-            } finally {
+-                BlockFalling.instaFall = false;
++                job.completion.run();
++            } catch (RuntimeException | Error cleanup) {
++                if (failure == null) {
++                    throw cleanup;
++                }
++                if (cleanup != failure) failure.addSuppressed(cleanup);
+             }
+         }
+-
+-        job.generator.finishPopulate(job);
+-        job.completion.run();
+     }
+ }
+ // Athena end
+diff --git a/src/main/java/net/minecraft/server/ChunkPopulateJob.java b/src/main/java/net/minecraft/server/ChunkPopulateJob.java
+index 3b5928fe1fe7bc18bff6fd24511f426d65ffa14c..ce71e8c60857e3b9dcb4843c80b87dad1005aa13 100644
+--- a/src/main/java/net/minecraft/server/ChunkPopulateJob.java
++++ b/src/main/java/net/minecraft/server/ChunkPopulateJob.java
+@@ -27,6 +27,8 @@ public class ChunkPopulateJob {
+ 
+     /** What the server thread runs once the decoration has been replayed. */
+     public Runnable completion;
++    // Athena - a worker Error is rethrown on the server thread, after releasing chunk holds.
++    Error failure;
+ 
+     public ChunkPopulateJob(ChunkProviderGenerate generator, World world, int chunkX, int chunkZ, SnapshotRandom random, BiomeBase biome, BlockPosition origin) {
+         this.generator = generator;
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index 68cf800dbd4fb8c2efc640452549562302cb04c0..6e4f0accf6b42fc996d8b84e1fc0e027a170084b 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -480,31 +480,35 @@ public class ChunkProviderGenerate implements IChunkProvider {
+      * chunk starts with, then the ice and snow that settle on whatever is now standing there.
+      */
+     public void finishPopulate(ChunkPopulateJob job) {
++        boolean previousInstaFall = BlockFalling.instaFall;
+         BlockFalling.instaFall = true;
+-        int k = job.originX;
+-        int l = job.originZ;
++        try {
++            int k = job.originX;
++            int l = job.originZ;
+ 
+-        SpawnerCreature.performWorldGenSpawning(this.worldObj, job.biome, k + 8, l + 8, 16, 16, job.random);
+-        BlockPosition blockposition = new BlockPosition(k, 0, l).add(8, 0, 8);
++            SpawnerCreature.performWorldGenSpawning(this.worldObj, job.biome, k + 8, l + 8, 16, 16, job.random);
++            BlockPosition blockposition = new BlockPosition(k, 0, l).add(8, 0, 8);
+ 
+-        for (int k1 = 0; k1 < 16; ++k1) {
+-            for (int l1 = 0; l1 < 16; ++l1) {
+-                BlockPosition blockposition1 = this.worldObj.getPrecipitationHeight(blockposition.add(k1, 0, l1));
+-                BlockPosition blockposition2 = blockposition1.down();
++            for (int k1 = 0; k1 < 16; ++k1) {
++                for (int l1 = 0; l1 < 16; ++l1) {
++                    BlockPosition blockposition1 = this.worldObj.getPrecipitationHeight(blockposition.add(k1, 0, l1));
++                    BlockPosition blockposition2 = blockposition1.down();
+ 
+-                if (this.worldObj.canBlockFreezeWater(blockposition2)) {
+-                    this.worldObj.setTypeAndData(blockposition2, Blocks.ICE.getBlockData(), 2);
+-                }
++                    if (this.worldObj.canBlockFreezeWater(blockposition2)) {
++                        this.worldObj.setTypeAndData(blockposition2, Blocks.ICE.getBlockData(), 2);
++                    }
+ 
+-                if (this.worldObj.canSnowAt(blockposition1, true)) {
+-                    this.worldObj.setTypeAndData(blockposition1, Blocks.SNOW_LAYER.getBlockData(), 2);
++                    if (this.worldObj.canSnowAt(blockposition1, true)) {
++                        this.worldObj.setTypeAndData(blockposition1, Blocks.SNOW_LAYER.getBlockData(), 2);
++                    }
+                 }
+             }
++        } finally {
++            BlockFalling.instaFall = previousInstaFall; // Athena - generator failures must restore global physics state
+         }
+-
+-        BlockFalling.instaFall = false;
+     }
+ 
++
+     public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
+         // The three stages back to back - what the server thread does when decoration is not deferred.
+         ChunkPopulateJob job = this.beginPopulate(i, j);
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index c8f54568b819ffa27ef31decc9a88981ba7f2261..f8ba37c5a7a38e3769697c83fe6ec8fc3d794d55 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -675,13 +675,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                     }
+                     job.completion = new Runnable() {
+                         public void run() {
+-                            chunk.decorationPending = false;
+-                            ChunkProviderServer.this.finishPopulate(chunk);
+-                            for (Chunk c : held) {
+-                                if (c != null) {
+-                                    ChunkProviderServer.this.releaseDecorationHold(c);
+-                                }
+-                            }
++                            ChunkProviderServer.this.finishDecoration(chunk, held);
+                         }
+                     };
+                     ChunkDecorationExecutor.queue(job);
+@@ -698,27 +692,43 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+     // Athena start - the tail of population: plugin block populators, then the event. Split out so
+     // that the deferred path runs it at the same point in the sequence, just later in wall time.
++    // Athena - always drop all holds, even if plugin population stops the tick with an exception.
++    void finishDecoration(Chunk chunk, Chunk[] held) {
++        try {
++            this.finishPopulate(chunk);
++        } finally {
++            chunk.decorationPending = false;
++            for (Chunk c : held) {
++                if (c != null) this.releaseDecorationHold(c);
++            }
++        }
++    }
++
+     private void finishPopulate(Chunk chunk) {
+         // CraftBukkit start
++        boolean previousInstaFall = BlockSand.instaFall;
+         BlockSand.instaFall = true;
+-        Random random = new Random();
+-        random.setSeed(world.getSeed());
+-        long xRand = random.nextLong() / 2L * 2L + 1L;
+-        long zRand = random.nextLong() / 2L * 2L + 1L;
+-        random.setSeed((long) chunk.locX * xRand + (long) chunk.locZ * zRand ^ world.getSeed());
+-
+-        org.bukkit.World world = this.world.getWorld();
+-        if (world != null) {
+-            this.world.populating = true;
+-            try {
+-                for (org.bukkit.generator.BlockPopulator populator : world.getPopulators()) {
+-                    populator.populate(world, random, chunk.bukkitChunk);
++        try {
++            Random random = new Random();
++            random.setSeed(world.getSeed());
++            long xRand = random.nextLong() / 2L * 2L + 1L;
++            long zRand = random.nextLong() / 2L * 2L + 1L;
++            random.setSeed((long) chunk.locX * xRand + (long) chunk.locZ * zRand ^ world.getSeed());
++
++            org.bukkit.World world = this.world.getWorld();
++            if (world != null) {
++                this.world.populating = true;
++                try {
++                    for (org.bukkit.generator.BlockPopulator populator : world.getPopulators()) {
++                        populator.populate(world, random, chunk.bukkitChunk);
++                    }
++                } finally {
++                    this.world.populating = false;
+                 }
+-            } finally {
+-                this.world.populating = false;
+             }
++        } finally {
++            BlockSand.instaFall = previousInstaFall; // Athena - restore even when a plugin populator throws
+         }
+-        BlockSand.instaFall = false;
+         this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.world.ChunkPopulateEvent(chunk.bukkitChunk));
+         // CraftBukkit end
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index b99aacb1bf71e9d0ebe1526357be1c9f68c1d9ac..cefedbab5ac3ec163e315e382a64568b2d43c3c6 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1081,6 +1081,8 @@ public final class CraftServer implements Server {
+             return false;
+         }
+ 
++        // Athena - save=false must also settle decoration before the world and its files disappear.
++        net.minecraft.server.ChunkDecorationExecutor.flush(handle);
+         if (save) {
+             try {
+                 handle.save(true, null);
+diff --git a/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java b/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbfb9d23d4befd966825cf80cdfa8eee796f7f1f
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java
+@@ -0,0 +1,132 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.util.List;
++import java.util.Random;
++import java.util.concurrent.*;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.function.Consumer;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.generator.BlockPopulator;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaDecorationCleanupTest extends AbstractTestingBase {
++    private static final class Generator extends ChunkProviderGenerate {
++        Consumer<ChunkPopulateJob> decorate, finish;
++        private Generator() { super(null, 0, false, ""); }
++        @Override public void decorate(ChunkPopulateJob job) { decorate.accept(job); }
++        @Override public void finishPopulate(ChunkPopulateJob job) { finish.accept(job); }
++    }
++
++    private static Generator generator(Consumer<ChunkPopulateJob> decorate, Consumer<ChunkPopulateJob> finish) throws Exception {
++        Generator generator = AthenaAuditFixtures.allocate(Generator.class);
++        generator.decorate = decorate;
++        generator.finish = finish;
++        return generator;
++    }
++
++    private static WorldServer world() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        AthenaAuditFixtures.set(world, World.class, "worldProvider", WorldProvider.byDimension(0));
++        return world;
++    }
++
++    private static ChunkPopulateJob job(WorldServer world, Generator generator, Runnable completion) {
++        ChunkPopulateJob job = new ChunkPopulateJob(generator, world, 0, 0, new SnapshotRandom(1), BiomeBase.PLAINS, BlockPosition.ZERO);
++        job.completion = completion;
++        return job;
++    }
++
++    @Test
++    public void pluginFailureReleasesAllFourHoldsAndRestoresPhysics() throws Exception {
++        WorldServer world = world();
++        world.worldData = new WorldData();
++        CraftWorld craft = AthenaAuditFixtures.allocate(CraftWorld.class);
++        RuntimeException failure = new RuntimeException("failing block populator");
++        BlockPopulator populator = new BlockPopulator() {
++            @Override public void populate(org.bukkit.World world, Random random, org.bukkit.Chunk chunk) { throw failure; }
++        };
++        AthenaAuditFixtures.set(craft, CraftWorld.class, "populators", List.of(populator));
++        AthenaAuditFixtures.set(world, World.class, "world", craft);
++        Chunk[] held = new Chunk[4];
++        for (int i = 0; i < held.length; ++i) {
++            held[i] = new Chunk(world, i & 1, i >> 1);
++            held[i].athenaDecorationHolds = 1;
++        }
++        held[0].decorationPending = true;
++        boolean before = BlockSand.instaFall;
++        BlockSand.instaFall = false;
++        try {
++            try { world.chunkProviderServer.finishDecoration(held[0], held); fail("plugin failure hidden"); }
++            catch (RuntimeException ex) { assertSame(failure, ex); }
++            for (Chunk chunk : held) assertEquals(0, chunk.athenaDecorationHolds);
++            assertFalse(held[0].decorationPending);
++            assertFalse(world.populating);
++            assertFalse(BlockSand.instaFall);
++        } finally { BlockSand.instaFall = before; }
++    }
++
++    @Test
++    public void generatorFailureStillRunsCleanupAndKeepsTheOriginalError() throws Exception {
++        Error fatal = new AssertionError("fatal generator error");
++        RuntimeException cleanup = new RuntimeException("cleanup also failed");
++        AtomicInteger calls = new AtomicInteger();
++        ChunkPopulateJob job = job(world(), generator(j -> {}, j -> { throw fatal; }), () -> {
++            calls.incrementAndGet();
++            throw cleanup;
++        });
++        Method complete = ChunkDecorationExecutor.class.getDeclaredMethod("complete", ChunkPopulateJob.class);
++        complete.setAccessible(true);
++        try { complete.invoke(null, job); fail("Error hidden"); }
++        catch (InvocationTargetException ex) { assertSame(fatal, ex.getCause()); }
++        assertEquals(1, calls.get());
++        assertArrayEquals(new Throwable[] {cleanup}, fatal.getSuppressed());
++    }
++
++    @Test(timeout = 10000)
++    public void workerErrorsReachTheServerThreadAndReleaseCleanup() throws Exception {
++        WorldServer world = world();
++        Error fatal = new AssertionError("worker failure");
++        AtomicInteger cleanup = new AtomicInteger();
++        ChunkDecorationExecutor.queue(job(world, generator(j -> { throw fatal; }, j -> {}), cleanup::incrementAndGet));
++        try { ChunkDecorationExecutor.flush(world); fail("worker Error hidden"); }
++        catch (Error ex) { assertSame(fatal, ex); }
++        assertEquals(1, cleanup.get());
++        assertNull(world.decorationThread);
++        assertNull(world.decorationBuffer);
++    }
++
++    @Test(timeout = 10000)
++    public void unloadingOneWorldDoesNotWaitForAnotherWorldsDecoration() throws Exception {
++        WorldServer first = world(), other = world();
++        CountDownLatch blocked = new CountDownLatch(1), release = new CountDownLatch(1);
++        AtomicInteger completions = new AtomicInteger();
++        Generator generator = generator(j -> {
++            if (j.world == other) {
++                blocked.countDown();
++                try { assertTrue(release.await(5, TimeUnit.SECONDS)); }
++                catch (InterruptedException ex) { throw new AssertionError(ex); }
++            }
++        }, j -> {});
++        ChunkDecorationExecutor.queue(job(first, generator, completions::incrementAndGet));
++        ChunkDecorationExecutor.queue(job(other, generator, completions::incrementAndGet));
++        ExecutorService flush = Executors.newSingleThreadExecutor();
++        Future<?> firstFlush = null;
++        try {
++            assertTrue(blocked.await(5, TimeUnit.SECONDS)); // first job is already in finished
++            firstFlush = flush.submit(() -> ChunkDecorationExecutor.flush(first));
++            firstFlush.get(1, TimeUnit.SECONDS);
++            assertEquals(1, completions.get());
++        } finally {
++            release.countDown();
++            if (firstFlush != null) firstFlush.get(5, TimeUnit.SECONDS);
++            flush.shutdownNow();
++            ChunkDecorationExecutor.flush(other);
++        }
++        assertEquals(2, completions.get());
++    }
++}

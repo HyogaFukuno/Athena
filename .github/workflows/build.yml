@@ -1,6 +1,7 @@
 name: Build
 
 on:
+  pull_request:
   push:
     branches:
       - master
@@ -26,6 +27,9 @@ jobs:
 
       - name: Setup build environment
         run: ./panda setup
+
+      - name: Test API and server
+        run: ./gradlew :pandaspigot-server:test :pandaspigot-api:test --console=plain
 
       - name: Build
         run: ./panda jar

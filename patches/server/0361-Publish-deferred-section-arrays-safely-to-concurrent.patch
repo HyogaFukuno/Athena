@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 21:03:11 +0900
+Subject: [PATCH] Publish deferred section arrays safely to concurrent NBT
+ readers
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+index 8f4924f954e5e42708986c566cd2754059d490ee..bcc26d366b1c4f7cc77e5131d31803fa6601c87b 100644
+--- a/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
++++ b/src/main/java/net/minecraft/server/AthenaDeferredSectionData.java
+@@ -29,7 +29,8 @@ final class AthenaDeferredSectionData {
+ 
+     private final char[] ids;
+     private final boolean needsAdd;
+-    private byte[] blocks;
++    // Athena - get() reads outside pack's monitor: publishing blocks must also publish data/add.
++    private volatile byte[] blocks;
+     private byte[] data;
+     private byte[] add;
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaDeferredNbtConcurrencyTest.java b/src/test/java/net/minecraft/server/AthenaDeferredNbtConcurrencyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4bc2ac3a991ae22b14fdc95f29ecdf350ac2a9a
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDeferredNbtConcurrencyTest.java
+@@ -0,0 +1,46 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.concurrent.*;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaDeferredNbtConcurrencyTest extends AbstractTestingBase {
++    @Test(timeout = 15000)
++    public void concurrentReadersSeeAllThreePackedArrays() throws Exception {
++        char[] ids = new char[4096];
++        for (int i = 0; i < ids.length; ++i) ids[i] = (char) (i << 4 | i & 15);
++        byte[] expectedBlocks = new byte[4096];
++        NibbleArray expectedData = new NibbleArray();
++        NibbleArray expectedAdd = ChunkRegionLoader.packSectionIds(ids, expectedBlocks, expectedData);
++        NBTTagCompound[] rounds = new NBTTagCompound[50];
++        for (int i = 0; i < rounds.length; ++i) {
++            rounds[i] = new NBTTagCompound();
++            AthenaDeferredSectionData.attach(rounds[i], ids);
++        }
++        ExecutorService readers = Executors.newFixedThreadPool(4);
++        CyclicBarrier start = new CyclicBarrier(4);
++        List<Future<?>> completed = new ArrayList<>();
++        try {
++            for (int reader = 0; reader < 4; ++reader) {
++                final int first = reader % 3;
++                completed.add(readers.submit(() -> {
++                    for (NBTTagCompound compound : rounds) {
++                        start.await(5, TimeUnit.SECONDS);
++                        String[] tags = {"Blocks", "Data", "Add"};
++                        // Race different tags on their first read of the same deferred owner.
++                        assertNotNull(compound.getByteArray(tags[first]));
++                        assertArrayEquals(expectedBlocks, compound.getByteArray("Blocks"));
++                        assertArrayEquals(expectedData.getData(), compound.getByteArray("Data"));
++                        assertArrayEquals(expectedAdd.getData(), compound.getByteArray("Add"));
++                    }
++                    return null;
++                }));
++            }
++            for (Future<?> future : completed) future.get(10, TimeUnit.SECONDS);
++        } finally { readers.shutdownNow(); }
++    }
++}
