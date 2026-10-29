@@ -1,0 +1,241 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:51:52 +0900
+Subject: [PATCH] Publish migrated settings atomically before backing up and
+ removing the source
+
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+index 1aca172cad7f427b00eb8134e710729539c636df..c1e65d0cb839372aad48694b77798d87aa06f786 100644
+--- a/src/main/java/athena/server/AthenaConfig.java
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -3,6 +3,10 @@ package athena.server;
+ import com.google.common.base.Throwables;
+ import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
+ import java.io.File;
++import java.io.IOException;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardCopyOption;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.List;
+@@ -34,6 +38,10 @@ import org.spongepowered.configurate.util.NamingSchemes;
+ public class AthenaConfig {
+ 
+     private static final Logger LOGGER = LogManager.getLogger("Athena");
++    private static final String HEADER = "This is the configuration file for Athena: the settings Athena adds to PandaSpigot.\n"
++            + "PandaSpigot's own settings stay in pandaspigot.yml.";
++    private static final String PANDA_HEADER = "This is the configuration file for PandaSpigot.\n"
++            + "Use caution when modifying settings, as some may impact gameplay in non-obvious ways.";
+ 
+     /** The global keys athena.yml took over from pandaspigot.yml. */
+     private static final String[] MOVED_GLOBAL_KEYS = {
+@@ -69,61 +77,71 @@ public class AthenaConfig {
+     public static void init(File file, File pandaSpigotFile) {
+         try {
+             boolean fresh = !file.exists();
+-            EOYamlConfigurationLoader loader = loader(file,
+-                    "This is the configuration file for Athena: the settings Athena adds to PandaSpigot.\n" +
+-                    "PandaSpigot's own settings stay in pandaspigot.yml.");
++            EOYamlConfigurationLoader loader = loader(file, HEADER);
+             CommentedConfigurationNode root = loader.load();
++            Migration migration = migrate(root, fresh, pandaSpigotFile);
+ 
+-            if (migrate(root, fresh, pandaSpigotFile) && fresh) {
+-                // write the moved values in the file's own order, not in the order they were found,
+-                // so that the next start does not rearrange the file
++            if (migration != null && fresh) {
+                 CommentedConfigurationNode ordered = loader.createNode();
+                 ordered.set(root.get(AthenaConfig.class));
+                 ordered.node("worlds").from(root.node("worlds"));
+                 root = ordered;
+             }
+ 
+-            config = root.get(AthenaConfig.class);
+-
++            // Athena - validate every setting before touching either file or publishing statics.
++            AthenaConfig next = root.get(AthenaConfig.class);
++            if (next.guard == null) {
++                throw new IllegalArgumentException("guard may not be null");
++            }
+             CommentedConfigurationNode worldsNode = root.node("worlds")
+                     .comment("Settings which can be configured per world. \"default\" gives the values for\n" +
+                             "every world without a section of its own; to set a world apart, add a section\n" +
+                             "with the world's name.");
+             ConfigurationNode defaultWorldNode = worldsNode.node("default");
+-            defaultWorldConfig = defaultWorldNode.get(AthenaWorldConfig.class);
+-            defaultWorldNode.set(defaultWorldConfig); // populate the defaults in the file
+-
+-            root.set(config);
+-            loader.save(root);
+-
+-            worldConfigs.clear();
++            AthenaWorldConfig nextDefault = defaultWorldNode.get(AthenaWorldConfig.class);
++            Map<String, AthenaWorldConfig> nextWorlds = new HashMap<String, AthenaWorldConfig>();
+             for (Map.Entry<Object, ? extends ConfigurationNode> entry : worldsNode.childrenMap().entrySet()) {
+                 if (!"default".equals(entry.getKey())) {
+-                    worldConfigs.put(entry.getKey().toString(), entry.getValue().get(AthenaWorldConfig.class));
++                    nextWorlds.put(entry.getKey().toString(), entry.getValue().get(AthenaWorldConfig.class));
+                 }
+             }
++            defaultWorldNode.set(nextDefault);
++            root.set(next);
++            saveAtomically(file, root, HEADER);
++            if (migration != null) {
++                migration.commit(fresh); // destination is safely published before removing the source
++            }
+ 
+-            apply(config);
++            config = next;
++            defaultWorldConfig = nextDefault;
++            worldConfigs.clear();
++            worldConfigs.putAll(nextWorlds);
++            apply(next);
+         } catch (Exception e) {
+             throw Throwables.propagate(e);
+         }
+     }
+ 
+-    /**
+-     * Moves Athena's keys out of pandaspigot.yml: into athena.yml if it is being created now, nowhere
+-     * (with a warning) if it already existed. Returns whether any were found.
+-     */
+-    private static boolean migrate(CommentedConfigurationNode root, boolean fresh, File pandaSpigotFile) throws Exception {
+-        if (pandaSpigotFile == null || !pandaSpigotFile.isFile()) {
+-            return false;
++    // Athena - temporary output stays beside its destination so rename is atomic. Failure leaves
++    // the old file in place; a filesystem without atomic rename fails safely instead of truncating it.
++    private static void saveAtomically(File file, CommentedConfigurationNode root, String header) throws IOException {
++        Path destination = file.toPath().toAbsolutePath();
++        Path temporary = Files.createTempFile(destination.getParent(), file.getName() + ".", ".tmp");
++        try {
++            loader(temporary.toFile(), header).save(root);
++            Files.move(temporary, destination, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++        } finally {
++            Files.deleteIfExists(temporary);
+         }
++    }
+ 
+-        EOYamlConfigurationLoader pandaLoader = loader(pandaSpigotFile,
+-                "This is the configuration file for PandaSpigot.\n" +
+-                "Use caution when modifying settings, as some may impact gameplay in non-obvious ways.");
+-        CommentedConfigurationNode panda = pandaLoader.load();
++    /** Stages removals in memory only. A failed validation or destination save never edits Panda's file. */
++    private static Migration migrate(CommentedConfigurationNode root, boolean fresh, File pandaSpigotFile) throws Exception {
++        if (pandaSpigotFile == null || !pandaSpigotFile.isFile()) {
++            return null;
++        }
++        CommentedConfigurationNode panda = loader(pandaSpigotFile, PANDA_HEADER).load();
+         List<String> found = new ArrayList<String>();
+-
+         for (String key : MOVED_GLOBAL_KEYS) {
+             move(panda, root, fresh, found, key);
+         }
+@@ -132,17 +150,30 @@ public class AthenaConfig {
+                 move(panda, root, fresh, found, "worlds", world.getKey(), key);
+             }
+         }
++        return found.isEmpty() ? null : new Migration(pandaSpigotFile, panda, found);
++    }
++
++    private static final class Migration {
++        final File source;
++        final CommentedConfigurationNode remaining;
++        final List<String> found;
+ 
+-        if (found.isEmpty()) {
+-            return false;
++        Migration(File source, CommentedConfigurationNode remaining, List<String> found) {
++            this.source = source;
++            this.remaining = remaining;
++            this.found = found;
+         }
+-        pandaLoader.save(panda);
+-        if (fresh) {
+-            LOGGER.info("Moved Athena's settings from {} to athena.yml: {}", pandaSpigotFile.getName(), found);
+-        } else {
+-            LOGGER.warn("Ignored and removed Athena settings found in {} - they are read from athena.yml: {}", pandaSpigotFile.getName(), found);
++
++        void commit(boolean fresh) throws IOException {
++            // Athena - preserve the exact pre-removal file, including proxy secrets, for recovery.
++            Files.copy(this.source.toPath(), new File(this.source.getPath() + ".bak").toPath(), StandardCopyOption.REPLACE_EXISTING);
++            saveAtomically(this.source, this.remaining, PANDA_HEADER);
++            if (fresh) {
++                LOGGER.info("Moved Athena's settings from {} to athena.yml: {}", this.source.getName(), this.found);
++            } else {
++                LOGGER.warn("Ignored and removed Athena settings found in {} - they are read from athena.yml: {}", this.source.getName(), this.found);
++            }
+         }
+-        return true;
+     }
+ 
+     private static void move(CommentedConfigurationNode from, CommentedConfigurationNode to, boolean copy, List<String> found, Object... path) {
+diff --git a/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d9cc0b147840e2064d917f5c5e5a86ba40fe1df6
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+@@ -0,0 +1,62 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import athena.server.AthenaConfig;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import org.junit.After;
++import org.junit.Test;
++
++public class AthenaConfigSafetyTest {
++    @After
++    public void restoreDefaults() throws Exception {
++        AthenaConfig.init(Files.createTempDirectory("athena-defaults").resolve("athena.yml").toFile(), null);
++    }
++
++    @Test
++    public void invalidGlobalOrWorldSettingsLeaveTheOriginalSecretsIntact() throws Exception {
++        for (String invalid : new String[] {"networkCompressionLevel: broken\n",
++                "worlds:\n  arena:\n    chunkUnloadMargin: broken\n"}) {
++            Path dir = Files.createTempDirectory("athena-config-invalid");
++            Path source = dir.resolve("pandaspigot.yml"), destination = dir.resolve("athena.yml");
++            String old = "bungeeGuardTokens:\n  - audit-dummy-secret\n" + invalid;
++            Files.writeString(source, old);
++            try { AthenaConfig.init(destination.toFile(), source.toFile()); fail("invalid setting accepted"); }
++            catch (RuntimeException expected) {}
++            assertEquals(old, Files.readString(source));
++            assertFalse(Files.exists(destination));
++        }
++    }
++
++    @Test
++    public void destinationWriteFailureLeavesTheSourceUntouched() throws Exception {
++        Path dir = Files.createTempDirectory("athena-config-io");
++        Path source = dir.resolve("pandaspigot.yml"), parentFile = dir.resolve("not-a-directory");
++        String old = "bungeeGuardTokens:\n  - audit-dummy-secret\n";
++        Files.writeString(source, old);
++        Files.writeString(parentFile, "block destination writes");
++        try { AthenaConfig.init(parentFile.resolve("athena.yml").toFile(), source.toFile()); fail("write succeeded"); }
++        catch (RuntimeException expected) {}
++        assertEquals(old, Files.readString(source));
++        assertFalse(Files.exists(dir.resolve("pandaspigot.yml.bak")));
++    }
++
++    @Test
++    public void successfulMigrationBacksUpTheExactSourceBeforeRemoval() throws Exception {
++        Path dir = Files.createTempDirectory("athena-config-backup");
++        Path source = dir.resolve("pandaspigot.yml"), destination = dir.resolve("athena.yml");
++        String old = "# keep this comment\nbungeeGuardTokens:\n  - audit-dummy-secret\n";
++        Files.writeString(source, old);
++        AthenaConfig.init(destination.toFile(), source.toFile());
++        assertEquals(old, Files.readString(dir.resolve("pandaspigot.yml.bak")));
++        assertFalse(Files.readString(source).contains("audit-dummy-secret"));
++        assertTrue(Files.readString(destination).contains("audit-dummy-secret"));
++        String reappeared = "networkCompressionLevel: 2\n";
++        Files.writeString(source, reappeared);
++        AthenaConfig.init(destination.toFile(), source.toFile());
++        assertEquals(reappeared, Files.readString(dir.resolve("pandaspigot.yml.bak")));
++        assertFalse(Files.readString(source).contains("networkCompressionLevel"));
++        assertEquals(6, AthenaConfig.get().networkCompressionLevel);
++    }
++}
