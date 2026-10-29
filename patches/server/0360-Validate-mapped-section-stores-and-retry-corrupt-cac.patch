@@ -1,0 +1,329 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 20:58:45 +0900
+Subject: [PATCH] Validate mapped section stores and retry corrupt cached
+ chunks from region NBT
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index 6f49b115ffdc33c0b9bf5f23db0a9964c48d457f..bdd4df180292024aff97bc234c809fdf1fce53db 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -75,6 +75,8 @@ final class AthenaSectionStore {
+     private static final long CHUNK_BYTES = CHUNK_LONGS * 8L;
+     private static final int SLIM = 16 * 3; // the slim NBT's two longs in a chunk's entries
+     private static final int HEADER = 32;
++    // Athena - slim chunk metadata is normally a few KB; larger chunks use their original NBT.
++    static final int MAX_SLIM_NBT = 1 << 20;
+ 
+     // an entry's kind is its top byte, its value the low 48 bits
+     static final int KIND_ABSENT = 0;     // no such section, or no sky light stored for it
+@@ -230,7 +232,8 @@ final class AthenaSectionStore {
+             int count = mapping.get(ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN), 12L);
+             long keysAt = mapping.get(LONG_LE, 24L);
+ 
+-            if (count < 0 || keysAt < HEADER || keysAt + (long) count * 8L * (1L + CHUNK_LONGS) > size) {
++            if (count < 0 || keysAt < HEADER || keysAt > size
++                    || count > (size - keysAt) / (8L * (1L + CHUNK_LONGS))) {
+                 return null;
+             }
+ 
+@@ -238,14 +241,73 @@ final class AthenaSectionStore {
+ 
+             for (int i = 0; i < count; ++i) {
+                 keys[i] = mapping.get(LONG_LE, keysAt + (long) i * 8L);
++                if (i > 0 && keys[i - 1] >= keys[i]) return null;
+             }
+-            return new AthenaSectionStore(mapping, keys, keysAt + (long) count * 8L);
++            AthenaSectionStore store = new AthenaSectionStore(mapping, keys, keysAt + (long) count * 8L);
++            // Athena - the header alone does not make offsets, lengths or palette indices safe.
++            return store.validEntries(keysAt) ? store : null;
+         } catch (IOException | RuntimeException e) {
+             LOGGER.warn("Could not map {}", file, e);
+             return null;
+         }
+     }
+ 
++    private boolean validEntries(long blobsEnd) {
++        for (int i = 0; i < this.keys.length; ++i) {
++            long at = this.entries + (long) i * CHUNK_BYTES;
++            for (int section = 0; section < 16; ++section) {
++                long ids = this.mapping.get(LONG_LE, at + section * 24L);
++                long block = this.mapping.get(LONG_LE, at + section * 24L + 8L);
++                long sky = this.mapping.get(LONG_LE, at + section * 24L + 16L);
++                if (!this.validIds(ids, blobsEnd) || !this.validLight(block, blobsEnd) || !this.validLight(sky, blobsEnd)) return false;
++            }
++            long offset = this.mapping.get(LONG_LE, at + SLIM * 8L);
++            long lengths = this.mapping.get(LONG_LE, at + SLIM * 8L + 8L);
++            if (offset == 0L) {
++                if (lengths != 0L) return false;
++            } else {
++                int deflated = (int) (lengths >>> 32), length = (int) lengths;
++                if (deflated <= 0 || length <= 0 || length > MAX_SLIM_NBT || !inBlobs(offset, deflated, blobsEnd)) return false;
++            }
++        }
++        return true;
++    }
++
++    private static boolean inBlobs(long offset, long length, long end) {
++        return offset >= HEADER && offset <= end && length <= end - offset;
++    }
++
++    private boolean validIds(long entry, long end) {
++        int kind = kind(entry);
++        long value = value(entry);
++        if (kind == KIND_ABSENT) return entry == 0L;
++        if (kind == KIND_UNIFORM) return value <= 65535L && (entry >>> 48 & 255L) == 0L;
++        if (kind == KIND_RAW) return (entry >>> 48 & 255L) == 0L && inBlobs(value, 8192L, end);
++        if (kind != KIND_PACKED || !inBlobs(value, 2080L, end)) return false;
++        int size = (int) (entry >>> 48 & 255L);
++        if (size < 2 || size > 16) return false;
++        for (int i = 0; i < 2048; ++i) {
++            int packed = this.mapping.get(ValueLayout.JAVA_BYTE, value + 32L + i) & 255;
++            if ((packed & 15) >= size || (packed >>> 4) >= size) return false;
++        }
++        return true;
++    }
++
++    private boolean validLight(long entry, long end) {
++        if (kind(entry) == KIND_ABSENT) return entry == 0L;
++        if ((entry >>> 48 & 255L) != 0L) return false;
++        switch (kind(entry)) {
++            case KIND_ZERO: case KIND_FULL: return value(entry) == 0L;
++            case KIND_LIGHT: return inBlobs(value(entry), 2048L, end);
++            default: return false;
++        }
++    }
++
++    boolean hasSlim(int chunkX, int chunkZ) {
++        int index = Arrays.binarySearch(this.keys, key(chunkX, chunkZ));
++        return index >= 0 && this.mapping.get(LONG_LE, this.entries + (long) index * CHUNK_BYTES + SLIM * 8L) != 0L;
++    }
++
+     static long key(int chunkX, int chunkZ) {
+         return (long) chunkX << 32 | chunkZ & 0xFFFFFFFFL;
+     }
+@@ -326,7 +388,8 @@ final class AthenaSectionStore {
+         int deflated = (int) (lengths >>> 32);
+         int length = (int) lengths;
+ 
+-        if (offset == 0L || deflated <= 0 || length <= 0 || offset + deflated > this.mapping.byteSize()) {
++        if (offset == 0L || deflated <= 0 || length <= 0 || length > MAX_SLIM_NBT
++                || offset < HEADER || offset > this.mapping.byteSize() || deflated > this.mapping.byteSize() - offset) {
+             return null;
+         }
+ 
+@@ -355,7 +418,11 @@ final class AthenaSectionStore {
+         } finally {
+             inflater.reset(); // also lets go of the mapping, which a world that unloads frees
+         }
+-        return NBTCompressedStreamTools.read(new java.io.DataInputStream(new java.io.ByteArrayInputStream(nbt, 0, length)));
++        try {
++            return NBTCompressedStreamTools.read((java.io.DataInput) new java.io.DataInputStream(new java.io.ByteArrayInputStream(nbt, 0, length)), new NBTReadLimiter(MAX_SLIM_NBT * 8L));
++        } catch (IOException | RuntimeException invalid) {
++            return null; // Athena - invalid cached metadata must fall back to the original region
++        }
+     }
+ 
+     private NibbleArray light(long entry) {
+@@ -593,6 +660,9 @@ final class AthenaSectionStore {
+         NBTCompressedStreamTools.write(copy, (java.io.DataOutput) new java.io.DataOutputStream(raw));
+ 
+         byte[] nbt = raw.toByteArray();
++        if (nbt.length > MAX_SLIM_NBT) {
++            return; // Athena - keep the section store, but load this unusually large chunk from NBT
++        }
+         java.util.zip.Deflater deflater = new java.util.zip.Deflater();
+         java.io.ByteArrayOutputStream deflated = new java.io.ByteArrayOutputStream(nbt.length / 4 + 64);
+         byte[] buffer = new byte[4096];
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index aafa07f69b8b144f0a013e20cc8aff70f25e6690..e11a4bc06fd35a3c380208e65b6a3af08de3af0b 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -27,6 +27,10 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     // Athena - the template's mapped ids and light, or null while there is none yet; see AthenaSectionStore
+     private final AthenaSectionStore store;
++    // Athena - each IO thread may be restoring a different chunk. Never fall back to slim NBT's
++    // absent arrays, and never disable the store globally just because one thread reads a region.
++    private final ThreadLocal<Boolean> readingStore = new ThreadLocal<Boolean>();
++    private volatile boolean storeInvalid;
+ 
+     AthenaTemplateChunkLoader(File directory) {
+         super(directory);
+@@ -36,7 +40,12 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+ 
+     @Override
+     protected boolean athenaSectionFromStore(int chunkX, int chunkZ, int sectionY, ChunkSection section, boolean sky) {
+-        return this.store != null && this.store.apply(chunkX, chunkZ, sectionY, section, sky);
++        if (this.store == null || this.storeInvalid) return false;
++        boolean applied = this.store.apply(chunkX, chunkZ, sectionY, section, sky);
++        if (!applied && Boolean.TRUE.equals(this.readingStore.get())) {
++            throw new IllegalStateException("Section missing from cached chunk " + chunkX + "," + sectionY + "," + chunkZ);
++        }
++        return applied;
+     }
+ 
+     private synchronized AthenaTemplateRegion region(int chunkX, int chunkZ) throws IOException {
+@@ -89,18 +98,28 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+     }
+ 
+     private Object[] loadChunkOpen(World world, int i, int j) throws IOException {
+-        // Athena - the slim NBT from the store when it has one: the section arrays it leaves out come
+-        // from the store anyway (see AthenaSectionStore). Not while the audit runs, which compares
+-        // each stored section with the region file's.
+-        NBTTagCompound nbttagcompound = this.store != null && !AthenaIndexAudit.enabled() ? this.store.chunk(i, j) : null;
+-
+-        if (nbttagcompound == null) {
+-            AthenaTemplateRegion region = this.region(i, j);
+-
+-            nbttagcompound = region == null ? null : region.read(i & 31, j & 31);
++        // Athena - only the cached path is recoverable. Original-region IO errors still propagate
++        // for a live world rather than quietly generating replacement terrain.
++        if (this.store != null && !this.storeInvalid && !AthenaIndexAudit.enabled()) {
++            try {
++                NBTTagCompound slim = this.store.chunk(i, j);
++                if (slim != null) {
++                    this.readingStore.set(Boolean.TRUE);
++                    Object[] data = this.a(world, i, j, slim);
++                    if (data == null) throw new IOException("Invalid cached chunk metadata");
++                    return athenaTrimAfterBuild(data);
++                }
++                if (this.store.hasSlim(i, j)) throw new IOException("Invalid compressed chunk metadata");
++            } catch (IOException | RuntimeException invalid) {
++                this.storeInvalid = true;
++                org.apache.logging.log4j.LogManager.getLogger().warn("Ignoring invalid template section store for " + this.directory, invalid);
++            } finally {
++                this.readingStore.remove();
++            }
+         }
+-
+-        return nbttagcompound == null ? null : athenaTrimAfterBuild(this.a(world, i, j, nbttagcompound)); // Athena - see there
++        AthenaTemplateRegion region = this.region(i, j);
++        NBTTagCompound nbt = region == null ? null : region.read(i & 31, j & 31);
++        return nbt == null ? null : athenaTrimAfterBuild(this.a(world, i, j, nbt));
+     }
+ 
+     /** Nothing is saved: a template world's changes live in memory only. */
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreSafetyTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreSafetyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..95b3406aa1f63f2e761780f507248deebb83477a
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreSafetyTest.java
+@@ -0,0 +1,116 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.io.DataOutputStream;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Arrays;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++public class AthenaSectionStoreSafetyTest extends AbstractTestingBase {
++    private static Path template() throws Exception {
++        Path dir = Files.createTempDirectory("athena-safe-store");
++        Files.createDirectory(dir.resolve("region"));
++        byte[] blocks = new byte[4096];
++        Arrays.fill(blocks, (byte) 1);
++        NBTTagCompound section = new NBTTagCompound();
++        section.setByte("Y", (byte) 0);
++        section.setByteArray("Blocks", blocks);
++        section.setByteArray("Data", new byte[2048]);
++        section.setByteArray("BlockLight", new byte[2048]);
++        byte[] sky = new byte[2048];
++        Arrays.fill(sky, (byte) 255);
++        section.setByteArray("SkyLight", sky);
++        NBTTagList sections = new NBTTagList();
++        sections.add(section);
++        NBTTagCompound level = new NBTTagCompound();
++        level.setInt("xPos", 0);
++        level.setInt("zPos", 0);
++        level.setIntArray("HeightMap", new int[256]);
++        level.set("Sections", sections);
++        NBTTagCompound root = new NBTTagCompound();
++        root.set("Level", level);
++        RegionFile region = new RegionFile(dir.resolve("region/r.0.0.mca").toFile());
++        try (DataOutputStream stream = region.getChunkDataOutputStream(0, 0)) {
++            NBTCompressedStreamTools.write(root, (java.io.DataOutput) stream);
++        } finally { region.close(); }
++        return dir;
++    }
++
++    private static void assertLoadsOriginalStone(Path directory) throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        AthenaAuditFixtures.set(world, World.class, "worldProvider", WorldProvider.byDimension(0));
++        AthenaTemplateChunkLoader loader = new AthenaTemplateChunkLoader(directory.toFile());
++        try {
++            Object[] loaded = loader.loadChunk(world, 0, 0);
++            assertNotNull(loaded);
++            assertSame(Blocks.STONE, ((Chunk) loaded[0]).getBlockData(0, 0, 0).getBlock());
++        } finally {
++            loader.close();
++            AthenaSectionStore.awaitBuilds();
++        }
++    }
++
++    @Test
++    public void anIntMaxSlimLengthInA441ByteFileFallsBackToTheRegion() throws Exception {
++        Path directory = template();
++        long fingerprint = AthenaSectionStore.fingerprint(directory.toFile());
++        ByteBuffer bytes = ByteBuffer.allocate(441).order(ByteOrder.LITTLE_ENDIAN);
++        bytes.putLong(0x3130434553485441L).putInt(2).putInt(1).putLong(fingerprint).putLong(32L);
++        bytes.putLong(0L);
++        bytes.putLong(424, 440L);
++        bytes.putLong(432, (1L << 32) | Integer.MAX_VALUE);
++        Files.write(AthenaSectionStore.file(directory.toFile(), fingerprint).toPath(), bytes.array());
++        assertLoadsOriginalStone(directory);
++    }
++
++    @Test
++    public void badEntryKindsOffsetsAndTableOverflowAreRejected() throws Exception {
++        for (int corruption = 0; corruption < 3; ++corruption) {
++            Path directory = template();
++            long fingerprint = AthenaSectionStore.fingerprint(directory.toFile());
++            Path file = AthenaSectionStore.file(directory.toFile(), fingerprint).toPath();
++            AthenaSectionStore.build(directory.toFile(), file.toFile(), fingerprint);
++            byte[] bytes = Files.readAllBytes(file);
++            ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
++            int entries = (int) buffer.getLong(24) + 8;
++            if (corruption == 0) buffer.putLong(entries, 99L << 56);
++            if (corruption == 1) buffer.putLong(entries, (3L << 56) | bytes.length);
++            if (corruption == 2) buffer.putLong(24, Long.MAX_VALUE);
++            Files.write(file, bytes); // no mapping exists yet
++            assertLoadsOriginalStone(directory);
++        }
++    }
++
++    @Test
++    public void missingStoredSectionsRetryTheWholeChunkFromOriginalNbt() throws Exception {
++        Path directory = template();
++        long fingerprint = AthenaSectionStore.fingerprint(directory.toFile());
++        Path file = AthenaSectionStore.file(directory.toFile(), fingerprint).toPath();
++        AthenaSectionStore.build(directory.toFile(), file.toFile(), fingerprint);
++        byte[] bytes = Files.readAllBytes(file);
++        ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
++        int entries = (int) buffer.getLong(24) + 8;
++        buffer.putLong(entries, 0L); // valid absent entry, but slim NBT still requires section zero
++        Files.write(file, bytes);
++        assertLoadsOriginalStone(directory);
++    }
++
++    @Test
++    public void corruptCompressedMetadataRetriesTheWholeChunkFromOriginalNbt() throws Exception {
++        Path directory = template();
++        long fingerprint = AthenaSectionStore.fingerprint(directory.toFile());
++        Path file = AthenaSectionStore.file(directory.toFile(), fingerprint).toPath();
++        AthenaSectionStore.build(directory.toFile(), file.toFile(), fingerprint);
++        byte[] bytes = Files.readAllBytes(file);
++        ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN);
++        int entries = (int) buffer.getLong(24) + 8;
++        bytes[(int) buffer.getLong(entries + 384)] = 0; // damage zlib header, keeping all lengths valid
++        Files.write(file, bytes);
++        assertLoadsOriginalStone(directory);
++    }
++}
