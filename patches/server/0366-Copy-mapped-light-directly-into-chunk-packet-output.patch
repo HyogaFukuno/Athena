@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 29 Oct 2026 22:56:07 +0900
+Subject: [PATCH] Copy mapped light directly into chunk packet output
+
+
+diff --git a/src/main/java/net/minecraft/server/NibbleArray.java b/src/main/java/net/minecraft/server/NibbleArray.java
+index 88cab2d104171d37de2fe0ffbd53963bf4ae837a..16d0b999d8833134e03afc4ed544f2476091b4e5 100644
+--- a/src/main/java/net/minecraft/server/NibbleArray.java
++++ b/src/main/java/net/minecraft/server/NibbleArray.java
+@@ -150,6 +150,19 @@ public class NibbleArray {
+         return data != null ? data : this.mappedCopy();
+     }
+ 
++    // Athena - packet extraction can copy mapped light straight into its output, without a
++    // temporary heap array. Keep getData's snapshot and copy-on-write behavior unchanged.
++    int copyTo(byte[] destination, int offset) {
++        byte[] data = this.data;
++        if (data != null) {
++            System.arraycopy(data, 0, destination, offset, 2048);
++        } else {
++            java.lang.foreign.MemorySegment.copy(this.mapped, java.lang.foreign.ValueLayout.JAVA_BYTE,
++                    this.mappedAt, destination, offset, 2048);
++        }
++        return offset + 2048;
++    }
++
+     private byte[] mappedCopy() {
+         return this.mapped.asSlice(this.mappedAt, 2048L).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index b070923f34c12ad21703736b8cdaf2717a97fb67..a62f8bbcbf4cd9c5618d734b10bdfd68ef52b230 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -141,12 +141,13 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+         j = charbuffer.position() * 2;
+         // Athena end
+ 
+-        for (iterator = arraylist.iterator(); iterator.hasNext(); j = a(chunksection1.getEmittedLightArray().getData(), packetplayoutmapchunk_chunkmap.data, j)) {
++        // Athena - copy light directly from its heap or mapped storage into the packet.
++        for (iterator = arraylist.iterator(); iterator.hasNext(); j = chunksection1.getEmittedLightArray().copyTo(packetplayoutmapchunk_chunkmap.data, j)) {
+             chunksection1 = (ChunkSection) iterator.next();
+         }
+ 
+         if (flag1) {
+-            for (iterator = arraylist.iterator(); iterator.hasNext(); j = a(chunksection1.getSkyLightArray().getData(), packetplayoutmapchunk_chunkmap.data, j)) {
++            for (iterator = arraylist.iterator(); iterator.hasNext(); j = chunksection1.getSkyLightArray().copyTo(packetplayoutmapchunk_chunkmap.data, j)) {
+                 chunksection1 = (ChunkSection) iterator.next();
+             }
+         }
+diff --git a/src/test/java/net/minecraft/server/AthenaPacketLightCopyTest.java b/src/test/java/net/minecraft/server/AthenaPacketLightCopyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f520e5382077b2dfe4309531323ec883c681caa
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaPacketLightCopyTest.java
+@@ -0,0 +1,126 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.*;
++
++import java.lang.foreign.Arena;
++import java.lang.foreign.MemorySegment;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.CharBuffer;
++import java.nio.channels.FileChannel;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collection;
++import java.util.List;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++import org.junit.runner.RunWith;
++import org.junit.runners.Parameterized;
++
++@RunWith(Parameterized.class)
++public class AthenaPacketLightCopyTest extends AbstractTestingBase {
++    @Parameterized.Parameters(name = "state={0},sky={1},mask={2}")
++    public static Collection<Object[]> cases() {
++        List<Object[]> cases = new ArrayList<>();
++        for (String state : new String[] {"heap", "zero", "full", "mapped", "mappedWritten"}) {
++            for (boolean sky : new boolean[] {false, true}) {
++                for (int mask : new int[] {0xFFFF, 0x0005, 0}) cases.add(new Object[] {state, sky, mask});
++            }
++        }
++        return cases;
++    }
++
++    private final String state;
++    private final boolean sky;
++    private final int mask;
++
++    public AthenaPacketLightCopyTest(String state, boolean sky, int mask) {
++        this.state = state;
++        this.sky = sky;
++        this.mask = mask;
++    }
++
++    @Test
++    public void packetBytesMatchPreviousExtractionForEveryLightStorage() throws Exception {
++        Path path = Files.createTempFile("athena-packet-light", ".bin");
++        byte[] source = new byte[2048 + 23];
++        for (int i = 0; i < source.length; ++i) source[i] = (byte) (i * 37);
++        Files.write(path, source);
++        try (Arena arena = Arena.ofConfined(); FileChannel channel = FileChannel.open(path)) {
++            MemorySegment mapping = channel.map(FileChannel.MapMode.READ_ONLY, 0, source.length, arena);
++            Chunk chunk = new Chunk(null, 0, 0);
++            for (int y : new int[] {0, 2, 7}) {
++                ChunkSection section = new ChunkSection(y << 4, sky);
++                if (y != 7) section.setType(0, 0, 0, Blocks.STONE.getBlockData()); // also exercise an empty section
++                NibbleArray block = light(mapping, source), sunlight = light(mapping, source);
++                section.setBlocklightArray(block);
++                if (sky) section.setSkylightArray(sunlight);
++                chunk.getSections()[y] = section;
++                assertDirectCopyPreservesStorage(block);
++                if (sky) assertDirectCopyPreservesStorage(sunlight);
++            }
++            for (int i = 0; i < 256; ++i) chunk.getBiomeIndex()[i] = (byte) i;
++            for (boolean full : new boolean[] {false, true}) {
++                PacketPlayOutMapChunk.ChunkMap expected = previousExtraction(chunk, full, sky, mask);
++                PacketPlayOutMapChunk.ChunkMap actual = PacketPlayOutMapChunk.getExtractedData(chunk, full, sky, mask);
++                assertEquals(expected.dataSize, actual.dataSize);
++                assertArrayEquals(expected.data, actual.data);
++            }
++        } finally {
++            Files.delete(path);
++        }
++    }
++
++    private NibbleArray light(MemorySegment mapping, byte[] source) {
++        if (state.equals("zero")) return NibbleArray.light();
++        if (state.equals("full")) return NibbleArray.lightFull();
++        if (state.equals("heap")) return new NibbleArray(Arrays.copyOfRange(source, 23, source.length));
++        NibbleArray light = NibbleArray.mapped(mapping, 23);
++        if (state.equals("mappedWritten")) light.setIndex(19, light.getFromIndex(19) ^ 15);
++        return light;
++    }
++
++    private static void assertDirectCopyPreservesStorage(NibbleArray light) {
++        boolean mapped = light.isMapped();
++        byte[] expected = light.getData();
++        byte[] destination = new byte[2048 + 14];
++        Arrays.fill(destination, (byte) 0x5A);
++        assertEquals(2055, light.copyTo(destination, 7));
++        assertArrayEquals(expected, Arrays.copyOfRange(destination, 7, 2055));
++        for (int i = 0; i < 7; ++i) assertEquals((byte) 0x5A, destination[i]);
++        for (int i = 2055; i < destination.length; ++i) assertEquals((byte) 0x5A, destination[i]);
++        assertEquals(mapped, light.isMapped());
++        assertArrayEquals(expected, light.getData());
++        if (!mapped) assertSame(expected, light.getData());
++    }
++
++    /** Pre-change packet extraction: obtain light snapshots, then arraycopy them into the packet. */
++    private static PacketPlayOutMapChunk.ChunkMap previousExtraction(Chunk chunk, boolean full, boolean sky, int mask) {
++        List<ChunkSection> included = new ArrayList<>();
++        PacketPlayOutMapChunk.ChunkMap result = new PacketPlayOutMapChunk.ChunkMap();
++        ChunkSection[] sections = chunk.getSections();
++        for (int i = 0; i < sections.length; ++i) {
++            if (sections[i] != null && (!full || !sections[i].isEmpty()) && (mask & 1 << i) != 0) {
++                included.add(sections[i]);
++                result.dataSize |= 1 << i;
++            }
++        }
++        result.data = new byte[PacketPlayOutMapChunk.a(included.size(), sky, full)];
++        CharBuffer ids = ByteBuffer.wrap(result.data).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer();
++        for (ChunkSection section : included) section.putIds(ids);
++        int offset = ids.position() * 2;
++        for (ChunkSection section : included) offset = copy(section.getEmittedLightArray().getData(), result.data, offset);
++        if (sky) {
++            for (ChunkSection section : included) offset = copy(section.getSkyLightArray().getData(), result.data, offset);
++        }
++        if (full) copy(chunk.getBiomeIndex(), result.data, offset);
++        return result;
++    }
++
++    private static int copy(byte[] source, byte[] destination, int offset) {
++        System.arraycopy(source, 0, destination, offset, source.length);
++        return offset + source.length;
++    }
++}
