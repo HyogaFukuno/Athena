@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 17:11:26 +0900
+Subject: [PATCH] One Netty event loop by default
+
+
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+index 3cfe3d0e8a63b2db785b5a748dbdf06dbed13edf..4714616f88929a25f0a82482fff5c83db06a68ef 100644
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -273,7 +273,9 @@ public class SpigotConfig
+ 
+     private static void nettyThreads()
+     {
+-        int count = getInt( "settings.netty-threads", 4 );
++        // Athena - 1 by default, as the live servers run: with 20 players one event loop does the work, and
++        // four spread it over threads that each pay their own wake-ups (Netty CPU 36 -> 26 ms/s, 20 bots)
++        int count = getInt( "settings.netty-threads", 1 );
+         System.setProperty( "io.netty.eventLoopThreads", Integer.toString( count ) );
+         Bukkit.getLogger().log( Level.INFO, "Using {0} threads for Netty based IO", count );
+     }
