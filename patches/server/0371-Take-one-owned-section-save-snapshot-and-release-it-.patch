@@ -56,18 +56,18 @@ index dff1f9355f17e25227b967d633d79efad9040bc8..1221ec2d909169bcc506931ceb062bbe
                  nbttagcompound1.setByteArray("BlockLight", chunksection.getEmittedLightArray().getData());
                  if (flag) {
 diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
-index dad291b89c702807fcc936cdf524fb7df1afdf7a..49ab45090bc961d6f0cf891aa7ad4ab3ab98c1be 100644
+index dad291b89c702807fcc936cdf524fb7df1afdf7a..4beebcfbc0b14c482098ca13b4aca9807d67bc03 100644
 --- a/src/main/java/net/minecraft/server/ChunkSection.java
 +++ b/src/main/java/net/minecraft/server/ChunkSection.java
 @@ -498,6 +498,13 @@ public class ChunkSection {
          return ids != null ? ids : this.unpackedIds();
      }
  
-+    // Athena - an owned save snapshot: packed/mapped ids already unpack into a new array.
-+    // Plain and uniform arrays remain live/shared and must be cloned at the save boundary.
++    // Athena - packed/mapped ids unpack into a new array; uniform ids are immutable under
++    // copy-on-write and can be retained directly. Only mutable plain ids need a save-time clone.
 +    char[] athenaSnapshotIds() {
 +        char[] ids = this.blockIds;
-+        return ids == null ? this.unpackedIds() : ids.clone();
++        return ids == null ? this.unpackedIds() : this.idsShared ? ids : ids.clone();
 +    }
 +
      public void setData(char[] achar) {
@@ -75,13 +75,17 @@ index dad291b89c702807fcc936cdf524fb7df1afdf7a..49ab45090bc961d6f0cf891aa7ad4ab3
          this.idsShared = false; // Athena
 diff --git a/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java b/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..e13739d0437167b898dfdaaa08a0c4d784494027
+index 0000000000000000000000000000000000000000..b78f919448c00677d0f118293167c123d75ef1a0
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/AthenaSaveSnapshotTest.java
-@@ -0,0 +1,53 @@
+@@ -0,0 +1,107 @@
 +package net.minecraft.server;
 +
-+import static org.junit.Assert.*;
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
 +
 +import java.lang.foreign.MemorySegment;
 +import java.lang.reflect.Field;
@@ -91,43 +95,93 @@ index 0000000000000000000000000000000000000000..e13739d0437167b898dfdaaa08a0c4d7
 +import org.bukkit.support.AbstractTestingBase;
 +import org.junit.Test;
 +
++/**
++ * Athena - saved block tags retain the state at attach time for every section storage form.
++ * Uniform snapshots share the immutable array while later section writes use copy-on-write.
++ */
 +public class AthenaSaveSnapshotTest extends AbstractTestingBase {
++
 +    @Test
-+    public void plainSnapshotSurvivesSubsequentWrites() throws Exception { check("plain"); }
++    public void plainSnapshotSurvivesSubsequentWrites() throws Exception {
++        check("plain");
++    }
++
 +    @Test
-+    public void uniformSnapshotSurvivesSubsequentWrites() throws Exception { check("uniform"); }
++    public void uniformSnapshotSurvivesSubsequentWrites() throws Exception {
++        check("uniform");
++    }
++
 +    @Test
-+    public void packedSnapshotSurvivesSubsequentWrites() throws Exception { check("packed"); }
++    public void packedSnapshotSurvivesSubsequentWrites() throws Exception {
++        check("packed");
++    }
++
 +    @Test
-+    public void mappedSnapshotSurvivesSubsequentWrites() throws Exception { check("mapped"); }
++    public void mappedSnapshotSurvivesSubsequentWrites() throws Exception {
++        check("mapped");
++    }
 +
 +    private static void check(String storage) throws Exception {
 +        char[] ids = new char[4096];
-+        for (int i = 0; i < ids.length; ++i) ids[i] = (char) (storage.equals("uniform") ? 16 : (i % 2 == 0 ? 16 : 0x1234));
++
++        for (int i = 0; i < ids.length; ++i) {
++            ids[i] = (char) (storage.equals("uniform") ? 16 : (i % 2 == 0 ? 16 : 0x1234));
++        }
++
 +        char[] expected = ids.clone();
 +        ChunkSection section = new ChunkSection(0, true);
++
 +        if (storage.equals("mapped")) {
 +            byte[] bytes = new byte[8192];
++
 +            ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asCharBuffer().put(ids);
 +            section.athenaMapRawIds(MemorySegment.ofArray(bytes), 0);
-+        } else if (storage.equals("plain")) section.setData(ids);
-+        else section.setDataSharingUniform(ids);
++        } else if (storage.equals("plain")) {
++            section.setData(ids);
++        } else {
++            section.setDataSharingUniform(ids);
++        }
++
++        char[] shared = storage.equals("uniform") ? section.getIdArray() : null;
 +        NBTTagCompound snapshot = new NBTTagCompound();
++
 +        AthenaDeferredSectionData.attach(snapshot, section);
++
++        Field owner = snapshot.get("Blocks").getClass().getDeclaredField("owner");
++
++        owner.setAccessible(true);
++
++        Object deferred = owner.get(snapshot.get("Blocks"));
++        Field snapshotIds = AthenaDeferredSectionData.class.getDeclaredField("ids");
++
++        snapshotIds.setAccessible(true);
++
++        if (shared != null) {
++            assertSame("uniform snapshots reuse the shared array", shared, section.athenaSnapshotIds());
++            assertSame("attach must retain that same array", shared, snapshotIds.get(deferred));
++
++            section.setType(0, 0, 0, Blocks.DIRT.getBlockData());
++
++            assertNotSame("section writes must copy before mutating", shared, section.getIdArray());
++            assertArrayEquals("the shared array must remain unchanged", expected, shared);
++        }
++
 +        Arrays.fill(ids, (char) 0);
 +        section.setData(new char[4096]);
++
 +        byte[] blocks = new byte[4096];
 +        NibbleArray data = new NibbleArray();
 +        NibbleArray add = ChunkRegionLoader.packSectionIds(expected, blocks, data);
++
 +        assertArrayEquals(blocks, snapshot.getByteArray("Blocks"));
 +        assertArrayEquals(data.getData(), snapshot.getByteArray("Data"));
-+        if (add == null) assertFalse(snapshot.hasKey("Add"));
-+        else assertArrayEquals(add.getData(), snapshot.getByteArray("Add"));
-+        Field owner = snapshot.get("Blocks").getClass().getDeclaredField("owner");
-+        owner.setAccessible(true);
-+        Object deferred = owner.get(snapshot.get("Blocks"));
-+        Field snapshotIds = AthenaDeferredSectionData.class.getDeclaredField("ids");
-+        snapshotIds.setAccessible(true);
++
++        if (add == null) {
++            assertFalse(snapshot.hasKey("Add"));
++        } else {
++            assertArrayEquals(add.getData(), snapshot.getByteArray("Add"));
++        }
++
 +        assertNull("packed tags must release their char snapshot", snapshotIds.get(deferred));
 +        assertArrayEquals(blocks, snapshot.getByteArray("Blocks"));
 +    }
