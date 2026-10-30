@@ -1,0 +1,35 @@
+save baseline process=1
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.880,86953848
+RESULT,save,2,19.573,86953848
+RESULT,save,3,19.512,86953848
+
+save fixed process=1
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,17.937,39749640
+RESULT,save,2,18.175,39749640
+RESULT,save,3,17.788,39749640
+
+save fixed process=2
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,17.990,39749640
+RESULT,save,2,17.796,39749640
+RESULT,save,3,18.067,39749640
+
+save baseline process=2
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.408,86953848
+RESULT,save,2,19.487,86953848
+RESULT,save,3,19.240,86953848
+
+save baseline process=3
+META,chunks=1200,ownedSnapshot=false
+RESULT,save,1,19.366,86953848
+RESULT,save,2,18.971,86953848
+RESULT,save,3,19.703,86953848
+
+save fixed process=3
+META,chunks=1200,ownedSnapshot=true
+RESULT,save,1,17.943,39749640
+RESULT,save,2,17.095,39749640
+RESULT,save,3,18.521,39749640
