@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Athena - start one small minigame server (a ~320 MB share of a box). Run it from the server
+# Athena - start one small minigame server (a ~280 MB share of a box). Run it from the server
 # directory, the one holding paperclip.jar:
 #
 #   cd /opt/mc/arena1 && /path/to/start-small.sh
 #
-# Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through whole SurvivalGames matches: the live
-# heap is ~40 MB plus ~11 KB per loaded chunk. 144M assumes the plugin pins the play area and
-# preloads it in pre-game (Athena.pinChunks / preloadChunks): the map then sits in the heap from the
-# start (~1,200 chunks, live heap up to ~100 MB) and the live game reads no chunk. That way 144M ran
-# 15-minute matches on Par_72 and Lobby_Games with no full GC outside pre-game; 128M had three on
-# Par_72 (120-165 ms). Without the pin, chunks unloaded and reloaded fill the old generation and
-# 160M ran a full GC every 3-5 minutes. RSS ~305 MB, 0.13 vCPU in the live game. What it does, and why:
+# Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through three SurvivalGames matches in one JVM
+# (as the live servers run: they go back to the lobby after a match, they never restart): the live
+# heap is ~50 MB after a full GC with the play area pinned and preloaded (Athena.pinChunks /
+# preloadChunks; ~1,300 chunks on Lobby_Games). Each match leaves ~16 MB more in the old generation
+# until a full GC empties it, so a full GC (76-104 ms, two ticks) comes about every third match at
+# 128M and about every fourth at 144M; 128M costs nothing else and takes 5-16 MB less. Without the
+# pin, chunks unloaded and reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
+# With the flags below: RSS ~276 MB of which ~194 MB is the server's own, 0.056 vCPU in a match.
+# What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
 #   jar to the class path at run time, which keeps the server's classes out of the AOT cache.
@@ -43,6 +45,13 @@
 #   5-6 full GCs of 50-200 ms in a match's first two minutes; at 50% of 32 MB one ~190 ms one was
 #   left in a 15-minute match; at 50% of 48 MB none. The cap is only reserved: the cache commits
 #   what it uses (~21 MB), so it costs no memory.
+# - TieredStopAtLevel=1 compiles with C1 only. C2 spent 19 s of CPU in a server's first match, 7 s in
+#   its second (56% and 37% of the process), and its compiler arenas, code and profiles kept ~38 MB
+#   more memory per server for good. With C1 alone the first match takes 40% less CPU and the
+#   pre-game preload 0.09 instead of 0.29 vCPU, which is what servers starting together (after a
+#   deploy) compete for. C1 code is slower: once C2 has finished, a match takes ~0.056 instead of
+#   ~0.042 vCPU and a tick 1.2 instead of 0.7 ms, against a 50 ms budget - memory, not CPU, is what
+#   limits how many servers fit on a box.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
 # - --enable-native-access and --sun-misc-unsafe-memory-access=allow say out loud what the server
@@ -52,13 +61,14 @@
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
-HEAP="${HEAP:-144M}"
+HEAP="${HEAP:-128M}"
 PAPERCLIP="paperclip.jar"
 MAIN="org.bukkit.craftbukkit.Main"
 
 FLAGS=(
     "-Xms$HEAP" "-Xmx$HEAP"
     -XX:+UseParallelGC
+    -XX:TieredStopAtLevel=1
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=48m
