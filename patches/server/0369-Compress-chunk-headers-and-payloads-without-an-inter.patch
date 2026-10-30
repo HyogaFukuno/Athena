@@ -6,22 +6,22 @@ Subject: [PATCH] Compress chunk headers and payloads without an intermediate
 
 
 diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
-index 4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964..9d6248e895e4076fcc718afa7d8c4086951f1cee 100644
+index 4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964..7fb713e372bdb93a716138ff8585d4ccb27216eb 100644
 --- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
 +++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
-@@ -173,50 +173,50 @@ final class AthenaChunkPacketCache {
+@@ -173,19 +173,20 @@ final class AthenaChunkPacketCache {
              return this.frame; // frame is set before map is cleared
          }
  
 -        ByteBuf raw = Unpooled.buffer(data.data.length + 32);
--
 +        // Athena - serialize only the header and feed the existing immutable payload separately.
 +        // NO_FLUSH keeps both inputs in one zlib stream without a full-size intermediate copy.
 +        ByteBuf header = Unpooled.buffer(32);
+ 
          try {
 -            PacketDataSerializer serializer = new PacketDataSerializer(raw);
--
 +            PacketDataSerializer serializer = new PacketDataSerializer(header);
+ 
              serializer.writeVarIntToBuffer(packetId);
              serializer.writeInt(this.chunkX);
              serializer.writeInt(this.chunkZ);
@@ -30,19 +30,18 @@ index 4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964..9d6248e895e4076fcc718afa7d8c4086
 -            serializer.writeByteArray(data.data);
 -
 -            int rawLength = raw.readableBytes();
--
--            if (rawLength < threshold) {
--                return null;
--            }
 +            serializer.writeVarIntToBuffer(data.data.length);
 +            int rawLength = header.readableBytes() + data.data.length;
-+            if (rawLength < threshold) return null;
+ 
+             if (rawLength < threshold) {
+                 return null;
+@@ -193,30 +194,38 @@ final class AthenaChunkPacketCache {
  
              Deflater deflater = DEFLATER.get();
              ByteBuf out = Unpooled.buffer(rawLength / 4 + 64);
 -            PacketDataSerializer outSerializer = new PacketDataSerializer(out);
 -            byte[] chunk = DEFLATE_BUFFER.get();
--
+ 
 -            outSerializer.writeVarIntToBuffer(rawLength);
              try {
 -                deflater.setInput(raw.array(), raw.arrayOffset() + raw.readerIndex(), rawLength);
@@ -50,20 +49,22 @@ index 4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964..9d6248e895e4076fcc718afa7d8c4086
 -
 -                while (!deflater.finished()) {
 -                    int n = deflater.deflate(chunk);
--
--                    out.writeBytes(chunk, 0, n);
 +                new PacketDataSerializer(out).writeVarIntToBuffer(rawLength);
 +                byte[] buffer = DEFLATE_BUFFER.get();
+ 
+-                    out.writeBytes(chunk, 0, n);
 +                try {
 +                    deflater.setInput(header.array(), header.arrayOffset() + header.readerIndex(), header.readableBytes());
 +                    while (!deflater.needsInput()) {
 +                        int count = deflater.deflate(buffer);
++
 +                        out.writeBytes(buffer, 0, count);
 +                    }
 +                    deflater.setInput(data.data);
 +                    deflater.finish();
 +                    while (!deflater.finished()) {
 +                        int count = deflater.deflate(buffer);
++
 +                        out.writeBytes(buffer, 0, count);
 +                    }
 +                } finally {
@@ -89,44 +90,64 @@ index 4ee0603d710f1a3e0c6f91df0c22bebb5e6f5964..9d6248e895e4076fcc718afa7d8c4086
  
 diff --git a/src/test/java/net/minecraft/server/AthenaChunkCompressionInputTest.java b/src/test/java/net/minecraft/server/AthenaChunkCompressionInputTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..e4d8b7cc665efa2f9b6744a8de62047936f57871
+index 0000000000000000000000000000000000000000..d265e66257b45e39d28419bd8a17cfebfb1d0960
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/AthenaChunkCompressionInputTest.java
-@@ -0,0 +1,101 @@
+@@ -0,0 +1,151 @@
 +package net.minecraft.server;
 +
-+import static org.junit.Assert.*;
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
 +
 +import io.netty.buffer.ByteBuf;
 +import io.netty.buffer.Unpooled;
++import java.util.ArrayList;
++import java.util.List;
 +import java.util.Random;
-+import java.util.concurrent.*;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.TimeUnit;
 +import java.util.zip.Deflater;
 +import org.bukkit.support.AbstractTestingBase;
 +import org.junit.Test;
 +
++/**
++ * Athena - split compression inputs produce the original frames and remain safe for concurrent readers.
++ */
 +public class AthenaChunkCompressionInputTest extends AbstractTestingBase {
++
 +    @Test
 +    public void splitInputsMatchTheOriginalStreamAtLevelsLengthsAndThresholds() throws Exception {
 +        int previous = PacketCompressor.level();
++
 +        try {
 +            for (int level : new int[] {1, 6, 9}) {
 +                PacketCompressor.setLevel(level);
 +                ExecutorService thread = Executors.newSingleThreadExecutor();
++
 +                try {
 +                    thread.submit(() -> {
 +                        for (int length : new int[] {0, 1, 127, 128, 16383, 16384, 196864}) {
 +                            for (boolean noisy : new boolean[] {false, true}) {
 +                                byte[] payload = new byte[length];
-+                                if (noisy) new Random(length).nextBytes(payload);
++
++                                if (noisy) {
++                                    new Random(length).nextBytes(payload);
++                                }
 +                                PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
 +                                map.data = payload;
 +                                map.dataSize = 0xA55A;
 +                                byte[] raw = raw(map);
 +                                byte[] expected = originalFrame(raw, level);
++
 +                                for (int threshold : new int[] {raw.length - 1, raw.length, raw.length + 1}) {
 +                                    AthenaChunkPacketCache cache = new AthenaChunkPacketCache(Integer.MIN_VALUE, Integer.MAX_VALUE, map);
 +                                    byte[] actual = cache.frame(0x1234, threshold);
++
 +                                    if (threshold > raw.length) {
 +                                        assertNull(actual);
 +                                        assertSame(map, cache.map());
@@ -139,34 +160,53 @@ index 0000000000000000000000000000000000000000..e4d8b7cc665efa2f9b6744a8de620479
 +                            }
 +                        }
 +                    }).get(30, TimeUnit.SECONDS);
-+                } finally { thread.shutdownNow(); }
++                } finally {
++                    thread.shutdownNow();
++                }
 +            }
-+        } finally { PacketCompressor.setLevel(previous); }
++        } finally {
++            PacketCompressor.setLevel(previous);
++        }
 +    }
 +
 +    @Test
 +    public void concurrentFirstReadersShareTheSameCompleteFrame() throws Exception {
 +        PacketPlayOutMapChunk.ChunkMap map = new PacketPlayOutMapChunk.ChunkMap();
++
 +        map.data = new byte[196864];
 +        new Random(11).nextBytes(map.data);
 +        AthenaChunkPacketCache cache = new AthenaChunkPacketCache(Integer.MIN_VALUE, Integer.MAX_VALUE, map);
 +        byte[] expected = originalFrame(raw(map), PacketCompressor.level());
 +        ExecutorService threads = Executors.newFixedThreadPool(3);
 +        CountDownLatch start = new CountDownLatch(1);
++
 +        try {
-+            java.util.List<Future<byte[]>> results = new java.util.ArrayList<>();
-+            for (int i = 0; i < 3; ++i) results.add(threads.submit(() -> { start.await(); return cache.frame(0x1234, 0); }));
++            List<Future<byte[]>> results = new ArrayList<>();
++
++            for (int i = 0; i < 3; ++i) {
++                results.add(threads.submit(() -> {
++                    start.await();
++                    return cache.frame(0x1234, 0);
++                }));
++            }
 +            start.countDown();
 +            byte[] first = results.get(0).get(10, TimeUnit.SECONDS);
++
 +            assertArrayEquals(expected, first);
-+            for (Future<byte[]> result : results) assertSame(first, result.get(10, TimeUnit.SECONDS));
-+        } finally { threads.shutdownNow(); }
++            for (Future<byte[]> result : results) {
++                assertSame(first, result.get(10, TimeUnit.SECONDS));
++            }
++        } finally {
++            threads.shutdownNow();
++        }
 +    }
 +
 +    private static byte[] raw(PacketPlayOutMapChunk.ChunkMap map) {
 +        ByteBuf buffer = Unpooled.buffer();
++
 +        try {
 +            PacketDataSerializer serializer = new PacketDataSerializer(buffer);
++
 +            serializer.writeVarIntToBuffer(0x1234);
 +            serializer.writeInt(Integer.MIN_VALUE);
 +            serializer.writeInt(Integer.MAX_VALUE);
@@ -174,23 +214,34 @@ index 0000000000000000000000000000000000000000..e4d8b7cc665efa2f9b6744a8de620479
 +            serializer.writeShort(map.dataSize);
 +            serializer.writeByteArray(map.data);
 +            byte[] result = new byte[buffer.readableBytes()];
++
 +            buffer.readBytes(result);
 +            return result;
-+        } finally { buffer.release(); }
++        } finally {
++            buffer.release();
++        }
 +    }
 +
 +    private static byte[] originalFrame(byte[] raw, int level) {
 +        ByteBuf output = Unpooled.buffer();
 +        Deflater compressor = new Deflater(level);
++
 +        try {
 +            new PacketDataSerializer(output).writeVarIntToBuffer(raw.length);
 +            compressor.setInput(raw);
 +            compressor.finish();
 +            byte[] scratch = new byte[8192];
-+            while (!compressor.finished()) output.writeBytes(scratch, 0, compressor.deflate(scratch));
++
++            while (!compressor.finished()) {
++                output.writeBytes(scratch, 0, compressor.deflate(scratch));
++            }
 +            byte[] result = new byte[output.readableBytes()];
++
 +            output.readBytes(result);
 +            return result;
-+        } finally { compressor.end(); output.release(); }
++        } finally {
++            compressor.end();
++            output.release();
++        }
 +    }
 +}
