@@ -8,10 +8,10 @@
 
 | patch | 内容 | Server commit | ルートcommit |
 |---|---|---|---|
-| 0369 | Compress chunk headers and payloads without an intermediate full copy | `adb77a80e` | `901d1d6` |
-| 0370 | Start per-chunk tile and creature maps at minimal capacity | `130f1908f` | `90e18bf` |
-| 0371 | Take one owned section save snapshot and release it after packing | `be23b74a5` | `9d4e93b` |
-| 0372 | Invalidate the Paper chunk map when any absent section becomes present | `47eeb14bf` | `191a8bf` |
+| 0369 | Compress chunk headers and payloads without an intermediate full copy | `f7b3b03d4` | `a139632` |
+| 0370 | Start per-chunk tile and creature maps at minimal capacity | `0ab6fc306` | `43179b9` |
+| 0371 | Take one owned section save snapshot and release it after packing | `9d9c14b26` | `4ea093e` |
+| 0372 | Invalidate the Paper chunk map when any absent section becomes present | `c5ef865a1` | `0a6439c` |
 
 ## 実装
 
@@ -31,11 +31,11 @@ TileEntityの追加・成長・削除・再利用と、creature tally・World ce
 
 ### 0371: 保存用snapshotを1回で取得し、pack後に解放
 
-ChunkSectionにpackage-privateのathenaSnapshotIdsを追加しました。plain/uniformはclone、packed/mappedは新しく展開された配列をそのまま所有snapshotとして使用します。ChunkRegionLoaderは新しいsection用attachを呼ぶため、packed/mappedの展開直後にもう一度cloneしません。
+ChunkSectionにpackage-privateのathenaSnapshotIdsを追加しました。mutableなplainはcloneし、uniformはidsSharedによるcopy-on-writeを前提に不変の共有配列をそのまま保持します。packed/mappedは新しく展開された配列をそのまま所有snapshotとして使用します。ChunkRegionLoaderは新しいsection用attachを呼ぶため、packed/mappedの展開直後にもう一度cloneしません。
 
 DeferredSectionDataはpackのmonitor内で、packed配列の生成後にids参照をnullへ戻し、その後にvolatile blocksを公開します。以後のTag読込にはpacked配列を使います。既存のchar[]用attachは入力をコピーし、従来のsnapshot契約を維持します。
 
-plain・uniform・packed・mappedの4ケースで、attach後に元配列とsectionを変更してもBlocks/Data/Addが変更前のsnapshotに一致することを確認しました。pack後にids参照が解放され、繰り返し読込が可能なことも検証しています。既存の並行読込テストも通っています。
+plain・uniform・packed・mappedの4ケースで、attach後に元配列とsectionを変更してもBlocks/Data/Addが変更前のsnapshotに一致することを確認しました。uniformではattachが共有配列と同じ参照を保持すること、attach後のsetTypeがcopy-on-writeを行ってsnapshotを変えないことも確認しています。pack後にids参照が解放され、繰り返し読込が可能なことも検証しています。既存の並行読込テストも通っています。
 
 SGテンプレートは保存しないため、この項目の実運用上の主対象はhub等の通常保存ワールドです。今回の比較はsnapshot作成までで、NBT serialization・deflate・ディスク書込全体の時間は測っていません。
 
@@ -76,15 +76,15 @@ map_baysideの既存storeのkey順で最初の1,200チャンクをロードし�
 |---|---:|---:|---:|---:|
 | 空チャンク生成 | 0.630 | 0.570 | 6,609,616 | 5,889,616 |
 | チャンクcache圧縮 | 404.941 | 392.870 | 85,597,960 | 18,443,728 |
-| 保存snapshot作成 | 19.586 | 18.168 | 86,953,848 | 48,860,520 |
+| 保存snapshot作成（レビュー対応後の再測定） | 19.487 | 17.943 | 86,953,848 | 39,749,640 |
 
 | 処理 | 変更前時間の範囲 ms | 変更後時間の範囲 ms | 変更前/後 allocation中央値 MiB |
 |---|---|---|---|
 | 空チャンク生成 | 0.464〜5.059 | 0.520〜4.854 | 6.303 / 5.617 |
 | チャンクcache圧縮 | 404.446〜415.078 | 382.070〜396.762 | 81.633 / 17.589 |
-| 保存snapshot作成 | 19.255〜19.794 | 17.631〜18.556 | 82.926 / 46.597 |
+| 保存snapshot作成（レビュー対応後の再測定） | 18.971〜19.880 | 17.095〜18.521 | 82.926 / 37.908 |
 
-圧縮allocationの中央値差は約64.04MiB、保存snapshotは約36.33MiB、空チャンク生成は720,000byteです。これらは累積割り当て量であり、そのままRSSや同時保持ヒープの削減量ではありません。
+圧縮allocationの中央値差は約64.04MiB、保存snapshotは約45.02MiB、空チャンク生成は720,000byteです。これらは累積割り当て量であり、そのままRSSや同時保持ヒープの削減量ではありません。
 
 空チャンク生成ではGCを含む時間のばらつきが大きく、速度改善の主張は限定的です。圧縮・snapshotの時間はこの条件で短縮しましたが、試合全体のTPSやVPSのCPU使用率への改善率には換算しません。
 
@@ -101,7 +101,7 @@ map_baysideの既存storeのkey順で最初の1,200チャンクをロードし�
 
 変更前後の全圧縮frameを順に集計したCRC32は、全6プロセスで `db27b2b2` と一致しました。厳密なframeのbyte一致は回帰テストで確認しています。
 
-全66測定の個別値は [results.csv](allocation-bench/results.csv)、各プロセス出力は [results.log](allocation-bench/results.log) に保存しました。
+初回の全66測定の個別値は [results.csv](allocation-bench/results.csv)、各プロセス出力は [results.log](allocation-bench/results.log) に保存しました。保存snapshot欄はレビュー対応後の18測定 [save-updated.csv](allocation-bench/save-updated.csv)・[ログ](allocation-bench/save-updated.log)へ更新しています。初回保存snapshotの46.597MiB/18.168msは旧結果としてresults.csvに残しています。
 
 ## 全テストとパッチ検証
 
@@ -122,7 +122,7 @@ map_baysideの既存storeのkey順で最初の1,200チャンクをロードし�
 - AthenaSaveSnapshotTest（4件）: plainSnapshotSurvivesSubsequentWrites、uniformSnapshotSurvivesSubsequentWrites、packedSnapshotSurvivesSubsequentWrites、mappedSnapshotSurvivesSubsequentWrites。
 - AthenaPaperChunkMapTransitionTest（4件）: absentPresentAndAbsentAgainRebuildTheEnabledPaperCache（section 0/1/7/15）。
 
-0369〜0372を開始時Server `efd684c5e` の一時indexへ順次適用し、最終Server `47eeb14bf` のツリーと一致しました。旧パッチの変更はありません。
+0369〜0372を開始時Server `efd684c5e` の一時indexへ順次適用し、最終Server `c5ef865a1` のツリーと一致しました。旧パッチの変更はありません。
 
 ## 再現方法
 
@@ -144,11 +144,36 @@ python3 audit/2026-10-30/allocation-bench/measure.py \
 
 ## 配布物の検証
 
-`./gradlew :paperclip:paperclipJar --offline --console=plain` は成功しました。ルート `191a8bf`・Server `47eeb14bf` を含むJARを、既存Mojang JARを使ってJava 25のpatch-onlyモードで展開し、出力SHA-256が埋め込みpatchedHashとServerビルド結果に一致しました。本番サーバーの起動は行っていません。
+`./gradlew :paperclip:paperclipJar --offline --console=plain` は成功しました。ルート `0a6439c`・Server `c5ef865a1` を含むJARを、既存Mojang JARを使ってJava 25のpatch-onlyモードで展開し、出力SHA-256が埋め込みpatchedHashとServerビルド結果に一致しました。本番サーバーの起動は行っていません。
 
 ```text
-paperclip SHA-256: 06b59399d27be2944e953be3babdaa5046f52e1a81c446e92569c3f88c94dfa2
-patched SHA-256: 38cd4ab53093938b85e7ec2d1d93d298f81b4aead1f99075210656b98c124251
+paperclip SHA-256: 19f17c00f05a1b17716fe36ce990b592405505a11167653dad9443456a6aab59
+patched SHA-256: 37a2381be23329f032539f63b926ad1577460c982dfe3ec94b3866414f9ee931
 ```
 
-成果物はpaperclip/build/libs/paperclip-1.8.8-R0.1-SNAPSHOT.jarです。ルートの既存paperclip.jarは置き換えていません。今回の作業はローカルのコミットまでで、push・PR作成・マージ・本番反映は行っていません。
+成果物はpaperclip/build/libs/paperclip-1.8.8-R0.1-SNAPSHOT.jarです。ルートの既存paperclip.jarは置き換えていません。[PR #29](https://github.com/HyogaFukuno/Athena/pull/29)へpush済みです。PR #28を土台にするマージ順序を維持し、マージ・本番反映は行っていません。
+
+## PR #29レビュー対応
+
+[修正依頼コメント](https://github.com/HyogaFukuno/Athena/pull/29#issuecomment-6514035794)に従い、0369〜0372の生成Serverコミットへ修正を取り込み、パッチを再生成しました。ルート履歴は書き換えず、上表の追加コミットで更新しています。
+
+- 0371: uniformをcloneせず共有し、参照同一性とattach後のsetTypeによるcopy-on-writeをテスト。
+- 0369/0370/全4テスト: 波括弧・空行・明示import・Javadocを既存スタイルへ統一し、fastutil移行のコメントを復元。
+- paper-cache-before.log/results.logのホームディレクトリを`<home>`へ置換。追加ログも同じ置換を実施。
+- 最終ソースでAPI/Server全テストを再実行し、6,606件、失敗0・エラー0・スキップ4。ケース数は維持し、uniformの既存ケースへ検証を追加。
+- 更新した0369〜0372をefd684c5eへ順次適用し、Server c5ef865a1とツリー一致を確認。
+
+### uniform共有だけの比較
+
+条件・マップ範囲・warm-upは上記の保存snapshot測定と同じです。PR修正前のServer 47eeb14bfと、今回のServer c5ef865a1を比較しました。各variantで3新規JVM×3巡、計9巡ずつ測定しています。
+
+| 指標（1,200チャンク/巡） | PR修正前 | uniform共有後 |
+|---|---:|---:|
+| allocated bytes中央値 | 48,860,520 | 39,749,640 |
+| MiB換算 | 46.597 | 37.908 |
+| 時間中央値 ms | 18.005 | 17.806 |
+| 時間範囲 ms | 17.864〜18.540 | 17.411〜18.493 |
+
+追加で9,110,880byte（約8.689MiB）の割り当てを削減しました。時間範囲は重なるため、uniform共有だけで一定割合高速化するとは主張しません。SGは保存しないテンプレート運用のため、主な対象は保存を行う通常ワールドです。
+
+全18測定は [uniform-comparison.csv](allocation-bench/uniform-comparison.csv)・[ログ](allocation-bench/uniform-comparison.log)に、両variantのclass hashはreview-class-sha256.jsonに保存しました。比較時のbaselineはPR修正前、fixedはレビュー対応後です。save-updated.csvのbaselineは従来どおりefd684c5e、fixedはレビュー対応後です。
