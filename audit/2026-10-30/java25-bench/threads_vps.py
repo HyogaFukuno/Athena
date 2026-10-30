@@ -3,7 +3,8 @@ import sys, collections, re
 TCK = 100.0
 def group(name):
     for p, g in [("Server thread", "server"), ("Netty", "netty"), ("C2 Compiler", "jit"), ("C1 Compiler", "jit"),
-                 ("Shenandoah", "gc"), ("GC Thread", "gc"), ("ParGC", "gc"), ("VM Thread", "vm"), ("Athena chunk", "compressor"),
+                 ("Shenandoah", "gc"), ("GC Thread", "gc"), ("ParGC", "gc"), ("G1 ", "gc"), ("Z", "gc"),
+                 ("VM Thread", "vm"), ("Athena chunk", "compressor"),
                  ("File IO", "fileio"), ("Chunk I/O", "chunkio"), ("Log4j", "log")]:
         if name.startswith(p): return g
     return "other"
