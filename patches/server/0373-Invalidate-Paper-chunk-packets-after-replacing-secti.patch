@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 13:21:00 +0900
+Subject: [PATCH] Invalidate Paper chunk packets after replacing section
+ storage
+
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index f39bda00ab6d458a4173233bb6ebc49656113b24..3a5a5192d8c9b72b2d545d09934cfe5c00772acf 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -1788,6 +1788,9 @@ public class Chunk {
+                 this.sections[i] = achunksection[i];
+             }
+ 
++            // Athena - replacing a present section need not set its dirty flag or change the mask.
++            // The Paper cache must not retain bytes from the previous section array contents.
++            this.chunkMap = null;
+             this.tickingSectionMask = 0xFFFF; // Athena - every section is new
+ 
+         }
+diff --git a/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java b/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java
+index 737ab1a261d82e6b685dd13edd3598f23c2c9c84..79efa8ed5b11b25f47eb64aedc111581260546a0 100644
+--- a/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java
++++ b/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java
+@@ -3,6 +3,7 @@ package net.minecraft.server;
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotSame;
+ import static org.junit.Assert.assertSame;
+ 
+ import java.util.Arrays;
+@@ -53,6 +54,35 @@ public class AthenaPaperChunkMapTransitionTest extends AbstractTestingBase {
+         }
+     }
+ 
++    @Test
++    public void replacingPresentSectionsThroughStorageSetterRebuildsTheCache() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++        PaperSpigotWorldConfig config = AthenaAuditFixtures.allocate(PaperSpigotWorldConfig.class);
++
++        config.cacheChunkMaps = true;
++        AthenaAuditFixtures.set(world, World.class, "paperSpigotConfig", config);
++        AthenaAuditFixtures.set(world, World.class, "worldProvider", WorldProvider.byDimension(0));
++
++        Chunk chunk = new Chunk(world, 0, 0);
++        ChunkSection[] sections = new ChunkSection[16];
++        char[] stone = new char[4096];
++
++        Arrays.fill(stone, (char) 16);
++        sections[section] = new ChunkSection(section << 4, true, stone);
++        chunk.setStorageArrays(sections);
++        assertMatchesExtraction(chunk);
++
++        PacketPlayOutMapChunk.ChunkMap previous = chunk.getChunkMap(true, 0xFFFF);
++        char[] dirt = new char[4096];
++
++        Arrays.fill(dirt, (char) 48);
++        sections[section] = new ChunkSection(section << 4, true, dirt);
++        assertFalse("the replacement does not carry a dirty flag", sections[section].isDirty);
++        chunk.setStorageArrays(sections);
++        assertMatchesExtraction(chunk);
++        assertNotSame(previous, chunk.getChunkMap(true, 0xFFFF));
++    }
++
+     private static void assertMatchesExtraction(Chunk chunk) {
+         PacketPlayOutMapChunk.ChunkMap expected = PacketPlayOutMapChunk.getExtractedData(chunk, true, true, 0xFFFF);
+         PacketPlayOutMapChunk.ChunkMap actual = chunk.getChunkMap(true, 0xFFFF);
