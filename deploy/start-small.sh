@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Athena - start one small minigame server (a ~280 MB share of a box). Run it from the server
+# Athena - start one small minigame server (a ~260 MB share of a box). Run it from the server
 # directory, the one holding paperclip.jar:
 #
 #   cd /opt/mc/arena1 && /path/to/start-small.sh
@@ -10,9 +10,12 @@
 # preloadChunks; ~1,300 chunks on Lobby_Games). Those chunks live the whole match, so they reach the
 # old generation, and when the match's world is unloaded they stay there as garbage until a full GC:
 # ~16 MB more after every match, back to ~48 MB after the full GC (76-94 ms, two ticks) that came in
-# the third match at 144M and at 128M alike - 128M only takes 5-16 MB less. Without the pin, chunks
-# unloaded and reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
-# With the flags below: RSS ~276 MB of which ~194 MB is the server's own, 0.056 vCPU in a match.
+# the third match at 144M and at 128M alike - 128M only takes 5-16 MB less. SurvivalGames now asks
+# for that full GC in the lobby, a second after unloading the world, so none comes during a match
+# and the old generation starts every match nearly empty. Without the pin, chunks unloaded and
+# reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
+# With the flags below and that GC: RSS ~259 MB of which ~177 MB is the server's own, 0.056 vCPU in
+# a match.
 # What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
