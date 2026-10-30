@@ -7,10 +7,11 @@
 # Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through three SurvivalGames matches in one JVM
 # (as the live servers run: they go back to the lobby after a match, they never restart): the live
 # heap is ~50 MB after a full GC with the play area pinned and preloaded (Athena.pinChunks /
-# preloadChunks; ~1,300 chunks on Lobby_Games). Each match leaves ~16 MB more in the old generation
-# until a full GC empties it, so a full GC (76-104 ms, two ticks) comes about every third match at
-# 128M and about every fourth at 144M; 128M costs nothing else and takes 5-16 MB less. Without the
-# pin, chunks unloaded and reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
+# preloadChunks; ~1,300 chunks on Lobby_Games). Those chunks live the whole match, so they reach the
+# old generation, and when the match's world is unloaded they stay there as garbage until a full GC:
+# ~16 MB more after every match, back to ~48 MB after the full GC (76-94 ms, two ticks) that came in
+# the third match at 144M and at 128M alike - 128M only takes 5-16 MB less. Without the pin, chunks
+# unloaded and reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
 # With the flags below: RSS ~276 MB of which ~194 MB is the server's own, 0.056 vCPU in a match.
 # What it does, and why:
 #
