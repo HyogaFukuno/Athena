@@ -5,7 +5,7 @@ Subject: [PATCH] Start per-chunk tile and creature maps at minimal capacity
 
 
 diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
-index cb47cdff284df317d1317948710eab39f0de986d..1459275e3833e814ff64bb347955d26c6594f3ca 100644
+index cb47cdff284df317d1317948710eab39f0de986d..6ae93fea63b2aa18f1e5bfd28d77e2923107c9e9 100644
 --- a/src/main/java/net/minecraft/server/Chunk.java
 +++ b/src/main/java/net/minecraft/server/Chunk.java
 @@ -137,7 +137,8 @@ public class Chunk {
@@ -14,7 +14,7 @@ index cb47cdff284df317d1317948710eab39f0de986d..1459275e3833e814ff64bb347955d26c
      private volatile ConcurrentLinkedQueue<BlockPosition> tileEntityPosQueue;
 -    protected it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class> entityCount = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class>(); // Spigot // Athena - fastutil in place of trove
 +    // Athena - most pinned chunks contain no creatures; grow the tally only when entries arrive.
-+    protected it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class> entityCount = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class>(0); // Spigot
++    protected it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class> entityCount = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<Class>(0); // Spigot // Athena - fastutil in place of trove
      // Athena - true while this chunk's tally is folded into the world's creature census. Set only
      // by ChunkCreatureCensus, at the points where the chunk enters or leaves the provider's map.
      boolean inCreatureCensus;
@@ -29,29 +29,38 @@ index cb47cdff284df317d1317948710eab39f0de986d..1459275e3833e814ff64bb347955d26c
          this.world = world;
 diff --git a/src/test/java/net/minecraft/server/AthenaSmallChunkMapsTest.java b/src/test/java/net/minecraft/server/AthenaSmallChunkMapsTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..0440e467e8cfe72e45ca821f69863065bec9c084
+index 0000000000000000000000000000000000000000..07b4f35c8a880bab0b54b186ffaebd1c1e5cecdc
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/AthenaSmallChunkMapsTest.java
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,70 @@
 +package net.minecraft.server;
 +
-+import static org.junit.Assert.*;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
 +
 +import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 +import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 +import org.bukkit.support.AbstractTestingBase;
 +import org.junit.Test;
 +
++/**
++ * Athena - minimal-capacity chunk maps preserve entries through growth, removal and census updates.
++ */
 +public class AthenaSmallChunkMapsTest extends AbstractTestingBase {
++
 +    @Test
 +    public void tileEntriesSurviveGrowthRemovalAndReuse() {
 +        Chunk chunk = new Chunk(null, 0, 0);
 +        Long2ObjectOpenHashMap<TileEntity> previous = new Long2ObjectOpenHashMap<>();
++
 +        assertTrue(chunk.tileEntities.isEmpty());
 +        assertNull(chunk.tileEntities.get(0));
 +        for (int i = -128; i <= 128; ++i) {
 +            TileEntity tile = new TileEntityChest();
 +            long key = (long) i << 32 | i & 0xFFFFFFFFL;
++
 +            assertSame(previous.put(key, tile), chunk.tileEntities.put(key, tile));
 +            assertEquals(previous, chunk.tileEntities);
 +        }
@@ -60,6 +69,7 @@ index 0000000000000000000000000000000000000000..0440e467e8cfe72e45ca821f69863065
 +            assertEquals(previous, chunk.tileEntities);
 +        }
 +        TileEntity replacement = new TileEntityChest();
++
 +        chunk.tileEntities.put(0, replacement);
 +        assertSame(replacement, chunk.tileEntities.get(0));
 +    }
@@ -69,6 +79,7 @@ index 0000000000000000000000000000000000000000..0440e467e8cfe72e45ca821f69863065
 +        Chunk chunk = new Chunk(null, 0, 0);
 +        Object2IntOpenHashMap<Class> previous = new Object2IntOpenHashMap<>();
 +        Class[] types = {EntityMonster.class, EntityAnimal.class, EntityWaterAnimal.class, EntityAmbient.class};
++
 +        for (Class type : types) {
 +            assertEquals(0, chunk.entityCount.getInt(type));
 +            assertEquals(previous.addTo(type, 3), chunk.entityCount.addTo(type, 3));
@@ -76,12 +87,19 @@ index 0000000000000000000000000000000000000000..0440e467e8cfe72e45ca821f69863065
 +        }
 +        assertEquals(previous, chunk.entityCount);
 +        ChunkCreatureCensus census = new ChunkCreatureCensus();
++
 +        census.chunkAdded(chunk);
-+        for (Class type : types) assertEquals(previous.getInt(type), census.count(type));
++        for (Class type : types) {
++            assertEquals(previous.getInt(type), census.count(type));
++        }
 +        census.chunkRemoved(chunk);
-+        for (Class type : types) assertEquals(0, census.count(type));
++        for (Class type : types) {
++            assertEquals(0, census.count(type));
++        }
 +        chunk.entityCount.clear();
 +        census.chunkAdded(chunk);
-+        for (Class type : types) assertEquals(0, census.count(type));
++        for (Class type : types) {
++            assertEquals(0, census.count(type));
++        }
 +    }
 +}
