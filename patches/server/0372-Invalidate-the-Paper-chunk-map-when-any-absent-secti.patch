@@ -6,7 +6,7 @@ Subject: [PATCH] Invalidate the Paper chunk map when any absent section
 
 
 diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
-index 1459275e3833e814ff64bb347955d26c6594f3ca..d110622f1d48d33929499850f0384f5ba75ecbdd 100644
+index 6ae93fea63b2aa18f1e5bfd28d77e2923107c9e9..f39bda00ab6d458a4173233bb6ebc49656113b24 100644
 --- a/src/main/java/net/minecraft/server/Chunk.java
 +++ b/src/main/java/net/minecraft/server/Chunk.java
 @@ -220,7 +220,8 @@ public class Chunk {
@@ -21,13 +21,16 @@ index 1459275e3833e814ff64bb347955d26c6594f3ca..d110622f1d48d33929499850f0384f5b
                      section.isDirty = false;
 diff --git a/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java b/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..520ae83b1c5d72b77428c8bf5fc7760832b53097
+index 0000000000000000000000000000000000000000..737ab1a261d82e6b685dd13edd3598f23c2c9c84
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/AthenaPaperChunkMapTransitionTest.java
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,64 @@
 +package net.minecraft.server;
 +
-+import static org.junit.Assert.*;
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertSame;
 +
 +import java.util.Arrays;
 +import java.util.Collection;
@@ -38,25 +41,36 @@ index 0000000000000000000000000000000000000000..520ae83b1c5d72b77428c8bf5fc77608
 +import org.junit.runners.Parameterized;
 +
 +@RunWith(Parameterized.class)
++/**
++ * Athena - the Paper cache rebuilds when a section at any height becomes present or absent.
++ */
 +public class AthenaPaperChunkMapTransitionTest extends AbstractTestingBase {
++
 +    @Parameterized.Parameters(name = "section={0}")
 +    public static Collection<Object[]> cases() {
 +        return Arrays.asList(new Object[][] {{0}, {1}, {7}, {15}});
 +    }
++
 +    private final int section;
-+    public AthenaPaperChunkMapTransitionTest(int section) { this.section = section; }
++
++    public AthenaPaperChunkMapTransitionTest(int section) {
++        this.section = section;
++    }
 +
 +    @Test
 +    public void absentPresentAndAbsentAgainRebuildTheEnabledPaperCache() throws Exception {
 +        WorldServer world = AthenaAuditFixtures.world();
 +        PaperSpigotWorldConfig config = AthenaAuditFixtures.allocate(PaperSpigotWorldConfig.class);
++
 +        config.cacheChunkMaps = true;
 +        AthenaAuditFixtures.set(world, World.class, "paperSpigotConfig", config);
 +        AthenaAuditFixtures.set(world, World.class, "worldProvider", WorldProvider.byDimension(0));
 +        Chunk chunk = new Chunk(world, 0, 0);
++
 +        assertMatchesExtraction(chunk);
 +        for (int transition = 0; transition < 2; ++transition) {
 +            char[] ids = new char[4096];
++
 +            ids[0] = (char) (transition == 0 ? 16 : 48);
 +            chunk.getSections()[section] = new ChunkSection(section << 4, true, ids);
 +            assertFalse(chunk.getSections()[section].isDirty);
@@ -69,6 +83,7 @@ index 0000000000000000000000000000000000000000..520ae83b1c5d72b77428c8bf5fc77608
 +    private static void assertMatchesExtraction(Chunk chunk) {
 +        PacketPlayOutMapChunk.ChunkMap expected = PacketPlayOutMapChunk.getExtractedData(chunk, true, true, 0xFFFF);
 +        PacketPlayOutMapChunk.ChunkMap actual = chunk.getChunkMap(true, 0xFFFF);
++
 +        assertEquals(expected.dataSize, actual.dataSize);
 +        assertArrayEquals(expected.data, actual.data);
 +        assertSame("an unchanged chunk must reuse the rebuilt cache", actual, chunk.getChunkMap(true, 0xFFFF));
