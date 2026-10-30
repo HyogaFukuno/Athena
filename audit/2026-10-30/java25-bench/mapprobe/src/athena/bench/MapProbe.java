@@ -113,8 +113,12 @@ public final class MapProbe extends JavaPlugin implements Listener {
                 this.result.put("process_cpu_load_to_ready_ms", (os.getProcessCpuTime() - cpu) / 1_000_000L);
                 this.result.put("heap_after_preload_mb", heapAfterGc() / 1048576.0);
                 this.result.put("loaded_chunks", this.world.getLoadedChunks().length);
+                packetCaches("after_preload");
                 this.ready = true;
                 getLogger().info("MAPPROBE READY");
+                if (this.bots == 0) {
+                    startWindow();
+                }
             }, 200L);
         });
     }
@@ -135,7 +139,41 @@ public final class MapProbe extends JavaPlugin implements Listener {
         }
     }
 
+    private final Map<Long, String> threadNames = new java.util.HashMap<Long, String>();
+    private final Map<Long, Long> threadCpu = new java.util.HashMap<Long, Long>();
+
+    private static String group(String name) {
+        for (String prefix : new String[] { "Server thread", "Netty", "Athena chunk packet compressor", "File IO",
+                "Chunk I/O", "Chunk Shaping", "Craft Scheduler", "Log4j", "AsyncAppender" }) {
+            if (name.startsWith(prefix)) return prefix;
+        }
+        return "other";
+    }
+
+    private void snapshotThreads() {
+        for (ThreadInfo info : threads.getThreadInfo(threads.getAllThreadIds())) {
+            if (info != null) {
+                this.threadNames.put(info.getThreadId(), info.getThreadName());
+                this.threadCpu.put(info.getThreadId(), Math.max(0, threads.getThreadCpuTime(info.getThreadId())));
+            }
+        }
+    }
+
+    private void threadDelta(double seconds) {
+        Map<String, Long> groups = new java.util.TreeMap<String, Long>();
+        for (ThreadInfo info : threads.getThreadInfo(threads.getAllThreadIds())) {
+            if (info == null) continue;
+            long before = this.threadCpu.getOrDefault(info.getThreadId(), 0L);
+            long now = Math.max(0, threads.getThreadCpuTime(info.getThreadId()));
+            groups.merge(group(info.getThreadName()), now - before, Long::sum);
+        }
+        for (Map.Entry<String, Long> e : groups.entrySet()) {
+            this.result.put("cpu_ms_per_s_" + e.getKey().replace(' ', '_').replace('/', '_'), Math.round(e.getValue() / 1e6 / seconds * 10) / 10.0);
+        }
+    }
+
     private void startWindow() {
+        snapshotThreads();
         this.windowStart = System.nanoTime();
         this.windowCpu = os.getProcessCpuTime();
         this.windowCompressorCpu = compressorCpu();
@@ -184,6 +222,7 @@ public final class MapProbe extends JavaPlugin implements Listener {
         this.result.put("players", getServer().getOnlinePlayers().size());
         this.result.put("window_process_cpu_ms_per_s", Math.round((os.getProcessCpuTime() - this.windowCpu) / 1e6 / seconds));
         this.result.put("window_compressor_cpu_ms", (compressorCpu() - this.windowCompressorCpu) / 1_000_000L);
+        threadDelta(seconds);
         long[] all = Arrays.copyOf(this.durations, this.count);
         long sum = 0, sum80 = 0, max80 = 0, n80 = 0, sumOther = 0, maxOther = 0;
 
@@ -211,6 +250,7 @@ public final class MapProbe extends JavaPlugin implements Listener {
         this.result.put("tick_other_mean_ms", ms(sumOther / Math.max(1, this.count - n80)));
         this.result.put("tick_other_max_ms", ms(maxOther));
         this.result.put("tile_entities_ticking", tickingTiles());
+        packetCaches("after_window");
         this.result.put("heap_after_window_mb", heapAfterGc() / 1048576.0);
 
         StringBuilder json = new StringBuilder("{");
@@ -227,6 +267,47 @@ public final class MapProbe extends JavaPlugin implements Listener {
         }
         getLogger().info("MAPPROBE DONE " + json);
         Bukkit.shutdown();
+    }
+
+    /**
+     * The chunk packet caches the loaded chunks hold (Chunk.athenaPacketCache): how many, how many
+     * have their compressed frame, and the bytes of the frames and of uncompressed data still held.
+     */
+    private void packetCaches(String when) {
+        long caches = 0, frames = 0, frameBytes = 0, mapBytes = 0;
+        try {
+            for (org.bukkit.Chunk chunk : this.world.getLoadedChunks()) {
+                Object handle = chunk.getClass().getMethod("getHandle").invoke(chunk);
+                java.lang.reflect.Field field = handle.getClass().getDeclaredField("athenaPacketCache");
+                field.setAccessible(true);
+                Object cache = field.get(handle);
+                if (cache == null) continue;
+                ++caches;
+                java.lang.reflect.Field frame = cache.getClass().getDeclaredField("frame");
+                frame.setAccessible(true);
+                Object f = frame.get(cache);
+                if (f instanceof byte[]) {
+                    ++frames;
+                    frameBytes += ((byte[]) f).length;
+                } else if (f != null) {
+                    ++frames; // a mapped frame: its bytes are in the store's mapping, not the heap
+                }
+                java.lang.reflect.Field map = cache.getClass().getDeclaredField("map");
+                map.setAccessible(true);
+                Object m = map.get(cache);
+                if (m != null) {
+                    java.lang.reflect.Field data = m.getClass().getDeclaredField("data");
+                    data.setAccessible(true);
+                    mapBytes += ((byte[]) data.get(m)).length;
+                }
+            }
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+        this.result.put("caches_" + when, caches);
+        this.result.put("heap_frames_" + when, frames);
+        this.result.put("heap_frame_mb_" + when, Math.round(frameBytes / 10485.76) / 100.0);
+        this.result.put("uncompressed_held_mb_" + when, Math.round(mapBytes / 10485.76) / 100.0);
     }
 
     /** How many tile entities the world ticks, read off World.tileEntityList through reflection. */
