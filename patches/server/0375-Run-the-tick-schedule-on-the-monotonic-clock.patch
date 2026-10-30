@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 14:43:18 +0900
+Subject: [PATCH] Run the tick schedule on the monotonic clock
+
+
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 351b028d7726fc10f9c6184f3fe8842e9f0e56bb..681c6e8af8d77701a785d9dab0e952bb0f5e13d7 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -103,7 +103,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     private final UserCache Z;
+     protected final Queue<FutureTask<?>> j = new java.util.concurrent.ConcurrentLinkedQueue<FutureTask<?>>(); // Spigot, PAIL: Rename
+     private Thread serverThread;
+-    private long ab = az();
++    // private long ab = az(); // Athena - the tick schedule is athenaNextTick, on the monotonic clock
+ 
+     // CraftBukkit start
+     public List<WorldServer> worlds = new ArrayList<WorldServer>();
+@@ -578,14 +578,27 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+ 
+     // PandaSpigot start - New Tick Loop System
+     private boolean isAheadOfTime() {
+-        return az() < this.ab;
++        return System.nanoTime() - this.athenaNextTick < 0L; // Athena
+     }
+     // PandaSpigot end
++
++    // Athena start - the tick schedule runs on the monotonic clock.
++    //
++    // It ran on System.currentTimeMillis(), the wall clock, which NTP, a VM resumed from a pause or
++    // an operator can step at any moment. Stepped back two seconds, the loop waited two seconds for
++    // the next tick; stepped forward three, it ran sixty ticks back to back to catch up - measured
++    // on a Linux VM with the clock set under a running server (audit/2026-10-30/java25-bench). The
++    // TPS figures were on System.nanoTime() already, so neither showed there. The schedule is in
++    // nanoseconds now, and the wait for the next tick is to the nanosecond instead of the millisecond.
++    private long athenaNextTick;
++    private long athenaLastSkip; // when the loop last gave up on catching up (the old R)
++    // Athena end
+  
+     public void run() {
+         try {
+             if (this.init()) {
+-                this.ab = az();
++                this.athenaNextTick = System.nanoTime(); // Athena
++                this.athenaLastSkip = this.athenaNextTick - 30_000_000_000L; // Athena - the first overload may skip at once, as before
+                 // long i = 0L; // PandaSpigot - No longer used
+ 
+                 this.r.setMOTD(new ChatComponentText(this.motd));
+@@ -603,14 +616,14 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 while (this.isRunning) {
+                     // PandaSpigot start - New Tick Loop System
+                     curTime = System.nanoTime();
+-                    long i = az() - this.ab;
+-                    if (i > 5000L && this.ab - this.R >= 30000L) { // CraftBukkit
++                    long i = (curTime - this.athenaNextTick) / 1_000_000L; // Athena - milliseconds behind, off the monotonic clock
++                    if (i > 5000L && this.athenaNextTick - this.athenaLastSkip >= 30_000_000_000L) { // CraftBukkit // Athena
+                         long j = i / 50L;
+                         if (server.getWarnOnOverload()) { // CraftBukkit
+                             LOGGER.warn("Can't keep up! Is the server overloaded? Running {}ms or {} ticks behind", i, j);
+                         }
+-                        this.ab += j * 50L;
+-                        this.R = this.ab;
++                        this.athenaNextTick += j * TICK_TIME; // Athena
++                        this.athenaLastSkip = this.athenaNextTick; // Athena
+                     }
+                     /*
+                     curTime = System.nanoTime();
+@@ -656,7 +669,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     this.A();
+                     AthenaDiagnostics.afterTick(this, System.nanoTime() - curTime); // Athena - for the diagnostics kit, while it asks
+                     // PandaSpigot start - New Tick Loop System
+-                    this.ab += 50L;
++                    this.athenaNextTick += TICK_TIME; // Athena
+ 
+                     // Athena start - sleep until the next tick is due, not a millisecond at a time.
+                     //
+@@ -668,8 +681,8 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     // same deadline in one wake-up; the loop stays, since a park can return early.
+                     long remaining;
+ 
+-                    while ((remaining = this.ab - az()) > 0L) {
+-                        java.util.concurrent.locks.LockSupport.parkNanos(remaining * 1_000_000L);
++                    while ((remaining = this.athenaNextTick - System.nanoTime()) > 0L) {
++                        java.util.concurrent.locks.LockSupport.parkNanos(remaining);
+                     }
+                     // Athena end
+                     // PandaSpigot end
+@@ -1704,7 +1717,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     }
+ 
+     public long aL() {
+-        return this.ab;
++        return az() + (this.athenaNextTick - System.nanoTime()) / 1_000_000L; // Athena - when the next tick is due, on the wall clock as before
+     }
+ 
+     public Thread aM() {
