@@ -1,0 +1,1886 @@
+[start-small] building the shared AOT cache from record-sgbench3.aotconf
+Picked up JAVA_TOOL_OPTIONS: -Xlog:gc:file=gc.log:time 
+Reading AOTConfiguration /opt/mc/sgbench3/aot-cache-train/14a3590b2917f01a/record-sgbench3.aotconf and writing AOTCache /opt/mc/sgbench3/aot-cache-train/14a3590b2917f01a/athena.aot.tmp.338238
+[0.952s][warning][aot] Skipping com/avaje/ebean/config/dbplatform/SQLitePlatform: Unlinked class not supported by AOTClassLinking
+[0.952s][warning][aot] Skipping com/avaje/ebean/config/dbplatform/DatabasePlatform: Unlinked class not supported by AOTClassLinking
+[0.953s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionParser: Unlinked class not supported by AOTClassLinking
+[0.953s][warning][aot] Skipping org/bukkit/craftbukkit/Main$1: Unlinked class not supported by AOTClassLinking
+[0.953s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionException: Unlinked class not supported by AOTClassLinking
+[0.953s][warning][aot] Skipping org/apache/commons/lang/exception/NestableRuntimeException: Unlinked class not supported by AOTClassLinking
+[0.953s][warning][aot] Skipping org/apache/commons/lang/exception/Nestable: Unlinked class not supported by AOTClassLinking
+[0.954s][warning][aot] Skipping org/apache/commons/lang/NotImplementedException: Unlinked class not supported by AOTClassLinking
+[0.956s][warning][aot] Skipping org/apache/commons/lang/UnhandledException: Unlinked class not supported by AOTClassLinking
+AOTCache creation is complete: /opt/mc/sgbench3/aot-cache-train/14a3590b2917f01a/athena.aot.tmp.338238 83701760 bytes
+Picked up JAVA_TOOL_OPTIONS: -Xlog:gc:file=gc.log:time 
+[0.014s][warning][aot,codecache,stubs] Saved blob's name 'LLLLLLLIILLL' is different from the expected name 'LLLLLLIILLLL'
+[0.014s][warning][aot                ] Failed to link AdapterHandlerEntry (fp=LLLLLLIILLLL) to its code in the AOT code cache
+Loading libraries, please wait...
+2026-10-30T18:30:20.276554107Z main WARN Advanced terminal features are not available in this environment
+[03:30:20 INFO]: Starting minecraft server version 1.8.8
+[03:30:20 WARN]: To start the server with more ram, launch it as "java -Xmx1024M -Xms1024M -jar minecraft_server.jar"
+[03:30:20 INFO]: Loading properties
+[03:30:20 INFO]: Default game type: SURVIVAL
+[03:30:20 INFO]: This server is running PandaSpigot version git-PandaSpigot-"d5108d7" (MC: 1.8.8) (Implementing API version 1.8.8-R0.1-SNAPSHOT) (Git: d5108d7 on perf/java25-audit-2026-10-30)
+[03:30:20 INFO]: Debug logging is disabled
+[03:30:20 INFO]: Spigot Timings: false - Verbose: true - Interval: 5m - Length: 60m
+[03:30:20 INFO]: Server Ping Player Sample Count: 12
+[03:30:20 INFO]: Using 1 threads for Netty based IO
+[03:30:20 INFO]: Data value allowed items: 
+[03:30:20 INFO]: Generating keypair
+[03:30:21 INFO]: Starting Minecraft server on 127.0.0.1:25570
+[03:30:21 INFO]: Using io_uring channel type
+[03:30:21 INFO]: Set PluginClassLoader as parallel capable
+[03:30:21 INFO]: [SurvivalGames] Loading SurvivalGames v1.0-SNAPSHOT
+[03:30:21 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[03:30:21 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[03:30:21 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[03:30:21 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[03:30:21 INFO]: **** Beginning UUID conversion, this may take A LONG time ****
+[03:30:21 INFO]: Preparing level "lobby"
+[03:30:21 INFO]: -------- World Settings For [lobby] --------
+[03:30:21 INFO]: Item Despawn Rate: 6000
+[03:30:21 INFO]: Item Merge Radius: 2.5
+[03:30:21 INFO]: Arrow Despawn Rate: 1200
+[03:30:21 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[03:30:21 INFO]: View Distance: 8
+[03:30:21 INFO]: Zombie Aggressive Towards Villager: true
+[03:30:21 INFO]: Anti X-Ray: false
+[03:30:21 INFO]: 	Engine Mode: 1
+[03:30:21 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[03:30:21 INFO]: 	Replace Blocks: [1, 5]
+[03:30:21 INFO]: Chunks to Grow per Tick: 650
+[03:30:21 INFO]: Clear tick list: false
+[03:30:21 INFO]: Experience Merge Radius: 3.0
+[03:30:21 INFO]: Mob Spawn Range: 4
+[03:30:21 INFO]: Nerfing mobs spawned from spawners: false
+[03:30:21 INFO]: Cactus Growth Modifier: 100%
+[03:30:21 INFO]: Cane Growth Modifier: 100%
+[03:30:21 INFO]: Melon Growth Modifier: 100%
+[03:30:21 INFO]: Mushroom Growth Modifier: 100%
+[03:30:21 INFO]: Pumpkin Growth Modifier: 100%
+[03:30:21 INFO]: Sapling Growth Modifier: 100%
+[03:30:21 INFO]: Wheat Growth Modifier: 100%
+[03:30:21 INFO]: NetherWart Growth Modifier: 100%
+[03:30:21 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[03:30:21 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[03:30:21 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[03:30:21 INFO]: Random Lighting Updates: false
+[03:30:21 INFO]: Structure Info Saving: true
+[03:30:21 INFO]: Sending up to 10 chunks per packet
+[03:30:21 INFO]: Max Entity Collisions: 8
+[03:30:21 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[03:30:21 INFO]: Max TNT Explosions: 100
+[03:30:21 INFO]: -------- World Settings For [lobby] --------
+[03:30:21 INFO]: Water over lava flow speed: 5
+[03:30:21 INFO]: Fix TNT cannons: false
+[03:30:21 INFO]: Allow undead horse types to be leashed: false
+[03:30:21 INFO]: Keep spawn chunk loaded: true
+[03:30:21 INFO]: World async lighting: false
+[03:30:21 INFO]: WorldServer TickNextTick cap set at 10000
+[03:30:21 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[03:30:21 INFO]: Remove invalid mob spawner tile entities: true
+[03:30:21 INFO]: Player blocking damage multiplier set to 0.5
+[03:30:21 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[03:30:21 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[03:30:21 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[03:30:21 INFO]: Preparing start region for level 0 (Seed: 0)
+[03:30:21 INFO]: [Athena] lobby: chunk shaping is on the server thread (config=true, generator=NormalChunkGenerator, pluginGenerator=false, biomeSource=WorldChunkManagerHell)
+[03:30:22 INFO]: Preparing spawn area: 82%
+[03:30:22 INFO]: [SurvivalGames] Enabling SurvivalGames v1.0-SNAPSHOT
+[03:30:22 INFO]: [SurvivalGames] Loaded 1 map(s) from /opt/mc/maps: Lobby_Games
+[03:30:22 INFO]: [SurvivalGames] Stats are not saved (database.enabled is false in config.yml)
+[03:30:22 INFO]: Server permissions file permissions.yml is empty, ignoring it
+[03:30:22 INFO]: Done (1.289s)! For help, type "help" or "?"
+[03:30:22 INFO]: Timings Reset
+[03:30:27 INFO]: Diagnostics started: athena-diag.csv every 100 ticks
+[03:30:30 INFO]: UUID of player Bot0 is ee2337bd-ef1b-3585-94ad-53fcd1977dd2
+[03:30:30 INFO]: Bot0[/127.0.0.1:48116] logged in with entity id 0 at ([lobby]262.5, 84.0, 39.5)
+[03:30:30 INFO]: UUID of player Bot1 is 51a4b33d-8b80-3bde-806f-de4086b03058
+[03:30:30 INFO]: Bot1[/127.0.0.1:48118] logged in with entity id 1 at ([lobby]262.5, 84.0, 39.5)
+[03:30:30 INFO]: UUID of player Bot2 is 16beaa94-ff1b-37a7-8afb-c22dcb8c16d1
+[03:30:31 INFO]: Bot2[/127.0.0.1:48130] logged in with entity id 2 at ([lobby]262.5, 84.0, 39.5)
+[03:30:31 INFO]: UUID of player Bot3 is 73f370b4-497b-347a-a6bb-50d07eb88947
+[03:30:31 INFO]: Bot3[/127.0.0.1:48136] logged in with entity id 3 at ([lobby]262.5, 84.0, 39.5)
+[03:30:31 INFO]: UUID of player Bot4 is c760baae-cdc1-3595-98d0-c7a6e074d851
+[03:30:31 INFO]: Bot4[/127.0.0.1:48140] logged in with entity id 4 at ([lobby]262.5, 84.0, 39.5)
+[03:30:32 INFO]: UUID of player Bot5 is 957bd75a-2799-3660-aa34-d1833e9c00b3
+[03:30:32 INFO]: Bot5[/127.0.0.1:53282] logged in with entity id 5 at ([lobby]262.5, 84.0, 39.5)
+[03:30:32 INFO]: UUID of player Bot6 is 88f0f096-1002-3386-8cc0-5371a30bd66f
+[03:30:32 INFO]: Bot6[/127.0.0.1:53296] logged in with entity id 6 at ([lobby]262.5, 84.0, 39.5)
+[03:30:33 INFO]: UUID of player Bot7 is 9aa06467-c242-3704-9d28-2b9ef52e9d26
+[03:30:33 INFO]: Bot7[/127.0.0.1:53308] logged in with entity id 7 at ([lobby]262.5, 84.0, 39.5)
+[03:30:33 INFO]: UUID of player Bot8 is a2aded80-15d4-38c5-8a6f-e532eedf9bde
+[03:30:33 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:30:33 INFO]: Item Despawn Rate: 6000
+[03:30:33 INFO]: Item Merge Radius: 2.5
+[03:30:33 INFO]: Arrow Despawn Rate: 1200
+[03:30:33 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[03:30:33 INFO]: View Distance: 8
+[03:30:33 INFO]: Zombie Aggressive Towards Villager: true
+[03:30:33 INFO]: Anti X-Ray: false
+[03:30:33 INFO]: 	Engine Mode: 1
+[03:30:33 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[03:30:33 INFO]: 	Replace Blocks: [1, 5]
+[03:30:33 INFO]: Chunks to Grow per Tick: 650
+[03:30:33 INFO]: Clear tick list: false
+[03:30:33 INFO]: Experience Merge Radius: 3.0
+[03:30:33 INFO]: Mob Spawn Range: 4
+[03:30:33 INFO]: Nerfing mobs spawned from spawners: false
+[03:30:33 INFO]: Cactus Growth Modifier: 100%
+[03:30:33 INFO]: Cane Growth Modifier: 100%
+[03:30:33 INFO]: Melon Growth Modifier: 100%
+[03:30:33 INFO]: Mushroom Growth Modifier: 100%
+[03:30:33 INFO]: Pumpkin Growth Modifier: 100%
+[03:30:33 INFO]: Sapling Growth Modifier: 100%
+[03:30:33 INFO]: Wheat Growth Modifier: 100%
+[03:30:33 INFO]: NetherWart Growth Modifier: 100%
+[03:30:33 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[03:30:33 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[03:30:33 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[03:30:33 INFO]: Random Lighting Updates: false
+[03:30:33 INFO]: Structure Info Saving: true
+[03:30:33 INFO]: Sending up to 10 chunks per packet
+[03:30:33 INFO]: Max Entity Collisions: 8
+[03:30:33 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[03:30:33 INFO]: Max TNT Explosions: 100
+[03:30:33 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:30:33 INFO]: Water over lava flow speed: 5
+[03:30:33 INFO]: Fix TNT cannons: false
+[03:30:33 INFO]: Allow undead horse types to be leashed: false
+[03:30:33 INFO]: Keep spawn chunk loaded: true
+[03:30:33 INFO]: World async lighting: false
+[03:30:33 INFO]: WorldServer TickNextTick cap set at 10000
+[03:30:33 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[03:30:33 INFO]: Remove invalid mob spawner tile entities: true
+[03:30:33 INFO]: Player blocking damage multiplier set to 0.5
+[03:30:33 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[03:30:33 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[03:30:33 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[03:30:33 INFO]: Bot8[/127.0.0.1:53310] logged in with entity id 8 at ([lobby]262.5, 84.0, 39.5)
+[03:30:33 INFO]: [SurvivalGames] Preloaded the spawns of sg-Lobby_Games: 36 chunks in 295 ms
+[03:30:33 INFO]: UUID of player Bot9 is 84789adf-47f8-367c-b639-0544ccf93ad2
+[03:30:33 INFO]: Bot9[/127.0.0.1:53312] logged in with entity id 410 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:34 INFO]: UUID of player Bot10 is dd0e24e4-744e-3f4c-97dc-32ceefa9fdd7
+[03:30:34 INFO]: Bot10[/127.0.0.1:53320] logged in with entity id 495 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:34 INFO]: UUID of player Bot11 is 1197a1e1-1f22-395d-ae93-9836bfcec466
+[03:30:34 INFO]: Bot11[/127.0.0.1:53326] logged in with entity id 496 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:35 INFO]: UUID of player Bot12 is d1b6b006-dda2-300d-82c6-b45b3c57f0d4
+[03:30:35 INFO]: Bot12[/127.0.0.1:53338] logged in with entity id 497 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:35 INFO]: UUID of player Bot13 is 0685a1bc-d22d-3055-b860-88b198c1a2c2
+[03:30:35 INFO]: Bot13[/127.0.0.1:53352] logged in with entity id 498 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:35 INFO]: [SurvivalGames] Preloaded sg-Lobby_Games: 1259 chunks in 1944 ms (2237 ms after the map opened)
+[03:30:35 INFO]: UUID of player Bot14 is 611d3f14-4877-3dbb-8d40-ab6a074c914d
+[03:30:35 INFO]: Bot14[/127.0.0.1:53362] logged in with entity id 499 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:36 INFO]: UUID of player Bot15 is 8760a068-783d-3a3f-9b76-d3d4e0d6745e
+[03:30:36 INFO]: Bot15[/127.0.0.1:53372] logged in with entity id 500 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:36 INFO]: UUID of player Bot16 is ef73d3ac-37cd-3dd5-8cfc-4dbbd1edd821
+[03:30:36 INFO]: Bot16[/127.0.0.1:53384] logged in with entity id 501 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:37 INFO]: UUID of player Bot17 is 3ef33022-674b-3084-a65c-2c10160c0032
+[03:30:37 INFO]: Bot17[/127.0.0.1:53390] logged in with entity id 502 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:37 INFO]: UUID of player Bot18 is c8c9bfd6-8b01-3923-952e-74536f6e7be2
+[03:30:37 INFO]: Bot18[/127.0.0.1:53394] logged in with entity id 503 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:30:37 INFO]: UUID of player Bot19 is d2bb8e6b-93cc-3625-a4fd-9447af52a436
+[03:30:37 INFO]: Bot19[/127.0.0.1:53400] logged in with entity id 504 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[03:31:11 WARN]: Bot6 moved wrongly!
+[03:31:11 WARN]: Bot6 moved wrongly!
+[03:31:11 WARN]: Bot6 moved wrongly!
+[03:31:12 WARN]: Bot5 moved wrongly!
+[03:31:12 WARN]: Bot5 moved wrongly!
+[03:31:12 WARN]: Bot5 moved wrongly!
+[03:31:25 WARN]: Bot5 moved wrongly!
+[03:31:25 WARN]: Bot5 moved wrongly!
+[03:31:25 WARN]: Bot5 moved wrongly!
+[03:31:25 WARN]: Bot5 moved wrongly!
+[03:31:25 WARN]: Bot5 moved wrongly!
+[03:31:26 WARN]: Bot3 moved wrongly!
+[03:31:26 WARN]: Bot3 moved wrongly!
+[03:31:26 WARN]: Bot3 moved wrongly!
+[03:31:31 WARN]: Bot3 moved wrongly!
+[03:31:31 WARN]: Bot3 moved wrongly!
+[03:31:31 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:32 WARN]: Bot3 moved wrongly!
+[03:31:33 WARN]: Bot3 moved wrongly!
+[03:31:33 WARN]: Bot3 moved wrongly!
+[03:31:33 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:34 WARN]: Bot3 moved wrongly!
+[03:31:36 WARN]: Bot3 moved wrongly!
+[03:31:37 WARN]: Bot3 moved wrongly!
+[03:31:37 WARN]: Bot3 moved wrongly!
+[03:31:37 WARN]: Bot3 moved wrongly!
+[03:31:37 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:32:23 WARN]: Bot3 moved wrongly!
+[03:33:29 WARN]: Bot2 moved wrongly!
+[03:33:29 WARN]: Bot2 moved wrongly!
+[03:33:29 WARN]: Bot2 moved wrongly!
+[03:33:31 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:32 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:33 WARN]: Bot2 moved wrongly!
+[03:33:34 WARN]: Bot2 moved wrongly!
+[03:33:34 WARN]: Bot2 moved wrongly!
+[03:33:34 WARN]: Bot2 moved wrongly!
+[03:33:43 WARN]: Bot4 moved wrongly!
+[03:33:43 WARN]: Bot4 moved wrongly!
+[03:33:43 WARN]: Bot4 moved wrongly!
+[03:33:43 WARN]: Bot4 moved wrongly!
+[03:33:45 WARN]: Bot4 moved wrongly!
+[03:33:45 WARN]: Bot4 moved wrongly!
+[03:33:45 WARN]: Bot4 moved wrongly!
+[03:33:45 WARN]: Bot4 moved wrongly!
+[03:33:49 WARN]: Bot2 moved wrongly!
+[03:33:49 WARN]: Bot2 moved wrongly!
+[03:33:49 WARN]: Bot2 moved wrongly!
+[03:33:51 WARN]: Bot4 moved wrongly!
+[03:33:51 WARN]: Bot4 moved wrongly!
+[03:33:51 WARN]: Bot4 moved wrongly!
+[03:33:52 WARN]: Bot4 moved wrongly!
+[03:33:55 WARN]: Bot4 moved wrongly!
+[03:33:55 WARN]: Bot4 moved wrongly!
+[03:33:55 WARN]: Bot4 moved wrongly!
+[03:33:55 WARN]: Bot4 moved wrongly!
+[03:33:56 WARN]: Bot4 moved wrongly!
+[03:33:57 WARN]: Bot4 moved wrongly!
+[03:33:57 WARN]: Bot4 moved wrongly!
+[03:33:57 WARN]: Bot4 moved wrongly!
+[03:33:58 WARN]: Bot4 moved wrongly!
+[03:34:03 WARN]: Bot4 moved wrongly!
+[03:34:03 WARN]: Bot4 moved wrongly!
+[03:34:04 WARN]: Bot4 moved wrongly!
+[03:34:04 WARN]: Bot4 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:09 WARN]: Bot2 moved wrongly!
+[03:34:11 WARN]: Bot4 moved wrongly!
+[03:34:11 WARN]: Bot4 moved wrongly!
+[03:34:12 WARN]: Bot4 moved wrongly!
+[03:34:12 WARN]: Bot4 moved wrongly!
+[03:34:12 WARN]: Bot4 moved wrongly!
+[03:34:12 WARN]: Bot4 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:13 WARN]: Bot2 moved wrongly!
+[03:34:22 WARN]: Bot4 moved wrongly!
+[03:34:22 WARN]: Bot4 moved wrongly!
+[03:34:22 WARN]: Bot4 moved wrongly!
+[03:34:22 WARN]: Bot4 moved wrongly!
+[03:34:22 WARN]: Bot4 moved wrongly!
+[03:34:25 WARN]: Bot2 moved wrongly!
+[03:34:25 WARN]: Bot2 moved wrongly!
+[03:34:25 WARN]: Bot2 moved wrongly!
+[03:34:25 WARN]: Bot2 moved wrongly!
+[03:34:26 WARN]: Bot2 moved wrongly!
+[03:34:26 WARN]: Bot4 moved wrongly!
+[03:34:26 WARN]: Bot4 moved wrongly!
+[03:34:26 WARN]: Bot4 moved wrongly!
+[03:34:26 WARN]: Bot4 moved wrongly!
+[03:34:26 WARN]: Bot4 moved wrongly!
+[03:34:42 WARN]: Bot4 moved wrongly!
+[03:34:42 WARN]: Bot4 moved wrongly!
+[03:34:42 WARN]: Bot4 moved wrongly!
+[03:34:42 WARN]: Bot4 moved wrongly!
+[03:34:47 WARN]: Bot2 moved wrongly!
+[03:34:47 WARN]: Bot2 moved wrongly!
+[03:34:48 WARN]: Bot2 moved wrongly!
+[03:34:48 WARN]: Bot2 moved wrongly!
+[03:34:48 WARN]: Bot2 moved wrongly!
+[03:34:51 WARN]: Bot2 moved wrongly!
+[03:34:52 WARN]: Bot2 moved wrongly!
+[03:34:52 WARN]: Bot2 moved wrongly!
+[03:34:52 WARN]: Bot2 moved wrongly!
+[03:34:52 WARN]: Bot2 moved wrongly!
+[03:35:04 WARN]: Bot4 moved wrongly!
+[03:35:04 WARN]: Bot4 moved wrongly!
+[03:35:04 WARN]: Bot4 moved wrongly!
+[03:35:05 WARN]: Bot4 moved wrongly!
+[03:35:10 WARN]: Bot2 moved wrongly!
+[03:35:10 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot2 moved wrongly!
+[03:35:16 WARN]: Bot4 moved wrongly!
+[03:35:17 WARN]: Bot4 moved wrongly!
+[03:35:17 WARN]: Bot4 moved wrongly!
+[03:35:17 WARN]: Bot4 moved wrongly!
+[03:35:18 WARN]: Bot4 moved wrongly!
+[03:35:19 WARN]: Bot4 moved wrongly!
+[03:35:19 WARN]: Bot4 moved wrongly!
+[03:35:19 WARN]: Bot4 moved wrongly!
+[03:35:20 WARN]: Bot2 moved wrongly!
+[03:35:20 WARN]: Bot2 moved wrongly!
+[03:35:20 WARN]: Bot2 moved wrongly!
+[03:35:20 WARN]: Bot2 moved wrongly!
+[03:35:20 WARN]: Bot2 moved wrongly!
+[03:35:24 WARN]: Bot2 moved wrongly!
+[03:35:24 WARN]: Bot2 moved wrongly!
+[03:35:24 WARN]: Bot2 moved wrongly!
+[03:35:25 WARN]: Bot4 moved wrongly!
+[03:35:25 WARN]: Bot4 moved wrongly!
+[03:35:25 WARN]: Bot4 moved wrongly!
+[03:35:25 WARN]: Bot4 moved wrongly!
+[03:35:29 WARN]: Bot4 moved wrongly!
+[03:35:29 WARN]: Bot4 moved wrongly!
+[03:35:29 WARN]: Bot4 moved wrongly!
+[03:35:29 WARN]: Bot4 moved wrongly!
+[03:35:29 WARN]: Bot4 moved wrongly!
+[03:35:33 WARN]: Bot4 moved wrongly!
+[03:35:33 WARN]: Bot4 moved wrongly!
+[03:35:33 WARN]: Bot4 moved wrongly!
+[03:35:33 WARN]: Bot4 moved wrongly!
+[03:35:33 WARN]: Bot4 moved wrongly!
+[03:35:34 WARN]: Bot2 moved wrongly!
+[03:35:34 WARN]: Bot2 moved wrongly!
+[03:35:34 WARN]: Bot2 moved wrongly!
+[03:35:34 WARN]: Bot2 moved wrongly!
+[03:35:34 WARN]: Bot2 moved wrongly!
+[03:35:35 WARN]: Bot2 moved wrongly!
+[03:35:35 WARN]: Bot4 moved wrongly!
+[03:35:35 WARN]: Bot4 moved wrongly!
+[03:35:35 WARN]: Bot4 moved wrongly!
+[03:35:35 WARN]: Bot4 moved wrongly!
+[03:35:35 WARN]: Bot4 moved wrongly!
+[03:35:37 WARN]: Bot4 moved wrongly!
+[03:35:37 WARN]: Bot4 moved wrongly!
+[03:35:37 WARN]: Bot4 moved wrongly!
+[03:35:37 WARN]: Bot4 moved wrongly!
+[03:36:06 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:36:06 INFO]: Item Despawn Rate: 6000
+[03:36:06 INFO]: Item Merge Radius: 2.5
+[03:36:06 INFO]: Arrow Despawn Rate: 1200
+[03:36:06 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[03:36:06 INFO]: View Distance: 8
+[03:36:06 INFO]: Zombie Aggressive Towards Villager: true
+[03:36:06 INFO]: Anti X-Ray: false
+[03:36:06 INFO]: 	Engine Mode: 1
+[03:36:06 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[03:36:06 INFO]: 	Replace Blocks: [1, 5]
+[03:36:06 INFO]: Chunks to Grow per Tick: 650
+[03:36:06 INFO]: Clear tick list: false
+[03:36:06 INFO]: Experience Merge Radius: 3.0
+[03:36:06 INFO]: Mob Spawn Range: 4
+[03:36:06 INFO]: Nerfing mobs spawned from spawners: false
+[03:36:06 INFO]: Cactus Growth Modifier: 100%
+[03:36:06 INFO]: Cane Growth Modifier: 100%
+[03:36:06 INFO]: Melon Growth Modifier: 100%
+[03:36:06 INFO]: Mushroom Growth Modifier: 100%
+[03:36:06 INFO]: Pumpkin Growth Modifier: 100%
+[03:36:06 INFO]: Sapling Growth Modifier: 100%
+[03:36:06 INFO]: Wheat Growth Modifier: 100%
+[03:36:06 INFO]: NetherWart Growth Modifier: 100%
+[03:36:06 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[03:36:06 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[03:36:06 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[03:36:06 INFO]: Random Lighting Updates: false
+[03:36:06 INFO]: Structure Info Saving: true
+[03:36:06 INFO]: Sending up to 10 chunks per packet
+[03:36:06 INFO]: Max Entity Collisions: 8
+[03:36:06 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[03:36:06 INFO]: Max TNT Explosions: 100
+[03:36:06 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:36:06 INFO]: Water over lava flow speed: 5
+[03:36:06 INFO]: Fix TNT cannons: false
+[03:36:06 INFO]: Allow undead horse types to be leashed: false
+[03:36:06 INFO]: Keep spawn chunk loaded: true
+[03:36:06 INFO]: World async lighting: false
+[03:36:06 INFO]: WorldServer TickNextTick cap set at 10000
+[03:36:06 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[03:36:06 INFO]: Remove invalid mob spawner tile entities: true
+[03:36:06 INFO]: Player blocking damage multiplier set to 0.5
+[03:36:06 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[03:36:06 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[03:36:06 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[03:36:06 INFO]: [SurvivalGames] Preloaded the spawns of sg-Lobby_Games: 36 chunks in 97 ms
+[03:36:08 INFO]: [SurvivalGames] Preloaded sg-Lobby_Games: 1238 chunks in 1795 ms (1891 ms after the map opened)
+[03:36:42 WARN]: Bot3 moved wrongly!
+[03:36:42 WARN]: Bot3 moved wrongly!
+[03:36:42 WARN]: Bot3 moved wrongly!
+[03:36:43 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:44 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot7 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:45 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot5 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot5 moved wrongly!
+[03:36:46 WARN]: Bot3 moved wrongly!
+[03:36:46 WARN]: Bot5 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot15 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot9 moved wrongly!
+[03:36:47 WARN]: Bot16 moved wrongly!
+[03:36:47 WARN]: Bot15 moved wrongly!
+[03:36:47 WARN]: Bot3 moved wrongly!
+[03:36:47 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot9 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:48 WARN]: Bot3 moved wrongly!
+[03:36:48 WARN]: Bot15 moved wrongly!
+[03:36:49 WARN]: Bot15 moved wrongly!
+[03:36:51 WARN]: Bot6 moved wrongly!
+[03:36:51 WARN]: Bot6 moved wrongly!
+[03:36:51 WARN]: Bot6 moved wrongly!
+[03:36:59 WARN]: Bot3 moved wrongly!
+[03:36:59 WARN]: Bot3 moved wrongly!
+[03:36:59 WARN]: Bot3 moved wrongly!
+[03:36:59 WARN]: Bot3 moved wrongly!
+[03:36:59 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:00 WARN]: Bot3 moved wrongly!
+[03:37:01 WARN]: Bot16 moved wrongly!
+[03:37:01 WARN]: Bot16 moved wrongly!
+[03:37:01 WARN]: Bot16 moved wrongly!
+[03:37:01 WARN]: Bot16 moved wrongly!
+[03:37:02 WARN]: Bot16 moved wrongly!
+[03:37:02 WARN]: Bot16 moved wrongly!
+[03:37:03 WARN]: Bot16 moved wrongly!
+[03:37:03 WARN]: Bot16 moved wrongly!
+[03:37:03 WARN]: Bot16 moved wrongly!
+[03:37:04 WARN]: Bot16 moved wrongly!
+[03:37:04 WARN]: Bot16 moved wrongly!
+[03:37:04 WARN]: Bot16 moved wrongly!
+[03:37:07 WARN]: Bot4 moved wrongly!
+[03:37:07 WARN]: Bot4 moved wrongly!
+[03:37:07 WARN]: Bot4 moved wrongly!
+[03:37:08 WARN]: Bot4 moved wrongly!
+[03:37:08 WARN]: Bot4 moved wrongly!
+[03:37:09 WARN]: Bot4 moved wrongly!
+[03:37:09 WARN]: Bot1 moved wrongly!
+[03:37:09 WARN]: Bot4 moved wrongly!
+[03:37:10 WARN]: Bot4 moved wrongly!
+[03:37:10 WARN]: Bot4 moved wrongly!
+[03:37:17 WARN]: Bot4 moved wrongly!
+[03:37:18 WARN]: Bot4 moved wrongly!
+[03:37:18 WARN]: Bot4 moved wrongly!
+[03:37:18 WARN]: Bot4 moved wrongly!
+[03:37:18 WARN]: Bot4 moved wrongly!
+[03:37:19 WARN]: Bot3 moved wrongly!
+[03:37:19 WARN]: Bot3 moved wrongly!
+[03:37:21 WARN]: Bot4 moved wrongly!
+[03:37:22 WARN]: Bot4 moved wrongly!
+[03:37:22 WARN]: Bot4 moved wrongly!
+[03:37:22 WARN]: Bot4 moved wrongly!
+[03:37:22 WARN]: Bot4 moved wrongly!
+[03:37:24 WARN]: Bot16 moved wrongly!
+[03:37:32 WARN]: Bot16 moved wrongly!
+[03:37:32 WARN]: Bot16 moved wrongly!
+[03:37:32 WARN]: Bot16 moved wrongly!
+[03:37:32 WARN]: Bot16 moved wrongly!
+[03:37:38 WARN]: Bot4 moved wrongly!
+[03:37:38 WARN]: Bot4 moved wrongly!
+[03:37:38 WARN]: Bot4 moved wrongly!
+[03:37:38 WARN]: Bot4 moved wrongly!
+[03:37:40 WARN]: Bot4 moved wrongly!
+[03:37:40 WARN]: Bot4 moved wrongly!
+[03:37:40 WARN]: Bot4 moved wrongly!
+[03:37:40 WARN]: Bot4 moved wrongly!
+[03:37:40 WARN]: Bot4 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:44 WARN]: Bot4 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:44 WARN]: Bot4 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:44 WARN]: Bot4 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:44 WARN]: Bot4 moved wrongly!
+[03:37:44 WARN]: Bot16 moved wrongly!
+[03:37:46 WARN]: Bot16 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:48 WARN]: Bot1 moved wrongly!
+[03:37:49 WARN]: Bot1 moved wrongly!
+[03:37:49 WARN]: Bot1 moved wrongly!
+[03:37:49 WARN]: Bot1 moved wrongly!
+[03:37:49 WARN]: Bot1 moved wrongly!
+[03:37:50 WARN]: Bot4 moved wrongly!
+[03:37:50 WARN]: Bot4 moved wrongly!
+[03:37:50 WARN]: Bot4 moved wrongly!
+[03:37:50 WARN]: Bot4 moved wrongly!
+[03:37:52 WARN]: Bot4 moved wrongly!
+[03:37:52 WARN]: Bot4 moved wrongly!
+[03:37:52 WARN]: Bot4 moved wrongly!
+[03:37:52 WARN]: Bot4 moved wrongly!
+[03:37:52 WARN]: Bot16 moved wrongly!
+[03:37:53 WARN]: Bot2 moved wrongly!
+[03:37:53 WARN]: Bot2 moved wrongly!
+[03:37:53 WARN]: Bot2 moved wrongly!
+[03:37:54 WARN]: Bot2 moved wrongly!
+[03:37:54 WARN]: Bot2 moved wrongly!
+[03:37:58 WARN]: Bot4 moved wrongly!
+[03:37:58 WARN]: Bot4 moved wrongly!
+[03:37:58 WARN]: Bot4 moved wrongly!
+[03:37:58 WARN]: Bot4 moved wrongly!
+[03:37:58 WARN]: Bot4 moved wrongly!
+[03:38:00 WARN]: Bot4 moved wrongly!
+[03:38:00 WARN]: Bot4 moved wrongly!
+[03:38:00 WARN]: Bot4 moved wrongly!
+[03:38:01 WARN]: Bot4 moved wrongly!
+[03:38:05 WARN]: Bot16 moved wrongly!
+[03:38:06 WARN]: Bot4 moved wrongly!
+[03:38:06 WARN]: Bot4 moved wrongly!
+[03:38:06 WARN]: Bot4 moved wrongly!
+[03:38:07 WARN]: Bot4 moved wrongly!
+[03:38:09 WARN]: Bot1 moved wrongly!
+[03:38:09 WARN]: Bot1 moved wrongly!
+[03:38:09 WARN]: Bot1 moved wrongly!
+[03:38:11 WARN]: Bot4 moved wrongly!
+[03:38:12 WARN]: Bot16 moved wrongly!
+[03:38:12 WARN]: Bot16 moved wrongly!
+[03:38:13 WARN]: Bot16 moved wrongly!
+[03:38:13 WARN]: Bot16 moved wrongly!
+[03:38:13 WARN]: Bot16 moved wrongly!
+[03:38:14 WARN]: Bot4 moved wrongly!
+[03:38:14 WARN]: Bot4 moved wrongly!
+[03:38:15 WARN]: Bot4 moved wrongly!
+[03:38:15 WARN]: Bot4 moved wrongly!
+[03:38:15 WARN]: Bot4 moved wrongly!
+[03:38:16 WARN]: Bot1 moved wrongly!
+[03:38:16 WARN]: Bot1 moved wrongly!
+[03:38:16 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:17 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot4 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:18 WARN]: Bot4 moved wrongly!
+[03:38:18 WARN]: Bot1 moved wrongly!
+[03:38:19 WARN]: Bot4 moved wrongly!
+[03:38:19 WARN]: Bot1 moved wrongly!
+[03:38:19 WARN]: Bot4 moved wrongly!
+[03:38:19 WARN]: Bot1 moved wrongly!
+[03:38:19 WARN]: Bot4 moved wrongly!
+[03:38:19 WARN]: Bot1 moved wrongly!
+[03:38:19 WARN]: Bot1 moved wrongly!
+[03:38:19 WARN]: Bot1 moved wrongly!
+[03:38:22 WARN]: Bot3 moved wrongly!
+[03:38:22 WARN]: Bot3 moved wrongly!
+[03:38:22 WARN]: Bot3 moved wrongly!
+[03:38:22 WARN]: Bot3 moved wrongly!
+[03:38:22 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:23 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:24 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:25 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot3 moved wrongly!
+[03:38:26 WARN]: Bot16 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot16 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot16 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot16 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:27 WARN]: Bot3 moved wrongly!
+[03:38:28 WARN]: Bot3 moved wrongly!
+[03:38:28 WARN]: Bot3 moved wrongly!
+[03:38:28 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:29 WARN]: Bot3 moved wrongly!
+[03:38:31 WARN]: Bot16 moved wrongly!
+[03:38:31 WARN]: Bot16 moved wrongly!
+[03:38:31 WARN]: Bot16 moved wrongly!
+[03:38:31 WARN]: Bot16 moved wrongly!
+[03:38:31 WARN]: Bot16 moved wrongly!
+[03:38:34 WARN]: Bot3 moved wrongly!
+[03:38:34 WARN]: Bot3 moved wrongly!
+[03:38:34 WARN]: Bot3 moved wrongly!
+[03:38:34 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot19 moved wrongly!
+[03:38:35 WARN]: Bot19 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:35 WARN]: Bot3 moved wrongly!
+[03:38:36 WARN]: Bot3 moved wrongly!
+[03:38:36 WARN]: Bot3 moved wrongly!
+[03:38:36 WARN]: Bot3 moved wrongly!
+[03:38:36 WARN]: Bot3 moved wrongly!
+[03:38:36 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:38:37 WARN]: Bot3 moved wrongly!
+[03:39:18 WARN]: Bot11 moved wrongly!
+[03:39:32 WARN]: Bot18 moved wrongly!
+[03:39:32 WARN]: Bot18 moved wrongly!
+[03:39:33 WARN]: Bot18 moved wrongly!
+[03:39:33 WARN]: Bot18 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:39:55 WARN]: Bot12 moved wrongly!
+[03:40:03 WARN]: Bot12 moved wrongly!
+[03:40:03 WARN]: Bot12 moved wrongly!
+[03:40:03 WARN]: Bot12 moved wrongly!
+[03:40:03 WARN]: Bot12 moved wrongly!
+[03:40:04 WARN]: Bot12 moved wrongly!
+[03:40:04 WARN]: Bot12 moved wrongly!
+[03:40:05 WARN]: Bot18 moved wrongly!
+[03:40:05 WARN]: Bot18 moved wrongly!
+[03:40:05 WARN]: Bot18 moved wrongly!
+[03:40:05 WARN]: Bot18 moved wrongly!
+[03:40:13 WARN]: Bot12 moved wrongly!
+[03:40:13 WARN]: Bot12 moved wrongly!
+[03:40:14 WARN]: Bot12 moved wrongly!
+[03:40:14 WARN]: Bot12 moved wrongly!
+[03:40:14 WARN]: Bot12 moved wrongly!
+[03:40:34 WARN]: Bot12 moved wrongly!
+[03:40:34 WARN]: Bot12 moved wrongly!
+[03:40:34 WARN]: Bot12 moved wrongly!
+[03:40:34 WARN]: Bot12 moved wrongly!
+[03:40:34 WARN]: Bot12 moved wrongly!
+[03:40:39 WARN]: Bot18 moved wrongly!
+[03:40:39 WARN]: Bot18 moved wrongly!
+[03:40:39 WARN]: Bot18 moved wrongly!
+[03:40:39 WARN]: Bot18 moved wrongly!
+[03:40:40 WARN]: Bot18 moved wrongly!
+[03:40:45 WARN]: Bot18 moved wrongly!
+[03:40:45 WARN]: Bot18 moved wrongly!
+[03:40:46 WARN]: Bot18 moved wrongly!
+[03:40:46 WARN]: Bot18 moved wrongly!
+[03:41:16 WARN]: Bot12 moved wrongly!
+[03:41:16 WARN]: Bot12 moved wrongly!
+[03:41:17 WARN]: Bot12 moved wrongly!
+[03:41:17 WARN]: Bot12 moved wrongly!
+[03:41:17 WARN]: Bot12 moved wrongly!
+[03:41:51 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:41:51 INFO]: Item Despawn Rate: 6000
+[03:41:51 INFO]: Item Merge Radius: 2.5
+[03:41:51 INFO]: Arrow Despawn Rate: 1200
+[03:41:51 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[03:41:51 INFO]: View Distance: 8
+[03:41:51 INFO]: Zombie Aggressive Towards Villager: true
+[03:41:51 INFO]: Anti X-Ray: false
+[03:41:51 INFO]: 	Engine Mode: 1
+[03:41:51 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[03:41:51 INFO]: 	Replace Blocks: [1, 5]
+[03:41:51 INFO]: Chunks to Grow per Tick: 650
+[03:41:51 INFO]: Clear tick list: false
+[03:41:51 INFO]: Experience Merge Radius: 3.0
+[03:41:51 INFO]: Mob Spawn Range: 4
+[03:41:51 INFO]: Nerfing mobs spawned from spawners: false
+[03:41:51 INFO]: Cactus Growth Modifier: 100%
+[03:41:51 INFO]: Cane Growth Modifier: 100%
+[03:41:51 INFO]: Melon Growth Modifier: 100%
+[03:41:51 INFO]: Mushroom Growth Modifier: 100%
+[03:41:51 INFO]: Pumpkin Growth Modifier: 100%
+[03:41:51 INFO]: Sapling Growth Modifier: 100%
+[03:41:51 INFO]: Wheat Growth Modifier: 100%
+[03:41:51 INFO]: NetherWart Growth Modifier: 100%
+[03:41:51 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[03:41:51 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[03:41:51 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[03:41:51 INFO]: Random Lighting Updates: false
+[03:41:51 INFO]: Structure Info Saving: true
+[03:41:51 INFO]: Sending up to 10 chunks per packet
+[03:41:51 INFO]: Max Entity Collisions: 8
+[03:41:51 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[03:41:51 INFO]: Max TNT Explosions: 100
+[03:41:51 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:41:51 INFO]: Water over lava flow speed: 5
+[03:41:51 INFO]: Fix TNT cannons: false
+[03:41:51 INFO]: Allow undead horse types to be leashed: false
+[03:41:51 INFO]: Keep spawn chunk loaded: true
+[03:41:51 INFO]: World async lighting: false
+[03:41:51 INFO]: WorldServer TickNextTick cap set at 10000
+[03:41:51 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[03:41:51 INFO]: Remove invalid mob spawner tile entities: true
+[03:41:51 INFO]: Player blocking damage multiplier set to 0.5
+[03:41:51 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[03:41:51 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[03:41:51 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[03:41:51 INFO]: [SurvivalGames] Preloaded the spawns of sg-Lobby_Games: 36 chunks in 88 ms
+[03:41:53 INFO]: [SurvivalGames] Preloaded sg-Lobby_Games: 1174 chunks in 1699 ms (1785 ms after the map opened)
+[03:42:27 WARN]: Bot15 moved wrongly!
+[03:42:27 WARN]: Bot15 moved wrongly!
+[03:42:28 WARN]: Bot15 moved wrongly!
+[03:42:29 WARN]: Bot7 moved wrongly!
+[03:42:29 WARN]: Bot7 moved wrongly!
+[03:42:29 WARN]: Bot7 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot17 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot17 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:31 WARN]: Bot17 moved wrongly!
+[03:42:31 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot17 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot17 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:32 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot5 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot4 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot4 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot4 moved wrongly!
+[03:42:33 WARN]: Bot17 moved wrongly!
+[03:42:33 WARN]: Bot9 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot9 moved wrongly!
+[03:42:33 WARN]: Bot17 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:33 WARN]: Bot17 moved wrongly!
+[03:42:33 WARN]: Bot9 moved wrongly!
+[03:42:33 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot17 moved wrongly!
+[03:42:34 WARN]: Bot17 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot17 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:34 WARN]: Bot14 moved wrongly!
+[03:42:34 WARN]: Bot6 moved wrongly!
+[03:42:35 WARN]: Bot14 moved wrongly!
+[03:42:35 WARN]: Bot6 moved wrongly!
+[03:42:35 WARN]: Bot6 moved wrongly!
+[03:42:35 WARN]: Bot17 moved wrongly!
+[03:42:35 WARN]: Bot6 moved wrongly!
+[03:42:35 WARN]: Bot17 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot17 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot17 moved wrongly!
+[03:42:36 WARN]: Bot17 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:36 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot14 moved wrongly!
+[03:42:37 WARN]: Bot6 moved wrongly!
+[03:42:37 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot4 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot4 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:38 WARN]: Bot4 moved wrongly!
+[03:42:38 WARN]: Bot4 moved wrongly!
+[03:42:38 WARN]: Bot14 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot14 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot17 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:39 WARN]: Bot17 moved wrongly!
+[03:42:39 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot17 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot17 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot17 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:40 WARN]: Bot4 moved wrongly!
+[03:42:41 WARN]: Bot4 moved wrongly!
+[03:42:42 WARN]: Bot4 moved wrongly!
+[03:42:42 WARN]: Bot4 moved wrongly!
+[03:42:43 WARN]: Bot4 moved wrongly!
+[03:42:43 WARN]: Bot4 moved wrongly!
+[03:42:43 WARN]: Bot4 moved wrongly!
+[03:42:43 WARN]: Bot17 moved wrongly!
+[03:42:43 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot17 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot17 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot17 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:44 WARN]: Bot4 moved wrongly!
+[03:42:45 WARN]: Bot4 moved wrongly!
+[03:42:45 WARN]: Bot4 moved wrongly!
+[03:42:45 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:46 WARN]: Bot4 moved wrongly!
+[03:42:47 WARN]: Bot4 moved wrongly!
+[03:42:47 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:48 WARN]: Bot4 moved wrongly!
+[03:42:49 WARN]: Bot4 moved wrongly!
+[03:42:49 WARN]: Bot4 moved wrongly!
+[03:42:49 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:50 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:51 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot2 moved wrongly!
+[03:42:52 WARN]: Bot2 moved wrongly!
+[03:42:52 WARN]: Bot4 moved wrongly!
+[03:42:52 WARN]: Bot2 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot2 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot4 moved wrongly!
+[03:42:53 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot17 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:54 WARN]: Bot4 moved wrongly!
+[03:42:55 WARN]: Bot4 moved wrongly!
+[03:42:55 WARN]: Bot4 moved wrongly!
+[03:42:55 WARN]: Bot4 moved wrongly!
+[03:42:56 WARN]: Bot18 moved wrongly!
+[03:42:56 WARN]: Bot18 moved wrongly!
+[03:42:56 WARN]: Bot18 moved wrongly!
+[03:42:56 WARN]: Bot18 moved wrongly!
+[03:43:00 WARN]: Bot17 moved wrongly!
+[03:43:00 WARN]: Bot17 moved wrongly!
+[03:43:00 WARN]: Bot17 moved wrongly!
+[03:43:00 WARN]: Bot17 moved wrongly!
+[03:43:00 WARN]: Bot17 moved wrongly!
+[03:43:02 WARN]: Bot17 moved wrongly!
+[03:43:02 WARN]: Bot17 moved wrongly!
+[03:43:02 WARN]: Bot17 moved wrongly!
+[03:43:02 WARN]: Bot17 moved wrongly!
+[03:43:02 WARN]: Bot17 moved wrongly!
+[03:43:10 WARN]: Bot17 moved wrongly!
+[03:43:10 WARN]: Bot17 moved wrongly!
+[03:43:10 WARN]: Bot17 moved wrongly!
+[03:43:10 WARN]: Bot17 moved wrongly!
+[03:43:10 WARN]: Bot9 moved wrongly!
+[03:43:10 WARN]: Bot9 moved wrongly!
+[03:43:10 WARN]: Bot10 moved wrongly!
+[03:43:10 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot10 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot10 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:11 WARN]: Bot9 moved wrongly!
+[03:43:12 WARN]: Bot9 moved wrongly!
+[03:43:12 WARN]: Bot9 moved wrongly!
+[03:43:12 WARN]: Bot9 moved wrongly!
+[03:43:12 WARN]: Bot9 moved wrongly!
+[03:43:12 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:13 WARN]: Bot9 moved wrongly!
+[03:43:14 WARN]: Bot9 moved wrongly!
+[03:43:14 WARN]: Bot9 moved wrongly!
+[03:43:14 WARN]: Bot9 moved wrongly!
+[03:43:14 WARN]: Bot9 moved wrongly!
+[03:43:14 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:15 WARN]: Bot9 moved wrongly!
+[03:43:16 WARN]: Bot9 moved wrongly!
+[03:43:16 WARN]: Bot9 moved wrongly!
+[03:43:16 WARN]: Bot9 moved wrongly!
+[03:43:18 WARN]: Bot17 moved wrongly!
+[03:43:18 WARN]: Bot17 moved wrongly!
+[03:43:18 WARN]: Bot17 moved wrongly!
+[03:43:18 WARN]: Bot17 moved wrongly!
+[03:43:20 WARN]: Bot17 moved wrongly!
+[03:43:20 WARN]: Bot17 moved wrongly!
+[03:43:20 WARN]: Bot17 moved wrongly!
+[03:43:20 WARN]: Bot17 moved wrongly!
+[03:43:24 WARN]: Bot17 moved wrongly!
+[03:43:24 WARN]: Bot17 moved wrongly!
+[03:43:24 WARN]: Bot17 moved wrongly!
+[03:43:24 WARN]: Bot17 moved wrongly!
+[03:43:24 WARN]: Bot17 moved wrongly!
+[03:43:28 WARN]: Bot17 moved wrongly!
+[03:43:28 WARN]: Bot17 moved wrongly!
+[03:43:28 WARN]: Bot17 moved wrongly!
+[03:43:28 WARN]: Bot17 moved wrongly!
+[03:43:33 WARN]: Bot17 moved wrongly!
+[03:43:36 WARN]: Bot17 moved wrongly!
+[03:43:36 WARN]: Bot17 moved wrongly!
+[03:43:36 WARN]: Bot17 moved wrongly!
+[03:43:37 WARN]: Bot17 moved wrongly!
+[03:43:50 WARN]: Bot17 moved wrongly!
+[03:43:50 WARN]: Bot17 moved wrongly!
+[03:43:51 WARN]: Bot17 moved wrongly!
+[03:43:51 WARN]: Bot17 moved wrongly!
+[03:43:56 WARN]: Bot17 moved wrongly!
+[03:43:57 WARN]: Bot17 moved wrongly!
+[03:43:57 WARN]: Bot17 moved wrongly!
+[03:43:57 WARN]: Bot17 moved wrongly!
+[03:43:59 WARN]: Bot4 moved wrongly!
+[03:43:59 WARN]: Bot17 moved wrongly!
+[03:43:59 WARN]: Bot4 moved wrongly!
+[03:43:59 WARN]: Bot4 moved wrongly!
+[03:44:00 WARN]: Bot4 moved wrongly!
+[03:44:00 WARN]: Bot4 moved wrongly!
+[03:44:01 WARN]: Bot17 moved wrongly!
+[03:44:01 WARN]: Bot17 moved wrongly!
+[03:44:01 WARN]: Bot17 moved wrongly!
+[03:44:01 WARN]: Bot17 moved wrongly!
+[03:44:19 WARN]: Bot1 moved wrongly!
+[03:44:19 WARN]: Bot1 moved wrongly!
+[03:44:19 WARN]: Bot1 moved wrongly!
+[03:45:01 WARN]: Bot2 moved wrongly!
+[03:45:01 WARN]: Bot6 moved wrongly!
+[03:45:01 WARN]: Bot15 moved wrongly!
+[03:45:01 WARN]: Bot15 moved wrongly!
+[03:45:01 WARN]: Bot2 moved wrongly!
+[03:45:01 WARN]: Bot6 moved wrongly!
+[03:45:02 WARN]: Bot2 moved wrongly!
+[03:45:02 WARN]: Bot6 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot15 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot14 moved wrongly!
+[03:45:02 WARN]: Bot12 moved wrongly!
+[03:45:02 WARN]: Bot14 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot12 moved wrongly!
+[03:45:03 WARN]: Bot14 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot14 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot12 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:03 WARN]: Bot15 moved wrongly!
+[03:45:03 WARN]: Bot12 moved wrongly!
+[03:45:03 WARN]: Bot2 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot15 moved wrongly!
+[03:45:04 WARN]: Bot2 moved wrongly!
+[03:45:04 WARN]: Bot2 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot15 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot2 moved wrongly!
+[03:45:04 WARN]: Bot12 moved wrongly!
+[03:45:04 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot12 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:05 WARN]: Bot2 moved wrongly!
+[03:45:06 WARN]: Bot2 moved wrongly!
+[03:45:06 WARN]: Bot2 moved wrongly!
+[03:45:06 WARN]: Bot5 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot5 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot5 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:07 WARN]: Bot2 moved wrongly!
+[03:45:08 WARN]: Bot2 moved wrongly!
+[03:45:08 WARN]: Bot2 moved wrongly!
+[03:45:08 WARN]: Bot2 moved wrongly!
+[03:45:23 WARN]: Bot17 moved wrongly!
+[03:45:23 WARN]: Bot17 moved wrongly!
+[03:45:23 WARN]: Bot17 moved wrongly!
+[03:45:23 WARN]: Bot17 moved wrongly!
+[03:45:25 WARN]: Bot12 moved wrongly!
+[03:45:25 WARN]: Bot12 moved wrongly!
+[03:45:25 WARN]: Bot12 moved wrongly!
+[03:45:25 WARN]: Bot12 moved wrongly!
+[03:45:25 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:26 WARN]: Bot12 moved wrongly!
+[03:45:28 WARN]: Bot12 moved wrongly!
+[03:45:29 WARN]: Bot8 moved wrongly!
+[03:45:29 WARN]: Bot8 moved wrongly!
+[03:45:29 WARN]: Bot8 moved wrongly!
+[03:45:29 WARN]: Bot8 moved wrongly!
+[03:45:29 WARN]: Bot8 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:30 WARN]: Bot12 moved wrongly!
+[03:45:31 WARN]: Bot17 moved wrongly!
+[03:45:31 WARN]: Bot17 moved wrongly!
+[03:45:31 WARN]: Bot17 moved wrongly!
+[03:45:31 WARN]: Bot17 moved wrongly!
+[03:45:32 WARN]: Bot12 moved wrongly!
+[03:45:32 WARN]: Bot12 moved wrongly!
+[03:45:32 WARN]: Bot12 moved wrongly!
+[03:45:32 WARN]: Bot12 moved wrongly!
+[03:45:32 WARN]: Bot12 moved wrongly!
+[03:45:37 WARN]: Bot12 moved wrongly!
+[03:45:37 WARN]: Bot12 moved wrongly!
+[03:45:37 WARN]: Bot19 moved wrongly!
+[03:45:38 WARN]: Bot12 moved wrongly!
+[03:45:38 WARN]: Bot19 moved wrongly!
+[03:45:38 WARN]: Bot19 moved wrongly!
+[03:45:38 WARN]: Bot19 moved wrongly!
+[03:45:38 WARN]: Bot19 moved wrongly!
+[03:45:39 WARN]: Bot13 moved wrongly!
+[03:45:39 WARN]: Bot13 moved wrongly!
+[03:45:39 WARN]: Bot13 moved wrongly!
+[03:45:40 WARN]: Bot3 moved wrongly!
+[03:45:40 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot1 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot1 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot1 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot1 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot1 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:41 WARN]: Bot4 moved wrongly!
+[03:45:41 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot19 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:42 WARN]: Bot3 moved wrongly!
+[03:45:42 WARN]: Bot4 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:43 WARN]: Bot4 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:43 WARN]: Bot1 moved wrongly!
+[03:45:43 WARN]: Bot1 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:43 WARN]: Bot1 moved wrongly!
+[03:45:43 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:44 WARN]: Bot3 moved wrongly!
+[03:45:45 WARN]: Bot3 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:46 WARN]: Bot16 moved wrongly!
+[03:45:47 WARN]: Bot16 moved wrongly!
+[03:45:47 WARN]: Bot16 moved wrongly!
+[03:45:47 WARN]: Bot16 moved wrongly!
+[03:45:47 WARN]: Bot1 moved wrongly!
+[03:45:47 WARN]: Bot1 moved wrongly!
+[03:45:47 WARN]: Bot1 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:48 WARN]: Bot16 moved wrongly!
+[03:45:49 WARN]: Bot1 moved wrongly!
+[03:45:49 WARN]: Bot1 moved wrongly!
+[03:45:49 WARN]: Bot1 moved wrongly!
+[03:45:49 WARN]: Bot1 moved wrongly!
+[03:45:49 WARN]: Bot1 moved wrongly!
+[03:45:51 WARN]: Bot16 moved wrongly!
+[03:45:51 WARN]: Bot16 moved wrongly!
+[03:45:51 WARN]: Bot16 moved wrongly!
+[03:45:52 WARN]: Bot16 moved wrongly!
+[03:45:52 WARN]: Bot16 moved wrongly!
+[03:45:52 WARN]: Bot16 moved wrongly!
+[03:45:52 WARN]: Bot16 moved wrongly!
+[03:45:52 WARN]: Bot16 moved wrongly!
+[03:45:53 WARN]: Bot16 moved wrongly!
+[03:45:53 WARN]: Bot16 moved wrongly!
+[03:45:53 WARN]: Bot16 moved wrongly!
+[03:45:53 WARN]: Bot1 moved wrongly!
+[03:45:53 WARN]: Bot16 moved wrongly!
+[03:45:53 WARN]: Bot1 moved wrongly!
+[03:45:53 WARN]: Bot1 moved wrongly!
+[03:45:53 WARN]: Bot1 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:54 WARN]: Bot16 moved wrongly!
+[03:45:55 WARN]: Bot16 moved wrongly!
+[03:45:55 WARN]: Bot16 moved wrongly!
+[03:45:55 WARN]: Bot16 moved wrongly!
+[03:45:55 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:56 WARN]: Bot16 moved wrongly!
+[03:45:57 WARN]: Bot16 moved wrongly!
+[03:45:57 WARN]: Bot16 moved wrongly!
+[03:45:57 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot16 moved wrongly!
+[03:45:58 WARN]: Bot12 moved wrongly!
+[03:45:59 WARN]: Bot16 moved wrongly!
+[03:45:59 WARN]: Bot12 moved wrongly!
+[03:45:59 WARN]: Bot12 moved wrongly!
+[03:45:59 WARN]: Bot13 moved wrongly!
+[03:45:59 WARN]: Bot13 moved wrongly!
+[03:45:59 WARN]: Bot13 moved wrongly!
+[03:46:00 WARN]: Bot19 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:01 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:02 WARN]: Bot16 moved wrongly!
+[03:46:03 WARN]: Bot16 moved wrongly!
+[03:46:03 WARN]: Bot16 moved wrongly!
+[03:46:03 WARN]: Bot16 moved wrongly!
+[03:46:04 WARN]: Bot16 moved wrongly!
+[03:46:04 WARN]: Bot16 moved wrongly!
+[03:46:08 WARN]: Bot19 moved wrongly!
+[03:46:08 WARN]: Bot19 moved wrongly!
+[03:46:08 WARN]: Bot19 moved wrongly!
+[03:46:08 WARN]: Bot19 moved wrongly!
+[03:46:08 WARN]: Bot19 moved wrongly!
+[03:46:11 WARN]: Bot1 moved wrongly!
+[03:46:11 WARN]: Bot1 moved wrongly!
+[03:46:11 WARN]: Bot1 moved wrongly!
+[03:46:11 WARN]: Bot16 moved wrongly!
+[03:46:11 WARN]: Bot1 moved wrongly!
+[03:46:11 WARN]: Bot16 moved wrongly!
+[03:46:12 WARN]: Bot1 moved wrongly!
+[03:46:12 WARN]: Bot16 moved wrongly!
+[03:46:12 WARN]: Bot16 moved wrongly!
+[03:46:13 WARN]: Bot19 moved wrongly!
+[03:46:15 WARN]: Bot16 moved wrongly!
+[03:46:15 WARN]: Bot16 moved wrongly!
+[03:46:16 WARN]: Bot16 moved wrongly!
+[03:46:16 WARN]: Bot16 moved wrongly!
+[03:46:18 WARN]: Bot19 moved wrongly!
+[03:46:19 WARN]: Bot19 moved wrongly!
+[03:46:20 WARN]: Bot13 moved wrongly!
+[03:46:20 WARN]: Bot13 moved wrongly!
+[03:46:20 WARN]: Bot13 moved wrongly!
+[03:46:20 WARN]: Bot13 moved wrongly!
+[03:46:21 WARN]: Bot12 moved wrongly!
+[03:46:22 WARN]: Bot17 moved wrongly!
+[03:46:22 WARN]: Bot17 moved wrongly!
+[03:46:22 WARN]: Bot17 moved wrongly!
+[03:46:22 WARN]: Bot17 moved wrongly!
+[03:46:24 WARN]: Bot13 moved wrongly!
+[03:46:24 WARN]: Bot13 moved wrongly!
+[03:46:24 WARN]: Bot13 moved wrongly!
+[03:46:24 WARN]: Bot13 moved wrongly!
+[03:46:24 WARN]: Bot13 moved wrongly!
+[03:46:27 WARN]: Bot12 moved wrongly!
+[03:46:27 WARN]: Bot12 moved wrongly!
+[03:46:27 WARN]: Bot12 moved wrongly!
+[03:46:28 WARN]: Bot17 moved wrongly!
+[03:46:28 WARN]: Bot17 moved wrongly!
+[03:46:28 WARN]: Bot17 moved wrongly!
+[03:46:28 WARN]: Bot17 moved wrongly!
+[03:46:29 WARN]: Bot16 moved wrongly!
+[03:46:29 WARN]: Bot1 moved wrongly!
+[03:46:29 WARN]: Bot16 moved wrongly!
+[03:46:29 WARN]: Bot1 moved wrongly!
+[03:46:30 WARN]: Bot1 moved wrongly!
+[03:46:30 WARN]: Bot13 moved wrongly!
+[03:46:30 WARN]: Bot1 moved wrongly!
+[03:46:30 WARN]: Bot13 moved wrongly!
+[03:46:30 WARN]: Bot13 moved wrongly!
+[03:46:30 WARN]: Bot13 moved wrongly!
+[03:46:30 WARN]: Bot13 moved wrongly!
+[03:46:30 WARN]: Bot16 moved wrongly!
+[03:46:30 WARN]: Bot16 moved wrongly!
+[03:46:30 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:31 WARN]: Bot16 moved wrongly!
+[03:46:33 WARN]: Bot19 moved wrongly!
+[03:46:35 WARN]: Bot16 moved wrongly!
+[03:46:35 WARN]: Bot16 moved wrongly!
+[03:46:35 WARN]: Bot16 moved wrongly!
+[03:46:36 WARN]: Bot16 moved wrongly!
+[03:46:36 WARN]: Bot16 moved wrongly!
+[03:46:36 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:37 WARN]: Bot16 moved wrongly!
+[03:46:38 WARN]: Bot16 moved wrongly!
+[03:46:38 WARN]: Bot16 moved wrongly!
+[03:46:38 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:39 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:40 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot1 moved wrongly!
+[03:46:41 WARN]: Bot16 moved wrongly!
+[03:46:41 WARN]: Bot1 moved wrongly!
+[03:46:42 WARN]: Bot16 moved wrongly!
+[03:46:42 WARN]: Bot1 moved wrongly!
+[03:46:42 WARN]: Bot13 moved wrongly!
+[03:46:42 WARN]: Bot13 moved wrongly!
+[03:46:42 WARN]: Bot1 moved wrongly!
+[03:46:42 WARN]: Bot13 moved wrongly!
+[03:46:42 WARN]: Bot13 moved wrongly!
+[03:46:42 WARN]: Bot16 moved wrongly!
+[03:46:42 WARN]: Bot13 moved wrongly!
+[03:46:42 WARN]: Bot16 moved wrongly!
+[03:46:42 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:43 WARN]: Bot16 moved wrongly!
+[03:46:44 WARN]: Bot16 moved wrongly!
+[03:46:44 WARN]: Bot16 moved wrongly!
+[03:46:44 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:45 WARN]: Bot16 moved wrongly!
+[03:46:46 WARN]: Bot16 moved wrongly!
+[03:46:46 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:47 WARN]: Bot16 moved wrongly!
+[03:46:48 WARN]: Bot16 moved wrongly!
+[03:46:48 WARN]: Bot16 moved wrongly!
+[03:46:48 WARN]: Bot13 moved wrongly!
+[03:46:48 WARN]: Bot13 moved wrongly!
+[03:46:48 WARN]: Bot13 moved wrongly!
+[03:46:48 WARN]: Bot13 moved wrongly!
+[03:46:48 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot19 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot19 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:49 WARN]: Bot16 moved wrongly!
+[03:46:50 WARN]: Bot16 moved wrongly!
+[03:46:50 WARN]: Bot16 moved wrongly!
+[03:46:50 WARN]: Bot16 moved wrongly!
+[03:46:50 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:51 WARN]: Bot16 moved wrongly!
+[03:46:52 WARN]: Bot16 moved wrongly!
+[03:46:52 WARN]: Bot1 moved wrongly!
+[03:46:52 WARN]: Bot16 moved wrongly!
+[03:46:52 WARN]: Bot1 moved wrongly!
+[03:46:52 WARN]: Bot1 moved wrongly!
+[03:46:52 WARN]: Bot1 moved wrongly!
+[03:46:52 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:53 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot13 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot13 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot13 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:54 WARN]: Bot13 moved wrongly!
+[03:46:54 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:55 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:56 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:57 WARN]: Bot16 moved wrongly!
+[03:46:58 WARN]: Bot16 moved wrongly!
+[03:46:58 WARN]: Bot16 moved wrongly!
+[03:46:58 WARN]: Bot13 moved wrongly!
+[03:46:58 WARN]: Bot13 moved wrongly!
+[03:46:58 WARN]: Bot13 moved wrongly!
+[03:46:58 WARN]: Bot13 moved wrongly!
+[03:46:58 WARN]: Bot13 moved wrongly!
+[03:46:58 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:46:59 WARN]: Bot16 moved wrongly!
+[03:47:00 WARN]: Bot16 moved wrongly!
+[03:47:00 WARN]: Bot16 moved wrongly!
+[03:47:00 WARN]: Bot13 moved wrongly!
+[03:47:00 WARN]: Bot13 moved wrongly!
+[03:47:00 WARN]: Bot17 moved wrongly!
+[03:47:00 WARN]: Bot13 moved wrongly!
+[03:47:00 WARN]: Bot17 moved wrongly!
+[03:47:00 WARN]: Bot13 moved wrongly!
+[03:47:00 WARN]: Bot17 moved wrongly!
+[03:47:01 WARN]: Bot17 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:01 WARN]: Bot16 moved wrongly!
+[03:47:02 WARN]: Bot16 moved wrongly!
+[03:47:02 WARN]: Bot16 moved wrongly!
+[03:47:02 WARN]: Bot16 moved wrongly!
+[03:47:02 WARN]: Bot16 moved wrongly!
+[03:47:02 WARN]: Bot13 moved wrongly!
+[03:47:02 WARN]: Bot13 moved wrongly!
+[03:47:02 WARN]: Bot13 moved wrongly!
+[03:47:03 WARN]: Bot13 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:03 WARN]: Bot16 moved wrongly!
+[03:47:04 WARN]: Bot16 moved wrongly!
+[03:47:04 WARN]: Bot16 moved wrongly!
+[03:47:04 WARN]: Bot1 moved wrongly!
+[03:47:04 WARN]: Bot16 moved wrongly!
+[03:47:04 WARN]: Bot1 moved wrongly!
+[03:47:04 WARN]: Bot1 moved wrongly!
+[03:47:04 WARN]: Bot1 moved wrongly!
+[03:47:04 WARN]: Bot17 moved wrongly!
+[03:47:04 WARN]: Bot17 moved wrongly!
+[03:47:05 WARN]: Bot17 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:05 WARN]: Bot16 moved wrongly!
+[03:47:06 WARN]: Bot16 moved wrongly!
+[03:47:06 WARN]: Bot16 moved wrongly!
+[03:47:06 WARN]: Bot1 moved wrongly!
+[03:47:06 WARN]: Bot16 moved wrongly!
+[03:47:06 WARN]: Bot1 moved wrongly!
+[03:47:06 WARN]: Bot16 moved wrongly!
+[03:47:06 WARN]: Bot13 moved wrongly!
+[03:47:06 WARN]: Bot1 moved wrongly!
+[03:47:06 WARN]: Bot13 moved wrongly!
+[03:47:06 WARN]: Bot1 moved wrongly!
+[03:47:06 WARN]: Bot13 moved wrongly!
+[03:47:06 WARN]: Bot1 moved wrongly!
+[03:47:06 WARN]: Bot13 moved wrongly!
+[03:47:07 WARN]: Bot13 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:07 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot13 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot13 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot17 moved wrongly!
+[03:47:08 WARN]: Bot16 moved wrongly!
+[03:47:08 WARN]: Bot13 moved wrongly!
+[03:47:08 WARN]: Bot17 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:09 WARN]: Bot17 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:09 WARN]: Bot16 moved wrongly!
+[03:47:10 WARN]: Bot16 moved wrongly!
+[03:47:10 WARN]: Bot16 moved wrongly!
+[03:47:10 WARN]: Bot16 moved wrongly!
+[03:47:10 WARN]: Bot16 moved wrongly!
+[03:47:10 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:11 WARN]: Bot16 moved wrongly!
+[03:47:12 WARN]: Bot16 moved wrongly!
+[03:47:12 WARN]: Bot16 moved wrongly!
+[03:47:12 WARN]: Bot1 moved wrongly!
+[03:47:12 WARN]: Bot16 moved wrongly!
+[03:47:12 WARN]: Bot1 moved wrongly!
+[03:47:12 WARN]: Bot13 moved wrongly!
+[03:47:12 WARN]: Bot1 moved wrongly!
+[03:47:12 WARN]: Bot17 moved wrongly!
+[03:47:12 WARN]: Bot13 moved wrongly!
+[03:47:12 WARN]: Bot1 moved wrongly!
+[03:47:13 WARN]: Bot17 moved wrongly!
+[03:47:13 WARN]: Bot13 moved wrongly!
+[03:47:13 WARN]: Bot17 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:13 WARN]: Bot16 moved wrongly!
+[03:47:14 WARN]: Bot16 moved wrongly!
+[03:47:14 WARN]: Bot16 moved wrongly!
+[03:47:14 WARN]: Bot16 moved wrongly!
+[03:47:14 WARN]: Bot16 moved wrongly!
+[03:47:14 WARN]: Bot13 moved wrongly!
+[03:47:14 WARN]: Bot13 moved wrongly!
+[03:47:14 WARN]: Bot13 moved wrongly!
+[03:47:15 WARN]: Bot13 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:15 WARN]: Bot16 moved wrongly!
+[03:47:16 WARN]: Bot16 moved wrongly!
+[03:47:16 WARN]: Bot16 moved wrongly!
+[03:47:16 WARN]: Bot16 moved wrongly!
+[03:47:16 WARN]: Bot16 moved wrongly!
+[03:47:16 WARN]: Bot17 moved wrongly!
+[03:47:17 WARN]: Bot17 moved wrongly!
+[03:47:17 WARN]: Bot17 moved wrongly!
+[03:47:17 WARN]: Bot16 moved wrongly!
+[03:47:17 WARN]: Bot17 moved wrongly!
+[03:47:17 WARN]: Bot16 moved wrongly!
+[03:47:17 WARN]: Bot16 moved wrongly!
+[03:47:17 WARN]: Bot16 moved wrongly!
+[03:47:18 WARN]: Bot16 moved wrongly!
+[03:47:18 WARN]: Bot16 moved wrongly!
+[03:47:18 WARN]: Bot16 moved wrongly!
+[03:47:28 INFO]: Bot0 lost connection: Disconnected
+[03:47:28 INFO]: Bot1 lost connection: Disconnected
+[03:47:28 INFO]: Bot2 lost connection: Disconnected
+[03:47:28 INFO]: Bot5 lost connection: Disconnected
+[03:47:28 INFO]: Bot6 lost connection: Disconnected
+[03:47:28 INFO]: Bot7 lost connection: Disconnected
+[03:47:28 INFO]: Bot9 lost connection: Disconnected
+[03:47:28 INFO]: Bot13 lost connection: Disconnected
+[03:47:28 INFO]: Bot14 lost connection: Disconnected
+[03:47:28 INFO]: Bot15 lost connection: Disconnected
+[03:47:28 INFO]: Bot17 lost connection: Disconnected
+[03:47:28 INFO]: Bot3 lost connection: Disconnected
+[03:47:28 INFO]: Bot4 lost connection: Disconnected
+[03:47:28 INFO]: Bot8 lost connection: Disconnected
+[03:47:28 INFO]: Bot10 lost connection: Disconnected
+[03:47:28 INFO]: Bot11 lost connection: Disconnected
+[03:47:28 INFO]: Bot12 lost connection: Disconnected
+[03:47:28 INFO]: Bot16 lost connection: Disconnected
+[03:47:28 INFO]: Bot18 lost connection: Disconnected
+[03:47:28 INFO]: Bot19 lost connection: Disconnected
+[03:47:35 INFO]: Stopping the server
+[03:47:36 INFO]: Stopping server
+[03:47:36 INFO]: [SurvivalGames] Disabling SurvivalGames v1.0-SNAPSHOT
+[03:47:36 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:47:36 INFO]: Item Despawn Rate: 6000
+[03:47:36 INFO]: Item Merge Radius: 2.5
+[03:47:36 INFO]: Arrow Despawn Rate: 1200
+[03:47:36 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[03:47:36 INFO]: View Distance: 8
+[03:47:36 INFO]: Zombie Aggressive Towards Villager: true
+[03:47:36 INFO]: Anti X-Ray: false
+[03:47:36 INFO]: 	Engine Mode: 1
+[03:47:36 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[03:47:36 INFO]: 	Replace Blocks: [1, 5]
+[03:47:36 INFO]: Chunks to Grow per Tick: 650
+[03:47:36 INFO]: Clear tick list: false
+[03:47:36 INFO]: Experience Merge Radius: 3.0
+[03:47:36 INFO]: Mob Spawn Range: 4
+[03:47:36 INFO]: Nerfing mobs spawned from spawners: false
+[03:47:36 INFO]: Cactus Growth Modifier: 100%
+[03:47:36 INFO]: Cane Growth Modifier: 100%
+[03:47:36 INFO]: Melon Growth Modifier: 100%
+[03:47:36 INFO]: Mushroom Growth Modifier: 100%
+[03:47:36 INFO]: Pumpkin Growth Modifier: 100%
+[03:47:36 INFO]: Sapling Growth Modifier: 100%
+[03:47:36 INFO]: Wheat Growth Modifier: 100%
+[03:47:36 INFO]: NetherWart Growth Modifier: 100%
+[03:47:36 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[03:47:36 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[03:47:36 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[03:47:36 INFO]: Random Lighting Updates: false
+[03:47:36 INFO]: Structure Info Saving: true
+[03:47:36 INFO]: Sending up to 10 chunks per packet
+[03:47:36 INFO]: Max Entity Collisions: 8
+[03:47:36 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[03:47:36 INFO]: Max TNT Explosions: 100
+[03:47:36 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[03:47:36 INFO]: Water over lava flow speed: 5
+[03:47:36 INFO]: Fix TNT cannons: false
+[03:47:36 INFO]: Allow undead horse types to be leashed: false
+[03:47:36 INFO]: Keep spawn chunk loaded: true
+[03:47:36 INFO]: World async lighting: false
+[03:47:36 INFO]: WorldServer TickNextTick cap set at 10000
+[03:47:36 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[03:47:36 INFO]: Remove invalid mob spawner tile entities: true
+[03:47:36 INFO]: Player blocking damage multiplier set to 0.5
+[03:47:36 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[03:47:36 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[03:47:36 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[03:47:36 INFO]: Saving players
+[03:47:36 INFO]: Saving worlds
+[03:47:36 INFO]: Saving chunks for level 'lobby'/Overworld
