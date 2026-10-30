@@ -45,7 +45,17 @@ for js in sorted(glob.glob(os.path.join(d, "j25_*.json")), key=lambda p: int(os.
             "gc_pause_sum_ms": round(sum(p[2] for p in ps), 1),
             "full_or_degenerated": sum(1 for p in ps if "Full" in p[1] or "Degenerated" in p[1]),
         })
-    rows.append({"run": tag, "phase": "ALL", "rss_max": r.get("rss_peak"), "anon_max": r.get("anon_peak"),
+    t_start, t_end = phases[0][0], phases[-1][0]
+    ds = [x for x in diag if t_start + 5 <= int(x["epoch_ms"]) / 1000.0 <= t_end]
+    ticks = sum(int(x["ticks"]) for x in ds)
+    mem = [m for m in r["mem"] if t_start <= m[0] <= t_end]
+    rows.append({"run": tag, "phase": "ALL", "s": round(t_end - t_start),
+                 "cores": round((mem[-1][1] - mem[0][1]) / (mem[-1][0] - mem[0][0]), 3) if len(mem) > 1 else None,
+                 "tick_mean_ms": round(sum(float(x["tick_ms_sum"]) for x in ds) / ticks, 2) if ticks else None,
+                 "tick_max_ms": max((float(x["tick_ms_max"]) for x in ds), default=None),
+                 "ticks_over_50": sum(int(x["ticks_over_50ms"]) for x in ds),
+                 "gc_pause_sum_ms": round(sum(p[2] for p in pauses), 1),
+                 "rss_max": r.get("rss_peak"), "anon_max": r.get("anon_peak"),
                  "gc_pause_max_ms": max((p[2] for p in pauses), default=0), "gc_pauses": len(pauses),
                  "full_or_degenerated": sum(1 for p in pauses if "Full" in p[1] or "Degenerated" in p[1]),
                  "bots_ok": r.get("bots_ok")})

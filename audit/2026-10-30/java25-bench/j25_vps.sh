@@ -14,7 +14,7 @@ OUT="$1"; shift
 mkdir -p "$OUT"
 F='^WARNING|terminal features|OFFLINE|authenticate|hackers|online-mode|more ram|moved wrongly'
 WARMED=" "
-n=0
+n=${J25_START:-0}
 for v in "$@"; do
   IFS=: read -r name jar script <<< "$v"
   n=$((n + 1)); tag="j25_${n}_${name}"

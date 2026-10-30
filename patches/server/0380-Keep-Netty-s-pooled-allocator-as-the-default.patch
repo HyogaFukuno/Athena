@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 17:04:17 +0900
+Subject: [PATCH] Keep Netty's pooled allocator as the default
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index ff7fd163d6cd96ed0064a46d574d3d8450cfdf04..d842ae53b53d20d093ef33a63f0dd9a3e5c33a58 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -21,6 +21,11 @@ public class Main {
+         if (System.getProperty("paper.explicit-flush") == null) System.setProperty("paper.explicit-flush", "true"); // PandaSpigot
+         // Todo: Installation script
+         if (System.getProperty("jdk.nio.maxCachedBufferSize") == null) System.setProperty("jdk.nio.maxCachedBufferSize", "262144"); // PandaSpigot - cap per-thread NIO cache size
++        // Athena - Netty 4.2 made its adaptive allocator the default. Over whole 20-player matches on
++        // the VPS it held ~14 MB more RSS than the pooled one (308-316 MB peaks against 300-302), and
++        // start-small.sh's io.netty.allocator.maxOrder only sizes the pooled one; keep pooled unless
++        // the command line says otherwise
++        if (System.getProperty("io.netty.allocator.type") == null) System.setProperty("io.netty.allocator.type", "pooled");
+         OptionParser parser = new OptionParser() {
+             {
+                 acceptsAll(asList("?", "help"), "Show the help");
