@@ -141,6 +141,11 @@ public final class MapProbe extends JavaPlugin implements Listener {
 
     private final Map<Long, String> threadNames = new java.util.HashMap<Long, String>();
     private final Map<Long, Long> threadCpu = new java.util.HashMap<Long, Long>();
+    private final Map<Long, Long> threadAlloc = new java.util.HashMap<Long, Long>();
+
+    private long allocated(long id) {
+        return Math.max(0, ((com.sun.management.ThreadMXBean) threads).getThreadAllocatedBytes(id));
+    }
 
     private static String group(String name) {
         for (String prefix : new String[] { "Server thread", "Netty", "Athena chunk packet compressor", "File IO",
@@ -155,21 +160,30 @@ public final class MapProbe extends JavaPlugin implements Listener {
             if (info != null) {
                 this.threadNames.put(info.getThreadId(), info.getThreadName());
                 this.threadCpu.put(info.getThreadId(), Math.max(0, threads.getThreadCpuTime(info.getThreadId())));
+                this.threadAlloc.put(info.getThreadId(), allocated(info.getThreadId()));
             }
         }
     }
 
     private void threadDelta(double seconds) {
         Map<String, Long> groups = new java.util.TreeMap<String, Long>();
+        Map<String, Long> alloc = new java.util.TreeMap<String, Long>();
         for (ThreadInfo info : threads.getThreadInfo(threads.getAllThreadIds())) {
             if (info == null) continue;
             long before = this.threadCpu.getOrDefault(info.getThreadId(), 0L);
             long now = Math.max(0, threads.getThreadCpuTime(info.getThreadId()));
             groups.merge(group(info.getThreadName()), now - before, Long::sum);
+            alloc.merge(group(info.getThreadName()), allocated(info.getThreadId()) - this.threadAlloc.getOrDefault(info.getThreadId(), 0L), Long::sum);
         }
         for (Map.Entry<String, Long> e : groups.entrySet()) {
             this.result.put("cpu_ms_per_s_" + e.getKey().replace(' ', '_').replace('/', '_'), Math.round(e.getValue() / 1e6 / seconds * 10) / 10.0);
         }
+        long total = 0;
+        for (Map.Entry<String, Long> e : alloc.entrySet()) {
+            total += e.getValue();
+            this.result.put("alloc_kb_per_s_" + e.getKey().replace(' ', '_').replace('/', '_'), Math.round(e.getValue() / 1024.0 / seconds));
+        }
+        this.result.put("alloc_kb_per_s_total", Math.round(total / 1024.0 / seconds));
     }
 
     private void startWindow() {

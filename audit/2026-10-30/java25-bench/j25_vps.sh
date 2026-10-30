@@ -25,6 +25,8 @@ for v in "$@"; do
     WARMED="$WARMED$jar:$script " ;;
   esac
   ssh -o BatchMode=yes $H "rm -f $D/athena-diag.csv; touch $D/athena-diag.request; chown mc:mc $D/athena-diag.request"
+  # per-thread CPU and the heap mapping's RSS, if the sampler is installed (see j25-threads.sh)
+  ssh -o BatchMode=yes $H "[ -x /root/j25-threads.sh ] && { rm -f /root/$tag.threads; nohup /root/j25-threads.sh /root/$tag.threads > /dev/null 2>&1 & }; true"
   perl -e 'alarm shift; exec @ARGV' 1500 python3 sg_match_load.py $H --dir $D --session sgbench3 --port 25570 --tunnel \
     --map Return_To_Moonbase_9 --centre 256,-153 --roam 200 --spread --heap 144M --matches 1 --live-seconds 120 \
     --tag $tag 2>&1 | grep -vE "$F" | grep -vE "^\[[0-9]|^$|^ +[0-9]+: |^ num"
@@ -32,6 +34,7 @@ for v in "$@"; do
     cp $D/athena-diag.csv /root/$tag.diag.csv; cp $D/gc.log /root/$tag.gc.log; cp $D/console.out /root/$tag.console; \
     grep -E 'start-small\]|AOT|Using .* channel type|Preloaded' $D/console.out | head -5"
   scp -q $H:/root/$tag.diag.csv $H:/root/$tag.gc.log $H:/root/$tag.console "$OUT/"
+  scp -q $H:/root/$tag.threads "$OUT/" 2>/dev/null
   cp out/$tag.json "$OUT/" 2>/dev/null
 done
 ssh -o BatchMode=yes $H "sudo -u mc tmux ls 2>&1; free -m | sed -n 2p"
