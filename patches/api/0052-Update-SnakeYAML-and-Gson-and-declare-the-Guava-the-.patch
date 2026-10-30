@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 15:47:02 +0900
+Subject: [PATCH] Update SnakeYAML and Gson, and declare the Guava the jar
+ holds
+
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 672276a91f256d8cbeee546dc7db0859efcff965..a2bc6b2cdc1bc29b5d6740af2633c5f39df4ff0f 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -20,7 +20,7 @@ dependencies {
+     api("com.googlecode.json-simple:json-simple:1.1.1") {
+         isTransitive = false
+     }
+-    api("org.yaml:snakeyaml:1.15")
++    api("org.yaml:snakeyaml:1.33") // Athena - the last 1.x: 2.x drops constructors plugins call; 1.15 had eight known advisories, 1.33 one (CVE-2022-1471, an unsafe Constructor Bukkit's YamlConstructor does not use)
+     api("net.md-5:bungeecord-chat:1.8-SNAPSHOT")
+     // PandaSpigot start - Adventure
+     api("net.kyori:adventure-api:$adventureVersion")
+@@ -32,8 +32,8 @@ dependencies {
+     compileOnlyApi("it.unimi.dsi:fastutil:8.5.19") // provided by server // Athena - fastutil in place of trove
+ 
+     // bundled with Minecraft, should be kept in sync
+-    api("com.google.guava:guava:17.0")
+-    api("com.google.code.gson:gson:2.2.4")
++    api("com.google.guava:guava:18.0") // Athena - what the jar has held all along (dependency resolution raised 17); 21+ removes API old plugins call
++    api("com.google.code.gson:gson:2.10.1") // Athena - was resolved to 2.8.0 (GHSA-4jrv-ppp4-jm57)
+     api("org.slf4j:slf4j-api:1.7.35") // PandaSpigot - Add SLF4J Logger
+ 
+     // testing

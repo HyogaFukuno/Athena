@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 15:47:02 +0900
+Subject: [PATCH] Update Log4j, Gson, commons-io and commons-lang3, and declare
+ the Guava the jar holds
+
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index ae9854c0566efb444b5aedb475911f77b8ca91d4..6bed4a8ea231e313f1fd32e83ac5c8768a0cfb02 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -36,16 +36,17 @@ dependencies {
+     // Athena end
+     implementation("com.mojang:authlib:1.5.21")
+     // PandaSpigot start - Update log4j
+-    implementation("org.apache.logging.log4j:log4j-api:2.25.3")
+-    implementation("org.apache.logging.log4j:log4j-core:2.25.3")
+-    implementation("org.apache.logging.log4j:log4j-slf4j-impl:2.25.3") // PandaSpigot - Add SLF4J logger
+-    implementation("org.apache.logging.log4j:log4j-iostreams:2.25.3") // PandaSpigot - Add Log4j IOStreams
++    // Athena - 2.25.5: 2.25.3 has four known advisories (fixed in 2.25.4)
++    implementation("org.apache.logging.log4j:log4j-api:2.25.5")
++    implementation("org.apache.logging.log4j:log4j-core:2.25.5")
++    implementation("org.apache.logging.log4j:log4j-slf4j-impl:2.25.5") // PandaSpigot - Add SLF4J logger
++    implementation("org.apache.logging.log4j:log4j-iostreams:2.25.5") // PandaSpigot - Add Log4j IOStreams
+     // PandaSpigot end
+-    implementation("org.apache.commons:commons-lang3:3.3.2")
+-    implementation("commons-io:commons-io:2.4")
++    implementation("org.apache.commons:commons-lang3:3.19.0") // Athena - 3.3.2 had a known advisory
++    implementation("commons-io:commons-io:2.20.0") // Athena - 2.4 had two known advisories
+     implementation("commons-codec:commons-codec:1.9")
+-    implementation("com.google.guava:guava:17.0")
+-    implementation("com.google.code.gson:gson:2.2.4")
++    implementation("com.google.guava:guava:18.0") // Athena - as in the API
++    implementation("com.google.code.gson:gson:2.10.1") // Athena - as in the API
+     implementation("net.sf.jopt-simple:jopt-simple:3.2")
+ 
+ 
+diff --git a/src/main/java/net/minecraft/server/LocaleLanguage.java b/src/main/java/net/minecraft/server/LocaleLanguage.java
+index 6047b575232d06dada196daf328e4865b1e32d5e..298eb416f7b544fa1d20f8b1afe46424b184165f 100644
+--- a/src/main/java/net/minecraft/server/LocaleLanguage.java
++++ b/src/main/java/net/minecraft/server/LocaleLanguage.java
+@@ -3,7 +3,6 @@ package net.minecraft.server;
+ import com.google.common.base.Splitter;
+ import com.google.common.collect.Iterables;
+ import com.google.common.collect.Maps;
+-import java.io.IOException;
+ import java.io.InputStream;
+ import java.util.IllegalFormatException;
+ import java.util.Map;
+@@ -38,7 +37,7 @@ public class LocaleLanguage {
+             }
+ 
+             this.lastUpdateTimeInMilliseconds = System.currentTimeMillis();
+-        } catch (IOException ioexception) {
++        } catch (java.io.UncheckedIOException ioexception) { // Athena - commons-io 2.20's readLines reports a read failure unchecked
+             ;
+         }
+ 
