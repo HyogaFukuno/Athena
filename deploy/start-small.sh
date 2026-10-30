@@ -45,6 +45,10 @@
 #   what it uses (~21 MB), so it costs no memory.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
+# - --enable-native-access and --sun-misc-unsafe-memory-access=allow say out loud what the server
+#   needs from Java 25: Netty's epoll/io_uring and jline load native libraries (JEP 472), and Netty
+#   allocates with sun.misc.Unsafe (JEP 471/498). Java 25 allows both and warns, with six WARNING
+#   lines at every start; a future release will refuse them unless asked for, as here.
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
@@ -64,6 +68,8 @@ FLAGS=(
     -XX:ArchiveRelocationMode=0
     -XX:+HeapDumpOnOutOfMemoryError
     -XX:HeapDumpPath=oom.hprof
+    --enable-native-access=ALL-UNNAMED
+    --sun-misc-unsafe-memory-access=allow
 )
 
 export MALLOC_ARENA_MAX=2
@@ -120,10 +126,14 @@ if [ ! -f "$AOT" ]; then
     fi
 fi
 
-# Keep this key and the two most recently used others; a server still running from an older one
-# keeps its open files either way
+# Keep this key and the two most recently used others, and any used in the last week; a server still
+# running from an older one keeps its open files either way. The week is what keeps a key another
+# server has just chosen: it touched it under this lock, but has not opened its jar yet, and three
+# servers starting on three other keys meanwhile would otherwise push it out of the newest three.
 touch "$DIR"
-ls -1dt "$ROOT"/*/ 2>/dev/null | tail -n +4 | while read -r old; do rm -rf "$old"; done
+ls -1dt "$ROOT"/*/ 2>/dev/null | tail -n +4 | while read -r old; do
+    if [ -n "$(find "$old" -maxdepth 0 -mtime +7)" ]; then rm -rf "$old"; fi
+done
 
 command -v flock >/dev/null && flock -u 9
 exec 9>&-
