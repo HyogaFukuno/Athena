@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 08:22:57 +0900
+Subject: [PATCH] Let an Error from a gradual teleport reach the tick loop
+
+An Exception is still one player's failed teleport: it is logged and the
+group moves on. An Error drops its group, fails the group's future with it and
+is rethrown, as the decoration worker's are; the other groups stay queued.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaTeleportQueue.java b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+index 8182922eb2401612c95ddc2c3cda5fe7bb0dd9a1..b8d8e32210260ddf0d042b3cfec95a88048af1d9 100644
+--- a/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
++++ b/src/main/java/net/minecraft/server/AthenaTeleportQueue.java
+@@ -81,8 +81,15 @@ public final class AthenaTeleportQueue {
+                     if (to != null && player.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN)) {
+                         ++batch.teleported;
+                     }
+-                } catch (Throwable throwable) {
+-                    LOGGER.warn("[Athena] Teleporting " + player.getName() + " failed", throwable);
++                } catch (Exception exception) {
++                    LOGGER.warn("[Athena] Teleporting " + player.getName() + " failed", exception);
++                } catch (Error error) {
++                    // Athena - an Error (out of memory, say) is not one player's failed teleport: the
++                    // group is dropped, its future fails with it, and it goes on to the tick loop as
++                    // the decoration worker's do. The other groups stay queued.
++                    this.batches.remove(batch);
++                    batch.future.completeExceptionally(error);
++                    throw error;
+                 }
+             }
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+index 40c915b46b166ceede455ac0ede27ad536121a1d..3243d2488578c751c0692e2f61f9acd5849230e7 100644
+--- a/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
++++ b/src/test/java/net/minecraft/server/AthenaTeleportQueueTest.java
+@@ -102,6 +102,49 @@ public class AthenaTeleportQueueTest {
+         assertEquals(1, second.get());
+     }
+ 
++    @Test
++    public void anExceptionSkipsOnlyThatPlayer() {
++        List<Player> players = Arrays.asList(this.player("a", true, null), this.player("b", true, null), this.player("c", true, null));
++        CompletableFuture<Integer> done = AthenaTeleportQueue.INSTANCE.teleportGradually(players, (i, p) -> {
++            if (p.getName().equals("b")) {
++                throw new IllegalStateException("a plugin's destination failed");
++            }
++            return new Location(null, 0, 64, 0);
++        }, 3);
++
++        drain(1);
++        assertEquals(Arrays.asList("a", "c"), this.log);
++        assertEquals(Integer.valueOf(2), done.join());
++    }
++
++    @Test
++    public void anErrorFailsItsGroupAndReachesTheTickLoop() {
++        final AssertionError failure = new AssertionError("out of memory, say");
++        CompletableFuture<Integer> broken = AthenaTeleportQueue.INSTANCE.teleportGradually(
++                Arrays.asList(this.player("a", true, null), this.player("b", true, null)), (i, p) -> {
++                    if (p.getName().equals("a")) {
++                        throw failure;
++                    }
++                    return new Location(null, 0, 64, 0);
++                }, 2);
++        CompletableFuture<Integer> other = AthenaTeleportQueue.INSTANCE.teleportGradually(
++                Arrays.asList(this.player("other", true, null)), (i, p) -> new Location(null, 0, 64, 0), 1);
++
++        try {
++            drain(1);
++            throw new IllegalStateException("the Error was swallowed");
++        } catch (AssertionError thrown) {
++            assertTrue("the same Error, not a wrapper", thrown == failure);
++        }
++        assertTrue(broken.isCompletedExceptionally());
++        assertTrue("b is not teleported after the Error", this.log.isEmpty());
++
++        // the group that failed is gone; the other one still moves on the next tick
++        drain(1);
++        assertEquals(Arrays.asList("other"), this.log);
++        assertEquals(Integer.valueOf(1), other.join());
++    }
++
+     @Test
+     public void anEmptyGroupIsDoneAtOnce() {
+         assertTrue(AthenaTeleportQueue.INSTANCE.teleportGradually(new ArrayList<Player>(), (i, p) -> null, 5).isDone());

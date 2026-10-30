@@ -1,0 +1,27 @@
+# SurvivalGames のサーバー 1 台 (Athena)。systemctl start sg@sg1 で /opt/mc/sg1 を起動する。
+# mc ユーザーの tmux のセッション (名前はサーバー名。サーバーごとに別の tmux (-L %i) にして、systemd が 1 台ずつ追えるようにする) の中で /opt/mc/start-small.sh を動かし、出力は console.out にも残す
+# (前回分は console.out.prev)。コンソールは
+#   su - mc -c "tmux -L sg1 attach -t sg1"   (抜けるときは Ctrl-b d)
+# 止める・再起動するときは systemctl stop / restart sg@sg1 (コンソールで stop と打っても止まるが、
+# Restart=always なので 10 秒後に立ち上がり直す)。MemoryMax は 1 台が暴走して他を巻き込まないための上限
+# (144M ヒープで 20 人 1 試合の RSS ピークは約 305 MB)
+[Unit]
+Description=SurvivalGames server %i (tmux session %i)
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=mc
+WorkingDirectory=/opt/mc/%i
+ExecStartPre=/bin/sh -c "mv -f console.out console.out.prev 2>/dev/null || true"
+ExecStart=/usr/bin/tmux -L %i new-session -d -s %i "/opt/mc/start-small.sh 2>&1 | tee console.out"
+ExecStop=/usr/bin/tmux -L %i send-keys -t %i stop Enter
+ExecStop=/bin/sh -c "while /usr/bin/tmux -L %i has-session -t %i 2>/dev/null; do sleep 1; done"
+TimeoutStopSec=60
+Restart=always
+RestartSec=10
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target

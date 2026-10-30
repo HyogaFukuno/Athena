@@ -1,0 +1,26 @@
+# Hub サーバー (Athena)。Velocity と同じ VPS の 127.0.0.1:25601 で待ち受け、Velocity からだけ入れる。
+# systemctl start hub で /opt/mc/hub を起動する。mc ユーザーの tmux (-L hub、セッション hub) の中で
+# /opt/mc/start-small.sh を動かし、出力は console.out にも残す (前回分は console.out.prev)。コンソールは
+#   su - mc -c "tmux -L hub attach -t hub"   (抜けるときは Ctrl-b d)
+# 止める・再起動するときは systemctl stop / restart hub (Restart=always なので、コンソールで stop と打つと
+# 10 秒後に立ち上がり直す)。MemoryMax は、同じ VPS の Velocity と MariaDB を巻き込まないための上限
+[Unit]
+Description=Hub server (tmux session hub)
+After=network-online.target velocity.service
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=mc
+WorkingDirectory=/opt/mc/hub
+ExecStartPre=/bin/sh -c "mv -f console.out console.out.prev 2>/dev/null || true"
+ExecStart=/usr/bin/tmux -L hub new-session -d -s hub "/opt/mc/start-small.sh 2>&1 | tee console.out"
+ExecStop=/usr/bin/tmux -L hub send-keys -t hub stop Enter
+ExecStop=/bin/sh -c "while /usr/bin/tmux -L hub has-session -t hub 2>/dev/null; do sleep 1; done"
+TimeoutStopSec=60
+Restart=always
+RestartSec=10
+MemoryMax=400M
+
+[Install]
+WantedBy=multi-user.target
