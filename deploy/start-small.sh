@@ -36,7 +36,7 @@
 #   (flock), so two servers starting together do the work once; the second waits and reuses it.
 # - The cache belongs to one jar, one JDK and one flag set. The first run under a new key records
 #   (AOTMode=record), each server into its own record-<server>.aotconf; the next server to start
-#   builds the shared cache from the newest record, and every start after that uses it. Stop the
+#   builds the shared cache from the largest record, and every start after that uses it. Stop the
 #   recording run with "stop" so its record is written. A cache that does not fit is ignored by the
 #   JVM with a warning, never fatal.
 # - Recording and creating are separate steps (AOTMode=record, then AOTMode=create before the
@@ -137,7 +137,10 @@ if [ ! -f "$PATCHED" ]; then
 fi
 
 if [ ! -f "$AOT" ]; then
-    RECORD="$(ls -t "$DIR"/record-*.aotconf 2>/dev/null | head -1 || true)"
+    # the largest record, not the newest: it is the run that loaded the most classes. A run that only
+    # started and stopped (a restart after a deploy) is newer than a bot match on sgbench3, and a cache
+    # built from it leaves the first login and the first map to load their classes in the match
+    RECORD="$(ls -S "$DIR"/record-*.aotconf 2>/dev/null | head -1 || true)"
     if [ -n "$RECORD" ] && [ -s "$RECORD" ]; then
         echo "[start-small] building the shared AOT cache from $(basename "$RECORD")"
         if "$JAVA" "${FLAGS[@]}" -XX:AOTMode=create -XX:AOTConfiguration="$RECORD" -XX:AOTCache="$AOT.tmp.$$" -cp "$PATCHED"; then
