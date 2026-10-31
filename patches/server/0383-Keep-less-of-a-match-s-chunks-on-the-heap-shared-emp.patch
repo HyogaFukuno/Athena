@@ -1,0 +1,291 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 31 Oct 2026 21:54:09 +0900
+Subject: [PATCH] Keep less of a match's chunks on the heap: shared empty
+ entity slices, no air sections
+
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 3a5a5192d8c9b72b2d545d09934cfe5c00772acf..3680dce160e17de54e2ec88e5aa6dc235b20742f 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -65,6 +65,30 @@ public class Chunk {
+     // up no longer needs a BlockPosition to hash and the map holds no position objects at all.
+     public final Long2ObjectMap<TileEntity> tileEntities;
+     public final List<Entity>[] entitySlices; // Spigot
++    // Athena start - what an entity slice holds until its first entity: one list shared by every
++    // chunk. A chunk had sixteen lists of its own from the start, almost all of them empty for the
++    // whole match - ~22,000 lists on a 1,400-chunk map, ~0.9 MB of objects that went to the old
++    // generation with the chunks and stayed there as garbage after the match's world was unloaded.
++    // addEntity swaps in a list of the slice's own before adding; it is never swapped back, as
++    // entities walk in and out of slices all the time. The shared list refuses to be changed, so a
++    // write that missed that swap fails loudly instead of putting an entity in every chunk.
++    private static final List<Entity> NO_ENTITIES = new org.bukkit.craftbukkit.util.UnsafeList<Entity>(0, 5) {
++        @Override
++        public boolean add(Entity entity) {
++            throw new UnsupportedOperationException("the shared empty entity slice");
++        }
++
++        @Override
++        public void add(int index, Entity entity) {
++            throw new UnsupportedOperationException("the shared empty entity slice");
++        }
++
++        @Override
++        public Entity set(int index, Entity entity) {
++            throw new UnsupportedOperationException("the shared empty entity slice");
++        }
++    };
++    // Athena end
+     // Athena - bit k set while entitySlices[k] holds at least one entity. Kept at the two places a
+     // slice changes, addEntity and removeEntityAtIndex. The activation range walks every chunk
+     // near every player, slice by slice, and on a small map with twenty players nearly every slice
+@@ -283,9 +307,7 @@ public class Chunk {
+         this.locZ = j;
+         this.heightMap = new int[256];
+ 
+-        for (int k = 0; k < this.entitySlices.length; ++k) {
+-            this.entitySlices[k] = new org.bukkit.craftbukkit.util.UnsafeList(0, 5); // Spigot // Athena - empty until an entity enters; see UnsafeList.EMPTY_DATA
+-        }
++        java.util.Arrays.fill(this.entitySlices, NO_ENTITIES); // Athena - a list of its own on the first entity; see NO_ENTITIES
+ 
+         Arrays.fill(this.precipitationHeightMap, -999);
+         Arrays.fill(this.blockBiomeArray, (byte) -1);
+@@ -1069,6 +1091,11 @@ public class Chunk {
+         entity.chunkCoordX = this.locX;
+         entity.chunkCoordY = k;
+         entity.chunkCoordZ = this.locZ;
++        // Athena start - the slice's own list on its first entity; see NO_ENTITIES
++        if (this.entitySlices[k] == NO_ENTITIES) {
++            this.entitySlices[k] = new org.bukkit.craftbukkit.util.UnsafeList<Entity>(0, 5); // Spigot - empty until an entity enters; see UnsafeList.EMPTY_DATA
++        }
++        // Athena end
+         this.entitySlices[k].add(entity);
+         this.nonEmptySliceMask |= 1 << k; // Athena
+         if (entity.activationType != 3) ++this.activationMobCount; // Athena
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 1221ec2d909169bcc506931ceb062bbebb3fe735..c0a97e41b4a0e2a73c8e82f502e88a0fa7ae78f8 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -368,6 +368,34 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+     }
+     // Athena end
+ 
++    /**
++     * Athena - whether a loaded section can be left out of its chunk: all air, no block light, full
++     * sky light, and above every column's height map. Chunk reads a missing section as air, with
++     * block light 0 and sky light 15 wherever the height map lets the sky in - here everywhere - so
++     * every read answers the same with or without it, and a write to it makes the section again
++     * (Chunk.a for a block, setLightFor for light), as for any chunk the generator left gaps in.
++     * The full-chunk packet leaves empty sections out anyway (PacketPlayOutMapChunk).
++     *
++     * Match maps are saved with their air sections - about twelve of a chunk's sixteen - and each
++     * cost a section and two light arrays on the heap: ~2.5 MB on a 1,400-chunk map, kept for the
++     * whole match and garbage in the old generation once its world was unloaded. Only worlds with
++     * sky: without it, a missing section reads sky light 15 above the height map, a present one 0.
++     */
++    static boolean athenaReadsAsMissing(ChunkSection section, int[] heightMap) {
++        if (!section.isEmpty() || !section.getEmittedLightArray().isSharedZero()
++                || section.getSkyLightArray() == null || !section.getSkyLightArray().isSharedFull()) {
++            return false;
++        }
++        int bottom = section.getYPosition();
++
++        for (int height : heightMap) {
++            if (height > bottom) {
++                return false;
++            }
++        }
++        return true;
++    }
++
+     private Chunk readChunkFromNBT(World world, NBTTagCompound nbttagcompound) {
+         int i = nbttagcompound.getInt("xPos");
+         int j = nbttagcompound.getInt("zPos");
+@@ -400,6 +428,10 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             // Athena end
+ 
+             chunksection.recalcBlockCounts();
++            // Athena - an air section that reads exactly as no section at all is left out
++            if (flag && athenaReadsAsMissing(chunksection, chunk.heightMap)) {
++                continue;
++            }
+             achunksection[b1] = chunksection;
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/NibbleArray.java b/src/main/java/net/minecraft/server/NibbleArray.java
+index 16d0b999d8833134e03afc4ed544f2476091b4e5..3190372f4103f7a7b67cda407f7c977e8dd0ad13 100644
+--- a/src/main/java/net/minecraft/server/NibbleArray.java
++++ b/src/main/java/net/minecraft/server/NibbleArray.java
+@@ -51,6 +51,16 @@ public class NibbleArray {
+         return array;
+     }
+ 
++    /** Whether this array is still the shared all-0 array (never written since it was made). */
++    boolean isSharedZero() {
++        return this.data == SHARED_ZERO;
++    }
++
++    /** Whether this array is still the shared all-15 array (never written since it was made). */
++    boolean isSharedFull() {
++        return this.data == SHARED_FULL;
++    }
++
+     /** Whether this array still reads from a mapped file; for tests and the audit. */
+     boolean isMapped() {
+         return this.data == null;
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java b/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
+index f062dcc31ccba1badaefc6e3caab836efabfde49..871e967a230bb0664a7629b10a4e5e62e3748cea 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/UnsafeList.java
+@@ -173,6 +173,14 @@ public class UnsafeList<E> extends AbstractList<E> implements List<E>, RandomAcc
+     }
+ 
+     public Iterator<E> iterator() {
++        // Athena start - nothing to walk: no iterator of its own. A chunk's sixteen entity lists are
++        // each walked once when the chunk loads (Chunk.addEntities), almost all of them empty, and
++        // the first walk made each its pool and an Itr - ~1 MB of a 20-player match's heap, all
++        // thrown away with the match's world. The shared iterator ends at once, as an Itr would.
++        if (size == 0) {
++            return java.util.Collections.emptyIterator();
++        }
++        // Athena end
+         // Try to find an iterator that isn't in use
+         for (Iterator iter : iterPool) {
+             if (!((Itr) iter).valid) {
+diff --git a/src/test/java/net/minecraft/server/AthenaMatchGarbageTest.java b/src/test/java/net/minecraft/server/AthenaMatchGarbageTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..94851f59c21222ae741fa0afa4bd0d100e78230c
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaMatchGarbageTest.java
+@@ -0,0 +1,130 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.util.Arrays;
++import java.util.Iterator;
++import java.util.List;
++import org.bukkit.craftbukkit.util.UnsafeList;
++import org.junit.BeforeClass;
++import org.junit.Test;
++
++/**
++ * Athena - what a loaded chunk no longer keeps for nothing: the sixteen entity slices share one
++ * empty list until their first entity, an empty UnsafeList walks without an iterator of its own,
++ * and an air section that reads exactly as a missing one is left out of the chunk.
++ */
++public class AthenaMatchGarbageTest {
++
++    @BeforeClass
++    public static void bootstrap() {
++        DispenserRegistry.register();
++    }
++
++    @Test
++    public void entitySlicesShareOneEmptyListThatRefusesWrites() {
++        Chunk a = new Chunk(null, 0, 0);
++        Chunk b = new Chunk(null, 1, 0);
++
++        assertSame(a.entitySlices[0], a.entitySlices[15]);
++        assertSame(a.entitySlices[3], b.entitySlices[3]);
++        assertTrue(a.entitySlices[0].isEmpty());
++        assertFalse(a.entitySlices[0].remove(new Object()));
++        try {
++            a.entitySlices[0].add(null);
++            fail("the shared empty slice took an entity");
++        } catch (UnsupportedOperationException expected) {
++        }
++        try {
++            a.entitySlices[0].addAll(Arrays.<Entity>asList((Entity) null));
++            fail("the shared empty slice took an entity");
++        } catch (UnsupportedOperationException expected) {
++        }
++        assertTrue(b.entitySlices[0].isEmpty());
++    }
++
++    @Test
++    public void emptyUnsafeListWalksWithoutAPoolAndAFilledOneStillWalks() {
++        UnsafeList<String> list = new UnsafeList<String>(0, 5);
++        Iterator<String> empty = list.iterator();
++
++        assertFalse(empty.hasNext());
++        list.add("x");
++        list.add("y");
++        StringBuilder seen = new StringBuilder();
++        for (String s : list) {
++            seen.append(s);
++        }
++        assertTrue(seen.toString().equals("xy"));
++        list.clear();
++        assertFalse(list.iterator().hasNext());
++    }
++
++    private static ChunkSection airWithFullSky(int y) {
++        ChunkSection section = new ChunkSection(y, true);
++        section.setSkylightArray(NibbleArray.lightFull());
++        return section;
++    }
++
++    private static int[] heights(int value) {
++        int[] heightMap = new int[256];
++        Arrays.fill(heightMap, value);
++        return heightMap;
++    }
++
++    @Test
++    public void onlyAnUntouchedAirSectionAboveEveryColumnIsLeftOut() {
++        assertTrue(ChunkRegionLoader.athenaReadsAsMissing(airWithFullSky(80), heights(70)));
++        assertTrue(ChunkRegionLoader.athenaReadsAsMissing(airWithFullSky(80), heights(80)));
++
++        // one column reaching into the section: below that column's top the sky is shut out
++        int[] tall = heights(70);
++        tall[37] = 81;
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(airWithFullSky(80), tall));
++
++        // sky light that is not 15 everywhere (the default for a new section is 0)
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(new ChunkSection(80, true), heights(70)));
++
++        // any block
++        ChunkSection withBlock = airWithFullSky(80);
++        withBlock.setType(1, 2, 3, Blocks.STONE.getBlockData());
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(withBlock, heights(70)));
++
++        // block light anywhere
++        ChunkSection lit = airWithFullSky(80);
++        lit.setExtBlocklightValue(4, 5, 6, 7);
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(lit, heights(70)));
++
++        // sky light changed anywhere, even back to 15 elsewhere: no longer the shared array
++        ChunkSection shaded = airWithFullSky(80);
++        shaded.setExtSkylightValue(4, 5, 6, 14);
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(shaded, heights(70)));
++
++        // no sky light at all (a world without sky)
++        assertFalse(ChunkRegionLoader.athenaReadsAsMissing(new ChunkSection(80, false), heights(70)));
++    }
++
++    @Test
++    public void aMissingSectionReadsLikeTheOneLeftOut() {
++        // what Chunk answers for a missing section above the height map, against the section's own
++        ChunkSection section = airWithFullSky(80);
++        Chunk chunk = new Chunk(null, 0, 0);
++        System.arraycopy(heights(70), 0, chunk.heightMap, 0, 256);
++
++        for (int x = 0; x < 16; x += 5) {
++            for (int y = 80; y < 96; y += 3) {
++                for (int z = 0; z < 16; z += 7) {
++                    assertTrue(chunk.canSeeSky(x, y, z));
++                    assertTrue(section.getExtSkylightValue(x, y & 15, z) == EnumSkyBlock.SKY.defaultLightValue);
++                    assertTrue(section.getExtBlocklightValue(x, y & 15, z) == 0);
++                    assertSame(Blocks.AIR.getBlockData(), section.getType(x, y & 15, z));
++                }
++            }
++        }
++        List<Entity> unused = chunk.entitySlices[5];
++        assertTrue(unused.isEmpty());
++    }
++}
