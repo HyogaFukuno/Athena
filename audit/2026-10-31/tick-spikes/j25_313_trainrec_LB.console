@@ -1,0 +1,492 @@
+[start-small] new jar, JDK or flags (84b5109f964fe8c5): patching
+Picked up JAVA_TOOL_OPTIONS: -Xlog:gc:file=gc.log:time 
+Patching vanilla jar...
+[start-small] no AOT cache yet (84b5109f964fe8c5): recording this run
+Picked up JAVA_TOOL_OPTIONS: -Xlog:gc:file=gc.log:time 
+Loading libraries, please wait...
+2026-10-31T09:58:59.680205364Z main WARN Advanced terminal features are not available in this environment
+[18:59:00 INFO]: Starting minecraft server version 1.8.8
+[18:59:00 WARN]: To start the server with more ram, launch it as "java -Xmx1024M -Xms1024M -jar minecraft_server.jar"
+[18:59:00 INFO]: Loading properties
+[18:59:00 INFO]: Default game type: SURVIVAL
+[18:59:00 INFO]: This server is running PandaSpigot version git-PandaSpigot-"d5108d7" (MC: 1.8.8) (Implementing API version 1.8.8-R0.1-SNAPSHOT) (Git: d5108d7 on perf/java25-audit-2026-10-30)
+[18:59:00 INFO]: Debug logging is disabled
+[18:59:00 INFO]: Spigot Timings: false - Verbose: true - Interval: 5m - Length: 60m
+[18:59:00 INFO]: Server Ping Player Sample Count: 12
+[18:59:00 INFO]: Using 1 threads for Netty based IO
+[18:59:01 INFO]: Data value allowed items: 
+[18:59:01 INFO]: Generating keypair
+[18:59:01 INFO]: Starting Minecraft server on 127.0.0.1:25570
+[18:59:01 INFO]: Using io_uring channel type
+[18:59:01 INFO]: Set PluginClassLoader as parallel capable
+[18:59:01 INFO]: [SurvivalGames] Loading SurvivalGames v1.0-SNAPSHOT
+[18:59:01 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[18:59:01 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[18:59:01 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[18:59:01 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[18:59:01 INFO]: **** Beginning UUID conversion, this may take A LONG time ****
+[18:59:01 INFO]: Preparing level "lobby"
+[18:59:01 INFO]: -------- World Settings For [lobby] --------
+[18:59:01 INFO]: Item Despawn Rate: 6000
+[18:59:01 INFO]: Item Merge Radius: 2.5
+[18:59:01 INFO]: Arrow Despawn Rate: 1200
+[18:59:01 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[18:59:01 INFO]: View Distance: 8
+[18:59:01 INFO]: Zombie Aggressive Towards Villager: true
+[18:59:01 INFO]: Anti X-Ray: false
+[18:59:01 INFO]: 	Engine Mode: 1
+[18:59:01 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[18:59:01 INFO]: 	Replace Blocks: [1, 5]
+[18:59:01 INFO]: Chunks to Grow per Tick: 650
+[18:59:01 INFO]: Clear tick list: false
+[18:59:01 INFO]: Experience Merge Radius: 3.0
+[18:59:01 INFO]: Mob Spawn Range: 4
+[18:59:01 INFO]: Nerfing mobs spawned from spawners: false
+[18:59:01 INFO]: Cactus Growth Modifier: 100%
+[18:59:01 INFO]: Cane Growth Modifier: 100%
+[18:59:01 INFO]: Melon Growth Modifier: 100%
+[18:59:01 INFO]: Mushroom Growth Modifier: 100%
+[18:59:01 INFO]: Pumpkin Growth Modifier: 100%
+[18:59:02 INFO]: Sapling Growth Modifier: 100%
+[18:59:02 INFO]: Wheat Growth Modifier: 100%
+[18:59:02 INFO]: NetherWart Growth Modifier: 100%
+[18:59:02 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[18:59:02 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[18:59:02 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[18:59:02 INFO]: Random Lighting Updates: false
+[18:59:02 INFO]: Structure Info Saving: true
+[18:59:02 INFO]: Sending up to 10 chunks per packet
+[18:59:02 INFO]: Max Entity Collisions: 8
+[18:59:02 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[18:59:02 INFO]: Max TNT Explosions: 100
+[18:59:02 INFO]: -------- World Settings For [lobby] --------
+[18:59:02 INFO]: Water over lava flow speed: 5
+[18:59:02 INFO]: Fix TNT cannons: false
+[18:59:02 INFO]: Allow undead horse types to be leashed: false
+[18:59:02 INFO]: Keep spawn chunk loaded: true
+[18:59:02 INFO]: World async lighting: false
+[18:59:02 INFO]: WorldServer TickNextTick cap set at 10000
+[18:59:02 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[18:59:02 INFO]: Remove invalid mob spawner tile entities: true
+[18:59:02 INFO]: Player blocking damage multiplier set to 0.5
+[18:59:02 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[18:59:02 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[18:59:02 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[18:59:02 INFO]: Preparing start region for level 0 (Seed: 0)
+[18:59:02 INFO]: [Athena] lobby: chunk shaping is on the server thread (config=true, generator=NormalChunkGenerator, pluginGenerator=false, biomeSource=WorldChunkManagerHell)
+[18:59:03 INFO]: Preparing spawn area: 54%
+[18:59:03 INFO]: [SurvivalGames] Enabling SurvivalGames v1.0-SNAPSHOT
+[18:59:03 INFO]: [SurvivalGames] Loaded 1 map(s) from /opt/mc/maps: Lobby_Games
+[18:59:03 INFO]: [SurvivalGames] Stats are not saved (database.enabled is false in config.yml)
+[18:59:03 INFO]: Server permissions file permissions.yml is empty, ignoring it
+[18:59:03 INFO]: Done (1.958s)! For help, type "help" or "?"
+[18:59:03 INFO]: Timings Reset
+[18:59:08 INFO]: Diagnostics started: athena-diag.csv every 100 ticks
+[18:59:12 INFO]: UUID of player Bot0 is ee2337bd-ef1b-3585-94ad-53fcd1977dd2
+[18:59:13 INFO]: Bot0[/127.0.0.1:57040] logged in with entity id 0 at ([lobby]262.5, 84.0, 39.5)
+[18:59:13 INFO]: UUID of player Bot1 is 51a4b33d-8b80-3bde-806f-de4086b03058
+[18:59:13 INFO]: Bot1[/127.0.0.1:57056] logged in with entity id 1 at ([lobby]262.5, 84.0, 39.5)
+[18:59:13 INFO]: UUID of player Bot2 is 16beaa94-ff1b-37a7-8afb-c22dcb8c16d1
+[18:59:13 INFO]: Bot2[/127.0.0.1:57072] logged in with entity id 2 at ([lobby]262.5, 84.0, 39.5)
+[18:59:13 INFO]: UUID of player Bot3 is 73f370b4-497b-347a-a6bb-50d07eb88947
+[18:59:13 INFO]: Bot3[/127.0.0.1:57084] logged in with entity id 3 at ([lobby]262.5, 84.0, 39.5)
+[18:59:14 INFO]: UUID of player Bot4 is c760baae-cdc1-3595-98d0-c7a6e074d851
+[18:59:14 INFO]: Bot4[/127.0.0.1:57098] logged in with entity id 4 at ([lobby]262.5, 84.0, 39.5)
+[18:59:14 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[18:59:14 INFO]: Item Despawn Rate: 6000
+[18:59:14 INFO]: Item Merge Radius: 2.5
+[18:59:14 INFO]: Arrow Despawn Rate: 1200
+[18:59:14 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[18:59:14 INFO]: View Distance: 8
+[18:59:14 INFO]: Zombie Aggressive Towards Villager: true
+[18:59:14 INFO]: Anti X-Ray: false
+[18:59:14 INFO]: 	Engine Mode: 1
+[18:59:14 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[18:59:14 INFO]: 	Replace Blocks: [1, 5]
+[18:59:14 INFO]: Chunks to Grow per Tick: 650
+[18:59:14 INFO]: Clear tick list: false
+[18:59:14 INFO]: Experience Merge Radius: 3.0
+[18:59:14 INFO]: Mob Spawn Range: 4
+[18:59:14 INFO]: Nerfing mobs spawned from spawners: false
+[18:59:14 INFO]: Cactus Growth Modifier: 100%
+[18:59:14 INFO]: Cane Growth Modifier: 100%
+[18:59:14 INFO]: Melon Growth Modifier: 100%
+[18:59:14 INFO]: Mushroom Growth Modifier: 100%
+[18:59:14 INFO]: Pumpkin Growth Modifier: 100%
+[18:59:14 INFO]: Sapling Growth Modifier: 100%
+[18:59:14 INFO]: Wheat Growth Modifier: 100%
+[18:59:14 INFO]: NetherWart Growth Modifier: 100%
+[18:59:14 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[18:59:14 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[18:59:14 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[18:59:14 INFO]: Random Lighting Updates: false
+[18:59:14 INFO]: Structure Info Saving: true
+[18:59:14 INFO]: Sending up to 10 chunks per packet
+[18:59:14 INFO]: Max Entity Collisions: 8
+[18:59:14 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[18:59:14 INFO]: Max TNT Explosions: 100
+[18:59:14 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[18:59:14 INFO]: Water over lava flow speed: 5
+[18:59:14 INFO]: Fix TNT cannons: false
+[18:59:14 INFO]: Allow undead horse types to be leashed: false
+[18:59:14 INFO]: Keep spawn chunk loaded: true
+[18:59:14 INFO]: World async lighting: false
+[18:59:14 INFO]: WorldServer TickNextTick cap set at 10000
+[18:59:14 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[18:59:14 INFO]: Remove invalid mob spawner tile entities: true
+[18:59:14 INFO]: Player blocking damage multiplier set to 0.5
+[18:59:14 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[18:59:14 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[18:59:14 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[18:59:14 INFO]: UUID of player Bot5 is 957bd75a-2799-3660-aa34-d1833e9c00b3
+[18:59:14 INFO]: Bot5[/127.0.0.1:57100] logged in with entity id 5 at ([lobby]262.5, 84.0, 39.5)
+[18:59:15 INFO]: [SurvivalGames] Preloaded the spawns of sg-Lobby_Games: 36 chunks in 265 ms
+[18:59:15 INFO]: UUID of player Bot6 is 88f0f096-1002-3386-8cc0-5371a30bd66f
+[18:59:15 INFO]: Bot6[/127.0.0.1:57106] logged in with entity id 407 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:15 INFO]: UUID of player Bot7 is 9aa06467-c242-3704-9d28-2b9ef52e9d26
+[18:59:15 INFO]: Bot7[/127.0.0.1:57108] logged in with entity id 486 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:15 INFO]: UUID of player Bot8 is a2aded80-15d4-38c5-8a6f-e532eedf9bde
+[18:59:16 INFO]: Bot8[/127.0.0.1:57120] logged in with entity id 493 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:16 INFO]: UUID of player Bot9 is 84789adf-47f8-367c-b639-0544ccf93ad2
+[18:59:16 INFO]: Bot9[/127.0.0.1:57128] logged in with entity id 494 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:16 INFO]: UUID of player Bot10 is dd0e24e4-744e-3f4c-97dc-32ceefa9fdd7
+[18:59:16 INFO]: Bot10[/127.0.0.1:57134] logged in with entity id 495 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:17 INFO]: [SurvivalGames] Preloaded sg-Lobby_Games: 1278 chunks in 1987 ms (2237 ms after the map opened)
+[18:59:17 INFO]: UUID of player Bot11 is 1197a1e1-1f22-395d-ae93-9836bfcec466
+[18:59:17 INFO]: Bot11[/127.0.0.1:57144] logged in with entity id 496 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:17 INFO]: UUID of player Bot12 is d1b6b006-dda2-300d-82c6-b45b3c57f0d4
+[18:59:17 INFO]: Bot12[/127.0.0.1:57146] logged in with entity id 497 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:18 INFO]: UUID of player Bot13 is 0685a1bc-d22d-3055-b860-88b198c1a2c2
+[18:59:18 INFO]: Bot13[/127.0.0.1:57150] logged in with entity id 498 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:18 INFO]: UUID of player Bot14 is 611d3f14-4877-3dbb-8d40-ab6a074c914d
+[18:59:18 INFO]: Bot14[/127.0.0.1:57158] logged in with entity id 499 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:18 INFO]: UUID of player Bot15 is 8760a068-783d-3a3f-9b76-d3d4e0d6745e
+[18:59:18 INFO]: Bot15[/127.0.0.1:57164] logged in with entity id 500 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:19 INFO]: UUID of player Bot16 is ef73d3ac-37cd-3dd5-8cfc-4dbbd1edd821
+[18:59:19 INFO]: Bot16[/127.0.0.1:57176] logged in with entity id 501 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:19 INFO]: UUID of player Bot17 is 3ef33022-674b-3084-a65c-2c10160c0032
+[18:59:19 INFO]: Bot17[/127.0.0.1:57188] logged in with entity id 502 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:20 INFO]: UUID of player Bot18 is c8c9bfd6-8b01-3923-952e-74536f6e7be2
+[18:59:20 INFO]: Bot18[/127.0.0.1:57192] logged in with entity id 503 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:20 INFO]: UUID of player Bot19 is d2bb8e6b-93cc-3625-a4fd-9447af52a436
+[18:59:20 INFO]: Bot19[/127.0.0.1:57198] logged in with entity id 555 at ([sg-Lobby_Games]143.5, 125.0, 15.5)
+[18:59:53 WARN]: Bot5 moved wrongly!
+[18:59:53 WARN]: Bot5 moved wrongly!
+[18:59:53 WARN]: Bot5 moved wrongly!
+[19:00:06 WARN]: Bot5 moved wrongly!
+[19:00:07 WARN]: Bot5 moved wrongly!
+[19:00:07 WARN]: Bot5 moved wrongly!
+[19:00:07 WARN]: Bot5 moved wrongly!
+[19:00:07 WARN]: Bot3 moved wrongly!
+[19:00:08 WARN]: Bot3 moved wrongly!
+[19:00:08 WARN]: Bot3 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:09 WARN]: Bot4 moved wrongly!
+[19:00:10 WARN]: Bot4 moved wrongly!
+[19:00:10 WARN]: Bot4 moved wrongly!
+[19:00:10 WARN]: Bot4 moved wrongly!
+[19:00:10 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:11 WARN]: Bot4 moved wrongly!
+[19:00:12 WARN]: Bot4 moved wrongly!
+[19:00:12 WARN]: Bot4 moved wrongly!
+[19:00:12 WARN]: Bot4 moved wrongly!
+[19:00:12 WARN]: Bot4 moved wrongly!
+[19:00:13 WARN]: Bot3 moved wrongly!
+[19:00:13 WARN]: Bot3 moved wrongly!
+[19:00:13 WARN]: Bot3 moved wrongly!
+[19:00:13 WARN]: Bot3 moved wrongly!
+[19:00:13 WARN]: Bot3 moved wrongly!
+[19:00:14 WARN]: Bot3 moved wrongly!
+[19:00:14 WARN]: Bot3 moved wrongly!
+[19:00:14 WARN]: Bot3 moved wrongly!
+[19:00:15 WARN]: Bot3 moved wrongly!
+[19:00:15 WARN]: Bot3 moved wrongly!
+[19:00:15 WARN]: Bot3 moved wrongly!
+[19:00:15 WARN]: Bot3 moved wrongly!
+[19:00:15 WARN]: Bot3 moved wrongly!
+[19:00:16 WARN]: Bot3 moved wrongly!
+[19:00:16 WARN]: Bot3 moved wrongly!
+[19:00:16 WARN]: Bot3 moved wrongly!
+[19:00:16 WARN]: Bot3 moved wrongly!
+[19:00:18 WARN]: Bot3 moved wrongly!
+[19:00:18 WARN]: Bot3 moved wrongly!
+[19:00:19 WARN]: Bot3 moved wrongly!
+[19:00:19 WARN]: Bot3 moved wrongly!
+[19:00:23 WARN]: Bot4 moved wrongly!
+[19:00:23 WARN]: Bot4 moved wrongly!
+[19:00:23 WARN]: Bot4 moved wrongly!
+[19:00:23 WARN]: Bot4 moved wrongly!
+[19:00:23 WARN]: Bot4 moved wrongly!
+[19:00:24 WARN]: Bot4 moved wrongly!
+[19:00:24 WARN]: Bot4 moved wrongly!
+[19:00:24 WARN]: Bot4 moved wrongly!
+[19:00:24 WARN]: Bot4 moved wrongly!
+[19:00:24 WARN]: Bot4 moved wrongly!
+[19:00:25 WARN]: Bot4 moved wrongly!
+[19:00:25 WARN]: Bot4 moved wrongly!
+[19:00:25 WARN]: Bot4 moved wrongly!
+[19:00:25 WARN]: Bot4 moved wrongly!
+[19:00:25 WARN]: Bot4 moved wrongly!
+[19:00:26 WARN]: Bot4 moved wrongly!
+[19:00:26 WARN]: Bot4 moved wrongly!
+[19:00:26 WARN]: Bot4 moved wrongly!
+[19:00:26 WARN]: Bot4 moved wrongly!
+[19:00:26 WARN]: Bot4 moved wrongly!
+[19:00:27 WARN]: Bot4 moved wrongly!
+[19:00:27 WARN]: Bot4 moved wrongly!
+[19:00:27 WARN]: Bot4 moved wrongly!
+[19:00:27 WARN]: Bot4 moved wrongly!
+[19:00:27 WARN]: Bot4 moved wrongly!
+[19:00:28 WARN]: Bot4 moved wrongly!
+[19:00:28 WARN]: Bot4 moved wrongly!
+[19:00:28 WARN]: Bot4 moved wrongly!
+[19:00:28 WARN]: Bot4 moved wrongly!
+[19:00:28 WARN]: Bot4 moved wrongly!
+[19:00:29 WARN]: Bot4 moved wrongly!
+[19:00:29 WARN]: Bot4 moved wrongly!
+[19:00:29 WARN]: Bot4 moved wrongly!
+[19:00:29 WARN]: Bot4 moved wrongly!
+[19:00:29 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:30 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:31 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:32 WARN]: Bot4 moved wrongly!
+[19:00:33 WARN]: Bot4 moved wrongly!
+[19:00:33 WARN]: Bot4 moved wrongly!
+[19:00:33 WARN]: Bot4 moved wrongly!
+[19:00:33 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:00:34 WARN]: Bot4 moved wrongly!
+[19:01:05 WARN]: Bot3 moved wrongly!
+[19:01:05 WARN]: Bot3 moved wrongly!
+[19:01:05 WARN]: Bot3 moved wrongly!
+[19:01:06 WARN]: Bot3 moved wrongly!
+[19:02:22 INFO]: Bot0 lost connection: Disconnected
+[19:02:22 INFO]: Bot1 lost connection: Disconnected
+[19:02:22 INFO]: Bot4 lost connection: Disconnected
+[19:02:22 INFO]: Bot5 lost connection: Disconnected
+[19:02:22 INFO]: Bot6 lost connection: Disconnected
+[19:02:22 INFO]: Bot7 lost connection: Disconnected
+[19:02:22 INFO]: Bot8 lost connection: Disconnected
+[19:02:22 INFO]: Bot10 lost connection: Disconnected
+[19:02:22 INFO]: Bot14 lost connection: Disconnected
+[19:02:22 INFO]: Bot15 lost connection: Disconnected
+[19:02:22 INFO]: Bot16 lost connection: Disconnected
+[19:02:22 INFO]: Bot17 lost connection: Disconnected
+[19:02:22 INFO]: Bot18 lost connection: Disconnected
+[19:02:22 INFO]: Bot2 lost connection: Disconnected
+[19:02:22 INFO]: Bot3 lost connection: Disconnected
+[19:02:22 INFO]: Bot9 lost connection: Disconnected
+[19:02:22 INFO]: Bot11 lost connection: Disconnected
+[19:02:22 INFO]: Bot12 lost connection: Disconnected
+[19:02:22 INFO]: Bot13 lost connection: Disconnected
+[19:02:22 INFO]: Bot19 lost connection: Disconnected
+[19:02:30 INFO]: Stopping the server
+[19:02:30 INFO]: Stopping server
+[19:02:30 INFO]: [SurvivalGames] Disabling SurvivalGames v1.0-SNAPSHOT
+[19:02:30 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[19:02:30 INFO]: Item Despawn Rate: 6000
+[19:02:30 INFO]: Item Merge Radius: 2.5
+[19:02:30 INFO]: Arrow Despawn Rate: 1200
+[19:02:30 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[19:02:30 INFO]: View Distance: 8
+[19:02:30 INFO]: Zombie Aggressive Towards Villager: true
+[19:02:30 INFO]: Anti X-Ray: false
+[19:02:30 INFO]: 	Engine Mode: 1
+[19:02:30 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[19:02:30 INFO]: 	Replace Blocks: [1, 5]
+[19:02:30 INFO]: Chunks to Grow per Tick: 650
+[19:02:30 INFO]: Clear tick list: false
+[19:02:30 INFO]: Experience Merge Radius: 3.0
+[19:02:30 INFO]: Mob Spawn Range: 4
+[19:02:30 INFO]: Nerfing mobs spawned from spawners: false
+[19:02:30 INFO]: Cactus Growth Modifier: 100%
+[19:02:30 INFO]: Cane Growth Modifier: 100%
+[19:02:30 INFO]: Melon Growth Modifier: 100%
+[19:02:30 INFO]: Mushroom Growth Modifier: 100%
+[19:02:30 INFO]: Pumpkin Growth Modifier: 100%
+[19:02:30 INFO]: Sapling Growth Modifier: 100%
+[19:02:30 INFO]: Wheat Growth Modifier: 100%
+[19:02:30 INFO]: NetherWart Growth Modifier: 100%
+[19:02:30 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[19:02:30 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[19:02:30 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[19:02:30 INFO]: Random Lighting Updates: false
+[19:02:30 INFO]: Structure Info Saving: true
+[19:02:30 INFO]: Sending up to 10 chunks per packet
+[19:02:30 INFO]: Max Entity Collisions: 8
+[19:02:30 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[19:02:30 INFO]: Max TNT Explosions: 100
+[19:02:30 INFO]: -------- World Settings For [sg-Lobby_Games] --------
+[19:02:30 INFO]: Water over lava flow speed: 5
+[19:02:30 INFO]: Fix TNT cannons: false
+[19:02:30 INFO]: Allow undead horse types to be leashed: false
+[19:02:30 INFO]: Keep spawn chunk loaded: true
+[19:02:30 INFO]: World async lighting: false
+[19:02:30 INFO]: WorldServer TickNextTick cap set at 10000
+[19:02:30 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[19:02:30 INFO]: Remove invalid mob spawner tile entities: true
+[19:02:30 INFO]: Player blocking damage multiplier set to 0.5
+[19:02:30 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[19:02:30 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[19:02:30 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[19:02:30 INFO]: Saving players
+[19:02:30 INFO]: Saving worlds
+[19:02:30 INFO]: Saving chunks for level 'lobby'/Overworld
+[212.619s][warning][aot] Preload Warning: Verification failed for org.apache.logging.log4j.core.async.AsyncLoggerContext
+[212.778s][warning][aot] Skipping jdk/internal/event/Event: JFR event class
+[212.778s][warning][aot] Skipping jdk/jfr/Event: JFR event class
+[212.778s][warning][aot] Skipping jdk/proxy2/$Proxy3: Unsupported location
+[212.779s][warning][aot] Skipping org/apache/logging/log4j/core/async/AsyncLoggerContext: Failed verification
+[212.779s][warning][aot] Skipping jdk/proxy2/$Proxy20: Unsupported location
+[212.779s][warning][aot] Skipping io/netty/buffer/AbstractChunkEvent: JFR event class
+[212.779s][warning][aot] Skipping jdk/proxy2/$Proxy4: Unsupported location
+[212.779s][warning][aot] Skipping io/netty/buffer/AbstractAllocatorEvent: JFR event class
+[212.779s][warning][aot] Skipping org/apache/commons/lang/Validate: Old class has been linked
+[212.779s][warning][aot] Skipping jdk/proxy2/$Proxy8: Unsupported location
+[212.780s][warning][aot] Skipping jdk/proxy1/$Proxy0: Unsupported location
+[212.780s][warning][aot] Skipping jdk/proxy2/$Proxy2: Unsupported location
+[212.780s][warning][aot] Skipping jdk/proxy2/$Proxy1: Unsupported location
+[212.780s][warning][aot] Skipping jdk/proxy2/$Proxy5: Unsupported location
+[212.780s][warning][aot] Skipping jdk/proxy1/$Proxy6: Unsupported location
+[212.781s][warning][aot] Skipping com/sun/proxy/jdk/proxy1/$Proxy18: Unsupported location
+[212.781s][warning][aot] Skipping jdk/proxy1/$Proxy7: Unsupported location
+[212.781s][warning][aot] Skipping jdk/proxy2/$Proxy19: Unsupported location
+[212.782s][warning][aot] Skipping com/avaje/ebean/EbeanServer: Unlinked class not supported by AOTConfiguration
+[212.782s][warning][aot] Skipping com/sun/proxy/jdk/proxy1/$Proxy24: Unsupported location
+[212.782s][warning][aot] Skipping org/apache/commons/lang/NotImplementedException: Unlinked class not supported by AOTConfiguration
+[212.782s][warning][aot] Skipping jdk/proxy2/$Proxy14: Unsupported location
+[212.782s][warning][aot] Skipping jdk/proxy2/$Proxy13: Unsupported location
+[212.782s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/ConstructorInvokingValueConverter: Old class has been linked
+[212.783s][warning][aot] Skipping jdk/internal/event/ThreadSleepEvent: JFR event class
+[212.783s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/MethodInvokingValueConverter: Old class has been linked
+[212.783s][warning][aot] Skipping jdk/proxy2/$Proxy16: Unsupported location
+[212.783s][warning][aot] Skipping jdk/proxy2/$Proxy15: Unsupported location
+[212.783s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionParserState$2: Old class has been linked
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionParserState$1: Unlinked class not supported by AOTConfiguration
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/IllegalOptionSpecificationException: Unlinked class not supported by AOTConfiguration
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/NoArgumentOptionSpec: Old class has been linked
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/RequiredArgumentOptionSpec: Old class has been linked
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionalArgumentOptionSpec: Unlinked class not supported by AOTConfiguration
+[212.784s][warning][aot] Skipping jdk/internal/event/ProcessStartEvent: JFR event class
+[212.784s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/Objects: Old class has been linked
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionArgumentConversionException: Unlinked class not supported by AOTConfiguration
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/ValueConverter: Old class has been linked
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/ReflectionException: Unlinked class not supported by AOTConfiguration
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/ValueConversionException: Unlinked class not supported by AOTConfiguration
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionMissingRequiredArgumentException: Unlinked class not supported by AOTConfiguration
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/Reflection: Old class has been linked
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/MultipleArgumentsForOptionException: Unlinked class not supported by AOTConfiguration
+[212.785s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionSpec: Old class has been linked
+[212.786s][warning][aot] Skipping jdk/proxy1/$Proxy21: Unsupported location
+[212.786s][warning][aot] Skipping jdk/proxy2/$Proxy22: Unsupported location
+[212.786s][warning][aot] Skipping io/netty/channel/$Proxy23: Unsupported location
+[212.786s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionParser: Old class has been linked
+[212.786s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionSet: Old class has been linked
+[212.786s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionException: Unlinked class not supported by AOTConfiguration
+[212.786s][warning][aot] Skipping org/bukkit/craftbukkit/Main$1: Old class has been linked
+[212.787s][warning][aot] Skipping jdk/proxy2/$Proxy17: Unsupported location
+[212.787s][warning][aot] Skipping jdk/proxy1/$Proxy33: Unsupported location
+[212.787s][warning][aot] Skipping jdk/proxy1/$Proxy32: Unsupported location
+[212.787s][warning][aot] Skipping jdk/proxy1/$Proxy31: Unsupported location
+[212.787s][warning][aot] Skipping org/apache/commons/lang/StringUtils: Old class has been linked
+[212.787s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/ArgumentAcceptingOptionSpec: Old class has been linked
+[212.787s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionSpecBuilder: Old class has been linked
+[212.787s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/ParserRules: Old class has been linked
+[212.787s][warning][aot] Skipping org/slf4j/Marker: Unlinked class not supported by AOTConfiguration
+[212.787s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/internal/AbbreviationMap: Old class has been linked
+[212.787s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/OptionParserState: Old class has been linked
+[212.788s][warning][aot] Skipping io/netty/buffer/AbstractBufferEvent: JFR event class
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy38: Unsupported location
+[212.788s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/AbstractOptionSpec: Old class has been linked
+[212.788s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/AlternativeLongOptionSpec: Unlinked class not supported by AOTConfiguration
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy39: Unsupported location
+[212.788s][warning][aot] Skipping jdk/internal/event/SecurityProviderServiceEvent: JFR event class
+[212.788s][warning][aot] Skipping org/bukkit/craftbukkit/libs/joptsimple/ArgumentList: Old class has been linked
+[212.788s][warning][aot] Skipping org/slf4j/spi/MarkerFactoryBinder: Old class has been linked
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy34: Unsupported location
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy35: Unsupported location
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy36: Unsupported location
+[212.788s][warning][aot] Skipping jdk/proxy1/$Proxy37: Unsupported location
+[212.789s][warning][aot] Skipping io/netty/buffer/AllocateBufferEvent: JFR event class
+[212.789s][warning][aot] Skipping io/netty/buffer/AllocateChunkEvent: JFR event class
+[212.789s][warning][aot] Skipping jdk/proxy2/$Proxy11: Unsupported location
+[212.789s][warning][aot] Skipping io/netty/buffer/FreeBufferEvent: JFR event class
+[212.789s][warning][aot] Skipping io/netty/buffer/ReallocateBufferEvent: JFR event class
+[212.789s][warning][aot] Skipping jdk/proxy1/$Proxy12: Unsupported location
+[212.789s][warning][aot] Skipping org/slf4j/helpers/NOPLoggerFactory: Old class has been linked
+[212.789s][warning][aot] Skipping org/slf4j/LoggerFactory: Old class has been linked
+[212.789s][warning][aot] Skipping org/slf4j/spi/LocationAwareLogger: Old class has been linked
+[212.789s][warning][aot] Skipping jdk/proxy2/$Proxy10: Unsupported location
+[212.790s][warning][aot] Skipping org/slf4j/ILoggerFactory: Old class has been linked
+[212.790s][warning][aot] Skipping org/slf4j/Logger: Old class has been linked
+[212.790s][warning][aot] Skipping jdk/proxy1/$Proxy27: Unsupported location
+[212.790s][warning][aot] Skipping org/slf4j/helpers/Util: Old class has been linked
+[212.790s][warning][aot] Skipping org/slf4j/impl/StaticLoggerBinder: Old class has been linked
+[212.790s][warning][aot] Skipping org/apache/commons/lang/UnhandledException: Unlinked class not supported by AOTConfiguration
+[212.790s][warning][aot] Skipping org/slf4j/helpers/SubstituteLoggerFactory: Old class has been linked
+[212.790s][warning][aot] Skipping jdk/proxy2/$Proxy9: Unsupported location
+[212.790s][warning][aot] Skipping org/apache/commons/lang/ObjectUtils: Old class has been linked
+[212.790s][warning][aot] Skipping org/apache/commons/lang/text/StrBuilder: Old class has been linked
+[212.791s][warning][aot] Skipping org/slf4j/event/LoggingEvent: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/apache/commons/lang/ObjectUtils$Null: Old class has been linked
+[212.791s][warning][aot] Skipping org/apache/logging/slf4j/Log4jLogger: Old class has been linked
+[212.791s][warning][aot] Skipping org/apache/commons/lang/exception/Nestable: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/apache/commons/lang/text/StrBuilder$StrBuilderTokenizer: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/apache/commons/lang/text/StrBuilder$StrBuilderReader: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/apache/commons/lang/text/StrBuilder$StrBuilderWriter: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/apache/logging/slf4j/Log4jMarkerFactory: Old class has been linked
+[212.791s][warning][aot] Skipping org/slf4j/IMarkerFactory: Old class has been linked
+[212.791s][warning][aot] Skipping org/slf4j/impl/StaticMarkerBinder: Old class has been linked
+[212.791s][warning][aot] Skipping org/apache/logging/slf4j/Log4jLoggerFactory: Old class has been linked
+[212.791s][warning][aot] Skipping org/apache/commons/lang/exception/NestableRuntimeException: Unlinked class not supported by AOTConfiguration
+[212.791s][warning][aot] Skipping org/slf4j/spi/LoggerFactoryBinder: Old class has been linked
+[212.791s][warning][aot] Skipping org/apache/commons/lang/exception/CloneFailedException: Unlinked class not supported by AOTConfiguration
+[212.792s][warning][aot] Skipping jdk/proxy1/$Proxy30: Unsupported location
+[212.792s][warning][aot] Skipping jdk/proxy1/$Proxy28: Unsupported location
+[212.792s][warning][aot] Skipping jdk/proxy1/$Proxy29: Unsupported location
+[212.793s][warning][aot] Skipping com/avaje/ebean/config/dbplatform/DatabasePlatform: Unlinked class not supported by AOTConfiguration
+[212.793s][warning][aot] Skipping com/avaje/ebean/config/dbplatform/SQLitePlatform: Unlinked class not supported by AOTConfiguration
+[212.793s][warning][aot] Skipping org/apache/commons/lang/text/StrTokenizer: Unlinked class not supported by AOTConfiguration
+[212.793s][warning][aot] Skipping jdk/proxy2/$Proxy25: Unsupported location
+[212.793s][warning][aot] Skipping com/sun/proxy/jdk/proxy1/$Proxy26: Unsupported location
+ AOTConfiguration recorded: /opt/mc/sgbench3/aot-cache-train2/84b5109f964fe8c5/record-sgbench3.aotconf

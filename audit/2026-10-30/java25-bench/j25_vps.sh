@@ -11,6 +11,7 @@
 # J25_MATCHES=3 plays three matches in one JVM, as the live servers do (they never restart between
 # matches). A script whose name holds "train" is not warmed: its first run records the AOT cache.
 # J25_PLUGIN=<local SurvivalGames.jar> runs that plugin instead of the one in sgbench3.
+# J25_EXTRA="<JVM flags>" adds flags (through JAVA_TOOL_OPTIONS), e.g. a JFR recording.
 cd "$(dirname "$0")/../../../bench"
 H=${J25_HOST:-root@vps-b}  # VPS-B (rebuilt 2026-10-30; the old box was old-vps-b)
 D=/opt/mc/sgbench3
@@ -38,7 +39,7 @@ for v in "$@"; do
   # per-thread CPU and the heap mapping's RSS, if the sampler is installed (see j25-threads.sh)
   ssh -o BatchMode=yes $H "[ -x /root/j25-threads.sh ] && { rm -f /root/$tag.threads; nohup /root/j25-threads.sh /root/$tag.threads > /dev/null 2>&1 & }; true"
   perl -e 'alarm shift; exec @ARGV' $((1500 * M)) python3 sg_match_load.py $H --dir $D --session sgbench3 --port 25570 --tunnel \
-    $MAP_ARGS --spread --heap 144M --matches $M ${J25_PLUGIN:+--plugin $J25_PLUGIN} --live-seconds 120 \
+    $MAP_ARGS --spread --heap 144M --matches $M ${J25_PLUGIN:+--plugin $J25_PLUGIN} ${J25_EXTRA:+"--jvm-extra=$J25_EXTRA"} --live-seconds 120 \
     --tag $tag 2>&1 | grep -vE "$F" | grep -vE "^\[[0-9]|^$|^ +[0-9]+: |^ num"
   ssh -o BatchMode=yes $H "rm -f $D/athena-diag.request; sudo -u mc tmux has-session -t sgbench3 2>/dev/null && echo 'still running'; \
     cp $D/athena-diag.csv /root/$tag.diag.csv; cp $D/gc.log /root/$tag.gc.log; cp $D/console.out /root/$tag.console; \

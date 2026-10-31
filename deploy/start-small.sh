@@ -56,6 +56,14 @@
 #   deploy) compete for. C1 code is slower: once C2 has finished, a match takes ~0.056 instead of
 #   ~0.042 vCPU and a tick 1.2 instead of 0.7 ms, against a 50 ms budget - memory, not CPU, is what
 #   limits how many servers fit on a box.
+# - UseMaximumCompactionOnSystemGC off: the full GC SurvivalGames asks for in the lobby (System.gc())
+#   otherwise compacts the whole old generation, live prefix included. Left as it is, the prefix
+#   skips forwarding and moving: forward 12 -> 3-5 ms, compaction 13 -> 8-11 ms of a ~85 ms pause.
+# - The AOT cache holds the classes its recording run loaded. A run that only starts and stops leaves
+#   out the ~800 classes the first players' login loads and the ~150 of the first map: on a fresh
+#   cache those loaded from the jar in one tick each (115-219 ms and 73-95 ms). Recorded through a
+#   whole match instead - the first run under a new key plays one with bots or players before it is
+#   stopped - the first login took 41 ms.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
 # - --enable-native-access and --sun-misc-unsafe-memory-access=allow say out loud what the server
@@ -73,6 +81,7 @@ FLAGS=(
     "-Xms$HEAP" "-Xmx$HEAP"
     -XX:+UseParallelGC
     -XX:TieredStopAtLevel=1
+    -XX:-UseMaximumCompactionOnSystemGC
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=48m
