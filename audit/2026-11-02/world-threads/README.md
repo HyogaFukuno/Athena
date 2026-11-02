@@ -1,0 +1,41 @@
+# ワールドごとのスレッドの試験の道具（段階 0）
+
+計画は [`../WORLD-THREADS-PLAN.md`](../WORLD-THREADS-PLAN.md) です。
+
+## 中身
+
+- `plugin/`：試験用のプラグイン `WorldThreadsProbe`。コンソールの `wt` コマンドで操作します。
+  - `wt create <n>`：平らなワールド `wt-0`〜`wt-<n-1>` を作る
+  - `wt spawn <world> <n>`：豚を出す（AI の負荷）
+  - `wt distribute`：オンラインのプレイヤーを各ワールドに振り分ける
+  - `wt shuffle <間隔 tick> <秒>`：間隔ごとに、4 人に 1 人を別のワールドへ移す
+  - `wt freeze <world> <ms>`：そのワールドを tick しているスレッドを止める。今は `Server thread` なので、全ワールドが止まる
+  - `wt status`・`wt dump`
+  - 自分のスレッドから 100 ms ごとに各ワールドの full time を `ticks.csv` に書く。イベントがどのスレッドから来たかを `threads.csv` に書く
+- `plugin/build.sh <出力 jar>`：このチェックアウトの `PandaSpigot-API` に対してプラグインを組み立てる
+- `run_wt.py`：手元でサーバーを起動し（`run/wt`、git の対象外）、ボットを入れて、次の筋書きを流して集計する
+  1. ワールドを作り、ボットを振り分ける
+  2. `wt-0` を凍らせる
+  3. ボットをワールド間で動かし続ける
+  4. その途中で `wt-1` を凍らせる
+
+## 使い方
+
+```bash
+./gradlew build -x test && ./gradlew paperclipJar   # base/mc-dev と cache/ が要る（本体のチェックアウトからコピー）
+python3 audit/2026-11-02/world-threads/run_wt.py --tag base
+```
+
+結果は `run/wt-out/report.json` に出ます。
+
+## 基準（2026-11-02、専用のスレッドなし、ボット 12・ワールド 4・豚 30）
+
+| 項目 | 値 |
+|---|---|
+| `wt-0`・`wt-1` を 5 秒凍らせたときの各ワールドの tick/s | 全ワールドが 0.0（同じ `Server thread` で tick しているため） |
+| ボットの時刻の更新の途切れ | 凍結中に最大 6.0 秒、凍結の外では 0 回 |
+| ワールドの移動（respawn） | 190 回、失ったボット 0 |
+| サーバーのエラーと警告（起動後） | 0・0 |
+| イベントのスレッド | すべて `Server thread` |
+
+段階 2 以降の合格の条件：凍らせたワールドだけが 0 で、他のワールドは約 20 tick/s のまま。凍結の外の途切れが 0 回で、失ったボットも 0。
