@@ -147,6 +147,13 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (command.getName().equals("wtping")) {
+            // a player's command runs on the thread that ticks the player's world
+            getLogger().info("wtping " + sender.getName() + " in " + (sender instanceof Player ? ((Player) sender).getWorld().getName() : "-")
+                + " on " + Thread.currentThread().getName());
+            count(sender instanceof Player ? ((Player) sender).getWorld() : Bukkit.getWorlds().get(0), "command");
+            return true;
+        }
         if (args.length == 0) {
             sender.sendMessage("wt create <n> [threaded] | thread <world> on|off | distribute | shuffle <period ticks> <seconds> | freeze <world> <ms> | spawn <world> <n> | status | dump");
             return true;
@@ -159,6 +166,9 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
             case "freeze": freeze(sender, args[1], Long.parseLong(args[2])); break;
             case "spawn": spawn(sender, args[1], Integer.parseInt(args[2])); break;
             case "status": status(sender); break;
+            case "where":
+                for (Player player : Bukkit.getOnlinePlayers()) getLogger().info("wt where " + player.getName() + " " + player.getWorld().getName());
+                break;
             case "dump": writeThreads(); sender.sendMessage("wt dumped"); break;
             default: sender.sendMessage("wt: unknown " + args[0]);
         }

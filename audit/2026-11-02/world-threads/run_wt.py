@@ -38,6 +38,7 @@ p.add_argument("--java", default="/Users/glacier/Library/Java/JavaVirtualMachine
 p.add_argument("--heap", default="512M")
 p.add_argument("--jvmarg", action="append", default=[])
 p.add_argument("--threaded", action="store_true")   # the test worlds tick on their own threads; bots stay in "world"
+p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
 a = p.parse_args()
 
 # --- protocol 47 bots ------------------------------------------------------------------------------
@@ -70,7 +71,7 @@ class Bot:
     def __init__(s, name):
         s.name = name; s.buf = b""; s.threshold = -1; s.play = False
         s.lock = threading.Lock(); s.mv = threading.Lock()
-        s.dead = False; s.err = None; s.err_at = None; s.pos = None; s.centre = None
+        s.dead = False; s.err = None; s.err_at = None; s.pos = None; s.left = False; s.centre = None
         s.dim = None; s.respawns = 0; s.teleports = 0; s.corrections = 0
         s.time_updates = []          # wall-clock arrival of each Time Update (one a second per world)
         s.dims = []                  # (monotonic, dimension) at each world change
@@ -149,6 +150,15 @@ class Bot:
                 except OSError:
                     s.dead = True; return
                 s.pos = [x, s.centre[1], z]
+
+    def chat(s, text):
+        s.send(0x01, st(text))
+
+    def leave(s):
+        """Closes the connection on purpose: not a lost bot."""
+        s.left = True; s.dead = True
+        try: s.s.close()
+        except OSError: pass
 
     def start(s):
         s.send(0x00, vi(47) + st("127.0.0.1") + struct.pack(">H", a.port) + vi(2))
@@ -256,7 +266,26 @@ def main():
             freezes.append({"world": world, "thread": m1.group(1), "start_ms": int(m1.group(2)), "end_ms": int(m2.group(1)),
                             "mono_end": time.monotonic()})
 
-    if a.threaded:
+    where = {}
+    if a.players_threaded:
+        # the bots are spread over the test worlds, which then move to their own threads with them
+        # inside: their packets, connection ticks, commands and quits must follow
+        srv.cmd("wt distribute"); time.sleep(5)
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        time.sleep(3)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        for b in bots: b.chat("/wtping")
+        time.sleep(2)
+        freeze("wt-0", a.freeze_ms); time.sleep(3)
+        freeze("world", a.freeze_ms); time.sleep(3)
+        for b in bots[:a.bots // 2]: b.leave()
+        time.sleep(3)
+    elif a.threaded:
         # players cannot enter threaded worlds yet: freeze one of them, then the server thread, then
         # hand wt-1 back to the server thread and freeze that again
         freeze("wt-0", a.freeze_ms); time.sleep(3)
@@ -313,13 +342,18 @@ def main():
     for b in bots:
         g = [(t, d) for t, d in b.gaps() if t < stopped_at]
         other = [d for t, d in g if not in_freeze(t, d)]
-        lost = b.err if b.err_at is not None and b.err_at < stopped_at else None
+        lost = b.err if b.err_at is not None and b.err_at < stopped_at and not b.left else None
         report["bots_detail"].append({"name": b.name, "lost": lost, "respawns": b.respawns, "teleports": b.teleports,
                                       "corrections": b.corrections,
                                       "longest_gap_in_freeze_s": round(max([d for t, d in g if in_freeze(t, d)], default=0), 2),
-                                      "longest_gap_outside_s": round(max(other, default=0), 2), "gaps_outside": len(other)})
+                                      "longest_gap_outside_s": round(max(other, default=0), 2), "gaps_outside": len(other),
+                                      "world": where.get(b.name), "left": b.left,
+                                      "gapped_in": [f["world"] + "#" + str(k) for k, f in enumerate(freezes)
+                                                    if any(t < f["end_ms"] / 1000.0 + 0.5 and t + d > f["start_ms"] / 1000.0 for t, d in g)]})
     log = open(os.path.join(a.out, "server.log")).read()
     log = log[log.find("Done ("):]   # the start's own warnings (offline mode, EULA flag) are not the run's
+    # a bot closing its socket on purpose logs "lost connection: Internal Exception: ... reset": not an error
+    log = "\n".join(l for l in log.split("\n") if "lost connection" not in l)
     report["server"] = {"errors": len(re.findall(r"\bERROR\]|Exception", log)),
                         "warnings": len(re.findall(r"WARN\]", log)),
                         "moved_wrongly": log.count("moved wrongly"), "status": status}
@@ -339,6 +373,17 @@ def main():
     threads = collections.Counter()
     for r in report["threads"]: threads[r["thread"]] += int(r["count"])
     print("event threads:", dict(threads))
+    if a.players_threaded:
+        for k, f in enumerate(freezes):
+            hit = collections.Counter(b["world"] for b in d if f["world"] + "#" + str(k) in b["gapped_in"])
+            print("freeze %s: bots with a time-update gap, by their world: %s" % (f["world"], dict(hit) or "none"))
+        pings = [l.strip() for l in open(os.path.join(a.out, "server.log")) if "[WorldThreadsProbe] wtping" in l]
+        ok = sum(1 for l in pings if re.search(r"in (\S+) on World thread - \1$", l))
+        print("commands: %d run, %d on the thread of the player's world" % (len(pings), ok))
+        quits = collections.Counter()
+        for r in report["threads"]:
+            if r["event"] == "quit": quits[(r["world"], r["thread"])] += int(r["count"])
+        print("quit events by world and thread:", dict(quits))
     print("report:", os.path.join(a.out, "report.json"))
 
 main()
