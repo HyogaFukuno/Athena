@@ -1,0 +1,1144 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 12:23:49 +0900
+Subject: [PATCH] Keep tick-time scratch state per thread or per world, not
+ static
+
+Vanilla and CraftBukkit pass a few facts down a call stack through static
+fields: instaFall, the sapling's tree type, the dispenser's event flag, the
+block or entity behind the next damage event, the activation boxes, and the
+enchantment modifiers' running totals. With one server thread that works. The
+asynchronous chunk decoration already set instaFall from its own thread, and
+worlds ticking on their own threads would overwrite the rest for each other.
+They move to AthenaThreadState (per thread), World.athenaActivationBounds and a
+per-thread set of modifiers; entity ids come from an AtomicInteger; sounds,
+effects, block actions and lightning go to the players of the world they happen
+in instead of every player filtered by dimension. One thread behaves as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaThreadState.java b/src/main/java/net/minecraft/server/AthenaThreadState.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4f178f8167195f3044cb18cecaa0b8c596e168c0
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaThreadState.java
+@@ -0,0 +1,37 @@
++package net.minecraft.server;
++
++import org.bukkit.TreeType;
++
++/**
++ * Athena - flags vanilla and CraftBukkit kept in static fields, set by one call and read by a call
++ * further down the same stack: "populating, so sand falls at once", "the sapling that grew was a
++ * birch", "the dispenser already fired its event", "the damage about to be dealt comes from this
++ * block or entity".
++ *
++ * A static is only right while one thread does all of this. The asynchronous chunk decoration
++ * already sets instaFall from its own thread, where the server thread could read it in between, and
++ * worlds that tick on their own threads would set the others mid-tick for each other. Each thread
++ * gets its own copy instead; within one thread nothing changes.
++ */
++public final class AthenaThreadState {
++
++    private static final ThreadLocal<AthenaThreadState> CURRENT = ThreadLocal.withInitial(AthenaThreadState::new);
++
++    /** BlockFalling.instaFall: falling blocks land at once instead of becoming entities. */
++    public boolean instaFall;
++    /** BlockSapling.treeType: the tree the last grow call made, for StructureGrowEvent. */
++    public TreeType treeType;
++    /** BlockDispenser.eventFired: the dispense behaviour already fired BlockDispenseEvent. */
++    public boolean dispenserEventFired;
++    /** CraftEventFactory.blockDamage: the block the next damage event comes from. */
++    public org.bukkit.block.Block blockDamage;
++    /** CraftEventFactory.entityDamage: the entity the next damage event comes from. */
++    public Entity entityDamage;
++
++    private AthenaThreadState() {
++    }
++
++    public static AthenaThreadState get() {
++        return CURRENT.get();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/BlockCactus.java b/src/main/java/net/minecraft/server/BlockCactus.java
+index 3f38733d1bb0dedfaf2d4ab0988ce70c6a9dc5a3..da57d0ace2f292207df61e6eb7f266f991ac8e93 100644
+--- a/src/main/java/net/minecraft/server/BlockCactus.java
++++ b/src/main/java/net/minecraft/server/BlockCactus.java
+@@ -104,9 +104,9 @@ public class BlockCactus extends Block implements PandaGrowablePlant { // PandaS
+     }
+ 
+     public void onEntityCollidedWithBlock(World world, BlockPosition blockposition, IBlockData iblockdata, Entity entity) {
+-        CraftEventFactory.blockDamage = world.getWorld().getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()); // CraftBukkit
++        AthenaThreadState.get().blockDamage = world.getWorld().getBlockAt(blockposition.getX(), blockposition.getY(), blockposition.getZ()); // CraftBukkit
+         entity.damageEntity(DamageSource.CACTUS, 1.0F);
+-        CraftEventFactory.blockDamage = null; // CraftBukkit
++        AthenaThreadState.get().blockDamage = null; // CraftBukkit
+     }
+ 
+     public IBlockData fromLegacyData(int i) {
+diff --git a/src/main/java/net/minecraft/server/BlockDispenser.java b/src/main/java/net/minecraft/server/BlockDispenser.java
+index 0867401d62a69db5d780b6687b4718d88a97349f..134e0b50d347a232f27ffd01574b49b9133b317f 100644
+--- a/src/main/java/net/minecraft/server/BlockDispenser.java
++++ b/src/main/java/net/minecraft/server/BlockDispenser.java
+@@ -9,7 +9,7 @@ public class BlockDispenser extends BlockContainer {
+     public static final BlockStateBoolean TRIGGERED = BlockStateBoolean.of("triggered");
+     public static final RegistryDefault<Item, IDispenseBehavior> REGISTRY = new RegistryDefault(new DispenseBehaviorItem());
+     protected Random rand = new Random();
+-    public static boolean eventFired = false; // CraftBukkit
++    // Athena - eventFired is per thread now: AthenaThreadState.dispenserEventFired
+ 
+     protected BlockDispenser() {
+         super(Material.STONE);
+@@ -87,7 +87,7 @@ public class BlockDispenser extends BlockContainer {
+ 
+                 if (idispensebehavior != IDispenseBehavior.NONE) {
+                     ItemStack itemstack1 = idispensebehavior.dispense(sourceblock, itemstack);
+-                    eventFired = false; // CraftBukkit - reset event status
++                    AthenaThreadState.get().dispenserEventFired = false; // CraftBukkit - reset event status // Athena - per thread
+ 
+                     tileentitydispenser.setItem(i, itemstack1.count <= 0 ? null : itemstack1);
+                 }
+diff --git a/src/main/java/net/minecraft/server/BlockDragonEgg.java b/src/main/java/net/minecraft/server/BlockDragonEgg.java
+index 4d9d4b8fbdf52bc16d6c2a71de82f3c00bbcb544..0fa9d894a284a94517b5001591555babcffb882e 100644
+--- a/src/main/java/net/minecraft/server/BlockDragonEgg.java
++++ b/src/main/java/net/minecraft/server/BlockDragonEgg.java
+@@ -34,7 +34,7 @@ public class BlockDragonEgg extends Block {
+         if (BlockFalling.canFall(world, blockposition.down()) && blockposition.getY() >= 0) {
+             byte b0 = 32;
+ 
+-            if (!BlockFalling.instaFall && world.areChunksLoadedBetween(blockposition.add(-b0, -b0, -b0), blockposition.add(b0, b0, b0))) {
++            if (!AthenaThreadState.get().instaFall && world.areChunksLoadedBetween(blockposition.add(-b0, -b0, -b0), blockposition.add(b0, b0, b0))) {
+                 // PaperSpigot start - Add FallingBlock source location API
+                 org.bukkit.Location loc = new org.bukkit.Location(world.getWorld(), (double) ((float) blockposition.getX() + 0.5F), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + 0.5F));
+                 world.addEntity(new EntityFallingBlock(loc, world, (double) ((float) blockposition.getX() + 0.5F), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + 0.5F), this.getBlockData()));
+diff --git a/src/main/java/net/minecraft/server/BlockFalling.java b/src/main/java/net/minecraft/server/BlockFalling.java
+index d4715f8b2a5653df8cb40a85213418ec29684f16..9d58a175c94623db329c29549db7d19df22ecfea 100644
+--- a/src/main/java/net/minecraft/server/BlockFalling.java
++++ b/src/main/java/net/minecraft/server/BlockFalling.java
+@@ -5,7 +5,7 @@ import java.util.Random;
+ 
+ public class BlockFalling extends Block {
+ 
+-    public static boolean instaFall;
++    // Athena - instaFall is per thread now: AthenaThreadState.instaFall
+ 
+     public BlockFalling() {
+         super(Material.SAND);
+@@ -41,7 +41,7 @@ public class BlockFalling extends Block {
+         if (canFall(world, blockposition.down()) && blockposition.getY() >= 0) {
+             byte b0 = 32;
+ 
+-            if (!BlockFalling.instaFall && world.areChunksLoadedBetween(blockposition.add(-b0, -b0, -b0), blockposition.add(b0, b0, b0))) {
++            if (!AthenaThreadState.get().instaFall && world.areChunksLoadedBetween(blockposition.add(-b0, -b0, -b0), blockposition.add(b0, b0, b0))) {
+                 if (!world.isClientSide) {
+                     // PaperSpigot start - Add FallingBlock source location API
+                     org.bukkit.Location loc = new org.bukkit.Location(world.getWorld(), (double) ((float) blockposition.getX() + 0.5F), (double) blockposition.getY(), (double) ((float) blockposition.getZ() + 0.5F));
+diff --git a/src/main/java/net/minecraft/server/BlockMushroom.java b/src/main/java/net/minecraft/server/BlockMushroom.java
+index db296e5ff1a6f127bffe9a49c23384f5c1c7dfb2..e236cc465c09cd6472f18f33f3c18f92635667b8 100644
+--- a/src/main/java/net/minecraft/server/BlockMushroom.java
++++ b/src/main/java/net/minecraft/server/BlockMushroom.java
+@@ -89,10 +89,10 @@ public class BlockMushroom extends BlockPlant implements IBlockFragilePlantEleme
+         WorldGenHugeMushroom worldgenhugemushroom = null;
+ 
+         if (this == Blocks.BROWN_MUSHROOM) {
+-            BlockSapling.treeType = TreeType.BROWN_MUSHROOM; // CraftBukkit
++            AthenaThreadState.get().treeType = TreeType.BROWN_MUSHROOM; // CraftBukkit
+             worldgenhugemushroom = new WorldGenHugeMushroom(Blocks.BROWN_MUSHROOM_BLOCK);
+         } else if (this == Blocks.RED_MUSHROOM) {
+-            BlockSapling.treeType = TreeType.RED_MUSHROOM; // CraftBukkit
++            AthenaThreadState.get().treeType = TreeType.RED_MUSHROOM; // CraftBukkit
+             worldgenhugemushroom = new WorldGenHugeMushroom(Blocks.RED_MUSHROOM_BLOCK);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockSapling.java b/src/main/java/net/minecraft/server/BlockSapling.java
+index b87c0882f5e99aafffca2e99261936447400dd32..d0064f7fe0ba50e72dc875241c2b85dda7bd0a4d 100644
+--- a/src/main/java/net/minecraft/server/BlockSapling.java
++++ b/src/main/java/net/minecraft/server/BlockSapling.java
+@@ -16,7 +16,7 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+ 
+     public static final BlockStateEnum<BlockWood.EnumLogVariant> TYPE = BlockStateEnum.of("type", BlockWood.EnumLogVariant.class);
+     public static final BlockStateInteger STAGE = BlockStateInteger.of("stage", 0, 1);
+-    public static TreeType treeType; // CraftBukkit
++    // Athena - treeType is per thread now: AthenaThreadState.treeType
+ 
+     protected BlockSapling() {
+         this.setDefaultState(this.blockStateList.getBlockData().set(BlockSapling.TYPE, BlockWood.EnumLogVariant.OAK).set(BlockSapling.STAGE, Integer.valueOf(0)));
+@@ -41,8 +41,8 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+                 // CraftBukkit start
+                 world.captureTreeGeneration = false;
+                 if (world.capturedBlockStates.size() > 0) {
+-                    TreeType treeType = BlockSapling.treeType;
+-                    BlockSapling.treeType = null;
++                    TreeType treeType = AthenaThreadState.get().treeType;
++                    AthenaThreadState.get().treeType = null;
+                     Location location = new Location(world.getWorld(), blockposition.getX(), blockposition.getY(), blockposition.getZ());
+                     List<BlockState> blocks = (List<BlockState>) world.capturedBlockStates.clone();
+                     world.capturedBlockStates.clear();
+@@ -77,10 +77,10 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+         // Object object = random.nextInt(10) == 0 ? new WorldGenBigTree(true) : new WorldGenTrees(true);
+         Object object;
+         if (random.nextInt(10) == 0) {
+-            treeType = TreeType.BIG_TREE;
++            AthenaThreadState.get().treeType = TreeType.BIG_TREE;
+             object = new WorldGenBigTree(true);
+         } else {
+-            treeType = TreeType.TREE;
++            AthenaThreadState.get().treeType = TreeType.TREE;
+             object = new WorldGenTrees(true);
+         }
+         // CraftBukkit end
+@@ -95,7 +95,7 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+             for (i = 0; i >= -1; --i) {
+                 for (j = 0; j >= -1; --j) {
+                     if (this.a(world, blockposition, i, j, BlockWood.EnumLogVariant.SPRUCE)) {
+-                        treeType = TreeType.MEGA_REDWOOD; // CraftBukkit
++                        AthenaThreadState.get().treeType = TreeType.MEGA_REDWOOD; // CraftBukkit
+                         object = new WorldGenMegaTree(false, random.nextBoolean());
+                         flag = true;
+                         break label66;
+@@ -106,13 +106,13 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+             if (!flag) {
+                 j = 0;
+                 i = 0;
+-                treeType = TreeType.REDWOOD; // CraftBukkit
++                AthenaThreadState.get().treeType = TreeType.REDWOOD; // CraftBukkit
+                 object = new WorldGenTaiga2(true);
+             }
+             break;
+ 
+         case 2:
+-            treeType = TreeType.BIRCH; // CraftBukkit
++            AthenaThreadState.get().treeType = TreeType.BIRCH; // CraftBukkit
+             object = new WorldGenForest(true, false);
+             break;
+ 
+@@ -124,7 +124,7 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+             for (i = 0; i >= -1; --i) {
+                 for (j = 0; j >= -1; --j) {
+                     if (this.a(world, blockposition, i, j, BlockWood.EnumLogVariant.JUNGLE)) {
+-                        treeType = TreeType.JUNGLE; // CraftBukkit
++                        AthenaThreadState.get().treeType = TreeType.JUNGLE; // CraftBukkit
+                         object = new WorldGenJungleTree(true, 10, 20, iblockdata1, iblockdata2);
+                         flag = true;
+                         break label78;
+@@ -135,13 +135,13 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+             if (!flag) {
+                 j = 0;
+                 i = 0;
+-                treeType = TreeType.SMALL_JUNGLE; // CraftBukkit
++                AthenaThreadState.get().treeType = TreeType.SMALL_JUNGLE; // CraftBukkit
+                 object = new WorldGenTrees(true, 4 + random.nextInt(7), iblockdata1, iblockdata2, false);
+             }
+             break;
+ 
+         case 4:
+-            treeType = TreeType.ACACIA; // CraftBukkit
++            AthenaThreadState.get().treeType = TreeType.ACACIA; // CraftBukkit
+             object = new WorldGenAcaciaTree(true);
+             break;
+ 
+@@ -150,7 +150,7 @@ public class BlockSapling extends BlockPlant implements IBlockFragilePlantElemen
+             for (i = 0; i >= -1; --i) {
+                 for (j = 0; j >= -1; --j) {
+                     if (this.a(world, blockposition, i, j, BlockWood.EnumLogVariant.DARK_OAK)) {
+-                        treeType = TreeType.DARK_OAK; // CraftBukkit
++                        AthenaThreadState.get().treeType = TreeType.DARK_OAK; // CraftBukkit
+                         object = new WorldGenForestTree(true);
+                         flag = true;
+                         break label90;
+diff --git a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+index a7b72dd82ebc03ab76cfc81c1b43a898e23d85c1..ac4fe72ffab03a1c3772c45fce7ed0f513dfab72 100644
+--- a/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
++++ b/src/main/java/net/minecraft/server/ChunkDecorationExecutor.java
+@@ -186,8 +186,8 @@ public final class ChunkDecorationExecutor {
+                     job.generator.decorate(job);
+                 }
+             } else {
+-                boolean previousInstaFall = BlockFalling.instaFall;
+-                BlockFalling.instaFall = true; // vanilla held this across the whole of populate
++                boolean previousInstaFall = AthenaThreadState.get().instaFall;
++                AthenaThreadState.get().instaFall = true; // vanilla held this across the whole of populate
+ 
+                 try {
+                     job.buffer.apply();
+@@ -197,7 +197,7 @@ public final class ChunkDecorationExecutor {
+                     // reported, rather than the world being lost.
+                     ChunkDecorationExecutor.logger.error("[Athena] Replaying the decoration of chunk " + job.chunkX + ", " + job.chunkZ + " failed; that chunk is partly decorated", throwable);
+                 } finally {
+-                    BlockFalling.instaFall = previousInstaFall;
++                    AthenaThreadState.get().instaFall = previousInstaFall;
+                 }
+             }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+index 6e4f0accf6b42fc996d8b84e1fc0e027a170084b..01b307de1ef834944cd8de7a09d33149998c8239 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderGenerate.java
+@@ -394,7 +394,7 @@ public class ChunkProviderGenerate implements IChunkProvider {
+     // top of every populate, so nothing carries between chunks and a job-local Random is exactly
+     // equivalent - and it is what lets one chunk's decoration outlive the call that started it.
+     public ChunkPopulateJob beginPopulate(int i, int j) {
+-        BlockFalling.instaFall = true;
++        AthenaThreadState.get().instaFall = true;
+         int k = i * 16;
+         int l = j * 16;
+         BlockPosition blockposition = new BlockPosition(k, 0, l);
+@@ -458,7 +458,7 @@ public class ChunkProviderGenerate implements IChunkProvider {
+             }
+         }
+ 
+-        BlockFalling.instaFall = false;
++        AthenaThreadState.get().instaFall = false;
+         return new ChunkPopulateJob(this, this.worldObj, i, j, random, biomebase, blockposition);
+     }
+ 
+@@ -466,12 +466,12 @@ public class ChunkProviderGenerate implements IChunkProvider {
+     public void decorate(ChunkPopulateJob job) {
+         // Vanilla held instaFall across the whole of populate. Off the server thread nothing is
+         // placed, so it does not matter there; inline it does, and the replay sets it as well.
+-        BlockFalling.instaFall = true;
++        AthenaThreadState.get().instaFall = true;
+ 
+         try {
+             job.biome.decorate(this.worldObj, job.random, new BlockPosition(job.originX, 0, job.originZ));
+         } finally {
+-            BlockFalling.instaFall = false;
++            AthenaThreadState.get().instaFall = false;
+         }
+     }
+ 
+@@ -480,8 +480,8 @@ public class ChunkProviderGenerate implements IChunkProvider {
+      * chunk starts with, then the ice and snow that settle on whatever is now standing there.
+      */
+     public void finishPopulate(ChunkPopulateJob job) {
+-        boolean previousInstaFall = BlockFalling.instaFall;
+-        BlockFalling.instaFall = true;
++        boolean previousInstaFall = AthenaThreadState.get().instaFall;
++        AthenaThreadState.get().instaFall = true;
+         try {
+             int k = job.originX;
+             int l = job.originZ;
+@@ -504,7 +504,7 @@ public class ChunkProviderGenerate implements IChunkProvider {
+                 }
+             }
+         } finally {
+-            BlockFalling.instaFall = previousInstaFall; // Athena - generator failures must restore global physics state
++            AthenaThreadState.get().instaFall = previousInstaFall; // Athena - generator failures must restore global physics state
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderHell.java b/src/main/java/net/minecraft/server/ChunkProviderHell.java
+index b40a7a435d97d82672049efcb4c6224d12802ecb..8243abdadb8b8e47d87893c0c34c38783ed1c6fb 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderHell.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderHell.java
+@@ -298,7 +298,7 @@ public class ChunkProviderHell implements IChunkProvider {
+     }
+ 
+     public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
+-        BlockFalling.instaFall = true;
++        AthenaThreadState.get().instaFall = true;
+         BlockPosition blockposition = new BlockPosition(i * 16, 0, j * 16);
+         ChunkCoordIntPair chunkcoordintpair = new ChunkCoordIntPair(i, j);
+ 
+@@ -338,7 +338,7 @@ public class ChunkProviderHell implements IChunkProvider {
+             this.x.generate(this.worldObj, this.hellRNG, blockposition.add(this.hellRNG.nextInt(16), this.hellRNG.nextInt(108) + 10, this.hellRNG.nextInt(16)));
+         }
+ 
+-        BlockFalling.instaFall = false;
++        AthenaThreadState.get().instaFall = false;
+     }
+ 
+     public boolean populateChunk(IChunkProvider ichunkprovider, Chunk chunk, int i, int j) {
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index f8ba37c5a7a38e3769697c83fe6ec8fc3d794d55..2909590547230b8ae702230c649857d46daaf3fe 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -706,8 +706,8 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+     private void finishPopulate(Chunk chunk) {
+         // CraftBukkit start
+-        boolean previousInstaFall = BlockSand.instaFall;
+-        BlockSand.instaFall = true;
++        boolean previousInstaFall = AthenaThreadState.get().instaFall;
++        AthenaThreadState.get().instaFall = true;
+         try {
+             Random random = new Random();
+             random.setSeed(world.getSeed());
+@@ -727,7 +727,7 @@ public class ChunkProviderServer implements IChunkProvider {
+                 }
+             }
+         } finally {
+-            BlockSand.instaFall = previousInstaFall; // Athena - restore even when a plugin populator throws
++            AthenaThreadState.get().instaFall = previousInstaFall; // Athena - restore even when a plugin populator throws
+         }
+         this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.world.ChunkPopulateEvent(chunk.bukkitChunk));
+         // CraftBukkit end
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderTheEnd.java b/src/main/java/net/minecraft/server/ChunkProviderTheEnd.java
+index f62776db9c70293e35189662182420287127a913..f8f5121f826072e84d1ed7ff704157b37a7d9875 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderTheEnd.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderTheEnd.java
+@@ -228,11 +228,11 @@ public class ChunkProviderTheEnd implements IChunkProvider {
+ 
+     @Override
+     public void getChunkAt(IChunkProvider ichunkprovider, int i, int j) {
+-        BlockFalling.instaFall = true;
++        AthenaThreadState.get().instaFall = true;
+         BlockPosition blockposition = new BlockPosition(i * 16, 0, j * 16);
+ 
+         this.endWorld.getBiome(blockposition.add(16, 0, 16)).decorate(this.endWorld, this.endWorld.random, blockposition);
+-        BlockFalling.instaFall = false;
++        AthenaThreadState.get().instaFall = false;
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/DispenseBehaviorItem.java b/src/main/java/net/minecraft/server/DispenseBehaviorItem.java
+index 4fd3d5ab738cb72ad00536b14c6ba3285ff6fdee..426cf7e43a7ba309862dfecff4ab3b575b5ad417 100644
+--- a/src/main/java/net/minecraft/server/DispenseBehaviorItem.java
++++ b/src/main/java/net/minecraft/server/DispenseBehaviorItem.java
+@@ -60,7 +60,7 @@ public class DispenseBehaviorItem implements IDispenseBehavior {
+         CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack);
+ 
+         BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(entityitem.motX, entityitem.motY, entityitem.motZ));
+-        if (!BlockDispenser.eventFired) {
++        if (!AthenaThreadState.get().dispenserEventFired) {
+             world.getServer().getPluginManager().callEvent(event);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/DispenseBehaviorProjectile.java b/src/main/java/net/minecraft/server/DispenseBehaviorProjectile.java
+index 1c1a4dd0a9432857044292ece20a1c4e9215fcdd..238c3198db9a7b22cd0eb8629fb2d19a1107aab6 100644
+--- a/src/main/java/net/minecraft/server/DispenseBehaviorProjectile.java
++++ b/src/main/java/net/minecraft/server/DispenseBehaviorProjectile.java
+@@ -23,7 +23,7 @@ public abstract class DispenseBehaviorProjectile extends DispenseBehaviorItem {
+         CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+         BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector((double) enumdirection.getAdjacentX(), (double) ((float) enumdirection.getAdjacentY() + 0.1F), (double) enumdirection.getAdjacentZ()));
+-        if (!BlockDispenser.eventFired) {
++        if (!AthenaThreadState.get().dispenserEventFired) {
+             world.getServer().getPluginManager().callEvent(event);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/DispenserRegistry.java b/src/main/java/net/minecraft/server/DispenserRegistry.java
+index 697df0f85ec94479c6318b610f65a40ac6b60f46..24be98444754d78c99e382e9a56b0c2bef253b8e 100644
+--- a/src/main/java/net/minecraft/server/DispenserRegistry.java
++++ b/src/main/java/net/minecraft/server/DispenserRegistry.java
+@@ -89,7 +89,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(d0, d1, d2));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -135,7 +135,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(d0, d1, d2));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -187,7 +187,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(d3, d4, d5));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -250,7 +250,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(d0, d1 + d3, d2));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -299,7 +299,7 @@ public class DispenserRegistry {
+                     CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack);
+ 
+                     BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(x, y, z));
+-                    if (!BlockDispenser.eventFired) {
++                    if (!AthenaThreadState.get().dispenserEventFired) {
+                         world.getServer().getPluginManager().callEvent(event);
+                     }
+ 
+@@ -366,7 +366,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(bukkitBlock, craftItem.clone(), new org.bukkit.util.Vector(blockposition.getX(), blockposition.getY(), blockposition.getZ()));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -408,7 +408,7 @@ public class DispenserRegistry {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(0, 0, 0));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+@@ -468,7 +468,7 @@ public class DispenserRegistry {
+                     CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack); // Spigot
+ 
+                     BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(0, 0, 0));
+-                    if (!BlockDispenser.eventFired) {
++                    if (!AthenaThreadState.get().dispenserEventFired) {
+                         world.getServer().getPluginManager().callEvent(event);
+                     }
+ 
+@@ -526,7 +526,7 @@ public class DispenserRegistry {
+                 if (!world.paperSpigotConfig.fixCannons) y += 0.5;
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(blockposition.getX() + 0.5, y, blockposition.getZ() + 0.5));
+                 // PaperSpigot end
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                    world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+diff --git a/src/main/java/net/minecraft/server/EnchantmentManager.java b/src/main/java/net/minecraft/server/EnchantmentManager.java
+index 253014be23fa2a6d1fd085ef6833f519be3f2bfd..1942ec564197914b9c9d5a2fed344128e53eca4c 100644
+--- a/src/main/java/net/minecraft/server/EnchantmentManager.java
++++ b/src/main/java/net/minecraft/server/EnchantmentManager.java
+@@ -14,10 +14,16 @@ import java.util.Random;
+ public class EnchantmentManager {
+ 
+     private static final Random enchantmentRand = new Random();
+-    private static final EnchantmentManager.EnchantmentModifierProtection enchantmentModifierDamage = new EnchantmentManager.EnchantmentModifierProtection((EnchantmentManager.SyntheticClass_1) null);
+-    private static final EnchantmentManager.EnchantmentModifierDamage enchantmentModifierLiving = new EnchantmentManager.EnchantmentModifierDamage((EnchantmentManager.SyntheticClass_1) null);
+-    private static final EnchantmentManager.EnchantmentModifierThorns ENCHANTMENT_ITERATOR_HURT = new EnchantmentManager.EnchantmentModifierThorns((EnchantmentManager.SyntheticClass_1) null);
+-    private static final EnchantmentManager.EnchantmentModifierArthropods ENCHANTMENT_ITERATOR_DAMAGE = new EnchantmentManager.EnchantmentModifierArthropods((EnchantmentManager.SyntheticClass_1) null);
++    // Athena start - the four modifiers carry one calculation's inputs and result in their fields, so
++    // two threads computing damage at once (worlds on their own threads) would mix them: one set per thread
++    private static final class Modifiers {
++        final EnchantmentManager.EnchantmentModifierProtection enchantmentModifierDamage = new EnchantmentManager.EnchantmentModifierProtection((EnchantmentManager.SyntheticClass_1) null);
++        final EnchantmentManager.EnchantmentModifierDamage enchantmentModifierLiving = new EnchantmentManager.EnchantmentModifierDamage((EnchantmentManager.SyntheticClass_1) null);
++        final EnchantmentManager.EnchantmentModifierThorns ENCHANTMENT_ITERATOR_HURT = new EnchantmentManager.EnchantmentModifierThorns((EnchantmentManager.SyntheticClass_1) null);
++        final EnchantmentManager.EnchantmentModifierArthropods ENCHANTMENT_ITERATOR_DAMAGE = new EnchantmentManager.EnchantmentModifierArthropods((EnchantmentManager.SyntheticClass_1) null);
++    }
++    private static final ThreadLocal<Modifiers> MODIFIERS = ThreadLocal.withInitial(Modifiers::new);
++    // Athena end
+ 
+     public static int getEnchantmentLevel(int i, ItemStack itemstack) {
+         if (itemstack == null) {
+@@ -140,47 +146,51 @@ public class EnchantmentManager {
+     }
+ 
+     public static int getEnchantmentModifierDamage(ItemStack[] aitemstack, DamageSource damagesource) {
+-        EnchantmentManager.enchantmentModifierDamage.damageModifier = 0;
+-        EnchantmentManager.enchantmentModifierDamage.source = damagesource;
+-        applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) EnchantmentManager.enchantmentModifierDamage, aitemstack);
+-        if (EnchantmentManager.enchantmentModifierDamage.damageModifier > 25) {
+-            EnchantmentManager.enchantmentModifierDamage.damageModifier = 25;
+-        } else if (EnchantmentManager.enchantmentModifierDamage.damageModifier < 0) {
+-            EnchantmentManager.enchantmentModifierDamage.damageModifier = 0;
++        final Modifiers modifiers = MODIFIERS.get(); // Athena - per thread
++        modifiers.enchantmentModifierDamage.damageModifier = 0;
++        modifiers.enchantmentModifierDamage.source = damagesource;
++        applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) modifiers.enchantmentModifierDamage, aitemstack);
++        if (modifiers.enchantmentModifierDamage.damageModifier > 25) {
++            modifiers.enchantmentModifierDamage.damageModifier = 25;
++        } else if (modifiers.enchantmentModifierDamage.damageModifier < 0) {
++            modifiers.enchantmentModifierDamage.damageModifier = 0;
+         }
+ 
+-        return (EnchantmentManager.enchantmentModifierDamage.damageModifier + 1 >> 1) + EnchantmentManager.enchantmentRand.nextInt((EnchantmentManager.enchantmentModifierDamage.damageModifier >> 1) + 1);
++        return (modifiers.enchantmentModifierDamage.damageModifier + 1 >> 1) + EnchantmentManager.enchantmentRand.nextInt((modifiers.enchantmentModifierDamage.damageModifier >> 1) + 1);
+     }
+ 
+     public static float getModifierForCreature(ItemStack itemstack, EnumMonsterType enummonstertype) {
+-        EnchantmentManager.enchantmentModifierLiving.livingModifier = 0.0F;
+-        EnchantmentManager.enchantmentModifierLiving.entityLiving = enummonstertype;
+-        applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) EnchantmentManager.enchantmentModifierLiving, itemstack);
+-        return EnchantmentManager.enchantmentModifierLiving.livingModifier;
++        final Modifiers modifiers = MODIFIERS.get(); // Athena - per thread
++        modifiers.enchantmentModifierLiving.livingModifier = 0.0F;
++        modifiers.enchantmentModifierLiving.entityLiving = enummonstertype;
++        applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) modifiers.enchantmentModifierLiving, itemstack);
++        return modifiers.enchantmentModifierLiving.livingModifier;
+     }
+ 
+     public static void applyThornEnchantments(EntityLiving entityliving, Entity entity) {
+-        EnchantmentManager.ENCHANTMENT_ITERATOR_HURT.attacker = entity;
+-        EnchantmentManager.ENCHANTMENT_ITERATOR_HURT.user = entityliving;
++        final Modifiers modifiers = MODIFIERS.get(); // Athena - per thread
++        modifiers.ENCHANTMENT_ITERATOR_HURT.attacker = entity;
++        modifiers.ENCHANTMENT_ITERATOR_HURT.user = entityliving;
+         if (entityliving != null) {
+-            applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) EnchantmentManager.ENCHANTMENT_ITERATOR_HURT, entityliving.getEquipment());
++            applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) modifiers.ENCHANTMENT_ITERATOR_HURT, entityliving.getEquipment());
+         }
+ 
+         if (entity instanceof EntityHuman) {
+-            applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) EnchantmentManager.ENCHANTMENT_ITERATOR_HURT, entityliving.getHeldItem());
++            applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) modifiers.ENCHANTMENT_ITERATOR_HURT, entityliving.getHeldItem());
+         }
+ 
+     }
+ 
+     public static void applyArthropodEnchantments(EntityLiving entityliving, Entity entity) {
+-        EnchantmentManager.ENCHANTMENT_ITERATOR_DAMAGE.user = entityliving;
+-        EnchantmentManager.ENCHANTMENT_ITERATOR_DAMAGE.target = entity;
++        final Modifiers modifiers = MODIFIERS.get(); // Athena - per thread
++        modifiers.ENCHANTMENT_ITERATOR_DAMAGE.user = entityliving;
++        modifiers.ENCHANTMENT_ITERATOR_DAMAGE.target = entity;
+         if (entityliving != null) {
+-            applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) EnchantmentManager.ENCHANTMENT_ITERATOR_DAMAGE, entityliving.getEquipment());
++            applyEnchantmentModifierArray((EnchantmentManager.EnchantmentModifier) modifiers.ENCHANTMENT_ITERATOR_DAMAGE, entityliving.getEquipment());
+         }
+ 
+         if (entityliving instanceof EntityHuman) {
+-            applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) EnchantmentManager.ENCHANTMENT_ITERATOR_DAMAGE, entityliving.getHeldItem());
++            applyEnchantmentModifier((EnchantmentManager.EnchantmentModifier) modifiers.ENCHANTMENT_ITERATOR_DAMAGE, entityliving.getHeldItem());
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index bac0be0ed5ed23b046ec528922258d621cb55ebe..c59a74badb2eaddb63ff2fc348335b3fb993bd4d 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -61,7 +61,7 @@ public abstract class Entity implements ICommandListener {
+     };
+     // PandaSpigot end
+ 
+-    private static int entityCount;
++    private static final java.util.concurrent.atomic.AtomicInteger entityCount = new java.util.concurrent.atomic.AtomicInteger(); // Athena - worlds on their own threads make entities at once
+     private int id;
+     public double renderDistanceWeight;
+     public boolean preventEntitySpawning;
+@@ -188,7 +188,7 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public Entity(World world) {
+-        this.id = Entity.entityCount++;
++        this.id = Entity.entityCount.getAndIncrement(); // Athena
+         this.renderDistanceWeight = 1.0D;
+         // Athena - zero bounding box (was Entity.ZERO_AABB)
+         this.boundingBoxMinX = this.boundingBoxMinY = this.boundingBoxMinZ = 0.0D;
+@@ -2018,9 +2018,9 @@ public abstract class Entity implements ICommandListener {
+         if (this.fireProof) {
+             return;
+         }
+-        CraftEventFactory.entityDamage = entitylightning;
++        AthenaThreadState.get().entityDamage = entitylightning;
+         if (!this.damageEntity(DamageSource.LIGHTNING, 5.0F)) {
+-            CraftEventFactory.entityDamage = null;
++            AthenaThreadState.get().entityDamage = null;
+             return;
+         }
+         // CraftBukkit end
+diff --git a/src/main/java/net/minecraft/server/EntityEnderDragon.java b/src/main/java/net/minecraft/server/EntityEnderDragon.java
+index f48a167677ffd61176d02e22dba04ed42c6b8176..c6b3877970cce251b89c63c713707de802b54a4f 100644
+--- a/src/main/java/net/minecraft/server/EntityEnderDragon.java
++++ b/src/main/java/net/minecraft/server/EntityEnderDragon.java
+@@ -307,9 +307,9 @@ public class EntityEnderDragon extends EntityInsentient implements IComplex, IMo
+         if (this.healingEnderCrystal != null) {
+             if (this.healingEnderCrystal.dead) {
+                 if (!this.world.isClientSide) {
+-                    CraftEventFactory.entityDamage = this.healingEnderCrystal; // CraftBukkit
++                    AthenaThreadState.get().entityDamage = this.healingEnderCrystal; // CraftBukkit
+                     this.attackEntityFromPart(this.dragonPartHead, DamageSource.explosion((Explosion) null), 10.0F);
+-                    CraftEventFactory.entityDamage = null; // CraftBukkit
++                    AthenaThreadState.get().entityDamage = null; // CraftBukkit
+                 }
+ 
+                 this.healingEnderCrystal = null;
+diff --git a/src/main/java/net/minecraft/server/EntityEnderPearl.java b/src/main/java/net/minecraft/server/EntityEnderPearl.java
+index f9e256ac0543e6145b8db4bff3267fcbacf7ee32..a8fa5a1391427bd0d9c25ceb6b3e17f2642075c9 100644
+--- a/src/main/java/net/minecraft/server/EntityEnderPearl.java
++++ b/src/main/java/net/minecraft/server/EntityEnderPearl.java
+@@ -72,9 +72,9 @@ public class EntityEnderPearl extends EntityProjectile {
+ 
+                         entityplayer.playerConnection.teleport(teleEvent.getTo());
+                         entityliving.fallDistance = 0.0F;
+-                        CraftEventFactory.entityDamage = this;
++                        AthenaThreadState.get().entityDamage = this;
+                         entityliving.damageEntity(DamageSource.FALL, 5.0F);
+-                        CraftEventFactory.entityDamage = null;
++                        AthenaThreadState.get().entityDamage = null;
+                     }
+                     // CraftBukkit end
+                 }
+diff --git a/src/main/java/net/minecraft/server/EntityFallingBlock.java b/src/main/java/net/minecraft/server/EntityFallingBlock.java
+index ec250ed84c6e40a4a7b67d973bb0dacbc015d45f..39333c52d6c9e9bc6b8b044d9cb842db1ce2cff8 100644
+--- a/src/main/java/net/minecraft/server/EntityFallingBlock.java
++++ b/src/main/java/net/minecraft/server/EntityFallingBlock.java
+@@ -179,9 +179,9 @@ public class EntityFallingBlock extends Entity {
+                 while (iterator.hasNext()) {
+                     Entity entity = (Entity) iterator.next();
+ 
+-                    CraftEventFactory.entityDamage = this; // CraftBukkit
++                    AthenaThreadState.get().entityDamage = this; // CraftBukkit
+                     entity.damageEntity(damagesource, (float) Math.min(MathHelper.floor_float((float) i * this.fallHurtAmount), this.fallHurtMax));
+-                    CraftEventFactory.entityDamage = null; // CraftBukkit
++                    AthenaThreadState.get().entityDamage = null; // CraftBukkit
+                 }
+ 
+                 if (flag && (double) this.random.nextFloat() < 0.05000000074505806D + (double) i * 0.05D) {
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+index ef94c21fda8a8f8ed1bd6744355f7758b1ae9550..e86c3ef9a100750de58b1cb82cdb51ef6fcfd322 100644
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -153,10 +153,10 @@ public class Explosion {
+                         double d13 = (1.0D - d7) * d12;
+ 
+                         // entity.damageEntity(DamageSource.explosion(this), (float) ((int) ((d13 * d13 + d13) / 2.0D * 8.0D * (double) f3 + 1.0D)));+                        // CraftBukkit start
+-                        CraftEventFactory.entityDamage = source;
++                        AthenaThreadState.get().entityDamage = source;
+                         entity.forceExplosionKnockback = false;
+                         boolean wasDamaged = entity.damageEntity(DamageSource.explosion(this), (float) ((int) ((d13 * d13 + d13) / 2.0D * 8.0D * (double) f3 + 1.0D)));
+-                        CraftEventFactory.entityDamage = null;
++                        AthenaThreadState.get().entityDamage = null;
+                         if (!wasDamaged && !(entity instanceof EntityTNTPrimed || entity instanceof EntityFallingBlock) && !entity.forceExplosionKnockback) {
+                             continue;
+                         }
+diff --git a/src/main/java/net/minecraft/server/ItemArmor.java b/src/main/java/net/minecraft/server/ItemArmor.java
+index b8afcb814567f338e9da63aeb04fd14133fd4c1e..ed8585c8a37da0424a15d76c396d6f702607f39a 100644
+--- a/src/main/java/net/minecraft/server/ItemArmor.java
++++ b/src/main/java/net/minecraft/server/ItemArmor.java
+@@ -34,7 +34,7 @@ public class ItemArmor extends Item {
+                 CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+                 BlockDispenseEvent event = new BlockDispenseEvent(block, craftItem.clone(), new org.bukkit.util.Vector(0, 0, 0));
+-                if (!BlockDispenser.eventFired) {
++                if (!AthenaThreadState.get().dispenserEventFired) {
+                     world.getServer().getPluginManager().callEvent(event);
+                 }
+ 
+diff --git a/src/main/java/net/minecraft/server/ItemMinecart.java b/src/main/java/net/minecraft/server/ItemMinecart.java
+index d49cc0da4dd332546c7bfb5feeb07be291bc17e4..1d84a4e8c0e547fed88f58afb85398511584226f 100644
+--- a/src/main/java/net/minecraft/server/ItemMinecart.java
++++ b/src/main/java/net/minecraft/server/ItemMinecart.java
+@@ -50,7 +50,7 @@ public class ItemMinecart extends Item {
+             CraftItemStack craftItem = CraftItemStack.asCraftMirror(itemstack1);
+ 
+             BlockDispenseEvent event = new BlockDispenseEvent(block2, craftItem.clone(), new org.bukkit.util.Vector(d0, d1 + d3, d2));
+-            if (!BlockDispenser.eventFired) {
++            if (!AthenaThreadState.get().dispenserEventFired) {
+                 world.getServer().getPluginManager().callEvent(event);
+             }
+ 
+diff --git a/src/main/java/net/minecraft/server/ItemStack.java b/src/main/java/net/minecraft/server/ItemStack.java
+index 108ad90ac0f38b571be493822d0660289e05f792..ac5b72ef2d52f1f6bb0427454589fbaf95d3f422 100644
+--- a/src/main/java/net/minecraft/server/ItemStack.java
++++ b/src/main/java/net/minecraft/server/ItemStack.java
+@@ -126,8 +126,8 @@ public final class ItemStack {
+         if (flag && world.captureTreeGeneration && world.capturedBlockStates.size() > 0) {
+             world.captureTreeGeneration = false;
+             Location location = new Location(world.getWorld(), blockposition.getX(), blockposition.getY(), blockposition.getZ());
+-            TreeType treeType = BlockSapling.treeType;
+-            BlockSapling.treeType = null;
++            TreeType treeType = AthenaThreadState.get().treeType;
++            AthenaThreadState.get().treeType = null;
+             List<BlockState> blocks = (List<BlockState>) world.capturedBlockStates.clone();
+             world.capturedBlockStates.clear();
+             StructureGrowEvent event = null;
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 4aa5965109c9c3f361cc93aa0734f79fbac7d4a6..185bd0694050722698cb474f75d8916401b0cff4 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -1092,6 +1092,33 @@ public abstract class PlayerList {
+ 
+     }
+ 
++    // Athena start - the same, over the players of one world only. The dimension versions above walk
++    // every player on the server and read the position (and hidden set) of players in other worlds;
++    // once worlds tick on their own threads those belong to other threads.
++    public void sendPacketNearby(EntityHuman entityhuman, double d0, double d1, double d2, double d3, WorldServer world, Packet packet) {
++        List<EntityHuman> players = world.players;
++        for (int j = 0; j < players.size(); ++j) {
++            EntityHuman human = players.get(j);
++            if (!(human instanceof EntityPlayer)) continue;
++            EntityPlayer entityplayer = (EntityPlayer) human;
++
++            if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
++               continue;
++            }
++
++            if (entityplayer != entityhuman) {
++                double d4 = d0 - entityplayer.locX;
++                double d5 = d1 - entityplayer.locY;
++                double d6 = d2 - entityplayer.locZ;
++
++                if (d4 * d4 + d5 * d5 + d6 * d6 < d3 * d3) {
++                    entityplayer.playerConnection.sendPacket(packet);
++                }
++            }
++        }
++    }
++    // Athena end
++
+     public void savePlayers() {
+         for (int i = 0; i < this.players.size(); ++i) {
+             this.savePlayerFile((EntityPlayer) this.players.get(i));
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 102324887f0dc981d6f228ec95307ebe2f74ef53..0e42d20bb7c5c8321880537fb0174ec9771a0c9f 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -170,6 +170,7 @@ public abstract class World implements IBlockAccess {
+     // Spigot end
+ 
+     public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
++    public final org.spigotmc.ActivationRange.Bounds athenaActivationBounds = new org.spigotmc.ActivationRange.Bounds(); // Athena - see ActivationRange.Bounds
+ 
+     public final org.github.paperspigot.PaperSpigotWorldConfig paperSpigotConfig; // PaperSpigot
+ 
+diff --git a/src/main/java/net/minecraft/server/WorldManager.java b/src/main/java/net/minecraft/server/WorldManager.java
+index f7c7ce3e1d1c5bdf1e0474fcdf1a2498d5229712..0749cd6d7d1b7234897faad0ee143df3611b285f 100644
+--- a/src/main/java/net/minecraft/server/WorldManager.java
++++ b/src/main/java/net/minecraft/server/WorldManager.java
+@@ -26,12 +26,12 @@ public class WorldManager implements IWorldAccess {
+ 
+     public void playSound(String s, double d0, double d1, double d2, float f, float f1) {
+         // CraftBukkit - this.world.dimension
+-        this.mcServer.getPlayerList().sendPacketNearby(d0, d1, d2, f > 1.0F ? (double) (16.0F * f) : 16.0D, this.world.dimension, new PacketPlayOutNamedSoundEffect(s, d0, d1, d2, f, f1));
++        this.mcServer.getPlayerList().sendPacketNearby(null, d0, d1, d2, f > 1.0F ? (double) (16.0F * f) : 16.0D, this.world, new PacketPlayOutNamedSoundEffect(s, d0, d1, d2, f, f1)); // Athena - this world's players
+     }
+ 
+     public void playSoundToNearExcept(EntityHuman entityhuman, String s, double d0, double d1, double d2, float f, float f1) {
+         // CraftBukkit - this.world.dimension
+-        this.mcServer.getPlayerList().sendPacketNearby(entityhuman, d0, d1, d2, f > 1.0F ? (double) (16.0F * f) : 16.0D, this.world.dimension, new PacketPlayOutNamedSoundEffect(s, d0, d1, d2, f, f1));
++        this.mcServer.getPlayerList().sendPacketNearby(entityhuman, d0, d1, d2, f > 1.0F ? (double) (16.0F * f) : 16.0D, this.world, new PacketPlayOutNamedSoundEffect(s, d0, d1, d2, f, f1)); // Athena - this world's players
+     }
+ 
+     public void markBlockRangeForRenderUpdate(int i, int j, int k, int l, int i1, int j1) {}
+@@ -46,7 +46,7 @@ public class WorldManager implements IWorldAccess {
+ 
+     public void playAuxSFX(EntityHuman entityhuman, int i, BlockPosition blockposition, int j) {
+         // CraftBukkit - this.world.dimension
+-        this.mcServer.getPlayerList().sendPacketNearby(entityhuman, (double) blockposition.getX(), (double) blockposition.getY(), (double) blockposition.getZ(), 64.0D, this.world.dimension, new PacketPlayOutWorldEvent(i, blockposition, j, false));
++        this.mcServer.getPlayerList().sendPacketNearby(entityhuman, (double) blockposition.getX(), (double) blockposition.getY(), (double) blockposition.getZ(), 64.0D, this.world, new PacketPlayOutWorldEvent(i, blockposition, j, false)); // Athena - this world's players
+     }
+ 
+     public void broadcastSound(int i, BlockPosition blockposition, int j) {
+@@ -54,7 +54,7 @@ public class WorldManager implements IWorldAccess {
+     }
+ 
+     public void sendBlockBreakProgress(int i, BlockPosition blockposition, int j) {
+-        Iterator iterator = this.mcServer.getPlayerList().getPlayerList().iterator();
++        Iterator iterator = this.world.players.iterator(); // Athena - this world's players; the check below keeps only those anyway
+ 
+         // CraftBukkit start
+         EntityHuman entityhuman = null;
+@@ -64,7 +64,9 @@ public class WorldManager implements IWorldAccess {
+ 
+         PacketPlayOutBlockBreakAnimation packet = null; // PandaSpigot - Cache block break animation packet
+         while (iterator.hasNext()) {
+-            EntityPlayer entityplayer = (EntityPlayer) iterator.next();
++            Object next = iterator.next(); // Athena - a world's players are EntityHumans; a plugin's NPC may not be an EntityPlayer
++            if (!(next instanceof EntityPlayer)) continue; // Athena
++            EntityPlayer entityplayer = (EntityPlayer) next; // Athena
+ 
+             if (entityplayer != null && entityplayer.world == this.world && entityplayer.getId() != i) {
+                 double d0 = (double) blockposition.getX() - entityplayer.locX;
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index deb7a778f9a727107aa91f4c69a212f1e06a1e8a..2c657e4cbfb58e2b0bf77edadf7f737158f7457f 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1291,7 +1291,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             return false;
+         }
+         if (super.strikeLightning(entity)) {
+-            this.server.getPlayerList().sendPacketNearby(entity.locX, entity.locY, entity.locZ, 512.0D, dimension, new PacketPlayOutSpawnEntityWeather(entity));
++            this.server.getPlayerList().sendPacketNearby(null, entity.locX, entity.locY, entity.locZ, 512.0D, this, new PacketPlayOutSpawnEntityWeather(entity)); // Athena - this world's players
+             // CraftBukkit end
+             return true;
+         } else {
+@@ -1364,7 +1364,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                 if (this.fireBlockEvent(blockactiondata)) {
+                     // CraftBukkit - this.worldProvider.dimension -> this.dimension
+-                    this.server.getPlayerList().sendPacketNearby((double) blockactiondata.getPosition().getX(), (double) blockactiondata.getPosition().getY(), (double) blockactiondata.getPosition().getZ(), 64.0D, dimension, new PacketPlayOutBlockAction(blockactiondata.getPosition(), blockactiondata.getBlock(), blockactiondata.getEventID(), blockactiondata.getEventParameter()));
++                    this.server.getPlayerList().sendPacketNearby(null, (double) blockactiondata.getPosition().getX(), (double) blockactiondata.getPosition().getY(), (double) blockactiondata.getPosition().getZ(), 64.0D, this, new PacketPlayOutBlockAction(blockactiondata.getPosition(), blockactiondata.getBlock(), blockactiondata.getEventID(), blockactiondata.getEventParameter())); // Athena - this world's players
+                 }
+             }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+index 8e8b7d0a5f6e6c4638cb7a236233b7ceeb5bc68b..58ff9f890b281cf2f85e9add0cbf17037ca4b4dc 100644
+--- a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
++++ b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+@@ -65,8 +65,7 @@ import org.bukkit.inventory.meta.BookMeta;
+ public class CraftEventFactory {
+     public static final DamageSource MELTING = CraftDamageSource.copyOf(DamageSource.BURN);
+     public static final DamageSource POISON = CraftDamageSource.copyOf(DamageSource.MAGIC);
+-    public static org.bukkit.block.Block blockDamage; // For use in EntityDamageByBlockEvent
+-    public static Entity entityDamage; // For use in EntityDamageByEntityEvent
++    // Athena - blockDamage and entityDamage are per thread now: AthenaThreadState
+ 
+     // helper methods
+     private static boolean canBuild(CraftWorld world, Player player, int x, int z) {
+@@ -429,10 +428,11 @@ public class CraftEventFactory {
+     }
+ 
+     private static EntityDamageEvent handleEntityDamageEvent(Entity entity, DamageSource source, Map<DamageModifier, Double> modifiers, Map<DamageModifier, Function<? super Double, Double>> modifierFunctions) {
++        final net.minecraft.server.AthenaThreadState state = net.minecraft.server.AthenaThreadState.get(); // Athena - per thread
+         if (source.isExplosion()) {
+             DamageCause damageCause;
+-            Entity damager = entityDamage;
+-            entityDamage = null;
++            Entity damager = state.entityDamage;
++            state.entityDamage = null;
+             EntityDamageEvent event;
+             if (damager == null) {
+                 event = new EntityDamageByBlockEvent(null, entity.getBukkitEntity(), DamageCause.BLOCK_EXPLOSION, modifiers, modifierFunctions);
+@@ -481,10 +481,10 @@ public class CraftEventFactory {
+                 event.getEntity().setLastDamageCause(event);
+             }
+             return event;
+-        } else if (blockDamage != null) {
++        } else if (state.blockDamage != null) {
+             DamageCause cause = null;
+-            Block damager = blockDamage;
+-            blockDamage = null;
++            Block damager = state.blockDamage;
++            state.blockDamage = null;
+             if (source == DamageSource.CACTUS) {
+                 cause = DamageCause.CONTACT;
+             } else {
+@@ -495,10 +495,10 @@ public class CraftEventFactory {
+                 event.getEntity().setLastDamageCause(event);
+             }
+             return event;
+-        } else if (entityDamage != null) {
++        } else if (state.entityDamage != null) {
+             DamageCause cause = null;
+-            CraftEntity damager = entityDamage.getBukkitEntity();
+-            entityDamage = null;
++            CraftEntity damager = state.entityDamage.getBukkitEntity();
++            state.entityDamage = null;
+             if (source == DamageSource.ANVIL || source == DamageSource.FALLING_BLOCK) {
+                 cause = DamageCause.FALLING_BLOCK;
+             } else if (damager instanceof LightningStrike) {
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index bc35cebc95561bedf83d9d0cc28b6bab65c80783..970aa96fd63c08b0b5c8382e5be8b883ec4c9d63 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -40,10 +40,15 @@ public class ActivationRange
+ 
+     // Athena - the four activation boxes are held as scalars. They were rebuilt for every player
+     // on every tick, so this removes four box allocations per player per tick.
+-    static double maxBBMinX, maxBBMinY, maxBBMinZ, maxBBMaxX, maxBBMaxY, maxBBMaxZ;
+-    static double miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ;
+-    static double animalBBMinX, animalBBMinY, animalBBMinZ, animalBBMaxX, animalBBMaxY, animalBBMaxZ;
+-    static double monsterBBMinX, monsterBBMinY, monsterBBMinZ, monsterBBMaxX, monsterBBMaxY, monsterBBMaxZ;
++    // Athena start - the boxes around the player being checked, per world rather than static: worlds
++    // that tick on their own threads would otherwise overwrite each other's boxes mid-check
++    public static final class Bounds {
++        double maxBBMinX, maxBBMinY, maxBBMinZ, maxBBMaxX, maxBBMaxY, maxBBMaxZ;
++        double miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ;
++        double animalBBMinX, animalBBMinY, animalBBMinZ, animalBBMaxX, animalBBMaxY, animalBBMaxZ;
++        double monsterBBMinX, monsterBBMinY, monsterBBMinZ, monsterBBMaxX, monsterBBMaxY, monsterBBMaxZ;
++    }
++    // Athena end
+ 
+     /**
+      * Initializes an entities type on construction to specify what group this
+@@ -109,6 +114,7 @@ public class ActivationRange
+         final int animalActivationRange = world.spigotConfig.animalActivationRange;
+         final int monsterActivationRange = world.spigotConfig.monsterActivationRange;
+ 
++        final Bounds b = world.athenaActivationBounds; // Athena
+         int maxRange = Math.max( monsterActivationRange, animalActivationRange );
+         maxRange = Math.max( maxRange, miscActivationRange );
+         maxRange = Math.min( ( world.spigotConfig.viewDistance << 4 ) - 8, maxRange );
+@@ -118,35 +124,35 @@ public class ActivationRange
+ 
+             player.activatedTick = MinecraftServer.currentTick;
+             // Athena - grow expanded inline (min/max mirrors the AxisAlignedBB constructor)
+-            maxBBMinX = Math.min( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
+-            maxBBMaxX = Math.max( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
+-            maxBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            maxBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            maxBBMinZ = Math.min( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
+-            maxBBMaxZ = Math.max( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
+-            miscBBMinX = Math.min( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
+-            miscBBMaxX = Math.max( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
+-            miscBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            miscBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            miscBBMinZ = Math.min( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
+-            miscBBMaxZ = Math.max( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
+-            animalBBMinX = Math.min( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
+-            animalBBMaxX = Math.max( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
+-            animalBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            animalBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            animalBBMinZ = Math.min( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
+-            animalBBMaxZ = Math.max( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
+-            monsterBBMinX = Math.min( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
+-            monsterBBMaxX = Math.max( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
+-            monsterBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            monsterBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
+-            monsterBBMinZ = Math.min( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
+-            monsterBBMaxZ = Math.max( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
++            b.maxBBMinX = Math.min( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
++            b.maxBBMaxX = Math.max( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
++            b.maxBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.maxBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.maxBBMinZ = Math.min( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
++            b.maxBBMaxZ = Math.max( player.boundingBoxMinZ - maxRange, player.boundingBoxMaxZ + maxRange );
++            b.miscBBMinX = Math.min( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
++            b.miscBBMaxX = Math.max( player.boundingBoxMinX - miscActivationRange, player.boundingBoxMaxX + miscActivationRange );
++            b.miscBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.miscBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.miscBBMinZ = Math.min( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
++            b.miscBBMaxZ = Math.max( player.boundingBoxMinZ - miscActivationRange, player.boundingBoxMaxZ + miscActivationRange );
++            b.animalBBMinX = Math.min( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
++            b.animalBBMaxX = Math.max( player.boundingBoxMinX - animalActivationRange, player.boundingBoxMaxX + animalActivationRange );
++            b.animalBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.animalBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.animalBBMinZ = Math.min( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
++            b.animalBBMaxZ = Math.max( player.boundingBoxMinZ - animalActivationRange, player.boundingBoxMaxZ + animalActivationRange );
++            b.monsterBBMinX = Math.min( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
++            b.monsterBBMaxX = Math.max( player.boundingBoxMinX - monsterActivationRange, player.boundingBoxMaxX + monsterActivationRange );
++            b.monsterBBMinY = Math.min( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.monsterBBMaxY = Math.max( player.boundingBoxMinY - 256, player.boundingBoxMaxY + 256 );
++            b.monsterBBMinZ = Math.min( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
++            b.monsterBBMaxZ = Math.max( player.boundingBoxMinZ - monsterActivationRange, player.boundingBoxMaxZ + monsterActivationRange );
+ 
+-            int i = MathHelper.floor( maxBBMinX / 16.0D );
+-            int j = MathHelper.floor( maxBBMaxX / 16.0D );
+-            int k = MathHelper.floor( maxBBMinZ / 16.0D );
+-            int l = MathHelper.floor( maxBBMaxZ / 16.0D );
++            int i = MathHelper.floor( b.maxBBMinX / 16.0D );
++            int j = MathHelper.floor( b.maxBBMaxX / 16.0D );
++            int k = MathHelper.floor( b.maxBBMinZ / 16.0D );
++            int l = MathHelper.floor( b.maxBBMaxZ / 16.0D );
+ 
+             for ( int i1 = i; i1 <= j; ++i1 )
+             {
+@@ -156,7 +162,7 @@ public class ActivationRange
+                     Chunk chunk = world.getChunkIfLoaded( i1, j1 );
+                     if ( chunk != null )
+                     {
+-                        activateChunkEntities( chunk );
++                        activateChunkEntities( chunk, b ); // Athena
+                     // PandaSpigot end
+                     }
+                 }
+@@ -170,7 +176,7 @@ public class ActivationRange
+      *
+      * @param chunk
+      */
+-    private static void activateChunkEntities(Chunk chunk)
++    private static void activateChunkEntities(Chunk chunk, Bounds b) // Athena
+     {
+         // Athena start - a chunk with no monster or animal has only misc entities to activate.
+         //
+@@ -183,7 +189,7 @@ public class ActivationRange
+         // index finds exactly those candidates without visiting the rest.
+         if ( chunk.activationMobCount == 0 )
+         {
+-            activateChunkMisc( chunk );
++            activateChunkMisc( chunk, b ); // Athena
+             return;
+         }
+         // Athena end
+@@ -216,20 +222,20 @@ public class ActivationRange
+                     switch ( entity.activationType )
+                     {
+                         case 1:
+-                            if ( AxisAlignedBBHelper.intersects( monsterBBMinX, monsterBBMinY, monsterBBMinZ, monsterBBMaxX, monsterBBMaxY, monsterBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
++                            if ( AxisAlignedBBHelper.intersects( b.monsterBBMinX, b.monsterBBMinY, b.monsterBBMinZ, b.monsterBBMaxX, b.monsterBBMaxY, b.monsterBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }
+                             break;
+                         case 2:
+-                            if ( AxisAlignedBBHelper.intersects( animalBBMinX, animalBBMinY, animalBBMinZ, animalBBMaxX, animalBBMaxY, animalBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
++                            if ( AxisAlignedBBHelper.intersects( b.animalBBMinX, b.animalBBMinY, b.animalBBMinZ, b.animalBBMaxX, b.animalBBMaxY, b.animalBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }
+                             break;
+                         case 3:
+                         default:
+-                            if ( AxisAlignedBBHelper.intersects( miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
++                            if ( AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+                                 entity.activatedTick = MinecraftServer.currentTick;
+                             }
+@@ -240,7 +246,7 @@ public class ActivationRange
+     }
+ 
+     // Athena start - see activateChunkEntities
+-    private static void activateChunkMisc(Chunk chunk)
++    private static void activateChunkMisc(Chunk chunk, Bounds b) // Athena
+     {
+         int mask = chunk.nonEmptySliceMask;
+ 
+@@ -252,15 +258,15 @@ public class ActivationRange
+ 
+             if ( buckets == null )
+             {
+-                activateMisc( chunk.entitySlices[ k ] );
++                activateMisc( chunk.entitySlices[ k ], b ); // Athena
+                 continue;
+             }
+ 
+-            int hiX = chunk.activationBucketHiX( miscBBMaxX );
+-            int loZ = chunk.activationBucketLoZ( k, miscBBMinZ );
+-            int hiZ = chunk.activationBucketHiZ( miscBBMaxZ );
++            int hiX = chunk.activationBucketHiX( b.miscBBMaxX );
++            int loZ = chunk.activationBucketLoZ( k, b.miscBBMinZ );
++            int hiZ = chunk.activationBucketHiZ( b.miscBBMaxZ );
+ 
+-            for ( int bx = chunk.activationBucketLoX( k, miscBBMinX ); bx <= hiX; ++bx )
++            for ( int bx = chunk.activationBucketLoX( k, b.miscBBMinX ); bx <= hiX; ++bx )
+             {
+                 for ( int bz = loZ; bz <= hiZ; ++bz )
+                 {
+@@ -268,21 +274,21 @@ public class ActivationRange
+ 
+                     if ( bucket != null )
+                     {
+-                        activateMisc( bucket );
++                        activateMisc( bucket, b ); // Athena
+                     }
+                 }
+             }
+         }
+     }
+ 
+-    private static void activateMisc(List<Entity> entities)
++    private static void activateMisc(List<Entity> entities, Bounds b) // Athena
+     {
+         for ( int index = 0, size = entities.size(); index < size; ++index )
+         {
+             Entity entity = entities.get( index );
+ 
+             if ( MinecraftServer.currentTick > entity.activatedTick && !entity.defaultActivationState
+-                    && AxisAlignedBBHelper.intersects( miscBBMinX, miscBBMinY, miscBBMinZ, miscBBMaxX, miscBBMaxY, miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) )
++                    && AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) )
+             {
+                 entity.activatedTick = MinecraftServer.currentTick;
+             }
+diff --git a/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java b/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java
+index fbfb9d23d4befd966825cf80cdfa8eee796f7f1f..a2e65a51436d99b92d930badcdd0e69b072a081d 100644
+--- a/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java
++++ b/src/test/java/net/minecraft/server/AthenaDecorationCleanupTest.java
+@@ -58,16 +58,16 @@ public class AthenaDecorationCleanupTest extends AbstractTestingBase {
+             held[i].athenaDecorationHolds = 1;
+         }
+         held[0].decorationPending = true;
+-        boolean before = BlockSand.instaFall;
+-        BlockSand.instaFall = false;
++        boolean before = AthenaThreadState.get().instaFall;
++        AthenaThreadState.get().instaFall = false;
+         try {
+             try { world.chunkProviderServer.finishDecoration(held[0], held); fail("plugin failure hidden"); }
+             catch (RuntimeException ex) { assertSame(failure, ex); }
+             for (Chunk chunk : held) assertEquals(0, chunk.athenaDecorationHolds);
+             assertFalse(held[0].decorationPending);
+             assertFalse(world.populating);
+-            assertFalse(BlockSand.instaFall);
+-        } finally { BlockSand.instaFall = before; }
++            assertFalse(AthenaThreadState.get().instaFall);
++        } finally { AthenaThreadState.get().instaFall = before; }
+     }
+ 
+     @Test
