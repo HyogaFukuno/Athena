@@ -250,9 +250,139 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
                 for (Player player : Bukkit.getOnlinePlayers()) getLogger().info("wt where " + player.getName() + " " + player.getWorld().getName());
                 break;
             case "dump": writeThreads(); sender.sendMessage("wt dumped"); break;
+            case "hidecross": hideCross(args[1], true); break;
+            case "showcross": hideCross(args[1], false); break;
+            case "seecheck": seeCheck(); break;
+            case "movepigs": movePigs(args[1], args[2], Integer.parseInt(args[3])); break;
+            case "hammer": hammer(Integer.parseInt(args[1])); break;
+            case "times":
+                for (World world : Bukkit.getWorlds()) {
+                    Athena.runOnWorld(world, () -> getLogger().info("wt time " + world.getName() + " " + world.getTime() + " storm " + world.hasStorm()
+                            + " doMobLoot " + world.getGameRuleValue("doMobLoot") + " pigs " + world.getEntitiesByClass(org.bukkit.entity.Pig.class).size()));
+                }
+                break;
+            case "threadcheck": {
+                try {
+                    Class<?> c = Class.forName("athena.server.AthenaThreadCheck");
+                    getLogger().info("wt threadcheck " + c.getMethod("total").invoke(null) + " " + c.getMethod("report").invoke(null));
+                } catch (ReflectiveOperationException e) {
+                    getLogger().info("wt threadcheck unavailable " + e);
+                }
+                break;
+            }
             default: sender.sendMessage("wt: unknown " + args[0]);
         }
         return true;
+    }
+
+    // ---- phase 7: the limits that were lifted ----
+
+    /**
+     * From the thread of {@code from}: every online player hides (or shows) every player who is not in
+     * {@code from}, so viewers and hidden players sit in worlds ticked by other threads.
+     */
+    private void hideCross(String from, boolean hide) {
+        World world = Bukkit.getWorld(from);
+        Athena.runOnWorld(world, () -> {
+            int n = 0;
+            for (Player viewer : Bukkit.getOnlinePlayers()) {
+                for (Player other : Bukkit.getOnlinePlayers()) {
+                    if (other == viewer || other.getWorld() == world) continue;
+                    if (hide) viewer.hidePlayer(other); else viewer.showPlayer(other);
+                    n++;
+                }
+            }
+            getLogger().info("wt " + (hide ? "hidecross" : "showcross") + " " + n + " on " + Thread.currentThread().getName());
+        });
+    }
+
+    private void seeCheck() {
+        int hidden = 0, pairs = 0;
+        for (Player viewer : Bukkit.getOnlinePlayers()) {
+            for (Player other : Bukkit.getOnlinePlayers()) {
+                if (other == viewer) continue;
+                pairs++;
+                if (!viewer.canSee(other)) hidden++;
+            }
+        }
+        getLogger().info("wt seecheck hidden " + hidden + " of " + pairs);
+    }
+
+    /** From the thread of {@code from}: {@code n} of its pigs go to {@code to}'s spawn; two seconds later, where they are. */
+    private void movePigs(String from, String to, int n) {
+        World a = Bukkit.getWorld(from), b = Bukkit.getWorld(to);
+        Athena.runOnWorld(a, () -> {
+            List<org.bukkit.entity.Entity> moved = new ArrayList<org.bukkit.entity.Entity>();
+            List<java.util.UUID> ids = new ArrayList<java.util.UUID>();
+            int refused = 0;
+            for (org.bukkit.entity.Pig pig : a.getEntitiesByClass(org.bukkit.entity.Pig.class)) {
+                if (moved.size() + refused >= n) break;
+                if (pig.teleport(spawnOf(b))) { moved.add(pig); ids.add(pig.getUniqueId()); } else refused++;
+            }
+            final int asked = moved.size(), no = refused;
+            Bukkit.getScheduler().runTaskLater(this, () -> Athena.runOnWorld(b, () -> {
+                int arrived = 0, handles = 0;
+                for (org.bukkit.entity.Pig pig : b.getEntitiesByClass(org.bukkit.entity.Pig.class)) {
+                    if (ids.contains(pig.getUniqueId())) arrived++;
+                }
+                for (org.bukkit.entity.Entity e : moved) {
+                    if (e.isValid() && e.getWorld() == b) handles++;
+                }
+                getLogger().info("wt movepigs " + from + " -> " + to + ": teleported " + asked + ", refused " + no + ", arrived " + arrived
+                        + ", Bukkit entities now in " + to + " " + handles + ", left in " + from + " " + a.getEntitiesByClass(org.bukkit.entity.Pig.class).size()
+                        + " (counted on " + Thread.currentThread().getName() + ")");
+            }), 40L);
+        });
+    }
+
+    /**
+     * For {@code seconds}: every tick, the server thread and the thread of every test world each make
+     * 40 changes to the main scoreboard (teams, entries, scores, an objective's display name).
+     */
+    private void hammer(int seconds) {
+        final org.bukkit.scoreboard.Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        if (board.getObjective("wt") == null) board.registerNewObjective("wt", "dummy");
+        final java.util.concurrent.atomic.AtomicLong ops = new java.util.concurrent.atomic.AtomicLong();
+        final java.util.concurrent.atomic.AtomicLong errors = new java.util.concurrent.atomic.AtomicLong();
+        final long until = System.currentTimeMillis() + seconds * 1000L;
+        List<World> worlds = new ArrayList<World>(testWorlds());
+        worlds.add(Bukkit.getWorlds().get(0));
+        final java.util.concurrent.atomic.AtomicInteger running = new java.util.concurrent.atomic.AtomicInteger(worlds.size());
+        int k = 0;
+        for (World world : worlds) {
+            final int me = k++;
+            final Random r = new Random(me);
+            final athena.api.WorldTask[] task = new athena.api.WorldTask[1];
+            task[0] = Athena.runOnWorldTimer(world, () -> {
+                if (System.currentTimeMillis() > until) {
+                    task[0].cancel();
+                    if (running.decrementAndGet() == 0) {
+                        getLogger().info("wt hammer done: " + ops.get() + " changes, " + errors.get() + " errors, " + board.getTeams().size()
+                                + " teams, " + board.getEntries().size() + " entries");
+                    }
+                    return;
+                }
+                for (int i = 0; i < 40; i++) {
+                    try {
+                        String team = "t" + r.nextInt(16), entry = "e" + me + "_" + r.nextInt(50);
+                        org.bukkit.scoreboard.Team t = board.getTeam(team);
+                        if (t == null) {
+                            try { t = board.registerNewTeam(team); } catch (IllegalArgumentException taken) { t = board.getTeam(team); }
+                        }
+                        switch (r.nextInt(5)) {
+                            case 0: if (t != null) t.addEntry(entry); break;
+                            case 1: if (t != null) t.removeEntry(entry); break;
+                            case 2: board.getObjective("wt").getScore(entry).setScore(r.nextInt(100)); break;
+                            case 3: board.resetScores(entry); break;
+                            default: if (t != null) t.setPrefix("p" + r.nextInt(10)); for (org.bukkit.scoreboard.Team each : board.getTeams()) each.getSize(); break;
+                        }
+                        ops.incrementAndGet();
+                    } catch (Throwable throwable) {
+                        if (errors.incrementAndGet() <= 5) getLogger().warning("wt hammer error on " + Thread.currentThread().getName() + ": " + throwable);
+                    }
+                }
+            }, 1L, 1L);
+        }
     }
 
     private List<World> testWorlds() {

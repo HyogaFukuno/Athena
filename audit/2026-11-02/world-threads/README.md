@@ -221,3 +221,14 @@ tick の途中で使う static を、スレッドごとかワールドごとの�
 - CPU の数値は Mac（M 系）の上の VM です。ConoHa の vCPU はずっと遅いので、CPU の絶対値はそのまま当てはまりません。比べるのは同じ条件の回どうしです。
 - AOT キャッシュとロビーの GC の設定がないので、本体の 1 試合の anon（203 MiB）は本番の計測（172〜177 MB）より大きく出ています。こちらも比べるのは回どうしです。
 - ボットは飛ぶので、バニラの「moved wrongly」の警告が出ます（どの回も同じくらい）。集計からは外しています。
+
+## 段階 7：残っていた制約を減らす（server 0393・api 0059、2026-11-02）
+
+洗い出しと結果は [`../WORLD-THREADS-PLAN.md`](../WORLD-THREADS-PLAN.md) の §7 にあります。試験の道具に足したもの：
+
+- `plugin/` の `wt hidecross <world>`・`showcross`・`seecheck`・`movepigs <from> <to> <n>`・`hammer <秒>`・`times`・`threadcheck`
+- `run_wt.py --constraints`：上の 4 つ（バニラのコマンド、ワールドをまたぐ hide/show、豚の移動、スコアボードの同時変更）を突く筋書き
+
+```bash
+python3 audit/2026-11-02/world-threads/run_wt.py --constraints --jvmarg=-Dathena.threadCheck=true
+```

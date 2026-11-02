@@ -41,6 +41,7 @@ p.add_argument("--threaded", action="store_true")   # the test worlds tick on th
 p.add_argument("--failures", action="store_true")   # threaded worlds with bots: one stalls past the watchdog, one throws out of its tick
 p.add_argument("--moves", action="store_true")   # threaded worlds; bots move between them and the main world, die, respawn, log in
 p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
+p.add_argument("--constraints", action="store_true")   # phase 7: vanilla commands, hide/show, pigs and scoreboards across threads
 a = p.parse_args()
 
 # --- protocol 47 bots ------------------------------------------------------------------------------
@@ -240,6 +241,9 @@ class Server:
 
 # --- the scenario ------------------------------------------------------------------------------------
 
+CONSTRAINT_PLAYERS = {}
+
+
 def main():
     shutil.rmtree(a.out, ignore_errors=True); os.makedirs(a.out)
     prepare()
@@ -296,6 +300,51 @@ def main():
         mark = srv.cmd("wt check")
         i = srv.wait_for(r"wt check online", 30, mark)
         if i >= 0: check = srv.lines[i].strip()
+    elif a.constraints:
+        # phase 7: the bots spread over the test worlds, each on its own thread; then what used to be
+        # refused or unguarded across threads: vanilla commands from the console and from a player in a
+        # threaded world (/time, /weather, /gamerule, /tp across worlds, a selector over every world),
+        # hiding and showing players in other threads' worlds, pigs moved between threads' worlds, and
+        # the main scoreboard changed from every thread at once
+        srv.cmd("wt distribute"); time.sleep(5)
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        time.sleep(2)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        by_world = collections.defaultdict(list)
+        for name, w in sorted(where.items()): by_world[w].append(name)
+        p0, p1, p2 = by_world["wt-0"][0], by_world["wt-1"][0], by_world["wt-2"][0]
+        srv.cmd("op %s" % p0); time.sleep(1)
+        srv.cmd("time set 1000"); srv.cmd("weather rain"); srv.cmd("gamerule doMobLoot false")
+        srv.cmd("tp %s %s" % (by_world["wt-1"][1], by_world["wt-3"][0]))     # console: a player in wt-1 to one in wt-3
+        time.sleep(2)
+        bot = next(b for b in bots if b.name == p0)
+        bot.chat("/time set 13000"); time.sleep(1)
+        bot.chat("/tp %s %s" % (p0, p2)); time.sleep(1)                     # a player in wt-0 sends itself to wt-2
+        bot.chat("/kill @e[type=Pig,c=3]"); time.sleep(1)                    # a selector from a threaded world
+        srv.cmd("kill @e[type=Pig,c=3]")
+        time.sleep(3)
+        srv.cmd("wt times"); time.sleep(1.5)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        srv.cmd("wt hidecross wt-0"); time.sleep(2); srv.cmd("wt seecheck"); time.sleep(1)
+        srv.cmd("wt showcross wt-0"); time.sleep(2); srv.cmd("wt seecheck"); time.sleep(1)
+        srv.cmd("wt movepigs wt-1 wt-2 10"); srv.cmd("wt movepigs wt-2 wt-3 10"); srv.cmd("wt movepigs wt-3 wt-0 5")
+        time.sleep(5)
+        mark = srv.cmd("wt hammer 10")
+        srv.wait_for(r"wt hammer done", 40, mark)
+        srv.cmd("wt times"); time.sleep(1.5)
+        mark = srv.cmd("wt check")
+        i = srv.wait_for(r"wt check online", 30, mark)
+        if i >= 0: check = srv.lines[i].strip()
+        srv.cmd("wt threadcheck"); time.sleep(1)
+        CONSTRAINT_PLAYERS.update({"p0": p0, "p2": p2, "console_tp": (by_world["wt-1"][1], by_world["wt-3"][0])})
     elif a.moves:
         # every test world on its own thread from the start; the bots begin in the main world and
         # are moved between all of them (Athena.teleportAsync) while one world freezes, some die and
@@ -441,6 +490,14 @@ def main():
         print("ticks/s after the crash:", {w: (lambda adv: None if adv is None else round(adv / 4.0, 1))(advance(w, t0, t1)) for w in sorted(samples)})
         moved = [b["name"] for b in report["bots_detail"] if b["world"] == "wt-1"]
         print("bots that were in wt-1:", moved, "their world changes:", [b["respawns"] for b in report["bots_detail"] if b["world"] == "wt-1"])
+        print("check:", check)
+    if a.constraints:
+        log_text = open(os.path.join(a.out, "server.log")).read()
+        for l in log_text.split("\n"):
+            if re.search(r"wt time |wt seecheck|wt hidecross|wt showcross|wt movepigs|wt hammer|wt threadcheck|not responding|Exception|Thread check|issued server command|Set the time|Changing to|Teleported|Killed|Game rule", l):
+                print(" ", l.split("]: ", 1)[-1][:230])
+        print("players:", CONSTRAINT_PLAYERS, "now in:", {k: where.get(v) for k, v in CONSTRAINT_PLAYERS.items() if isinstance(v, str)},
+              "console tp:", [where.get(n) for n in CONSTRAINT_PLAYERS.get("console_tp", ())])
         print("check:", check)
     if a.moves:
         log_text = open(os.path.join(a.out, "server.log")).read()
