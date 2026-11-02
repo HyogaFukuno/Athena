@@ -35,6 +35,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import athena.api.Athena;
+import athena.api.event.WorldThreadFailureEvent;
+import athena.api.event.WorldThreadStallEvent;
 
 /**
  * Test harness for running worlds on their own tick threads (feature/world-threads).
@@ -139,6 +141,18 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onStall(WorldThreadStallEvent event) {
+        getLogger().info("wt stall " + event.getWorld().getName() + " " + event.getStalledMillis() + " ms recovered=" + event.isRecovered()
+            + " on " + Thread.currentThread().getName());
+    }
+
+    @EventHandler
+    public void onFailure(WorldThreadFailureEvent event) {
+        getLogger().info("wt failure " + event.getWorld().getName() + " players " + event.getWorld().getPlayers().size()
+            + " cause " + event.getCause() + " on " + Thread.currentThread().getName());
+    }
+
+    @EventHandler
     public void onInitialSpawn(PlayerInitialSpawnEvent event) {
         String name = joinWorld;
         World world = name == null ? null : Bukkit.getWorld(name);
@@ -201,6 +215,19 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
             case "joinworld": joinWorld = args[1].equals("off") ? null : args[1]; sender.sendMessage("wt joinworld " + joinWorld); break;
             case "kill": kill(sender, Integer.parseInt(args[1])); break;
             case "check": check(sender); break;
+            case "crash": {
+                // the next tick of that world throws (a test hook in AthenaWorldThread, set by reflection)
+                try {
+                    Class<?> type = Class.forName("net.minecraft.server.v1_8_R3.AthenaWorldThread");
+                    java.lang.reflect.Field field = type.getDeclaredField("crashForTest");
+                    field.setAccessible(true);
+                    field.set(null, args[1]);
+                    sender.sendMessage("wt crash armed for " + args[1]);
+                } catch (ReflectiveOperationException e) {
+                    sender.sendMessage("wt crash: " + e);
+                }
+                break;
+            }
             case "preload": {
                 // asked from the console (the server thread) for a world that may tick on its own thread
                 World world = Bukkit.getWorld(args[1]);

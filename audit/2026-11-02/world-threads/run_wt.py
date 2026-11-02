@@ -38,6 +38,7 @@ p.add_argument("--java", default="/Users/glacier/Library/Java/JavaVirtualMachine
 p.add_argument("--heap", default="512M")
 p.add_argument("--jvmarg", action="append", default=[])
 p.add_argument("--threaded", action="store_true")   # the test worlds tick on their own threads; bots stay in "world"
+p.add_argument("--failures", action="store_true")   # threaded worlds with bots: one stalls past the watchdog, one throws out of its tick
 p.add_argument("--moves", action="store_true")   # threaded worlds; bots move between them and the main world, die, respawn, log in
 p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
 a = p.parse_args()
@@ -195,6 +196,10 @@ def prepare():
             "online-mode=false", "server-port=%d" % a.port, "level-type=FLAT", "generate-structures=false",
             "spawn-animals=false", "spawn-monsters=false", "spawn-npcs=false", "view-distance=4",
             "max-players=200", "spawn-protection=0", "allow-nether=false", "motd=wt", ""]))
+    if a.failures:
+        # the watchdog reports a world thread that has gone 2 s without a tick
+        with open(os.path.join(a.dir, "athena.yml"), "w") as f:
+            f.write("worldThreadStallSeconds: 2\n")
     with open(os.path.join(a.dir, "bukkit.yml"), "w") as f:
         f.write("settings:\n  allow-end: false\n")
     # a time update every second (PandaSpigot's default is every 5 s): the bots read a gap in them as
@@ -273,7 +278,25 @@ def main():
 
     where = {}
     check = None
-    if a.moves:
+    if a.failures:
+        srv.cmd("wt distribute"); time.sleep(5)
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        time.sleep(2)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        freeze("wt-0", 4000); time.sleep(3)
+        mark = srv.cmd("wt crash wt-1")
+        srv.wait_for(r"wt failure wt-1", 30, mark)
+        crash_ms = int(time.time() * 1000)
+        time.sleep(6)
+        mark = srv.cmd("wt check")
+        i = srv.wait_for(r"wt check online", 30, mark)
+        if i >= 0: check = srv.lines[i].strip()
+    elif a.moves:
         # every test world on its own thread from the start; the bots begin in the main world and
         # are moved between all of them (Athena.teleportAsync) while one world freezes, some die and
         # respawn, and two more log in aimed straight at a threaded world
@@ -408,6 +431,17 @@ def main():
     threads = collections.Counter()
     for r in report["threads"]: threads[r["thread"]] += int(r["count"])
     print("event threads:", dict(threads))
+    if a.failures:
+        log_text = open(os.path.join(a.out, "server.log")).read()
+        for l in log_text.split("\n"):
+            if re.search(r"wt stall |wt failure |has not finished a tick|is ticking again|stopped ticking|is halted", l):
+                print(" ", l.split("]: ", 1)[-1][:170])
+        # after the crash: wt-1 stopped, the others and the main world go on
+        t0 = crash_ms + 1000; t1 = crash_ms + 5000
+        print("ticks/s after the crash:", {w: (lambda adv: None if adv is None else round(adv / 4.0, 1))(advance(w, t0, t1)) for w in sorted(samples)})
+        moved = [b["name"] for b in report["bots_detail"] if b["world"] == "wt-1"]
+        print("bots that were in wt-1:", moved, "their world changes:", [b["respawns"] for b in report["bots_detail"] if b["world"] == "wt-1"])
+        print("check:", check)
     if a.moves:
         log_text = open(os.path.join(a.out, "server.log")).read()
         m = re.search(r"wt shuffle done: (\d+) moves, (\d+) refused", log_text)
