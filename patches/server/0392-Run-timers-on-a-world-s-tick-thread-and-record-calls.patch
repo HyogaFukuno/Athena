@@ -1,0 +1,506 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 18:36:52 +0900
+Subject: [PATCH] Run timers on a world's tick thread, and record calls from
+ the wrong thread
+
+Athena.runOnWorldTimer's tasks are kept by the world and run at the start of its
+tick (MinecraftServer.athenaTickWorld), on its own thread or on the server
+thread, counting the world's own ticks; others hand new ones over through a
+queue, and unloading the world cancels them.
+
+A test aid for the long runs: with -Dathena.threadCheck=true, block changes,
+entity adds, removes, kills and moves, chunk loads and lookups, the entity
+tracker and the player chunk map record each call from a thread that does not
+tick their world, and calls AsyncCatcher refuses. Each place is logged once with
+its stack and counted; the server logs the summary when it stops. Off, the
+checks are a constant false and compile away.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 14537de411a449dec4c98be288499983044c467a..de35bda4f21e84c67249b22be6d3f7e9530c52c8 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -361,4 +361,14 @@ public final class AthenaServerImpl implements AthenaServer {
+         Validate.notNull(task, "Task may not be null");
+         ((CraftWorld) world).getHandle().athenaRunOnTickThread(task);
+     }
++
++    @Override
++    public athena.api.WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period) {
++        Validate.notNull(world, "World may not be null");
++        Validate.notNull(task, "Task may not be null");
++        net.minecraft.server.WorldServer handle = ((CraftWorld) world).getHandle();
++        athena.server.AthenaWorldTimer timer = new athena.server.AthenaWorldTimer(handle, task, delay, period);
++        handle.athenaAddTimer(timer);
++        return timer;
++    }
+ }
+diff --git a/src/main/java/athena/server/AthenaThreadCheck.java b/src/main/java/athena/server/AthenaThreadCheck.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..b394bf57d1dd2ca8ee0f1e3e485e3d36661df8b3
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaThreadCheck.java
+@@ -0,0 +1,110 @@
++package athena.server;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.ConcurrentHashMap;
++import java.util.concurrent.atomic.LongAdder;
++
++import net.minecraft.server.World;
++import net.minecraft.server.WorldServer;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++/**
++ * A test aid for worlds on their own threads: with {@code -Dathena.threadCheck=true}, the places that
++ * change a world (blocks, entities, chunk lookups, the entity tracker, the player chunk map, entity
++ * moves) record every call from a thread other than the one that ticks that world, instead of
++ * letting it race. Each place is logged once with its stack, and counted; {@link #report} lists them,
++ * and the server logs the list when it stops. Off, the checks compile away ({@link #ENABLED} is a
++ * constant).
++ *
++ * <p>The JVM's ThreadSanitizer does not run Minecraft, so this is how the long tests find calls that
++ * slipped past the routing to a world's thread.
++ */
++public final class AthenaThreadCheck {
++    public static final boolean ENABLED = Boolean.getBoolean("athena.threadCheck");
++
++    private static final Logger LOGGER = LogManager.getLogger();
++    /** Stacks of this many frames tell one place from another. */
++    private static final int KEY_FRAMES = 8;
++    /** Places logged with their whole stack; later ones are only counted. */
++    private static final int LOGGED_PLACES = 50;
++
++    private static final Map<String, LongAdder> PLACES = new ConcurrentHashMap<>();
++    private static final LongAdder TOTAL = new LongAdder();
++
++    private AthenaThreadCheck() {}
++
++    /** Records the call if this thread is not the one that ticks {@code world}. */
++    public static void check(World world, String what) {
++        if (world instanceof WorldServer && !((WorldServer) world).isMainThread()) {
++            record((WorldServer) world, what);
++        }
++    }
++
++    /** Records a call that AsyncCatcher is about to refuse. */
++    public static void refused(World world, String what) {
++        record(world instanceof WorldServer ? (WorldServer) world : null, "refused " + what);
++    }
++
++    private static void record(WorldServer world, String what) {
++        TOTAL.increment();
++        StackTraceElement[] stack = new Throwable().getStackTrace();
++        StringBuilder key = new StringBuilder(what).append(" on ").append(threadKind(Thread.currentThread().getName()));
++        int frames = 0;
++        for (int i = 2; i < stack.length && frames < KEY_FRAMES; i++, frames++) {
++            key.append(" < ").append(stack[i].getClassName()).append('.').append(stack[i].getMethodName()).append(':').append(stack[i].getLineNumber());
++        }
++        String place = key.toString();
++        LongAdder count = PLACES.get(place);
++        if (count == null) {
++            LongAdder created = new LongAdder();
++            count = PLACES.putIfAbsent(place, created);
++            if (count == null) {
++                count = created;
++                if (PLACES.size() <= LOGGED_PLACES) {
++                    StringBuilder trace = new StringBuilder();
++                    for (int i = 2; i < stack.length; i++) {
++                        trace.append("\n\tat ").append(stack[i]);
++                    }
++                    String owner = world == null ? "?" : (world.athenaThread != null ? world.athenaThread.getName() : "the server thread");
++                    LOGGER.warn("Thread check: " + what + " in " + (world == null ? "?" : world.getWorldData().getName())
++                            + " from " + Thread.currentThread().getName() + ", which does not tick it (" + owner + " does):" + trace);
++                }
++            }
++        }
++        count.increment();
++    }
++
++    /** "Athena world wt-0" and "Netty Epoll Server IO #3" count as one thread kind each. */
++    private static String threadKind(String name) {
++        return name.replaceAll("[ #-]*\\d+$", "");
++    }
++
++    /** Calls from the wrong thread recorded so far. */
++    public static long total() {
++        return TOTAL.sum();
++    }
++
++    /** One line per place, most calls first. */
++    public static List<String> report() {
++        List<Map.Entry<String, LongAdder>> entries = new ArrayList<>(PLACES.entrySet());
++        entries.sort((a, b) -> Long.compare(b.getValue().sum(), a.getValue().sum()));
++        List<String> lines = new ArrayList<>();
++        for (Map.Entry<String, LongAdder> entry : entries) {
++            lines.add(entry.getValue().sum() + "x " + entry.getKey());
++        }
++        return lines;
++    }
++
++    /** For the server's stop: the summary, if the check is on. */
++    public static void logReport() {
++        if (!ENABLED) return;
++        List<String> lines = report();
++        LOGGER.info("Thread check: " + total() + " calls from a thread that does not tick the world, at " + lines.size() + " places");
++        for (String line : lines) {
++            LOGGER.info("Thread check: " + line);
++        }
++    }
++}
+diff --git a/src/main/java/athena/server/AthenaWorldTimer.java b/src/main/java/athena/server/AthenaWorldTimer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..db0fbc4579830136cc41a508e6e5582864d23e5b
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaWorldTimer.java
+@@ -0,0 +1,68 @@
++package athena.server;
++
++import athena.api.WorldTask;
++import net.minecraft.server.WorldServer;
++import org.bukkit.World;
++
++/**
++ * One Athena.runOnWorldTimer task. Its world's tick thread runs it at the start of the world's tick
++ * (WorldServer.athenaRunTimers), counting the world's own ticks, so it keeps time with the world
++ * and not with the server thread.
++ */
++public final class AthenaWorldTimer implements WorldTask {
++    private final WorldServer world;
++    private final Runnable task;
++    private final long delay;
++    private final long period;
++    /** The world tick it runs next at; set when the tick thread takes it on. */
++    private long next;
++    private volatile boolean cancelled;
++
++    public AthenaWorldTimer(WorldServer world, Runnable task, long delay, long period) {
++        this.world = world;
++        this.task = task;
++        this.delay = Math.max(0L, delay);
++        this.period = period;
++    }
++
++    /** On the tick thread, when it takes the timer on. */
++    public void start(long currentTick) {
++        this.next = currentTick + this.delay;
++    }
++
++    /**
++     * On the tick thread, once a tick: runs the task if it is due.
++     *
++     * @return false once the timer is done and can be dropped
++     */
++    public boolean tick(long currentTick) {
++        if (this.cancelled) return false;
++        if (currentTick < this.next) return true;
++        try {
++            this.task.run();
++        } catch (Throwable throwable) {
++            org.apache.logging.log4j.LogManager.getLogger().error("A timer task for world " + this.world.getWorldData().getName() + " threw", throwable);
++        }
++        if (this.period <= 0L) {
++            this.cancelled = true;
++            return false;
++        }
++        this.next = currentTick + this.period;
++        return !this.cancelled;
++    }
++
++    @Override
++    public World getWorld() {
++        return this.world.getWorld();
++    }
++
++    @Override
++    public void cancel() {
++        this.cancelled = true;
++    }
++
++    @Override
++    public boolean isCancelled() {
++        return this.cancelled;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index a8d2ded70707a0c352e5ab29908f1b785d1879b8..d61a88aa33aec6ad4e94fc1a31b127c912893148 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -424,6 +424,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public Chunk getChunkAt(int i, int j, Runnable runnable) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "chunk load"); // Athena - test aid: calls from a thread that does not tick the world
+         // Athena start - outside the pinned square there is nothing to load
+         if (this.isOutsideBounds(i, j) && !this.chunks.containsKey(LongHash.toLong(i, j))) {
+             if (runnable != null) {
+@@ -548,6 +549,7 @@ public class ChunkProviderServer implements IChunkProvider {
+     }
+ 
+     public Chunk getOrCreateChunk(int i, int j) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "chunk lookup"); // Athena - test aid: calls from a thread that does not tick the world
+         // Athena start - answer from the memo when the last chunk looked up is the one being asked
+         // for. A hit means the chunk is in the map, so the load-or-generate branch below could not
+         // have run anyway, and the coordinate check below already passed for exactly this i and j.
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index cb85a1bc2890ee3e6496d1de820914673b833637..da7a0aea1363c65b8d2cc0388e43cabdef092a2f 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -483,6 +483,7 @@ public abstract class Entity implements ICommandListener {
+     // Athena end
+ 
+     public void move(double d0, double d1, double d2) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "entity move"); // Athena - test aid: calls from a thread that does not tick the world
+         if (this.loadChunks) loadChunks(); // PaperSpigot - Load chunks
+         if (this.noclip) {
+             this.setEntityBoundingBox(this.boundingBoxMinX + d0, this.boundingBoxMinY + d1, this.boundingBoxMinZ + d2, this.boundingBoxMaxX + d0, this.boundingBoxMaxY + d1, this.boundingBoxMaxZ + d2); // Athena
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index 8014fba5bf137368dfcd44af47b35e38a574e835..a4cba46c8ac4b708500713365c8d81cb35e2089a 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -62,6 +62,7 @@ public class EntityTracker {
+     }
+ 
+     public void track(Entity entity) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "entity track"); // Athena - test aid: calls from a thread that does not tick the world
+         if (entity instanceof EntityPlayer) {
+             this.addEntity(entity, 512, 2);
+             EntityPlayer entityplayer = (EntityPlayer) entity;
+@@ -184,6 +185,7 @@ public class EntityTracker {
+     }
+ 
+     public void untrackEntity(Entity entity) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "entity untrack"); // Athena - test aid: calls from a thread that does not tick the world
+         org.spigotmc.AsyncCatcher.catchOp( "entity untrack", this.world ); // Spigot // Athena - the thread that ticks this world
+         if (entity instanceof EntityPlayer) {
+             EntityPlayer entityplayer = (EntityPlayer) entity;
+@@ -203,6 +205,7 @@ public class EntityTracker {
+     }
+ 
+     public void updatePlayers() {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "tracker update"); // Athena - test aid: calls from a thread that does not tick the world
+         ArrayList arraylist = null; // Athena - most ticks move no player; do not allocate for them
+ 
+         for (int i = 0; i < this.entryCount; ++i) { // Athena - indexed walk
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 0e0de1cb22642f1eda1383987eb54c56070552e5..72f4d52e9761e7c93d96717580d5ec0f1eeb588f 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -462,6 +462,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             for (WorldServer world : this.worlds) {
+                 world.athenaStopThread(10000L);
+             }
++            athena.server.AthenaThreadCheck.logReport();
+             // Athena end
+             SpigotTimings.stopServer(); // Spigot
+ 
+@@ -973,6 +974,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     }
+ 
+     private void athenaTickWorld0(WorldServer worldserver) {
++        worldserver.athenaRunTimers(); // Athena - Athena.runOnWorldTimer: at the start of the world's tick, on its thread
+         worldserver.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
+         worldserver.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 41c28dca3b185c7a07b7f327cf62aa6788f0de79..4292af512e5b7ed73f7ccacb7c25576f06ad0583 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -406,6 +406,7 @@ public class PlayerChunkMap {
+     }
+ 
+     public void addPlayer(EntityPlayer entityplayer) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "chunk map add"); // Athena - test aid: calls from a thread that does not tick the world
+         int i = (int) entityplayer.locX >> 4;
+         int j = (int) entityplayer.locZ >> 4;
+ 
+@@ -527,6 +528,7 @@ public class PlayerChunkMap {
+     // Athena end
+ 
+     public void removePlayer(EntityPlayer entityplayer) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "chunk map remove"); // Athena - test aid: calls from a thread that does not tick the world
+         int i = (int) entityplayer.managedPosX >> 4;
+         int j = (int) entityplayer.managedPosZ >> 4;
+ 
+@@ -554,6 +556,7 @@ public class PlayerChunkMap {
+     }
+ 
+     public void movePlayer(EntityPlayer entityplayer) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this.world, "chunk map move"); // Athena - test aid: calls from a thread that does not tick the world
+         int i = (int) entityplayer.locX >> 4;
+         int j = (int) entityplayer.locZ >> 4;
+         double d0 = entityplayer.managedPosX - entityplayer.locX;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 5fd4777a32a1c01e2548c313dc925eb2d0b68c4a..d7ce8ef96373c316b33c1c0db766a01bb259d83b 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -430,6 +430,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public boolean setTypeAndData(BlockPosition blockposition, IBlockData iblockdata, int i) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this, "block change"); // Athena - test aid: calls from a thread that does not tick the world
+         if (this.decorating()) return this.decorationBuffer.setType(blockposition, iblockdata, i); // Athena
+         // CraftBukkit start - tree generation
+         if (this.captureTreeGeneration) {
+@@ -1337,6 +1338,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public boolean addEntity(Entity entity, SpawnReason spawnReason) { // Changed signature, added SpawnReason
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this, "entity add"); // Athena - test aid: calls from a thread that does not tick the world
+         org.spigotmc.AsyncCatcher.catchOp( "entity add", this ); // Spigot // Athena - the thread that ticks this world
+         if (entity == null) return false;
+         // CraftBukkit end
+@@ -1427,6 +1429,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void kill(Entity entity) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this, "entity kill"); // Athena - test aid: calls from a thread that does not tick the world
+         if (entity.passenger != null) {
+             entity.passenger.mount((Entity) null);
+         }
+@@ -1462,6 +1465,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void removeEntity(Entity entity) {
++        if (athena.server.AthenaThreadCheck.ENABLED) athena.server.AthenaThreadCheck.check(this, "entity remove"); // Athena - test aid: calls from a thread that does not tick the world
+         org.spigotmc.AsyncCatcher.catchOp( "entity remove", this ); // Spigot // Athena - the thread that ticks this world
+         entity.die();
+         if (entity instanceof EntityHuman) {
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index c8ef543c0b2a4ec6a79786a3b7a8a9622648e6c7..918d6d105caa2ef6ff3e3950161fa1483529a6dd 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1501,6 +1501,39 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     /** Set while some thread is inside this world's tick (MinecraftServer.athenaTickWorld). */
+     volatile boolean athenaInTick;
+ 
++    /** Athena.runOnWorldTimer tasks: touched by the tick thread only; others hand theirs over through athenaNewTimers. */
++    private final java.util.ArrayList<athena.server.AthenaWorldTimer> athenaTimers = new java.util.ArrayList<>();
++    private final java.util.concurrent.ConcurrentLinkedQueue<athena.server.AthenaWorldTimer> athenaNewTimers = new java.util.concurrent.ConcurrentLinkedQueue<>();
++
++    /** Adds a timer; any thread. It is taken on at the start of the world's next tick. */
++    public void athenaAddTimer(athena.server.AthenaWorldTimer timer) {
++        this.athenaNewTimers.add(timer);
++    }
++
++    /** At the start of each tick, on the tick thread: the timers that are due. */
++    void athenaRunTimers() {
++        athena.server.AthenaWorldTimer added;
++        while ((added = this.athenaNewTimers.poll()) != null) {
++            added.start(this.athenaCurrentTick);
++            this.athenaTimers.add(added);
++        }
++        if (this.athenaTimers.isEmpty()) return;
++        // a timer may add timers (they wait in athenaNewTimers for the next tick) or cancel any of them
++        for (int i = 0; i < this.athenaTimers.size(); i++) {
++            if (!this.athenaTimers.get(i).tick(this.athenaCurrentTick)) {
++                this.athenaTimers.remove(i--);
++            }
++        }
++    }
++
++    /** When the world is unloaded: its timers stop. */
++    public void athenaCancelTimers() {
++        for (athena.server.AthenaWorldTimer timer : this.athenaTimers) timer.cancel();
++        athena.server.AthenaWorldTimer timer;
++        while ((timer = this.athenaNewTimers.poll()) != null) timer.cancel();
++        this.athenaTimers.clear();
++    }
++
+     public ListenableFuture<Object> postToMainThread(Runnable runnable) {
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread == null) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 7805453f36a03763bf6b7704aba4b3b45a620878..923986051c6545d84a821807b16c11cc1ab4bb56 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1104,6 +1104,7 @@ public final class CraftServer implements Server {
+         worlds.remove(world.getName().toLowerCase());
+         console.worlds.remove(console.worlds.indexOf(handle));
+         handle.athenaUnloaded = true; // Athena - see ChunkIOProvider.callStage2
++        handle.athenaCancelTimers(); // Athena - Athena.runOnWorldTimer tasks stop with the world
+ 
+         // Athena - a template world keeps its own read-only region files; the cache below never had them
+         if (handle.getDataManager() instanceof AthenaTemplateDataManager) {
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index 1fdc1ff4b44223b8278e9551ef4c24e1bb928f2f..7070c39a4aa64731e4de9add4a7b3da79bf163e9 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -22,6 +22,7 @@ public class AsyncCatcher
+     {
+         if ( enabled && !( world instanceof net.minecraft.server.WorldServer ? ( (net.minecraft.server.WorldServer) world ).isMainThread() : Thread.currentThread() == MinecraftServer.getServer().primaryThread ) )
+         {
++            if ( athena.server.AthenaThreadCheck.ENABLED ) athena.server.AthenaThreadCheck.refused( world, reason );
+             throw new IllegalStateException( "Asynchronous " + reason + "!" );
+         }
+     }
+diff --git a/src/test/java/athena/server/AthenaWorldTimerTest.java b/src/test/java/athena/server/AthenaWorldTimerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..bdd96dd2b0c3e3d8fe5c1195431057be24f078f0
+--- /dev/null
++++ b/src/test/java/athena/server/AthenaWorldTimerTest.java
+@@ -0,0 +1,59 @@
++package athena.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.junit.Test;
++
++public class AthenaWorldTimerTest {
++
++    /** Runs the timer once per tick from {@code from} to {@code to} and returns the ticks it ran at. */
++    private static List<Long> run(AthenaWorldTimer timer, List<Long> ran, long from, long to) {
++        for (long tick = from; tick <= to; tick++) {
++            if (!timer.tick(tick)) break;
++        }
++        return ran;
++    }
++
++    @Test
++    public void runsAfterTheDelayThenEveryPeriod() {
++        final List<Long> ran = new ArrayList<>();
++        final long[] now = {0};
++        AthenaWorldTimer timer = new AthenaWorldTimer(null, () -> ran.add(now[0]), 3, 5);
++        timer.start(100);
++        for (now[0] = 100; now[0] <= 120; now[0]++) {
++            assertTrue(timer.tick(now[0]));
++        }
++        assertEquals(List.of(103L, 108L, 113L, 118L), ran);
++        assertFalse(timer.isCancelled());
++    }
++
++    @Test
++    public void aPeriodOfZeroRunsOnce() {
++        final List<Long> ran = new ArrayList<>();
++        AthenaWorldTimer timer = new AthenaWorldTimer(null, () -> ran.add(1L), 0, 0);
++        timer.start(7);
++        run(timer, ran, 7, 20);
++        assertEquals(List.of(1L), ran);
++        assertTrue(timer.isCancelled());
++        assertFalse(timer.tick(21));
++    }
++
++    @Test
++    public void cancelStopsIt() {
++        final List<Long> ran = new ArrayList<>();
++        final AthenaWorldTimer[] self = new AthenaWorldTimer[1];
++        self[0] = new AthenaWorldTimer(null, () -> {
++            ran.add(1L);
++            if (ran.size() == 2) self[0].cancel();
++        }, 1, 1);
++        self[0].start(0);
++        run(self[0], ran, 0, 50);
++        assertEquals(2, ran.size());
++        assertTrue(self[0].isCancelled());
++    }
++}
