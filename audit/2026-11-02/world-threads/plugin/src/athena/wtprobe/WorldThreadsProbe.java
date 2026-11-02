@@ -31,6 +31,8 @@ import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import athena.api.Athena;
+
 /**
  * Test harness for running worlds on their own tick threads (feature/world-threads).
  *
@@ -146,11 +148,12 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 0) {
-            sender.sendMessage("wt create <n> | distribute | shuffle <period ticks> <seconds> | freeze <world> <ms> | spawn <world> <n> | status | dump");
+            sender.sendMessage("wt create <n> [threaded] | thread <world> on|off | distribute | shuffle <period ticks> <seconds> | freeze <world> <ms> | spawn <world> <n> | status | dump");
             return true;
         }
         switch (args[0]) {
-            case "create": create(sender, Integer.parseInt(args[1])); break;
+            case "create": create(sender, Integer.parseInt(args[1]), args.length > 2 && args[2].equals("threaded")); break;
+            case "thread": thread(sender, args[1], args[2].equals("on")); break;
             case "distribute": distribute(sender); break;
             case "shuffle": shuffle(sender, Integer.parseInt(args[1]), Integer.parseInt(args[2])); break;
             case "freeze": freeze(sender, args[1], Long.parseLong(args[2])); break;
@@ -170,17 +173,33 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
         return worlds;
     }
 
-    private void create(CommandSender sender, int n) {
+    private void create(CommandSender sender, int n, boolean threaded) {
         long start = System.nanoTime();
         for (int i = 0; i < n; ++i) {
             String name = PREFIX + i;
             if (Bukkit.getWorld(name) != null) continue;
             World world = new WorldCreator(name).type(WorldType.FLAT).generateStructures(false).createWorld();
-            world.setKeepSpawnInMemory(false);
+            // the spawn chunks stay loaded, so the pigs there keep ticking in a world nobody is in
+            world.setKeepSpawnInMemory(true);
             world.setAutoSave(false);
             world.setSpawnLocation(0, 4, 0);
+            if (threaded) Athena.startWorldThread(world);
         }
-        sender.sendMessage("wt created " + testWorlds().size() + " worlds in " + (System.nanoTime() - start) / 1_000_000L + " ms");
+        sender.sendMessage("wt created " + testWorlds().size() + " worlds in " + (System.nanoTime() - start) / 1_000_000L + " ms" + (threaded ? ", each on its own thread" : ""));
+    }
+
+    private void thread(CommandSender sender, String name, boolean on) {
+        World world = Bukkit.getWorld(name);
+        if (world == null) {
+            sender.sendMessage("wt: no world " + name);
+            return;
+        }
+        if (on) {
+            Athena.startWorldThread(world);
+            sender.sendMessage("wt thread " + name + " on");
+        } else {
+            sender.sendMessage("wt thread " + name + " off: " + Athena.stopWorldThread(world));
+        }
     }
 
     private Location spawnOf(World world) {
@@ -220,8 +239,8 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     }
 
     /**
-     * Blocks the thread that ticks this world. Until worlds have their own threads that is the
-     * server thread, so every world stops; that is the baseline the later phases must beat.
+     * Blocks the thread that ticks this world: its own thread if it has one, else the server
+     * thread, which stops every world that has none.
      */
     private void freeze(CommandSender sender, String name, final long millis) {
         World world = Bukkit.getWorld(name);
@@ -238,7 +257,7 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
             }
             getLogger().info("wt froze " + name + " until " + System.currentTimeMillis());
         };
-        Bukkit.getScheduler().runTask(this, block);
+        Athena.runOnWorld(world, block);
         sender.sendMessage("wt freeze queued for " + name);
     }
 
@@ -248,17 +267,20 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
             sender.sendMessage("wt: no world " + name);
             return;
         }
-        for (int i = 0; i < n; ++i) {
-            world.spawnEntity(spawnOf(world), EntityType.PIG);
-        }
-        sender.sendMessage("wt spawned " + n + " pigs in " + name);
+        Athena.runOnWorld(world, () -> {
+            for (int i = 0; i < n; ++i) {
+                world.spawnEntity(spawnOf(world), EntityType.PIG);
+            }
+            getLogger().info("wt spawned " + n + " pigs in " + name + " on " + Thread.currentThread().getName());
+        });
     }
 
     private void status(CommandSender sender) {
         for (World world : Bukkit.getWorlds()) {
-            sender.sendMessage("wt status " + world.getName() + " time " + world.getFullTime()
+            // read on the thread that ticks the world
+            Athena.runOnWorld(world, () -> getLogger().info("wt status " + world.getName() + " time " + world.getFullTime()
                 + " players " + world.getPlayers().size() + " entities " + world.getEntities().size()
-                + " chunks " + world.getLoadedChunks().length);
+                + " chunks " + world.getLoadedChunks().length + " thread " + Thread.currentThread().getName()));
         }
     }
 }

@@ -37,6 +37,7 @@ p.add_argument("--shuffle-s", type=int, default=20)
 p.add_argument("--java", default="/Users/glacier/Library/Java/JavaVirtualMachines/graalvm-jdk-25/Contents/Home/bin/java")
 p.add_argument("--heap", default="512M")
 p.add_argument("--jvmarg", action="append", default=[])
+p.add_argument("--threaded", action="store_true")   # the test worlds tick on their own threads; bots stay in "world"
 a = p.parse_args()
 
 # --- protocol 47 bots ------------------------------------------------------------------------------
@@ -227,7 +228,7 @@ def main():
         print("server did not start; see", os.path.join(a.out, "server.log")); sys.exit(1)
     srv.wait_for(r"\[WorldThreadsProbe\] ready", 30)
 
-    mark = srv.cmd("wt create %d" % a.worlds)
+    mark = srv.cmd("wt create %d%s" % (a.worlds, " threaded" if a.threaded else ""))
     if srv.wait_for(r"wt created", 120, mark) < 0:
         print("worlds not created"); srv.cmd("stop"); sys.exit(1)
     for i in range(a.worlds):
@@ -241,7 +242,9 @@ def main():
         time.sleep(0.1)
     spawned = sum(1 for b in bots if b.pos is not None)
 
-    srv.cmd("wt distribute"); time.sleep(5)
+    if not a.threaded:
+        srv.cmd("wt distribute")
+    time.sleep(5)
 
     freezes = []
     def freeze(world, ms):
@@ -253,12 +256,21 @@ def main():
             freezes.append({"world": world, "thread": m1.group(1), "start_ms": int(m1.group(2)), "end_ms": int(m2.group(1)),
                             "mono_end": time.monotonic()})
 
-    freeze("wt-0", a.freeze_ms); time.sleep(3)
-    srv.cmd("wt shuffle 10 %d" % a.shuffle_s)
-    time.sleep(a.shuffle_s / 2)
-    freeze("wt-1", a.freeze_ms)
-    srv.wait_for(r"wt shuffle done", a.shuffle_s + 30)
-    time.sleep(2)
+    if a.threaded:
+        # players cannot enter threaded worlds yet: freeze one of them, then the server thread, then
+        # hand wt-1 back to the server thread and freeze that again
+        freeze("wt-0", a.freeze_ms); time.sleep(3)
+        freeze("world", a.freeze_ms); time.sleep(3)
+        mark = srv.cmd("wt thread wt-1 off")
+        srv.wait_for(r"wt thread wt-1 off", 30, mark); time.sleep(2)
+        freeze("world", a.freeze_ms); time.sleep(2)
+    else:
+        freeze("wt-0", a.freeze_ms); time.sleep(3)
+        srv.cmd("wt shuffle 10 %d" % a.shuffle_s)
+        time.sleep(a.shuffle_s / 2)
+        freeze("wt-1", a.freeze_ms)
+        srv.wait_for(r"wt shuffle done", a.shuffle_s + 30)
+        time.sleep(2)
     mark = srv.cmd("wt status"); time.sleep(1)
     status = [l.strip() for l in srv.lines[mark:] if "wt status" in l]
     srv.cmd("wt dump"); time.sleep(1)

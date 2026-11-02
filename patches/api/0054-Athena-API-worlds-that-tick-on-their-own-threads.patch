@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 13:31:18 +0900
+Subject: [PATCH] Athena API: worlds that tick on their own threads
+
+startWorldThread moves a world's ticking off the server thread, stopWorldThread
+hands it back, isWorldThreaded and isWorldThread tell which thread owns a world,
+and runOnWorld runs a task on that thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 7be552ae354dbb65cb8425da6351ffb002295e66..abb78bc4db06b412d3c40a9872437cd24b2ff518 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -403,4 +403,53 @@ public final class Athena {
+     public static void removeBossBar(Player player) {
+         getServer().removeBossBar(player);
+     }
++
++    // ---- worlds on their own threads ----
++
++    /**
++     * Moves {@code world}'s ticking off the server thread onto a thread of its own. A stall in that
++     * world (a slow listener, a long chunk load) then holds up that world alone, and the server
++     * thread and the other worlds keep ticking. From then on only that thread may touch the world:
++     * use {@link #runOnWorld} to work on it from elsewhere. Aikar's timings are turned off.
++     *
++     * <p>Not yet for worlds with players: their packets still run on the server thread. Players
++     * cannot be teleported into the world, entities cannot be moved between it and other worlds, and
++     * {@link #preloadChunks} refuses it.
++     *
++     * @throws IllegalStateException if the world has players
++     */
++    public static void startWorldThread(World world) {
++        getServer().startWorldThread(world);
++    }
++
++    /**
++     * Hands {@code world}'s ticking back to the server thread: waits up to 10 seconds for its thread
++     * to finish the tick it is in. Unloading a world does this itself.
++     *
++     * @return false if the thread did not stop in time; it then still owns the world
++     */
++    public static boolean stopWorldThread(World world) {
++        return getServer().stopWorldThread(world);
++    }
++
++    /** Whether {@code world} ticks on a thread of its own ({@link #startWorldThread}). */
++    public static boolean isWorldThreaded(World world) {
++        return getServer().isWorldThreaded(world);
++    }
++
++    /**
++     * Whether the calling thread is the one that ticks {@code world}: its own thread if it has
++     * one, else the server thread. Only that thread may change the world.
++     */
++    public static boolean isWorldThread(World world) {
++        return getServer().isWorldThread(world);
++    }
++
++    /**
++     * Runs {@code task} on the thread that ticks {@code world}, before that thread's next tick. May be
++     * called from any thread.
++     */
++    public static void runOnWorld(World world, Runnable task) {
++        getServer().runOnWorld(world, task);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 5d508d7286bfd7d4a902ddb3cb8f9fc1bacf18ba..bc12d9bf85b36210b3677ed3032fff6c894d1b6b 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -63,4 +63,14 @@ public interface AthenaServer {
+     void setBossBar(Player player, String title, float progress);
+ 
+     void removeBossBar(Player player);
++
++    void startWorldThread(World world);
++
++    boolean stopWorldThread(World world);
++
++    boolean isWorldThreaded(World world);
++
++    boolean isWorldThread(World world);
++
++    void runOnWorld(World world, Runnable task);
+ }
