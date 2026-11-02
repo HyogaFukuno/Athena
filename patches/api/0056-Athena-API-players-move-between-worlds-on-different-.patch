@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 14:33:51 +0900
+Subject: [PATCH] Athena API: players move between worlds on different threads
+
+Document the two-step move, logins aimed at a world on its own thread, and that
+teleportAsync runs and completes on the thread of the entity's world.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index c950fa77f8584a9bee9049541a03ce11c65a9b0c..f2a0f393c6d5ced7e34975eaed67c663b2d43d79 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -222,12 +222,13 @@ public final class Athena {
+     /**
+      * Teleports {@code entity} once the chunk at {@code location} is loaded, loading it off the
+      * server thread first if it is not - Paper's {@code Entity#teleportAsync}. The teleport itself
+-     * happens on the server thread; what is asynchronous is the chunk read. It does not make the
+-     * work after the teleport any lighter: for many players at once, see
+-     * {@link #teleportGradually(List, List, int)}.
++     * happens on the thread that ticks the entity's world (the server thread unless the world has
++     * its own, see {@link #startWorldThread}); what is asynchronous is the chunk read. May be called
++     * from any thread. It does not make the work after the teleport any lighter: for many players at
++     * once, see {@link #teleportGradually(List, List, int)}.
+      *
+-     * @return completes on the server thread: true if the entity was teleported, false if it was
+-     *         gone by then or a plugin cancelled the teleport
++     * @return completes on the thread that ticks the entity's world: true if the entity was
++     *         teleported, false if it was gone by then or a plugin cancelled the teleport
+      */
+     public static CompletableFuture<Boolean> teleportAsync(Entity entity, Location location) {
+         return getServer().teleportAsync(entity, location);
+@@ -413,9 +414,12 @@ public final class Athena {
+      * use {@link #runOnWorld} to work on it from elsewhere. Aikar's timings are turned off.
+      *
+      * <p>Players in the world go with it: their packets, connection ticks, commands, chat
+-     * callbacks and quits run on the world's thread. Not yet: players and entities cannot change
+-     * worlds into or out of it (teleports are refused, a respawn stays in the world, a login never
+-     * lands in it), {@link #preloadChunks} refuses it, and the main world cannot have its own thread.
++     * callbacks and quits run on the world's thread. A player moves between worlds ticked by
++     * different threads in two steps: it leaves on its old world's thread and arrives on the new
++     * one's, so {@code teleport} returns before the player is there, and a player on the way cannot
++     * be teleported again. A login aimed at such a world lands in the main world and is then moved.
++     * Entities other than players do not move between worlds ticked by different threads, and the
++     * main world cannot have its own thread.
+      *
+      * @throws IllegalStateException if {@code world} is the main world, or this is called from inside
+      *         the world's own tick

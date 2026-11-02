@@ -38,6 +38,7 @@ p.add_argument("--java", default="/Users/glacier/Library/Java/JavaVirtualMachine
 p.add_argument("--heap", default="512M")
 p.add_argument("--jvmarg", action="append", default=[])
 p.add_argument("--threaded", action="store_true")   # the test worlds tick on their own threads; bots stay in "world"
+p.add_argument("--moves", action="store_true")   # threaded worlds; bots move between them and the main world, die, respawn, log in
 p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
 a = p.parse_args()
 
@@ -71,7 +72,7 @@ class Bot:
     def __init__(s, name):
         s.name = name; s.buf = b""; s.threshold = -1; s.play = False
         s.lock = threading.Lock(); s.mv = threading.Lock()
-        s.dead = False; s.err = None; s.err_at = None; s.pos = None; s.left = False; s.centre = None
+        s.dead = False; s.err = None; s.err_at = None; s.pos = None; s.left = False; s.deaths = 0; s.centre = None
         s.dim = None; s.respawns = 0; s.teleports = 0; s.corrections = 0
         s.time_updates = []          # wall-clock arrival of each Time Update (one a second per world)
         s.dims = []                  # (monotonic, dimension) at each world change
@@ -128,6 +129,10 @@ class Bot:
                         else:
                             s.teleports += 1; s.centre = (x, y, z)
                         s.pos = [x, y, z]
+                elif pid == 0x06:
+                    health, = r.unpack(">f")
+                    if health <= 0:
+                        s.deaths += 1; s.send(0x16, vi(0))   # Client Status: perform respawn
                 elif pid == 0x40:
                     s.err = "KICKED " + r.string(); s.dead = True
         except Exception as e:
@@ -267,7 +272,37 @@ def main():
                             "mono_end": time.monotonic()})
 
     where = {}
-    if a.players_threaded:
+    check = None
+    if a.moves:
+        # every test world on its own thread from the start; the bots begin in the main world and
+        # are moved between all of them (Athena.teleportAsync) while one world freezes, some die and
+        # respawn, and two more log in aimed straight at a threaded world
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        srv.cmd("wt joinworld wt-2")
+        mark = srv.cmd("wt shuffle 10 %d" % a.shuffle_s)
+        time.sleep(a.shuffle_s / 4)
+        freeze("wt-0", a.freeze_ms)
+        srv.cmd("wt kill 4")
+        for k in range(2):
+            b = Bot("wtj%d" % k); b.start(); bots.append(b); time.sleep(0.3)
+        srv.wait_for(r"wt shuffle done", a.shuffle_s + 60)
+        time.sleep(3)
+        mark = srv.cmd("wt preload wt-3 160")
+        srv.wait_for(r"wt preloaded", 60, mark)
+        mark = srv.cmd("wt gather wt-1")
+        srv.wait_for(r"wt gathered", 60, mark)
+        time.sleep(2)
+        mark = srv.cmd("wt check")
+        i = srv.wait_for(r"wt check online", 30, mark)
+        if i >= 0:
+            check = srv.lines[i].strip()
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+    elif a.players_threaded:
         # the bots are spread over the test worlds, which then move to their own threads with them
         # inside: their packets, connection ticks, commands and quits must follow
         srv.cmd("wt distribute"); time.sleep(5)
@@ -373,6 +408,21 @@ def main():
     threads = collections.Counter()
     for r in report["threads"]: threads[r["thread"]] += int(r["count"])
     print("event threads:", dict(threads))
+    if a.moves:
+        log_text = open(os.path.join(a.out, "server.log")).read()
+        m = re.search(r"wt shuffle done: (\d+) moves, (\d+) refused", log_text)
+        print("moves:", m.group(0) if m else "shuffle did not finish")
+        print("deaths %d, world changes seen by the bots %d" % (sum(b.deaths for b in bots), sum(b.respawns for b in bots)))
+        joined = [b for b in bots if b.name.startswith("wtj")]
+        print("logins aimed at wt-2:", [(b.name, len(b.dims), where.get(b.name)) for b in joined])
+        arrivals = re.findall(r"wt arrived (wtj\d) (\S+) -> (\S+) on (.+)", log_text)
+        print("first arrival of each login:", {n: (f, t, th) for n, f, t, th in reversed(arrivals)})
+        # the probe warns when a player arrives on a thread that does not tick its new world at that moment
+        print("arrivals off the new world's thread:", log_text.count("wt arrived off its world's thread"))
+        for l in log_text.split("\n"):
+            if "wt preloaded" in l or "wt gathered" in l: print(l.split("]: ")[-1])
+        print("check:", check)
+        print("where:", dict(collections.Counter(where.values())))
     if a.players_threaded:
         for k, f in enumerate(freezes):
             hit = collections.Counter(b["world"] for b in d if f["world"] + "#" + str(k) in b["gapped_in"])

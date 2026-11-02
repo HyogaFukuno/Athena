@@ -24,7 +24,10 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockPhysicsEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.player.PlayerInitialSpawnEvent;
+import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerTeleportEvent;
@@ -53,6 +56,8 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     private volatile boolean sampling = true;
     private Thread sampler;
     private BukkitTask shuffle;
+    /** A world logins are sent to (PlayerInitialSpawnEvent), or null. */
+    private volatile String joinWorld;
 
     @Override
     public void onEnable() {
@@ -134,6 +139,33 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     }
 
     @EventHandler
+    public void onInitialSpawn(PlayerInitialSpawnEvent event) {
+        String name = joinWorld;
+        World world = name == null ? null : Bukkit.getWorld(name);
+        if (world != null) event.setSpawnLocation(spawnOf(world));
+    }
+
+    @EventHandler
+    public void onChangedWorld(PlayerChangedWorldEvent event) {
+        // fires when the player has arrived: on the thread that ticks the new world
+        count(event.getPlayer().getWorld(), "arrived");
+        if (!Athena.isWorldThread(event.getPlayer().getWorld())) {
+            getLogger().warning("wt arrived off its world's thread: " + event.getPlayer().getName() + " " + event.getFrom().getName() + " -> "
+                + event.getPlayer().getWorld().getName() + " on " + Thread.currentThread().getName());
+            new Throwable("wt arrival stack").printStackTrace();
+        }
+        if (event.getPlayer().getName().startsWith("wtj")) {
+            getLogger().info("wt arrived " + event.getPlayer().getName() + " " + event.getFrom().getName() + " -> "
+                + event.getPlayer().getWorld().getName() + " on " + Thread.currentThread().getName());
+        }
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        count(event.getRespawnLocation().getWorld(), "respawn-to");
+    }
+
+    @EventHandler
     public void onJoin(PlayerJoinEvent event) {
         count(event.getPlayer().getWorld(), "join");
     }
@@ -166,6 +198,27 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
             case "freeze": freeze(sender, args[1], Long.parseLong(args[2])); break;
             case "spawn": spawn(sender, args[1], Integer.parseInt(args[2])); break;
             case "status": status(sender); break;
+            case "joinworld": joinWorld = args[1].equals("off") ? null : args[1]; sender.sendMessage("wt joinworld " + joinWorld); break;
+            case "kill": kill(sender, Integer.parseInt(args[1])); break;
+            case "check": check(sender); break;
+            case "preload": {
+                // asked from the console (the server thread) for a world that may tick on its own thread
+                World world = Bukkit.getWorld(args[1]);
+                Athena.preloadChunks(new Location(world, 0, 4, 0), Integer.parseInt(args[2]), 4).whenComplete((n, t) ->
+                    getLogger().info("wt preloaded " + n + " chunks in " + world.getName() + " (error " + t + ") on " + Thread.currentThread().getName()));
+                break;
+            }
+            case "gather": {
+                // asked from the thread of a world: its players go to the main world a few per tick
+                World world = Bukkit.getWorld(args[1]);
+                World main = Bukkit.getWorlds().get(0);
+                Athena.runOnWorld(world, () -> {
+                    List<Player> players = new ArrayList<Player>(world.getPlayers());
+                    Athena.teleportGradually(players, player -> spawnOf(main), 2).whenComplete((n, t) ->
+                        getLogger().info("wt gathered " + n + " of " + players.size() + " from " + world.getName() + " (error " + t + ") on " + Thread.currentThread().getName()));
+                });
+                break;
+            }
             case "where":
                 for (Player player : Bukkit.getOnlinePlayers()) getLogger().info("wt where " + player.getName() + " " + player.getWorld().getName());
                 break;
@@ -228,21 +281,23 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
     private void shuffle(CommandSender sender, int periodTicks, int seconds) {
         if (shuffle != null) shuffle.cancel();
         final List<World> worlds = testWorlds();
+        worlds.add(Bukkit.getWorlds().get(0)); // and back to the main world, which the server thread ticks
         final long end = System.currentTimeMillis() + seconds * 1000L;
         final AtomicLong moves = new AtomicLong();
+        final AtomicLong refused = new AtomicLong();
         shuffle = Bukkit.getScheduler().runTaskTimer(this, () -> {
             if (System.currentTimeMillis() >= end) {
                 shuffle.cancel();
                 shuffle = null;
-                getLogger().info("wt shuffle done: " + moves.get() + " moves");
+                getLogger().info("wt shuffle done: " + moves.get() + " moves, " + refused.get() + " refused");
                 return;
             }
             for (Player player : Bukkit.getOnlinePlayers()) {
                 if (random.nextInt(4) != 0) continue;   // a quarter of the players each period
                 World to = worlds.get(random.nextInt(worlds.size()));
                 if (to == player.getWorld()) continue;
-                player.teleport(spawnOf(to));
-                moves.incrementAndGet();
+                // the player's own world's thread moves it (Athena.teleportAsync), whichever thread that is
+                Athena.teleportAsync(player, spawnOf(to)).thenAccept(ok -> { if (ok) moves.incrementAndGet(); else refused.incrementAndGet(); });
             }
         }, periodTicks, periodTicks);
         sender.sendMessage("wt shuffling every " + periodTicks + " ticks for " + seconds + " s");
@@ -269,6 +324,48 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
         };
         Athena.runOnWorld(world, block);
         sender.sendMessage("wt freeze queued for " + name);
+    }
+
+    /** Kills n players, each on the thread that ticks its world; the bots respawn. */
+    private void kill(CommandSender sender, int n) {
+        List<Player> players = new ArrayList<Player>(Bukkit.getOnlinePlayers());
+        java.util.Collections.shuffle(players, random);
+        for (Player player : players.subList(0, Math.min(n, players.size()))) {
+            Athena.runOnWorld(player.getWorld(), () -> {
+                if (!Athena.isWorldThread(player.getWorld())) return; // it moved meanwhile
+                player.setHealth(0.0D);
+            });
+        }
+        sender.sendMessage("wt killed " + Math.min(n, players.size()));
+    }
+
+    /**
+     * Every world's player list, read on the thread that ticks it: each online player must be in
+     * exactly one world, and no world may hold one that is gone.
+     */
+    private void check(CommandSender sender) {
+        final Map<String, List<String>> seen = new ConcurrentHashMap<String, List<String>>();
+        final List<World> worlds = new ArrayList<World>(Bukkit.getWorlds());
+        final java.util.concurrent.atomic.AtomicInteger left = new java.util.concurrent.atomic.AtomicInteger(worlds.size());
+        for (World world : worlds) {
+            Athena.runOnWorld(world, () -> {
+                for (Player player : world.getPlayers()) {
+                    seen.computeIfAbsent(player.getName(), k -> java.util.Collections.synchronizedList(new ArrayList<String>())).add(world.getName());
+                }
+                if (left.decrementAndGet() == 0) {
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        int online = 0, missing = 0, twice = 0, ghosts = 0;
+                        for (Player player : Bukkit.getOnlinePlayers()) {
+                            ++online;
+                            List<String> in = seen.get(player.getName());
+                            if (in == null) ++missing; else if (in.size() > 1) ++twice;
+                        }
+                        for (String name : seen.keySet()) if (Bukkit.getPlayerExact(name) == null) ++ghosts;
+                        getLogger().info("wt check online " + online + " missing " + missing + " twice " + twice + " ghosts " + ghosts);
+                    });
+                }
+            });
+        }
     }
 
     private void spawn(CommandSender sender, String name, int n) {
