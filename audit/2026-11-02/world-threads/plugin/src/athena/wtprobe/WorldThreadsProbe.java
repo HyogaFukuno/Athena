@@ -261,6 +261,28 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
                             + " doMobLoot " + world.getGameRuleValue("doMobLoot") + " pigs " + world.getEntitiesByClass(org.bukkit.entity.Pig.class).size()));
                 }
                 break;
+            case "kickworld": {
+                // from the server thread: everyone in that world is kicked (its thread may be stuck)
+                int n = 0;
+                for (Player player : new ArrayList<Player>(Bukkit.getOnlinePlayers())) {
+                    if (player.getWorld().getName().equals(args[1])) { player.kickPlayer("wt kickworld"); n++; }
+                }
+                getLogger().info("wt kickworld " + args[1] + " kicked " + n + " on " + Thread.currentThread().getName());
+                break;
+            }
+            case "enterunload": {
+                // from the server thread: the players of the main world are sent into a world on its own
+                // thread, which is unloaded at once, before that thread has taken them in
+                World world = Bukkit.getWorld(args[1]);
+                World main = Bukkit.getWorlds().get(0);
+                int sent = 0;
+                for (Player player : new ArrayList<Player>(main.getPlayers())) {
+                    if (player.teleport(spawnOf(world))) sent++;
+                }
+                boolean unloaded = Bukkit.unloadWorld(world, false);
+                getLogger().info("wt enterunload sent " + sent + " into " + args[1] + ", unloaded " + unloaded);
+                break;
+            }
             case "threadcheck": {
                 try {
                     Class<?> c = Class.forName("athena.server.AthenaThreadCheck");
@@ -442,11 +464,12 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
         final long end = System.currentTimeMillis() + seconds * 1000L;
         final AtomicLong moves = new AtomicLong();
         final AtomicLong refused = new AtomicLong();
+        final AtomicLong early = new AtomicLong();
         shuffle = Bukkit.getScheduler().runTaskTimer(this, () -> {
             if (System.currentTimeMillis() >= end) {
                 shuffle.cancel();
                 shuffle = null;
-                getLogger().info("wt shuffle done: " + moves.get() + " moves, " + refused.get() + " refused");
+                getLogger().info("wt shuffle done: " + moves.get() + " moves, " + refused.get() + " refused, " + early.get() + " completed before the player was there");
                 return;
             }
             for (Player player : Bukkit.getOnlinePlayers()) {
@@ -454,7 +477,11 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
                 World to = worlds.get(random.nextInt(worlds.size()));
                 if (to == player.getWorld()) continue;
                 // the player's own world's thread moves it (Athena.teleportAsync), whichever thread that is
-                Athena.teleportAsync(player, spawnOf(to)).thenAccept(ok -> { if (ok) moves.incrementAndGet(); else refused.incrementAndGet(); });
+                Athena.teleportAsync(player, spawnOf(to)).thenAccept(ok -> {
+                    if (ok) moves.incrementAndGet(); else refused.incrementAndGet();
+                    // the future completes once the player is there, on the thread that ticks it now
+                    if (ok && (player.getWorld() != to || !Athena.isWorldThread(to))) early.incrementAndGet();
+                });
             }
         }, periodTicks, periodTicks);
         sender.sendMessage("wt shuffling every " + periodTicks + " ticks for " + seconds + " s");

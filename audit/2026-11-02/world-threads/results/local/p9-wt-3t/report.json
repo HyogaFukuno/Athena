@@ -1,0 +1,115 @@
+{
+ "desc": "p9-wt-3t: 72 bots, 3 at once (threaded), 2 rounds, --cpus=2 --memory=3g, heap 192M, thread check, jar eb5c6b9fd5d6, configs 97dbbd5",
+ "tag": "p9-wt-3t",
+ "bots": 72,
+ "at_once": 3,
+ "threaded": true,
+ "heap": "192M",
+ "cpus": "2",
+ "oom": "false",
+ "bots_ok": 72,
+ "bot_matches": {
+  "2": 72
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "seconds": 597,
+   "ticks": 11940,
+   "max_gap_ms": 106,
+   "gaps_over_60": 10,
+   "gaps_over_100": 1,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-1": {
+   "seconds": 251,
+   "ticks": 5020,
+   "max_gap_ms": 74,
+   "gaps_over_60": 2,
+   "gaps_over_100": 0,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-2": {
+   "seconds": 251,
+   "ticks": 5020,
+   "max_gap_ms": 96,
+   "gaps_over_60": 3,
+   "gaps_over_100": 0,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-3": {
+   "seconds": 251,
+   "ticks": 5020,
+   "max_gap_ms": 100,
+   "gaps_over_60": 3,
+   "gaps_over_100": 1,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-4": {
+   "seconds": 213,
+   "ticks": 4260,
+   "max_gap_ms": 73,
+   "gaps_over_60": 2,
+   "gaps_over_100": 0,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-5": {
+   "seconds": 251,
+   "ticks": 5020,
+   "max_gap_ms": 86,
+   "gaps_over_60": 4,
+   "gaps_over_100": 0,
+   "tps_fighting_median": 20
+  },
+  "sg-lobby_games-6": {
+   "seconds": 251,
+   "ticks": 5020,
+   "max_gap_ms": 87,
+   "gaps_over_60": 4,
+   "gaps_over_100": 0,
+   "tps_fighting_median": 20
+  }
+ },
+ "match_ticks": 29360,
+ "match_gaps_over_60": 18,
+ "match_gaps_over_100": 1,
+ "anon_peak_mib": 285.12890625,
+ "rss_peak_mib": 328.46875,
+ "full_seconds": 298.29259181022644,
+ "full_cores": 0.13151516691020645,
+ "full_threads": {
+  "Netty io_uring": 0.08075963219135542,
+  "World thread -": 0.04421832912428303,
+  "Log4j2-AsyncApp": 0.0028495511566065624,
+  "Server thread": 0.002614882237827201,
+  "GC Thread": 0.0005363861000671179,
+  "C1 CompilerThre": 0.0004358137063045327,
+  "VM Thread": 3.352413125419486e-05,
+  "Monitor Deflati": 3.3524131254194856e-05,
+  "Athena world wa": 3.3524131254194856e-05,
+  "java": 0.0,
+  "VM Periodic Tas": 0.0,
+  "Reference Handl": 0.0
+ },
+ "full_anon_median_mib": 274.384765625,
+ "full_anon_peak_mib": 285.12890625,
+ "run_cores": 0.09544812020348999,
+ "gc": {
+  "count": 108,
+  "full": 9,
+  "max_after_mb": 123,
+  "longest_ms": 64.978,
+  "young_total_ms": 297.5
+ },
+ "freezes": [],
+ "thread_check": {
+  "calls": 0,
+  "places": 0
+ },
+ "thread_check_lines": [],
+ "moved_wrongly": 8726,
+ "log_warnings": 0,
+ "stalls_reported": 0,
+ "log_warning_samples": [],
+ "exceptions": 0
+}

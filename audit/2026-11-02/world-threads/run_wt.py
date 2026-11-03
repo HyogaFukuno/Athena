@@ -42,6 +42,7 @@ p.add_argument("--failures", action="store_true")   # threaded worlds with bots:
 p.add_argument("--moves", action="store_true")   # threaded worlds; bots move between them and the main world, die, respawn, log in
 p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
 p.add_argument("--constraints", action="store_true")   # phase 7: vanilla commands, hide/show, pigs and scoreboards across threads
+p.add_argument("--hazards", action="store_true")   # review fixes: logging in again, a stuck world's players, a stop that times out, an unload while players come in
 a = p.parse_args()
 
 # --- protocol 47 bots ------------------------------------------------------------------------------
@@ -197,7 +198,7 @@ def prepare():
             "online-mode=false", "server-port=%d" % a.port, "level-type=FLAT", "generate-structures=false",
             "spawn-animals=false", "spawn-monsters=false", "spawn-npcs=false", "view-distance=4",
             "max-players=200", "spawn-protection=0", "allow-nether=false", "motd=wt", ""]))
-    if a.failures:
+    if a.failures or a.hazards:
         # the watchdog reports a world thread that has gone 2 s without a tick
         with open(os.path.join(a.dir, "athena.yml"), "w") as f:
             f.write("worldThreadStallSeconds: 2\n")
@@ -242,6 +243,7 @@ class Server:
 # --- the scenario ------------------------------------------------------------------------------------
 
 CONSTRAINT_PLAYERS = {}
+HAZARDS = {}
 
 
 def main():
@@ -300,6 +302,76 @@ def main():
         mark = srv.cmd("wt check")
         i = srv.wait_for(r"wt check online", 30, mark)
         if i >= 0: check = srv.lines[i].strip()
+    elif a.hazards:
+        # the four cases the review of 2026-11-03 found: (1) a player in a world on its own thread logs
+        # in again; (2) a world's thread is stuck: one of its players logs in again and the rest are
+        # kicked from the server thread; (3) a stop of a stuck world's thread times out; (4) players are
+        # sent into a world that is unloaded at once, before its thread has taken them in
+        srv.cmd("wt distribute"); time.sleep(5)
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        time.sleep(2)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        by_world = collections.defaultdict(list)
+        for name, w in sorted(where.items()): by_world[w].append(name)
+        def relogin(name):
+            old = next(b for b in bots if b.name == name and not b.dead)
+            new = Bot(name); new.start(); bots.append(new)
+            t = time.time()
+            while time.time() - t < 15 and new.pos is None and not new.dead: time.sleep(0.05)
+            time.sleep(0.5)
+            return {"name": name, "spawned_after_s": round(time.time() - t, 2) if new.pos is not None else None,
+                    "new_lost": new.err, "old": old.err}
+        HAZARDS["1 relogin in wt-0"] = relogin(by_world["wt-0"][0])
+        old_kicked = [b for b in bots if b.err and "another location" in b.err]
+        for b in old_kicked: b.left = True   # kicked on purpose
+
+        mark = srv.cmd("wt freeze wt-1 12000")
+        srv.wait_for(r"wt freezing wt-1", 30, mark)
+        srv.wait_for(r"wt-1 has not finished a tick", 10, mark)
+        HAZARDS["2a relogin in stuck wt-1"] = relogin(by_world["wt-1"][0])
+        km = srv.cmd("wt kickworld wt-1")
+        i = srv.wait_for(r"wt kickworld", 10, km); time.sleep(1.5)
+        HAZARDS["2b kickworld"] = {"log": srv.lines[i].split("]: ", 1)[-1].strip() if i >= 0 else None,
+                                   "bots": [(b.name, b.err) for b in bots if b.name in by_world["wt-1"][1:]]}
+        for b in bots:
+            if b.err and ("wt kickworld" in b.err or "another location" in b.err): b.left = True
+        j = srv.wait_for(r"wt froze wt-1", 20, mark); time.sleep(3)
+        HAZARDS["2c froze ended"] = j >= 0
+
+        mark = srv.cmd("wt freeze wt-2 13000")
+        srv.wait_for(r"wt freezing wt-2", 30, mark); time.sleep(1)
+        om = srv.cmd("wt thread wt-2 off")
+        i = srv.wait_for(r"wt thread wt-2 off", 20, om)
+        j = srv.wait_for(r"wt-2's thread stopped late", 20, mark); time.sleep(2)
+        sm = srv.cmd("wt status"); time.sleep(1.5)
+        st2 = [l.split("]: ", 1)[-1].strip() for l in srv.lines[sm:] if "wt status wt-2" in l]
+        HAZARDS["3 stop timed out"] = {"answer": srv.lines[i].split("]: ", 1)[-1].strip() if i >= 0 else None,
+                                       "handed back later": j >= 0, "status": st2}
+
+        gm = srv.cmd("wt gather wt-3")
+        srv.wait_for(r"wt gathered", 60, gm); time.sleep(2)
+        # wt-3's thread is held for a moment, so the players are still queued for it when the unload
+        # stops it: they must go on to the main world, and the world unload
+        fm = srv.cmd("wt freeze wt-3 1500")
+        srv.wait_for(r"wt freezing wt-3", 30, fm)
+        um = srv.cmd("wt enterunload wt-3")
+        i = srv.wait_for(r"wt enterunload", 20, um); time.sleep(4)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        where.clear()
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        HAZARDS["4 enter and unload"] = {"log": srv.lines[i].split("]: ", 1)[-1].strip() if i >= 0 else None,
+                                        "players by world": dict(collections.Counter(where.values()))}
+        mark = srv.cmd("wt check")
+        i = srv.wait_for(r"wt check online", 30, mark)
+        if i >= 0: check = srv.lines[i].strip()
+        srv.cmd("wt threadcheck"); time.sleep(1)
     elif a.constraints:
         # phase 7: the bots spread over the test worlds, each on its own thread; then what used to be
         # refused or unguarded across threads: vanilla commands from the console and from a player in a
@@ -490,6 +562,13 @@ def main():
         print("ticks/s after the crash:", {w: (lambda adv: None if adv is None else round(adv / 4.0, 1))(advance(w, t0, t1)) for w in sorted(samples)})
         moved = [b["name"] for b in report["bots_detail"] if b["world"] == "wt-1"]
         print("bots that were in wt-1:", moved, "their world changes:", [b["respawns"] for b in report["bots_detail"] if b["world"] == "wt-1"])
+        print("check:", check)
+    if a.hazards:
+        for k in sorted(HAZARDS): print(k, HAZARDS[k])
+        log_text = open(os.path.join(a.out, "server.log")).read()
+        for l in log_text.split("\n"):
+            if re.search(r"Exception|ERROR\]|wt threadcheck|whose thread is stuck|stopped late|did not stop", l):
+                print(" ", l.split("]: ", 1)[-1][:230])
         print("check:", check)
     if a.constraints:
         log_text = open(os.path.join(a.out, "server.log")).read()
