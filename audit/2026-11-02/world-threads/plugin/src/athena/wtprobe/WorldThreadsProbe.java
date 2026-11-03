@@ -270,6 +270,32 @@ public final class WorldThreadsProbe extends JavaPlugin implements Listener {
                 getLogger().info("wt kickworld " + args[1] + " kicked " + n + " on " + Thread.currentThread().getName());
                 break;
             }
+            case "group": {
+                // the first world joins the thread that ticks the second (Athena.joinWorldThread)
+                Athena.joinWorldThread(Bukkit.getWorld(args[1]), Bukkit.getWorld(args[2]));
+                getLogger().info("wt group " + args[1] + " joined " + args[2] + "'s thread");
+                break;
+            }
+            case "hop": {
+                // on the thread of the first world: its players go to the second, which that thread ticks too;
+                // each must be there as soon as teleport returns
+                World from = Bukkit.getWorld(args[1]), to = Bukkit.getWorld(args[2]);
+                Athena.runOnWorld(from, () -> {
+                    int moved = 0, there = 0;
+                    for (Player player : new ArrayList<Player>(from.getPlayers())) {
+                        if (player.teleport(spawnOf(to))) {
+                            moved++;
+                            if (player.getWorld() == to && to.getPlayers().contains(player)) there++;
+                        }
+                    }
+                    getLogger().info("wt hop " + args[1] + " -> " + args[2] + " moved " + moved + ", there at once " + there + " on " + Thread.currentThread().getName());
+                });
+                break;
+            }
+            case "unload": {
+                getLogger().info("wt unload " + args[1] + " " + Bukkit.unloadWorld(Bukkit.getWorld(args[1]), false));
+                break;
+            }
             case "enterunload": {
                 // from the server thread: the players of the main world are sent into a world on its own
                 // thread, which is unloaded at once, before that thread has taken them in

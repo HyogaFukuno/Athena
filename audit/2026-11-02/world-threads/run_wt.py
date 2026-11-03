@@ -42,6 +42,7 @@ p.add_argument("--failures", action="store_true")   # threaded worlds with bots:
 p.add_argument("--moves", action="store_true")   # threaded worlds; bots move between them and the main world, die, respawn, log in
 p.add_argument("--players-threaded", action="store_true")   # bots spread over the test worlds, which then get their own threads
 p.add_argument("--constraints", action="store_true")   # phase 7: vanilla commands, hide/show, pigs and scoreboards across threads
+p.add_argument("--groups", action="store_true")   # two worlds on one thread (Athena.joinWorldThread): moves at once, a freeze holds both, one leaves, one unloads
 p.add_argument("--hazards", action="store_true")   # review fixes: logging in again, a stuck world's players, a stop that times out, an unload while players come in
 a = p.parse_args()
 
@@ -244,6 +245,7 @@ class Server:
 
 CONSTRAINT_PLAYERS = {}
 HAZARDS = {}
+GROUPS = {}
 
 
 def main():
@@ -302,6 +304,41 @@ def main():
         mark = srv.cmd("wt check")
         i = srv.wait_for(r"wt check online", 30, mark)
         if i >= 0: check = srv.lines[i].strip()
+    elif a.groups:
+        # wt-1 joins wt-0's thread; the players hop between the two on that thread; a freeze of that
+        # thread holds both while wt-2 and wt-3 go on; wt-1 leaves the thread and comes back; then it
+        # is emptied and unloaded while wt-0 goes on
+        srv.cmd("wt distribute"); time.sleep(5)
+        for i in range(a.worlds):
+            mark = srv.cmd("wt thread wt-%d on" % i)
+            srv.wait_for(r"wt thread wt-%d on" % i, 30, mark)
+        mark = srv.cmd("wt thread wt-1 off")
+        srv.wait_for(r"wt thread wt-1 off", 30, mark)
+        mark = srv.cmd("wt group wt-1 wt-0")
+        srv.wait_for(r"wt group wt-1", 30, mark); time.sleep(2)
+        def lines(pattern, mark):
+            time.sleep(1.5)
+            return [l.split("]: ", 1)[-1].strip() for l in srv.lines[mark:] if re.search(pattern, l)]
+        mark = srv.cmd("wt status"); GROUPS["status grouped"] = lines(r"wt status wt-[01] ", mark)
+        mark = srv.cmd("wt hop wt-0 wt-1"); GROUPS["hop 0->1"] = lines(r"wt hop", mark)
+        mark = srv.cmd("wt hop wt-1 wt-0"); GROUPS["hop 1->0"] = lines(r"wt hop", mark)
+        mark = srv.cmd("wt movepigs wt-1 wt-0 10"); time.sleep(3); GROUPS["pigs 1->0"] = lines(r"wt movepigs", mark)
+        freeze("wt-0", a.freeze_ms); time.sleep(3)
+        mark = srv.cmd("wt thread wt-1 off"); GROUPS["leave"] = lines(r"wt thread wt-1 off", mark)
+        mark = srv.cmd("wt status"); GROUPS["status after leave"] = lines(r"wt status wt-[01] ", mark)
+        mark = srv.cmd("wt group wt-1 wt-0"); time.sleep(1)
+        mark = srv.cmd("wt hop wt-1 wt-0"); GROUPS["empty wt-1"] = lines(r"wt hop", mark)
+        mark = srv.cmd("wt unload wt-1"); GROUPS["unload"] = lines(r"wt unload", mark)
+        mark = srv.cmd("wt status"); GROUPS["status after unload"] = lines(r"wt status wt-", mark)
+        mark = srv.cmd("wt where"); time.sleep(1.5)
+        for l in srv.lines[mark:]:
+            m = re.search(r"wt where (\S+) (\S+)", l)
+            if m: where[m.group(1)] = m.group(2)
+        GROUPS["players by world"] = dict(collections.Counter(where.values()))
+        mark = srv.cmd("wt check")
+        i = srv.wait_for(r"wt check online", 30, mark)
+        if i >= 0: check = srv.lines[i].strip()
+        srv.cmd("wt threadcheck"); time.sleep(1)
     elif a.hazards:
         # the four cases the review of 2026-11-03 found: (1) a player in a world on its own thread logs
         # in again; (2) a world's thread is stuck: one of its players logs in again and the rest are
@@ -562,6 +599,13 @@ def main():
         print("ticks/s after the crash:", {w: (lambda adv: None if adv is None else round(adv / 4.0, 1))(advance(w, t0, t1)) for w in sorted(samples)})
         moved = [b["name"] for b in report["bots_detail"] if b["world"] == "wt-1"]
         print("bots that were in wt-1:", moved, "their world changes:", [b["respawns"] for b in report["bots_detail"] if b["world"] == "wt-1"])
+        print("check:", check)
+    if a.groups:
+        for k in GROUPS: print(k, GROUPS[k])
+        log_text = open(os.path.join(a.out, "server.log")).read()
+        for l in log_text.split("\n"):
+            if re.search(r"Exception|ERROR\]|wt threadcheck|left its thread|did not let", l):
+                print(" ", l.split("]: ", 1)[-1][:230])
         print("check:", check)
     if a.hazards:
         for k in sorted(HAZARDS): print(k, HAZARDS[k])
