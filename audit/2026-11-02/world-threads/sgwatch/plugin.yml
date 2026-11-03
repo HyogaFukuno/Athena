@@ -1,0 +1,8 @@
+name: SgWatch
+main: athena.sgwatch.SgWatch
+version: 1
+depend: [SurvivalGames]
+commands:
+  sgwatch:
+    description: records the tick gaps of SurvivalGames' rooms; freezes one for a test (freeze <room|lobby> <ms>)
+    permission: sgwatch.use

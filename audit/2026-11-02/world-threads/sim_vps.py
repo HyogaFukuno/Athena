@@ -15,6 +15,11 @@ box's CPU (busy and steal), MemAvailable and swap, and sshd's CPU. The live serv
 here: stop them first (systemctl stop sg@sg1 sg@sg2) and start them again afterwards.
 
     python3 sim_vps.py JAR TAG --at-once 2 --threaded --heap 192M
+
+With --sg SG_JAR it runs the real SurvivalGames (feature/rooms) instead of MatchSim: --at-once rooms,
+production's SG config with the database off and only the --map map, and the SgWatch plugin
+(sgwatch/) writing ticks.csv. --freeze ROOM:MS@SECONDS (repeatable, ROOM may be "lobby") blocks that
+room's match world's thread (or the server thread) for MS ms, SECONDS after the first bot starts.
 """
 import argparse, collections, csv, json, os, re, shutil, statistics, subprocess, sys, threading, time
 
@@ -47,6 +52,8 @@ p.add_argument("--no-gc-after-match", action="store_true")   # MatchSim skips it
 p.add_argument("--port", type=int, default=25650)
 p.add_argument("--login-gap", type=float, default=0.3)
 p.add_argument("--timeout", type=float, default=3600)
+p.add_argument("--sg", default=None)               # the SurvivalGames jar (rooms): the real plugin instead of MatchSim
+p.add_argument("--freeze", action="append", default=[])   # ROOM:MS@SECONDS, with --sg
 a = p.parse_args()
 BOTS = a.bots or a.at_once * a.per_match
 H = a.host
@@ -93,10 +100,27 @@ edit("athena.yml", [(r"^bungeeGuardTokens:\n(\s+- .*\n)+", "bungeeGuardTokens: [
 open(os.path.join(RUN, "eula.txt"), "w").write("eula=true\n")
 shutil.copytree(os.path.join(MAIN, "bench", "run_sg", "lobby"), os.path.join(RUN, "lobby"),
                 ignore=shutil.ignore_patterns("playerdata", "session.lock"))
-os.makedirs(os.path.join(RUN, "plugins", "MatchSim"))
-subprocess.run([os.path.join(HERE, "matchsim", "build.sh"), os.path.join(RUN, "plugins", "MatchSim.jar")], check=True)
-shutil.copy(os.path.join(HERE, "maps", a.map + ".yml"), os.path.join(RUN, "map.yml"))
-open(os.path.join(RUN, "plugins", "MatchSim", "config.yml"), "w").write("""maps-folder: /opt/mc/maps
+if a.sg:
+    # the real SurvivalGames: its production config, with the bench's rooms, durations and map, and no database
+    os.makedirs(os.path.join(RUN, "plugins", "SurvivalGames", "maps"))
+    shutil.copy(os.path.abspath(a.sg), os.path.join(RUN, "plugins", "SurvivalGames.jar"))
+    shutil.copy(os.path.join(CONF, "plugins", "SurvivalGames", "maps", a.map + ".yml"), os.path.join(RUN, "plugins", "SurvivalGames", "maps"))
+    sgconf = open(os.path.join(CONF, "plugins", "SurvivalGames", "config.yml")).read()
+    sgconf = re.sub(r"(?m)^(database:\n  enabled: )true", r"\1false", sgconf)
+    if "\ndatabase:\n  enabled: false" not in sgconf: sys.exit("SG config: could not turn the database off")
+    durations = {"lobby": a.lobby, "pre-game": a.pregame, "live-game": a.live, "pre-deathmatch": a.predeathmatch,
+                 "deathmatch": a.deathmatch, "end-game": a.end}
+    for k, v in durations.items():
+        sgconf, n = re.subn(r"(?m)^(  %s: )\d+" % k, r"\g<1>%d" % v, sgconf)
+        if not n: sys.exit("SG config: no durations.%s" % k)
+    sgconf = re.sub(r"(?m)^rooms: .*\n", "", sgconf) + "\nrooms: %d\n" % a.at_once
+    open(os.path.join(RUN, "plugins", "SurvivalGames", "config.yml"), "w").write(sgconf)
+    subprocess.run([os.path.join(HERE, "sgwatch", "build.sh"), os.path.join(RUN, "plugins", "SgWatch.jar")], check=True)
+else:
+    os.makedirs(os.path.join(RUN, "plugins", "MatchSim"))
+    subprocess.run([os.path.join(HERE, "matchsim", "build.sh"), os.path.join(RUN, "plugins", "MatchSim.jar")], check=True)
+    shutil.copy(os.path.join(HERE, "maps", a.map + ".yml"), os.path.join(RUN, "map.yml"))
+    open(os.path.join(RUN, "plugins", "MatchSim", "config.yml"), "w").write("""maps-folder: /opt/mc/maps
 map-file: %s/map.yml
 players-per-match: %d
 max-matches: %d
@@ -120,7 +144,7 @@ ssh("chown -R mc:mc %s %s" % (D, CACHE))
 jar_key = ssh("sha256sum %s/paperclip.jar" % D).split()[0][:12]
 GC = a.gc or ("-XX:+UseG1GC -XX:+ExplicitGCInvokesConcurrent" if a.g1 else None)
 desc = "%s: %d bots, %d at once (%s), %d rounds, live %d s, heap %s%s, jar %s, configs %s, VPS-B" % (
-    a.tag, BOTS, a.at_once, "threaded" if a.threaded else "one thread", a.rounds, a.live, a.heap,
+    a.tag, BOTS, a.at_once, "SurvivalGames rooms" if a.sg else ("threaded" if a.threaded else "one thread"), a.rounds, a.live, a.heap,
     (", no System.gc() after a match" if a.no_gc_after_match else "") + (", GC " + GC if GC else "") + (", JIT %r" % a.jit if a.jit is not None else ""), jar_key, conf_rev)
 print(desc, flush=True)
 
@@ -178,6 +202,19 @@ tunnel = subprocess.Popen(["ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForw
                            "-L", "%d:127.0.0.1:%d" % (a.port, a.port), H])
 time.sleep(4)
 BOT_START = time.time()
+FREEZES = []   # (what, ms, unix seconds when asked)
+
+
+def freezer(spec):
+    what, rest = spec.split(":", 1)
+    ms, at = rest.split("@")
+    time.sleep(max(0.0, BOT_START + float(at) - time.time()))
+    FREEZES.append((what, int(ms), time.time()))
+    console("sgwatch freeze %s %s" % (what, ms))
+
+
+for spec in a.freeze:
+    threading.Thread(target=freezer, args=(spec,), daemon=True).start()
 bots = []
 for i in range(BOTS):
     out = os.path.join(OUT, "bot%d.json" % i)
@@ -190,12 +227,13 @@ for _, pr in bots:
     try: pr.wait(timeout=max(a.timeout + 120 - (time.time() - BOT_START), 10))
     except subprocess.TimeoutExpired: pr.kill()
 time.sleep(4)
-console("sim status")
+if not a.sg:
+    console("sim status")
 time.sleep(2)
 ssh("kill $(cat /root/simbench-sampler.pid) 2>/dev/null; true", check=False)
 clean = stop_server()
 tunnel.terminate()
-for f in ("console.out", "gc.log", "plugins/MatchSim/ticks.csv"):
+for f in ("console.out", "gc.log", "plugins/SgWatch/ticks.csv" if a.sg else "plugins/MatchSim/ticks.csv"):
     subprocess.run(["scp", "-q", "%s:%s/%s" % (H, D, f), OUT])
 subprocess.run(["scp", "-q", "%s:/root/simbench-samples.txt" % H, os.path.join(OUT, "samples.txt")])
 print("server stopped %s; box now: %s" % ("cleanly" if clean else "by kill", ssh("free -m | sed -n 2p").strip()), flush=True)
@@ -315,5 +353,15 @@ report["cant_keep_up"] = len(re.findall(r"Can't keep up", text))
 print("stalls reported %d | can't keep up %d | server WARN/ERROR lines %d | timed out %d" % (
     report["stalls_reported"], report["cant_keep_up"], len(errs), text.count("lost connection: Timed out")))
 for l in errs[:10]: print("   ", l[:220])
+# each freeze: the tick rate of every world while it lasted (rows of 1 s, a second in from each end)
+report["freezes"] = []
+for what, ms, at in FREEZES:
+    t0, t1 = at + 1.5, at + ms / 1000.0 - 0.5
+    rates = collections.defaultdict(list)
+    for r in rows:
+        if t0 <= int(r["unix_ms"]) / 1000.0 <= t1: rates[r["world"]].append(int(r["ticks"]))
+    per_world = {w: round(statistics.mean(v), 1) for w, v in sorted(rates.items())}
+    report["freezes"].append({"what": what, "ms": ms, "ticks_per_s": per_world})
+    print("freeze %s for %d ms: ticks/s %s" % (what, ms, " ".join("%s=%s" % kv for kv in per_world.items())))
 json.dump(report, open(os.path.join(OUT, "report.json"), "w"), indent=1, default=str)
 print("out: %s" % OUT)

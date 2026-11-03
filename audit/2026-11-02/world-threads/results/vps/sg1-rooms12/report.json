@@ -1,0 +1,239 @@
+{
+ "desc": "sg1-rooms12: 288 bots, 12 at once (one thread), 2 rounds, live 240 s, heap 320M, GC -XX:+UseShenandoahGC -XX:+ExplicitGCInvokesConcurrent, jar 769706b9ac8e, configs 97dbbd5, VPS-B",
+ "tag": "sg1-rooms12",
+ "bots": 288,
+ "at_once": 12,
+ "threaded": false,
+ "heap": "320M",
+ "aot": [
+  "[start-small] building the shared AOT cache from record-simbench.aotconf"
+ ],
+ "bots_ok": 288,
+ "bot_matches": {
+  "2": 288
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "rows": 1019,
+   "ticks": 20437,
+   "max_gap_ms": 4056,
+   "gaps_over_60": 396,
+   "gaps_over_100": 79
+  },
+  "sg-1-Lobby_Games": {
+   "rows": 744,
+   "ticks": 14872,
+   "max_gap_ms": 1799,
+   "gaps_over_60": 145,
+   "gaps_over_100": 28
+  },
+  "sg-3-Lobby_Games": {
+   "rows": 742,
+   "ticks": 14573,
+   "max_gap_ms": 12237,
+   "gaps_over_60": 169,
+   "gaps_over_100": 25
+  },
+  "sg-2-Lobby_Games": {
+   "rows": 817,
+   "ticks": 16323,
+   "max_gap_ms": 1792,
+   "gaps_over_60": 175,
+   "gaps_over_100": 26
+  },
+  "sg-6-Lobby_Games": {
+   "rows": 809,
+   "ticks": 16137,
+   "max_gap_ms": 1805,
+   "gaps_over_60": 170,
+   "gaps_over_100": 28
+  },
+  "sg-5-Lobby_Games": {
+   "rows": 673,
+   "ticks": 13434,
+   "max_gap_ms": 1812,
+   "gaps_over_60": 141,
+   "gaps_over_100": 30
+  },
+  "sg-7-Lobby_Games": {
+   "rows": 700,
+   "ticks": 13959,
+   "max_gap_ms": 1789,
+   "gaps_over_60": 163,
+   "gaps_over_100": 22
+  },
+  "sg-4-Lobby_Games": {
+   "rows": 675,
+   "ticks": 13473,
+   "max_gap_ms": 1779,
+   "gaps_over_60": 127,
+   "gaps_over_100": 22
+  },
+  "sg-9-Lobby_Games": {
+   "rows": 835,
+   "ticks": 16667,
+   "max_gap_ms": 1774,
+   "gaps_over_60": 148,
+   "gaps_over_100": 18
+  },
+  "sg-10-Lobby_Games": {
+   "rows": 715,
+   "ticks": 14285,
+   "max_gap_ms": 1814,
+   "gaps_over_60": 166,
+   "gaps_over_100": 24
+  },
+  "sg-12-Lobby_Games": {
+   "rows": 770,
+   "ticks": 15358,
+   "max_gap_ms": 1823,
+   "gaps_over_60": 169,
+   "gaps_over_100": 22
+  },
+  "sg-11-Lobby_Games": {
+   "rows": 778,
+   "ticks": 15518,
+   "max_gap_ms": 1827,
+   "gaps_over_60": 147,
+   "gaps_over_100": 23
+  },
+  "sg-8-Lobby_Games": {
+   "rows": 802,
+   "ticks": 16007,
+   "max_gap_ms": 1786,
+   "gaps_over_60": 182,
+   "gaps_over_100": 24
+  }
+ },
+ "match_ticks": 180606,
+ "match_gaps_over_60": 1902,
+ "match_gaps_over_100": 292,
+ "match_worst_ms": 12237,
+ "fighting_tps_min": 17.102920265821865,
+ "anon_peak_mib": 427.15234375,
+ "rss_peak_mib": 509.71875,
+ "avail_min_mib": 41.640625,
+ "swap_used_max_mib": 220.34375,
+ "full": {
+  "seconds": 397.88499999046326,
+  "server_cores": 0.7335787979114466,
+  "box_cores": 1.0706611207012344,
+  "steal_cores": 0.001231511617707993,
+  "sshd_cores": 0.31858451563401047,
+  "threads": {
+   "World thread -": 0.3515588675203958,
+   "Netty io_uring": 0.30270052905459316,
+   "Shenandoah GC T": 0.046621511241802575,
+   "Shenandoah Cont": 0.015532126117215089,
+   "Log4j2-AsyncApp": 0.00623295675901188,
+   "Server thread": 0.004649584679101613,
+   "VM Periodic Tas": 0.0025886876862025155,
+   "bStats-Metrics": 0.001658770750382194,
+   "C1 CompilerThre": 0.0010807142767641571,
+   "VM Thread": 0.0003015946818876717
+  },
+  "anon_median_mib": 401.8671875
+ },
+ "run": {
+  "seconds": 1014.9579999446869,
+  "server_cores": 0.7012999553073044,
+  "box_cores": 0.956581454654194,
+  "steal_cores": 0.0014581884177282782,
+  "sshd_cores": 0.244670222820583,
+  "threads": {
+   "Netty io_uring": 0.3006331296631279,
+   "Shenandoah GC T": 0.06341149092229184,
+   "Server thread": 0.03636603682320994,
+   "Shenandoah Cont": 0.016611524812769427,
+   "World thread -": 0.012434012048466796,
+   "Chunk I/O Execu": 0.011133465621844281,
+   "Log4j2-AsyncApp": 0.004049428646529203,
+   "C1 CompilerThre": 0.0029360820843447747,
+   "VM Periodic Tas": 0.002748882219906685,
+   "Athena chunk pa": 0.0020690511332630964
+  }
+ },
+ "gc": {
+  "count": 5190,
+  "full": 0,
+  "max_after_mb": 295,
+  "longest_ms": 2556.429,
+  "young_total_ms": 0
+ },
+ "log_warnings": 1447,
+ "log_warning_samples": [
+  "[01:11:02 WARN]: [SurvivalGames] Map Lobby_Games has only 4 deathmatch spawns: add the rest with /sg edit Lobby_Games (spawns are reused until then)",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:04 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:06 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:06 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:06 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:06 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[01:12:09 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 "
+ ],
+ "stalls_reported": 1,
+ "cant_keep_up": 0,
+ "freezes": [
+  {
+   "what": "3",
+   "ms": 12000,
+   "ticks_per_s": {
+    "lobby": 20,
+    "sg-1-Lobby_Games": 20,
+    "sg-10-Lobby_Games": 20,
+    "sg-11-Lobby_Games": 20,
+    "sg-12-Lobby_Games": 20,
+    "sg-2-Lobby_Games": 20,
+    "sg-3-Lobby_Games": 4.4,
+    "sg-4-Lobby_Games": 20,
+    "sg-5-Lobby_Games": 20.1,
+    "sg-6-Lobby_Games": 20,
+    "sg-7-Lobby_Games": 20,
+    "sg-8-Lobby_Games": 20,
+    "sg-9-Lobby_Games": 20
+   }
+  },
+  {
+   "what": "lobby",
+   "ms": 4000,
+   "ticks_per_s": {
+    "lobby": 15,
+    "sg-1-Lobby_Games": 20,
+    "sg-10-Lobby_Games": 20,
+    "sg-11-Lobby_Games": 20,
+    "sg-12-Lobby_Games": 20,
+    "sg-2-Lobby_Games": 20,
+    "sg-3-Lobby_Games": 20,
+    "sg-4-Lobby_Games": 20,
+    "sg-5-Lobby_Games": 20,
+    "sg-6-Lobby_Games": 20,
+    "sg-7-Lobby_Games": 20,
+    "sg-8-Lobby_Games": 20,
+    "sg-9-Lobby_Games": 20
+   }
+  }
+ ]
+}
