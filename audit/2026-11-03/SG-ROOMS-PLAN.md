@@ -79,3 +79,15 @@ v2 のトーナメントのデスマッチは、試合のマップとは別の�
 | 1〜5 SG | SG の作業用ワークツリー `developments/SurvivalGames-rooms`（ブランチ `feature/rooms`、`origin/v2` から）を作った。athena-api は mavenLocal のもの（本番用）を上書きしないよう、world-threads のワークツリーでビルドした jar を使う（`-PathenaApiJar` で変えられる） |
 
 段階 1 の進め方：部屋（`Room`）が `Game`・`StateFactoryImpl`・`Arenas`・`Eliminations` などを 1 組ずつ持つ。リスナーは部屋ごとに 1 組ずつ登録し、それぞれ自分の部屋のプレイヤーとワールドのイベントだけを扱う（ハンドラーの頭で部屋のものかを見る）。こうすると、ハンドラーの中身は今のままで済み、部屋のスレッドに移ったあとも、ハンドラーは自分の部屋だけを触る。部屋が 12 個なら 1 つのイベントで 12 回呼ばれるが、判定は集合を 1 回引くだけ。
+
+### 段階 1 の結果（2026-11-03、SG `feature/rooms`、まだ commit していない）
+
+- `room/Room`（部屋 1 つ分の `Game`・`Arenas`・`Eliminations`・`StateFactoryImpl`・`Scoreboards`・`CombatTracker` と、部屋にいる人）と `room/Rooms`（部屋の一覧と、誰がどの部屋にいるか）を足した。部屋の数は config.yml の `rooms`（既定 1）。
+- 入ってきた人は、ロビーで待っている人がいちばん多く、まだ空きのある部屋へ入る（Hub からの指定は段階 4）。
+- 試合のワールドの名前は `sg-{部屋}-{マップ}`。2 つの部屋が同じマップを同時に使える。
+- 部屋ごとに登録するリスナー：殴り合いの記録・チェスト・火打石・モブ・試合（`GameEventListener`）・ロビー・カウントダウン。ロビーとカウントダウンと試合後のダメージは、その部屋のプレイヤーだけを見るようにした。サーバーで 1 つのままのもの：壊せるブロック・天気・矢の数・釣竿・パンチ・空腹（逃げている人の判定は、その人の部屋の記録に聞く）。
+- コマンド（`/records`・`/vote`・`/team`・`/bounty`・`/sponsor`）は、送った人の部屋の試合を見る。ゲームループは 1 本のまま、部屋ごとに 1 秒進める。
+- MOTD の状況は、段階 4 までは最初の部屋のもの。
+- 単体試験 143 件はすべて通った。手元の 1 試合（`bench/sg_local.py`、run_sg_short の設定、ボット 24 体、Athena は wt-p10、2 CPU・ヒープ 192M）：24 体全員が完走し、ロビー → PreGame → Live → PreDeathmatch → Deathmatch → End のどの段階も 20 TPS、サーバーのエラー 0。試合のワールドは `sg-1-Par_72_Revamped`。
+
+段階 2 で直すこと：状態のクラスの一斉送信（`Bukkit.getOnlinePlayers`・`AudienceUtils`）を部屋の人だけにする、`LobbyState` の入場時の処理と、次の試合へのチームの持ち越しを部屋の人だけにする、`PlayerReset` の見せる・隠すを部屋の中だけにする、チャットを部屋の中だけにする。
