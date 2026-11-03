@@ -1,0 +1,140 @@
+{
+ "desc": "v1-wt-4m: 96 bots, 4 at once (threaded), 2 rounds, live 240 s, heap 256M, jar 39dfdfbb1d15, configs 97dbbd5, VPS-B",
+ "tag": "v1-wt-4m",
+ "bots": 96,
+ "at_once": 4,
+ "threaded": true,
+ "heap": "256M",
+ "aot": [
+  "[start-small] building the shared AOT cache from record-simbench.aotconf"
+ ],
+ "bots_ok": 96,
+ "bot_matches": {
+  "2": 96
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "rows": 965,
+   "ticks": 19300,
+   "max_gap_ms": 281,
+   "gaps_over_60": 24,
+   "gaps_over_100": 10
+  },
+  "sg-lobby_games-1": {
+   "rows": 329,
+   "ticks": 6580,
+   "max_gap_ms": 86,
+   "gaps_over_60": 18,
+   "gaps_over_100": 0
+  },
+  "sg-lobby_games-2": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 188,
+   "gaps_over_60": 10,
+   "gaps_over_100": 2
+  },
+  "sg-lobby_games-3": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 221,
+   "gaps_over_60": 16,
+   "gaps_over_100": 3
+  },
+  "sg-lobby_games-4": {
+   "rows": 330,
+   "ticks": 6600,
+   "max_gap_ms": 223,
+   "gaps_over_60": 5,
+   "gaps_over_100": 1
+  },
+  "sg-lobby_games-5": {
+   "rows": 330,
+   "ticks": 6600,
+   "max_gap_ms": 180,
+   "gaps_over_60": 8,
+   "gaps_over_100": 3
+  },
+  "sg-lobby_games-6": {
+   "rows": 357,
+   "ticks": 7140,
+   "max_gap_ms": 255,
+   "gaps_over_60": 9,
+   "gaps_over_100": 3
+  },
+  "sg-lobby_games-7": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 261,
+   "gaps_over_60": 6,
+   "gaps_over_100": 3
+  },
+  "sg-lobby_games-8": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 248,
+   "gaps_over_60": 7,
+   "gaps_over_100": 3
+  }
+ },
+ "match_ticks": 61400,
+ "match_gaps_over_60": 79,
+ "match_gaps_over_100": 18,
+ "match_worst_ms": 261,
+ "fighting_tps_min": 19.999874223744353,
+ "anon_peak_mib": 248.45703125,
+ "rss_peak_mib": 328.73828125,
+ "avail_min_mib": 149.328125,
+ "swap_used_max_mib": 3.7734375,
+ "full": {
+  "seconds": 369.9590001106262,
+  "server_cores": 0.2300254892421948,
+  "box_cores": 0.32341421607319165,
+  "steal_cores": 0.0007568406226535202,
+  "sshd_cores": 0.10241675425836388,
+  "threads": {
+   "Netty io_uring": 0.11360718346474087,
+   "World thread -": 0.10698482801652257,
+   "Server thread": 0.004622133802633997,
+   "Log4j2-AsyncApp": 0.0027570622682378232,
+   "GC Thread": 0.000891990733841649,
+   "C1 CompilerThre": 0.0007838706448911446,
+   "Monitor Deflati": 0.00013515011118812856,
+   "Athena world wa": 8.109006671287714e-05,
+   "Native Heap Tri": 5.406004447525143e-05,
+   "VM Thread": 5.406004447525142e-05
+  },
+  "anon_median_mib": 227.775390625
+ },
+ "run": {
+  "seconds": 959.3940000534058,
+  "server_cores": 0.1376181214314978,
+  "box_cores": 0.2919759764855804,
+  "steal_cores": 0.0007504737365044193,
+  "sshd_cores": 0.08581458712001226,
+  "threads": {
+   "Netty io_uring": 0.10341945018884505,
+   "World thread -": 0.010808906454931698,
+   "Server thread": 0.010037586225746601,
+   "Chunk I/O Execu": 0.003606443233757346,
+   "GC Thread": 0.0029393554679756403,
+   "C1 CompilerThre": 0.0025120023680217348,
+   "Log4j2-AsyncApp": 0.0018866075876013862,
+   "File IO Thread": 0.0006045482877396706,
+   "Athena chunk pa": 0.000552432056037975,
+   "bStats-Metrics": 0.00047946933165560093
+  }
+ },
+ "gc": {
+  "count": 83,
+  "full": 8,
+  "max_after_mb": 89,
+  "longest_ms": 226.718,
+  "young_total_ms": 852.0
+ },
+ "log_warnings": 0,
+ "log_warning_samples": [],
+ "stalls_reported": 0,
+ "cant_keep_up": 0
+}

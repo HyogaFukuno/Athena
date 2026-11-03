@@ -74,7 +74,7 @@ public final class MatchSim extends JavaPlugin implements Listener {
     // settings (config.yml)
     int perMatch, maxMatches, lobbySeconds, pregameSeconds, liveSeconds, predeathmatchSeconds, deathmatchSeconds,
             endSeconds, cleanupSeconds, deathmatchAt, pinRadius, deathmatchPinRadius, teleportsPerTick;
-    boolean threaded, gcAfterMatch;
+    boolean threaded, gcAfterMatch, hasGcRequests;
     File template;
     String mapName;
     List<double[]> spawns = new ArrayList<>(), deathmatchSpawns = new ArrayList<>();
@@ -120,12 +120,13 @@ public final class MatchSim extends JavaPlugin implements Listener {
 
         hasWorldThreads = hasMethod("startWorldThread");
         hasWorldTimers = hasMethod("runOnWorldTimer");
+        hasGcRequests = hasMethod("requestGarbageCollection");
         if (threaded && !hasWorldThreads) {
             getLogger().warning("threaded: true, but this server has no world threads; matches share the server thread");
             threaded = false;
         }
         getLogger().info("players-per-match " + perMatch + ", max-matches " + maxMatches + ", threaded " + threaded
-                + ", world timers " + hasWorldTimers + ", map " + mapName);
+                + ", world timers " + hasWorldTimers + ", GC requests " + hasGcRequests + ", map " + mapName);
         try {
             csv = new BufferedWriter(new FileWriter(new File(getDataFolder(), "ticks.csv")));
             csv.write("unix_ms,world,state,ticks,max_gap_ms,gaps_over_60,gaps_over_100,players,alive,spectators,thread_check\n");
@@ -312,8 +313,10 @@ public final class MatchSim extends JavaPlugin implements Listener {
                 matchesFinished++;
                 getLogger().info("Match " + match.id + " unloaded");
                 if (gcAfterMatch) {
-                    // as SurvivalGames: the old map would otherwise stay in the old generation until a full GC
-                    Bukkit.getScheduler().runTaskLater(this, System::gc, 20L);
+                    // as SurvivalGames: the old map would otherwise stay in the old generation until a full GC.
+                    // Athena runs it off the tick threads; System.gc() here would hold the lobby for the
+                    // whole cycle under a concurrent collector
+                    Bukkit.getScheduler().runTaskLater(this, hasGcRequests ? Athena::requestGarbageCollection : System::gc, 20L);
                 }
             } else if (attempt < 30) {
                 if (attempt >= 5) {

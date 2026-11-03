@@ -1,0 +1,225 @@
+{
+ "desc": "v2-nogc-8m: 192 bots, 8 at once (threaded), 2 rounds, live 240 s, heap 384M, no System.gc() after a match, jar 39dfdfbb1d15, configs 97dbbd5, VPS-B",
+ "tag": "v2-nogc-8m",
+ "bots": 192,
+ "at_once": 8,
+ "threaded": true,
+ "heap": "384M",
+ "aot": [],
+ "bots_ok": 192,
+ "bot_matches": {
+  "2": 192
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "rows": 1037,
+   "ticks": 20740,
+   "max_gap_ms": 234,
+   "gaps_over_60": 58,
+   "gaps_over_100": 7
+  },
+  "sg-lobby_games-1": {
+   "rows": 350,
+   "ticks": 7000,
+   "max_gap_ms": 139,
+   "gaps_over_60": 35,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-2": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 124,
+   "gaps_over_60": 48,
+   "gaps_over_100": 5
+  },
+  "sg-lobby_games-3": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 127,
+   "gaps_over_60": 44,
+   "gaps_over_100": 5
+  },
+  "sg-lobby_games-4": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 125,
+   "gaps_over_60": 46,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-5": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 125,
+   "gaps_over_60": 39,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-6": {
+   "rows": 335,
+   "ticks": 6700,
+   "max_gap_ms": 125,
+   "gaps_over_60": 21,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-7": {
+   "rows": 328,
+   "ticks": 6560,
+   "max_gap_ms": 132,
+   "gaps_over_60": 22,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-8": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 151,
+   "gaps_over_60": 46,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-9": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 139,
+   "gaps_over_60": 39,
+   "gaps_over_100": 4
+  },
+  "sg-lobby_games-10": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 96,
+   "gaps_over_60": 33,
+   "gaps_over_100": 0
+  },
+  "sg-lobby_games-11": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 119,
+   "gaps_over_60": 39,
+   "gaps_over_100": 5
+  },
+  "sg-lobby_games-12": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 147,
+   "gaps_over_60": 27,
+   "gaps_over_100": 5
+  },
+  "sg-lobby_games-13": {
+   "rows": 324,
+   "ticks": 6480,
+   "max_gap_ms": 127,
+   "gaps_over_60": 24,
+   "gaps_over_100": 2
+  },
+  "sg-lobby_games-14": {
+   "rows": 320,
+   "ticks": 6400,
+   "max_gap_ms": 83,
+   "gaps_over_60": 23,
+   "gaps_over_100": 0
+  },
+  "sg-lobby_games-15": {
+   "rows": 431,
+   "ticks": 8620,
+   "max_gap_ms": 120,
+   "gaps_over_60": 29,
+   "gaps_over_100": 1
+  },
+  "sg-lobby_games-16": {
+   "rows": 321,
+   "ticks": 6420,
+   "max_gap_ms": 108,
+   "gaps_over_60": 16,
+   "gaps_over_100": 2
+  }
+ },
+ "match_ticks": 125760,
+ "match_gaps_over_60": 531,
+ "match_gaps_over_100": 53,
+ "match_worst_ms": 151,
+ "fighting_tps_min": 19.999846938876455,
+ "anon_peak_mib": 443.5,
+ "rss_peak_mib": 519.70703125,
+ "avail_min_mib": 131.47265625,
+ "swap_used_max_mib": 52.04296875,
+ "full": {
+  "seconds": 352.1619999408722,
+  "server_cores": 0.43068247007191385,
+  "box_cores": 0.6559197188759239,
+  "steal_cores": 0.001107444869308673,
+  "sshd_cores": 0.2090515160987294,
+  "threads": {
+   "World thread -": 0.21365167170970395,
+   "Netty io_uring": 0.2012426099689889,
+   "Server thread": 0.0061051447923426835,
+   "Log4j2-AsyncApp": 0.004656947655554419,
+   "GC Thread": 0.002016117582587584,
+   "bStats-Metrics": 0.0015333852036581623,
+   "C1 CompilerThre": 0.0011642369138886038,
+   "Monitor Deflati": 0.0001419801114498298,
+   "VM Thread": 0.00011358408915986389,
+   "Athena world wa": 8.518806686989791e-05
+  },
+  "anon_median_mib": 346.892578125
+ },
+ "run": {
+  "seconds": 1032.2669999599457,
+  "server_cores": 0.38990881236697245,
+  "box_cores": 0.580353726335575,
+  "steal_cores": 0.0013853005085462272,
+  "sshd_cores": 0.17383099528219206,
+  "threads": {
+   "Netty io_uring": 0.18714150506360838,
+   "Server thread": 0.020605134137607155,
+   "World thread -": 0.01203177085045044,
+   "Chunk I/O Execu": 0.004795270991121553,
+   "GC Thread": 0.003264659240420127,
+   "Log4j2-AsyncApp": 0.003119347998264929,
+   "C1 CompilerThre": 0.002625289774937254,
+   "Athena chunk pa": 0.0010365535273737497,
+   "File IO Thread": 0.0006103072170518339,
+   "bStats-Metrics": 0.0005618701363334344
+  }
+ },
+ "gc": {
+  "count": 99,
+  "full": 0,
+  "max_after_mb": 239,
+  "longest_ms": 51.785,
+  "young_total_ms": 1945.5
+ },
+ "log_warnings": 70,
+ "log_warning_samples": [
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:10 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:10 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:26 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:23:47 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:24:08 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[16:24:08 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 "
+ ],
+ "stalls_reported": 0,
+ "cant_keep_up": 0
+}

@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 19:49:04 +0900
+Subject: [PATCH] Athena API: ask for a garbage collection without waiting in
+ it
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index c3b1becfa812d0dc7918fafb20a23f6b00f6bae8..5d88087e9642deb286dc64033db6f630c5809fc9 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -476,4 +476,20 @@ public final class Athena {
+     public static WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period) {
+         return getServer().runOnWorldTimer(world, task, delay, period);
+     }
++
++    /**
++     * Asks for a garbage collection and returns at once: {@code System.gc()} runs on a thread of
++     * Athena's own, never on the caller's. Requests that come while one runs are folded into one more
++     * after it. May be called from any thread.
++     *
++     * <p>Use this instead of calling {@code System.gc()} from a tick thread, for instance to clear a
++     * match's map out of the old generation after its world was unloaded. With a concurrent collector
++     * and {@code -XX:+ExplicitGCInvokesConcurrent}, {@code System.gc()} stops no other thread but
++     * keeps its caller until the whole cycle is done (hundreds of milliseconds with many matches in
++     * one JVM), which on the server thread stalls the lobby. With a stop-the-world collector
++     * (ParallelGC, Serial) the collection still pauses every thread, wherever it is asked from.
++     */
++    public static void requestGarbageCollection() {
++        getServer().requestGarbageCollection();
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 53906ac216aefcc9f9ed7b1564195ce3c488e712..1fed1eac34834ae95c353818ad591bf9e70671d2 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -75,4 +75,6 @@ public interface AthenaServer {
+     void runOnWorld(World world, Runnable task);
+ 
+     WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period);
++
++    void requestGarbageCollection();
+ }

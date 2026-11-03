@@ -1,0 +1,160 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 19:49:04 +0900
+Subject: [PATCH] Run requested garbage collections off the tick threads
+
+
+diff --git a/src/main/java/athena/server/AthenaGcRequests.java b/src/main/java/athena/server/AthenaGcRequests.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7cc7a979aa758210c6e83b0748663ef10d7338bb
+--- /dev/null
++++ b/src/main/java/athena/server/AthenaGcRequests.java
+@@ -0,0 +1,71 @@
++package athena.server;
++
++/**
++ * Runs the garbage collections plugins ask for ({@link athena.api.Athena#requestGarbageCollection})
++ * on a daemon thread of its own, so that no tick thread waits in {@code System.gc()}.
++ *
++ * <p>With a concurrent collector and {@code -XX:+ExplicitGCInvokesConcurrent}, {@code System.gc()}
++ * pauses no other thread but keeps its caller until the whole cycle is done: 300-600 ms on a
++ * 2 vCPU box with 12 matches in one JVM. Called from the server thread a second after a match's world
++ * was unloaded, as SurvivalGames did, that stalled the lobby. Requests that come while a collection
++ * runs are folded into one more after it: the running cycle may have started before their garbage
++ * was let go.
++ */
++public final class AthenaGcRequests {
++    private static final AthenaGcRequests INSTANCE = new AthenaGcRequests(System::gc, "Athena GC request");
++
++    private final Runnable gc;
++    private final String threadName;
++    private boolean pending;
++    private Thread thread;
++    private long done;
++
++    AthenaGcRequests(Runnable gc, String threadName) {
++        this.gc = gc;
++        this.threadName = threadName;
++    }
++
++    public static AthenaGcRequests get() {
++        return INSTANCE;
++    }
++
++    /** Asks for a collection and returns at once. May be called from any thread. */
++    public synchronized void request() {
++        pending = true;
++        if (thread == null) {
++            thread = new Thread(this::run, threadName);
++            thread.setDaemon(true);
++            thread.start();
++        }
++        notifyAll();
++    }
++
++    /** Collections run so far. */
++    synchronized long collections() {
++        return done;
++    }
++
++    private void run() {
++        while (true) {
++            synchronized (this) {
++                while (!pending) {
++                    try {
++                        wait();
++                    } catch (InterruptedException e) {
++                        return;
++                    }
++                }
++                pending = false;
++            }
++            try {
++                gc.run();
++            } catch (Throwable t) {
++                org.apache.logging.log4j.LogManager.getLogger().warn("Requested garbage collection failed", t);
++            }
++            synchronized (this) {
++                done++;
++                notifyAll();
++            }
++        }
++    }
++}
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index de35bda4f21e84c67249b22be6d3f7e9530c52c8..ed89bd23fb94b5fa596469622523cfac1f102672 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -371,4 +371,9 @@ public final class AthenaServerImpl implements AthenaServer {
+         handle.athenaAddTimer(timer);
+         return timer;
+     }
++
++    @Override
++    public void requestGarbageCollection() {
++        AthenaGcRequests.get().request();
++    }
+ }
+diff --git a/src/test/java/athena/server/AthenaGcRequestsTest.java b/src/test/java/athena/server/AthenaGcRequestsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f31fbf0061ffae5aa926c0d8be4f19880b04d65c
+--- /dev/null
++++ b/src/test/java/athena/server/AthenaGcRequestsTest.java
+@@ -0,0 +1,57 @@
++package athena.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.Test;
++
++public class AthenaGcRequestsTest {
++
++    @Test
++    public void theCallerDoesNotWaitForTheCollection() throws Exception {
++        CountDownLatch release = new CountDownLatch(1);
++        CountDownLatch started = new CountDownLatch(1);
++        AthenaGcRequests requests = new AthenaGcRequests(() -> {
++            started.countDown();
++            try {
++                release.await();
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
++        }, "gc-test-1");
++        long before = System.nanoTime();
++        requests.request();
++        assertTrue("request() returns before the collection ends", System.nanoTime() - before < TimeUnit.MILLISECONDS.toNanos(500));
++        assertTrue(started.await(5, TimeUnit.SECONDS));
++        release.countDown();
++    }
++
++    @Test
++    public void requestsDuringACollectionFoldIntoOneMore() throws Exception {
++        CountDownLatch release = new CountDownLatch(1);
++        CountDownLatch started = new CountDownLatch(1);
++        AtomicInteger runs = new AtomicInteger();
++        AthenaGcRequests requests = new AthenaGcRequests(() -> {
++            if (runs.incrementAndGet() == 1) {
++                started.countDown();
++                try {
++                    release.await();
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
++            }
++        }, "gc-test-2");
++        requests.request();
++        assertTrue(started.await(5, TimeUnit.SECONDS));
++        for (int i = 0; i < 10; i++) requests.request();
++        release.countDown();
++        long deadline = System.currentTimeMillis() + 5000;
++        while (requests.collections() < 2 && System.currentTimeMillis() < deadline) Thread.sleep(10);
++        Thread.sleep(200);
++        assertEquals("one collection, then one more for the ten that came meanwhile", 2, runs.get());
++        assertEquals(2, requests.collections());
++    }
++}

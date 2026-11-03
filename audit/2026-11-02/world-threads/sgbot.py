@@ -548,7 +548,7 @@ while not b.dead and time.time() - start < a.seconds and b.matches_done < a.matc
         if d > 0: time.sleep(d)
         else: next_t = time.monotonic()
         continue
-    if ph in ("live", "deathmatch") and not b.spectator and sum(1 for t in b.corr_times if now - t < 1.0) >= 3 and now - last_escape > 2.0:
+    if ph in ("live", "deathmatch") and not b.spectator and sum(1 for t in list(b.corr_times) if now - t < 1.0) >= 3 and now - last_escape > 2.0:
         b.stats["escapes"] += 1; escape = 12; last_escape = now
         ang = rnd.random() * 2 * math.pi; esc_dir = (math.cos(ang), math.sin(ang))
         if cruise is not None and b.mode in ("chest_fly", "roam_fly", "chase_fly"): cruise = min(cruise + 4.0, cruise_base + 12.0)
