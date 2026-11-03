@@ -15,6 +15,11 @@ sprint-jump speed, and keeps moving from wherever the server last put it, so a c
 a tree) costs it a few ticks instead of the whole route.
 
     python3 sgbot.py --port 25566 --name Bot0 --centre 143,15 --roam 200 --matches 1 --out bot0.json
+
+Through Velocity and the hub (AthenaHub), --hub-sign X,Y,Z right-clicks that join sign when the bot
+lands on the hub, and plays from the server the sign sends it to. --hop-sign X,Y,Z --hop-after S goes
+back to the hub (/hub) S seconds into its first SG lobby and right-clicks the other sign. --centre auto
+takes the map's centre from where the pre-game puts the bot (for rooms on different maps).
 """
 import socket, struct, zlib, sys, time, math, threading, collections, json, argparse, os, random, re
 
@@ -32,6 +37,9 @@ p.add_argument("--seed", type=int, default=None)
 # spread: in the live game, roam this bot's own sector of the map (sector k of n) and nothing else,
 # so twenty bots hold as many distinct chunks as twenty players can: the memory upper bound
 p.add_argument("--spread", default=None)                # "k/n"
+p.add_argument("--hub-sign", default=None)              # "x,y,z": the hub's join sign to right-click first
+p.add_argument("--hop-sign", default=None)              # "x,y,z": back to the hub from the SG lobby, then this sign
+p.add_argument("--hop-after", type=float, default=15.0)
 a = p.parse_args()
 rnd = random.Random(a.seed if a.seed is not None else a.name)
 
@@ -40,10 +48,12 @@ DT = 0.05
 SPEED = 0.35        # blocks per tick horizontally (~7 b/s, sprint-jumping)
 VSPEED = 0.5
 REACH = 3.2         # punch from this close
-CX, CZ = [float(v) for v in a.centre.split(",")]
+AUTO_CENTRE = a.centre == "auto"
+CX, CZ = (0.0, 0.0) if AUTO_CENTRE else [float(v) for v in a.centre.split(",")]
 
 
 def vi(n):
+    n &= 0xFFFFFFFF   # a VarInt is 32 bits: a negative one (Velocity's keep-alive ids) is written as its two's complement
     out = b""
     while True:
         b = n & 0x7F; n >>= 7
@@ -108,7 +118,28 @@ def read_slot(r):
 
 
 def packpos(x, y, z):
-    return struct.pack(">q", ((x & 0x3FFFFFF) << 38) | ((y & 0xFFF) << 26) | (z & 0x3FFFFFF))
+    return struct.pack(">Q", ((x & 0x3FFFFFF) << 38) | ((y & 0xFFF) << 26) | (z & 0x3FFFFFF))
+
+
+def unpackpos(v):
+    x, y, z = v >> 38, (v >> 26) & 0xFFF, v & 0x3FFFFFF
+    if x >= 1 << 25: x -= 1 << 26
+    if z >= 1 << 25: z -= 1 << 26
+    return x, y, z
+
+
+def sign_text(js):
+    """A sign line's JSON chat component, as plain text."""
+    try:
+        o = json.loads(js)
+    except ValueError:
+        return js
+    if isinstance(o, str): return o
+    if not isinstance(o, dict): return "" if o is None else str(o)
+    out = o.get("text", "")
+    for e in o.get("extra", []) or []:
+        out += e if isinstance(e, str) else sign_text(json.dumps(e))
+    return out
 
 
 # chest (54) and ender chest (130) block states, little-endian (id << 4 | meta) in a 1.8 section
@@ -135,6 +166,11 @@ class Bot:
         s.have = set(); s.dropped = set()   # Athena - chunk columns this client holds / was told to drop
         s.rx = collections.Counter()     # Athena - packets received per "phase pid", and their bytes per "phase pid b"
         s.ticks = []
+        s.joins = 0                      # Join Game packets: one at login, one more for every server switch (Velocity)
+        s.switches = []                  # (unix time, what, ok)
+        s.signs = {}                     # "x,y,z" -> the sign's lines, as the server last sent them
+        s.sign_log = []                  # (unix time, "x,y,z", lines) every time a sign changed
+        s.last_rx = collections.deque(maxlen=12)   # (unix time, packet id): what came last, for a bot that stops hearing
 
     def send(s, pid, payload=b""):
         body = vi(pid) + payload
@@ -145,6 +181,7 @@ class Bot:
             s.sent["m%d %s" % (s.matches_done + 1, s.phase)] += 1
 
     def _fill(s, n):
+        s.want = n
         while len(s.buf) < n:
             c = s.s.recv(1 << 16)
             if not c: raise EOFError
@@ -209,6 +246,7 @@ class Bot:
         try:
             while not s.dead:
                 pid, r = s.read()
+                s.last_rx.append((round(time.time(), 2), pid if s.play else "login %d" % pid))
                 if s.play:
                     ph = "m%d %s" % (s.matches_done + 1, s.phase)   # Athena - per match, so a second match shows the JVM warm
                     s.rx["%s %02x" % (ph, pid)] += 1; s.rx["%s %02x b" % (ph, pid)] += len(r.d) - r.i
@@ -234,7 +272,17 @@ class Bot:
                     if pid == 0x00: s.err = "DISCONNECT " + r.string(); s.dead = True; return
                     continue
                 if pid == 0x00: s.send(0x00, vi(r.vi()))
-                elif pid == 0x01: s.eid, = r.unpack(">i")
+                elif pid == 0x01:
+                    # a server switch through Velocity starts with a Join Game: wait for the new server's position
+                    s.eid, = r.unpack(">i"); s.joins += 1; s.pos = None
+                    s.players.clear(); s.chests.clear(); s.window = None; s.have.clear(); s.dropped.clear()
+                elif pid == 0x33:
+                    x, y, z = unpackpos(r.unpack(">q")[0])
+                    lines = [sign_text(r.string()) for _ in range(4)]
+                    key = "%d,%d,%d" % (x, y, z)
+                    if s.signs.get(key) != lines:
+                        s.signs[key] = lines
+                        if len(s.sign_log) < 400: s.sign_log.append([round(time.time(), 1), key, lines])
                 elif pid == 0x02: s.chat(r.string())
                 elif pid == 0x03: s.ticks.append((time.monotonic(), r.unpack(">q")[0]))
                 elif pid == 0x07:                      # respawn: a world change
@@ -329,13 +377,58 @@ class Bot:
 b = Bot()
 b.send(0x00, vi(47) + st(HOST) + struct.pack(">H", a.port) + vi(2))
 b.send(0x00, st(a.name))
-threading.Thread(target=b.reader, daemon=True).start()
+reader = threading.Thread(target=b.reader, daemon=True); reader.start()
 
-t0 = time.time()
-while b.pos is None and not b.dead and time.time() - t0 < 60:
-    time.sleep(0.05)
-if b.pos is None:
-    json.dump({"name": a.name, "ok": False, "err": b.err or "never spawned"}, open(a.out, "w")); sys.exit(1)
+
+def wait_spawn(seconds):
+    t0 = time.time()
+    while b.pos is None and not b.dead and time.time() - t0 < seconds:
+        time.sleep(0.05)
+    return b.pos is not None
+
+
+def still(seconds):
+    """Wait as a client does: one flying packet a tick (a client never goes quiet while it waits for a server)."""
+    t0 = time.time()
+    while not b.dead and time.time() - t0 < seconds:
+        b.send(0x03, b"\x01"); time.sleep(DT)
+
+
+def switch(what, act):
+    """act() asks for a server switch (a sign, /hub); waits for the next server's Join Game and position."""
+    joins = b.joins
+    act()
+    t0 = time.time()
+    while b.joins == joins and not b.dead and time.time() - t0 < 30:
+        still(DT)
+    ok = b.joins != joins and wait_spawn(30)
+    b.switches.append([round(time.time(), 2), what, ok])
+    return ok
+
+
+def click_sign(where):
+    x, y, z = [int(v) for v in where.split(",")]
+    return lambda: b.send(0x08, packpos(x, y, z) + b"\x01" + struct.pack(">h", -1) + b"\x08\x08\x08")
+
+
+def fail(err):
+    b.err = b.err or err
+    import faulthandler
+    faulthandler.dump_traceback(sys.stderr, all_threads=True)   # where the reader waits, when the bot stops hearing
+    json.dump({"name": a.name, "ok": False, "err": b.err, "switches": b.switches, "signs": b.signs, "joins": b.joins,
+               "last_rx": list(b.last_rx), "reader_alive": reader.is_alive(), "at": round(time.time(), 2),
+               "buffered": len(b.buf), "wanted": getattr(b, "want", None), "threshold": b.threshold,
+               "sign_log": b.sign_log, "chat": list(b.chatlog)}, open(a.out, "w"))
+    sys.exit(1)
+
+
+if not wait_spawn(60):
+    fail("never spawned")
+if a.hub_sign:
+    still(1.0 + rnd.random())   # the sign's lines arrive with its chunk; a player reads before clicking
+    if not switch("sign " + a.hub_sign, click_sign(a.hub_sign)):
+        fail("the hub sign %s did not send us anywhere" % a.hub_sign)
+hop_due = time.time() + a.hop_after if a.hop_sign else None
 
 
 # --- moving -----------------------------------------------------------------------------------
@@ -534,6 +627,18 @@ seen_tp = 0
 while not b.dead and time.time() - start < a.seconds and b.matches_done < a.matches:
     ph = b.phase
     now = time.time()
+    if hop_due is not None and now >= hop_due and ph == "lobby":
+        # back to the hub from the SG lobby, and through the other sign
+        hop_due = None
+        b.set_phase("hub")
+        if not switch("/hub", lambda: b.send(0x01, st("/hub"))):
+            fail("/hub did not send us to the hub")
+        still(1.0)
+        if not switch("sign " + a.hop_sign, click_sign(a.hop_sign)):
+            fail("the hub sign %s did not send us anywhere" % a.hop_sign)
+        b.set_phase("connect")
+        next_t = time.monotonic()
+        continue
     if escape > 0:
         # stuck against a block: go straight up for a while, then carry on (higher) or give up
         escape -= 1
@@ -560,6 +665,7 @@ while not b.dead and time.time() - start < a.seconds and b.matches_done < a.matc
         plan = None; chasing = None
         if ph in ("starting", "pregame"):
             cruise = cruise_base = b.pos[1] + 40.0          # above the map's buildings and trees
+            if AUTO_CENTRE: CX, CZ = b.pos[0], b.pos[2]      # the pedestals ring the map's centre
             chest_done.clear(); decided.clear()
     if ph == "live" and not live_since: live_since = time.time()
     if ph != "live" and ph != "deathmatch": live_since = 0.0
@@ -583,4 +689,5 @@ try: b.s.close()
 except Exception: pass
 json.dump({"name": a.name, "ok": ok, "err": b.err, "phases": b.phases, "matches": b.matches_done,
            "spectator": b.spectator, "stats": dict(b.stats), "sent": dict(b.sent), "rx": dict(b.rx), "teleports": b.teleports, "tp_log": b.tp_log, "chunk_log": b.chunk_log,
-           "chat": list(b.chatlog), "corr_log": b.corr_log, "ticks": b.ticks, "mono_to_unix": time.time() - time.monotonic()}, open(a.out, "w"))
+           "chat": list(b.chatlog), "corr_log": b.corr_log,
+           "switches": b.switches, "signs": b.signs, "sign_log": b.sign_log, "ticks": b.ticks, "mono_to_unix": time.time() - time.monotonic()}, open(a.out, "w"))

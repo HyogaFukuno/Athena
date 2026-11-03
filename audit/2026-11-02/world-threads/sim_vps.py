@@ -20,6 +20,8 @@ With --sg SG_JAR it runs the real SurvivalGames (feature/rooms) instead of Match
 production's SG config with the database off and only the --map map, and the SgWatch plugin
 (sgwatch/) writing ticks.csv. --freeze ROOM:MS@SECONDS (repeatable, ROOM may be "lobby") blocks that
 room's match world's thread (or the server thread) for MS ms, SECONDS after the first bot starts.
+--map takes several maps ("A,B,C", or "all" for every map production has): each room votes among them
+and the bots find each map's centre themselves (sgbot --centre auto). --team-size 2 plays duos.
 """
 import argparse, collections, csv, json, os, re, shutil, statistics, subprocess, sys, threading, time
 
@@ -54,6 +56,7 @@ p.add_argument("--login-gap", type=float, default=0.3)
 p.add_argument("--timeout", type=float, default=3600)
 p.add_argument("--sg", default=None)               # the SurvivalGames jar (rooms): the real plugin instead of MatchSim
 p.add_argument("--freeze", action="append", default=[])   # ROOM:MS@SECONDS, with --sg
+p.add_argument("--team-size", type=int, default=1)       # with --sg: 2 for duos
 a = p.parse_args()
 BOTS = a.bots or a.at_once * a.per_match
 H = a.host
@@ -104,7 +107,10 @@ if a.sg:
     # the real SurvivalGames: its production config, with the bench's rooms, durations and map, and no database
     os.makedirs(os.path.join(RUN, "plugins", "SurvivalGames", "maps"))
     shutil.copy(os.path.abspath(a.sg), os.path.join(RUN, "plugins", "SurvivalGames.jar"))
-    shutil.copy(os.path.join(CONF, "plugins", "SurvivalGames", "maps", a.map + ".yml"), os.path.join(RUN, "plugins", "SurvivalGames", "maps"))
+    MAPS = sorted(f[:-4] for f in os.listdir(os.path.join(CONF, "plugins", "SurvivalGames", "maps")) if f.endswith(".yml")) \
+        if a.map == "all" else a.map.split(",")
+    for m in MAPS:
+        shutil.copy(os.path.join(CONF, "plugins", "SurvivalGames", "maps", m + ".yml"), os.path.join(RUN, "plugins", "SurvivalGames", "maps"))
     sgconf = open(os.path.join(CONF, "plugins", "SurvivalGames", "config.yml")).read()
     sgconf = re.sub(r"(?m)^(database:\n  enabled: )true", r"\1false", sgconf)
     if "\ndatabase:\n  enabled: false" not in sgconf: sys.exit("SG config: could not turn the database off")
@@ -113,7 +119,7 @@ if a.sg:
     for k, v in durations.items():
         sgconf, n = re.subn(r"(?m)^(  %s: )\d+" % k, r"\g<1>%d" % v, sgconf)
         if not n: sys.exit("SG config: no durations.%s" % k)
-    sgconf = re.sub(r"(?m)^rooms: .*\n", "", sgconf) + "\nrooms: %d\n" % a.at_once
+    sgconf = re.sub(r"(?m)^(rooms|team-size): .*\n", "", sgconf) + "\nrooms: %d\nteam-size: %d\n" % (a.at_once, a.team_size)
     open(os.path.join(RUN, "plugins", "SurvivalGames", "config.yml"), "w").write(sgconf)
     subprocess.run([os.path.join(HERE, "sgwatch", "build.sh"), os.path.join(RUN, "plugins", "SgWatch.jar")], check=True)
 else:
@@ -131,8 +137,11 @@ durations: {lobby: %d, pre-game: %d, live-game: %d, pre-deathmatch: %d, deathmat
 """ % (D, a.per_match, a.at_once, "true" if a.threaded else "false", "false" if a.no_gc_after_match else "true", a.lobby, a.pregame, a.live, a.predeathmatch, a.deathmatch, a.end))
 shutil.copy(JAR, os.path.join(RUN, "paperclip.jar"))
 shutil.copy(os.path.join(HERE, "vps_sampler.py"), os.path.join(RUN, "vps_sampler.py"))
-centre = [l for l in open(os.path.join(HERE, "maps", a.map + ".yml")) if l.startswith("center:")][0].split(":")[1].split(",")
-CENTRE = "%s,%s" % (centre[0].strip(), centre[2].strip())
+if a.sg and len(MAPS) > 1:
+    CENTRE = "auto"
+else:
+    centre = [l for l in open(os.path.join(HERE, "maps", a.map + ".yml")) if l.startswith("center:")][0].split(":")[1].split(",")
+    CENTRE = "%s,%s" % (centre[0].strip(), centre[2].strip())
 
 # --- to the box ------------------------------------------------------------------------------------
 if ssh("%s has-session -t %s 2>/dev/null && echo up; true" % (TMUX, S)).strip():
@@ -144,7 +153,8 @@ ssh("chown -R mc:mc %s %s" % (D, CACHE))
 jar_key = ssh("sha256sum %s/paperclip.jar" % D).split()[0][:12]
 GC = a.gc or ("-XX:+UseG1GC -XX:+ExplicitGCInvokesConcurrent" if a.g1 else None)
 desc = "%s: %d bots, %d at once (%s), %d rounds, live %d s, heap %s%s, jar %s, configs %s, VPS-B" % (
-    a.tag, BOTS, a.at_once, "SurvivalGames rooms" if a.sg else ("threaded" if a.threaded else "one thread"), a.rounds, a.live, a.heap,
+    a.tag, BOTS, a.at_once, ("SurvivalGames rooms, maps %s%s" % (",".join(MAPS), ", team-size %d" % a.team_size if a.team_size > 1 else ""))
+    if a.sg else ("threaded" if a.threaded else "one thread"), a.rounds, a.live, a.heap,
     (", no System.gc() after a match" if a.no_gc_after_match else "") + (", GC " + GC if GC else "") + (", JIT %r" % a.jit if a.jit is not None else ""), jar_key, conf_rev)
 print(desc, flush=True)
 
@@ -276,8 +286,16 @@ full = set(t for t, ws in fighting.items() if len(ws) >= a.at_once)
 tps = []
 for w, rs in per.items():
     if w == "lobby": continue
+    # a world name comes back for every match the room plays on that map: one rate per match (rows a few
+    # seconds apart), not one over the hours between the first and the last
     ts = sorted(int(r["unix_ms"]) / 1000.0 for r in rs if r["state"] in ("LIVE", "PREDEATHMATCH", "DEATHMATCH"))
-    if len(ts) > 5: tps.append(20.0 * (len(ts) - 1) / (ts[-1] - ts[0]))
+    runs, cur = [], []
+    for t in ts:
+        if cur and t - cur[-1] > 30: runs.append(cur); cur = []
+        cur.append(t)
+    if cur: runs.append(cur)
+    for run in runs:
+        if len(run) > 5: tps.append(20.0 * (len(run) - 1) / (run[-1] - run[0]))
 report["fighting_tps_min"] = min(tps) if tps else None
 
 # samples: "t|thread name|ticks" lines per thread, and one "BOX" line per sample
@@ -323,7 +341,7 @@ def window(samples):
 in_full = [s for s in SAMPLES if int(s["t"]) in full]
 report["full"] = window(in_full) if len(in_full) >= 2 else None
 report["run"] = window(SAMPLES)
-if in_full:
+if report["full"]:   # one sample or none: the matches never all fought at once (rooms on maps of different lengths)
     report["full"]["anon_median_mib"] = statistics.median(s["box"]["anon_kb"] for s in in_full) / 1024
 try:
     gc = open(os.path.join(OUT, "gc.log")).read().splitlines()
