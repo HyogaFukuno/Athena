@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" font-family="'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="960" height="360" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="38" font-size="20" font-weight="700" fill="#0b0b0b">部屋の持ち主のスレッド：試合の間だけ、試合のワールドのスレッドへ移る</text>
+
+  <!-- states -->
+  <g font-size="14" fill="#0b0b0b" text-anchor="middle">
+    <rect x="24"  y="70" width="116" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="82"  y="97">Lobby</text>
+    <rect x="152" y="70" width="116" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="210" y="97">PreGame</text>
+    <rect x="280" y="70" width="116" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="338" y="97">LiveGame</text>
+    <rect x="408" y="70" width="132" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="474" y="97">PreDeathmatch</text>
+    <rect x="552" y="70" width="124" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="614" y="97">Deathmatch</text>
+    <rect x="688" y="70" width="116" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="746" y="97">EndGame</text>
+    <rect x="816" y="70" width="120" height="44" rx="8" fill="#ffffff" stroke="#52514e"/><text x="876" y="97">Cleanup</text>
+  </g>
+
+  <!-- owner lane -->
+  <rect x="24" y="134" width="116" height="40" rx="6" fill="#fdeee6" stroke="#eb6834"/>
+  <rect x="152" y="134" width="652" height="40" rx="6" fill="#e6f0fc" stroke="#2a78d6"/>
+  <rect x="816" y="134" width="120" height="40" rx="6" fill="#fdeee6" stroke="#eb6834"/>
+  <g font-size="13" fill="#0b0b0b" text-anchor="middle">
+    <text x="82" y="159">Server thread</text>
+    <text x="478" y="159">試合のワールドのスレッド（マップとデスマッチ会場を 1 本で）</text>
+    <text x="876" y="159">Server thread</text>
+  </g>
+
+  <!-- switch markers -->
+  <line x1="152" y1="184" x2="152" y2="214" stroke="#52514e" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="816" y1="184" x2="816" y2="214" stroke="#52514e" stroke-width="2" marker-end="url(#arrow)"/>
+  <g font-size="13" fill="#0b0b0b">
+    <text x="40" y="234">moveToMatchThread：PreGame の最初の 1 秒の終わりに、</text>
+    <text x="40" y="254">試合のマップに専用のスレッドを持たせ（startWorldThread）、部屋の tick を</text>
+    <text x="40" y="274">そのワールドのタイマー（runOnWorldTimer）へ</text>
+    <text x="520" y="234">moveToServerThread：Cleanup に入った 1 秒の終わりに、</text>
+    <text x="520" y="254">部屋をサーバースレッドへ戻す。全員をロビーへ移してから、</text>
+    <text x="520" y="274">マップと会場をサーバースレッドで捨てる</text>
+  </g>
+
+  <g font-size="13" fill="#52514e">
+    <text x="24" y="312">部屋の状態（試合・脱落・スコアボード・切断のスケルトン）を触るのは、そのときの持ち主のスレッドだけ。</text>
+    <text x="24" y="334">ほかのスレッドからの頼みは Room#execute で持ち主へ回す。持ち主を替えるのは、今の持ち主が 1 秒の処理を終えたときだけ。</text>
+  </g>
+</svg>

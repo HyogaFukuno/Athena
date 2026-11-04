@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" width="960" height="600" font-family="'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="960" height="600" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="38" font-size="20" font-weight="700" fill="#0b0b0b">Hub の看板から部屋に入るまで</text>
+
+  <!-- columns -->
+  <g font-size="14" font-weight="700" fill="#52514e" text-anchor="middle">
+    <text x="130" y="72">Hub（AthenaHub）</text>
+    <text x="370" y="72">MariaDB ・ Velocity</text>
+    <text x="700" y="72">SG サーバー</text>
+  </g>
+
+  <g font-size="13" fill="#0b0b0b">
+    <!-- hub -->
+    <rect x="24" y="88" width="212" height="72" rx="8" fill="#ffffff" stroke="#52514e"/>
+    <text x="36" y="110">看板「SG-1 #2」</text>
+    <text x="36" y="130">部屋ごとの状態と人数を出す</text>
+    <text x="36" y="150">（MOTD の rooms を読む）</text>
+
+    <rect x="24" y="190" width="212" height="56" rx="8" fill="#ffffff" stroke="#52514e"/>
+    <text x="36" y="214">右クリック</text>
+    <text x="36" y="234">→ 部屋を書いてから送る</text>
+
+    <!-- db / velocity -->
+    <rect x="262" y="190" width="216" height="56" rx="8" fill="#ffffff" stroke="#52514e"/>
+    <text x="274" y="214">sg_room_joins</text>
+    <text x="274" y="234">（uuid・server・room）</text>
+
+    <rect x="262" y="280" width="216" height="56" rx="8" fill="#ffffff" stroke="#52514e"/>
+    <text x="274" y="304">Velocity：Connect sg1</text>
+    <text x="274" y="324">（送れるのはサーバーまで）</text>
+
+    <!-- sg -->
+    <rect x="510" y="190" width="426" height="56" rx="8" fill="#fdeee6" stroke="#eb6834"/>
+    <text x="522" y="214">ログイン前（別のスレッド）：sg_room_joins を読んで消す</text>
+    <text x="522" y="234">（60 秒より古い行・ほかのサーバー宛ては使わない）</text>
+
+    <rect x="510" y="280" width="426" height="76" rx="8" fill="#fdeee6" stroke="#eb6834"/>
+    <text x="522" y="304">ログイン（Server thread）：入る部屋を決める</text>
+    <text x="522" y="324">切断して戻った人 → スケルトンの待つ部屋</text>
+    <text x="522" y="344">選んだ部屋 → その部屋／選んでいない → いちばん埋まったロビー</text>
+
+    <rect x="510" y="384" width="200" height="72" rx="8" fill="#ffffff" stroke="#d03b3b"/>
+    <text x="522" y="408">満員（観戦者込み 24 人）</text>
+    <text x="522" y="428">→「The server is full!」</text>
+    <text x="522" y="448">→ Hub に残ってこれを見る</text>
+
+    <rect x="726" y="384" width="210" height="72" rx="8" fill="#fdeee6" stroke="#eb6834"/>
+    <text x="738" y="408">参加：ロビーのワールドに</text>
+    <text x="738" y="428">出て、部屋に入る</text>
+    <text x="738" y="448">（部屋の持ち主へ execute）</text>
+
+    <rect x="510" y="486" width="426" height="76" rx="8" fill="#e6f0fc" stroke="#2a78d6"/>
+    <text x="522" y="510">部屋が試合中なら：試合のワールドへ受け渡す（teleportAsync）</text>
+    <text x="522" y="530">着いてから、その部屋のスレッドで観戦者にする／戻った人は</text>
+    <text x="522" y="550">スケルトンを消して、持ち物と体力を戻す</text>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#52514e" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <line x1="130" y1="160" x2="130" y2="188"/>
+    <line x1="236" y1="218" x2="260" y2="218"/>
+    <path d="M130,246 L130,308 L260,308"/>
+    <line x1="478" y1="308" x2="508" y2="308"/>
+    <line x1="478" y1="218" x2="508" y2="218"/>
+    <line x1="723" y1="246" x2="723" y2="278"/>
+    <line x1="610" y1="356" x2="610" y2="382"/>
+    <line x1="830" y1="356" x2="830" y2="382"/>
+    <line x1="830" y1="456" x2="830" y2="484"/>
+    <path d="M510,420 L470,420 L470,560 L236,560" stroke-dasharray="5 4"/>
+  </g>
+  <text x="250" y="580" font-size="12" fill="#52514e">断られたら、Velocity が Hub に残す（今までの満員のサーバーと同じ見え方）</text>
+</svg>

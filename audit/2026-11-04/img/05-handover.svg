@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" font-family="'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="960" height="420" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="38" font-size="20" font-weight="700" fill="#0b0b0b">スレッドの違うワールドへの移動：2 段階の受け渡し</text>
+
+  <!-- lanes -->
+  <rect x="24" y="64" width="912" height="96" rx="8" fill="#fdeee6" stroke="#eb6834"/>
+  <text x="40" y="88" font-size="14" font-weight="700" fill="#0b0b0b">元のワールドのスレッド（例：ロビー＝Server thread）</text>
+  <rect x="24" y="250" width="912" height="96" rx="8" fill="#e6f0fc" stroke="#2a78d6"/>
+  <text x="40" y="274" font-size="14" font-weight="700" fill="#0b0b0b">行き先のワールドのスレッド（例：部屋 3 の試合のスレッド）</text>
+
+  <g font-size="13" fill="#0b0b0b">
+    <rect x="40" y="100" width="250" height="48" rx="6" fill="#ffffff" stroke="#eb6834"/>
+    <text x="52" y="121">① teleport／teleportAsync</text>
+    <text x="52" y="140">（どのスレッドから呼んでもよい）</text>
+
+    <rect x="320" y="100" width="290" height="48" rx="6" fill="#ffffff" stroke="#eb6834"/>
+    <text x="332" y="121">② ワールドから外す（tracker・チャンク）</text>
+    <text x="332" y="140">プレイヤーは「移動中」。一覧には残る</text>
+
+    <rect x="560" y="286" width="350" height="48" rx="6" fill="#ffffff" stroke="#2a78d6"/>
+    <text x="572" y="307">③ ワールドに入れる（行き先のスレッドの次の tick）</text>
+    <text x="572" y="326">着いたら future が完了 → 続きの処理はここで</text>
+  </g>
+
+  <g stroke="#52514e" stroke-width="2" fill="none" marker-end="url(#arrow)">
+    <line x1="290" y1="124" x2="318" y2="124"/>
+    <path d="M610,124 L735,124 L735,284"/>
+  </g>
+
+  <g font-size="13" fill="#52514e">
+    <text x="748" y="200">受け渡しの列</text>
+    <text x="748" y="218">（移動中に届いたパケットも</text>
+    <text x="748" y="236">　プレイヤーを追って行き先へ）</text>
+  </g>
+
+  <g font-size="13" fill="#0b0b0b">
+    <text x="24" y="374">・同じスレッドのワールドどうし（試合のマップとデスマッチ会場、joinWorldThread）なら、今までどおりその場で移り、teleport は着いてから返る。</text>
+    <text x="24" y="396">・移動中のプレイヤーは、どちらのスレッドからも触らない。SG では「移動中の人」をその秒の処理から外す（present）。</text>
+  </g>
+</svg>
