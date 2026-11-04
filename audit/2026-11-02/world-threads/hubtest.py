@@ -19,6 +19,10 @@ The bots (sgbot.py --hub-sign), in this order:
   any    6 bots: the sign with no room (SG puts them in the fullest lobby with room: room 3)
   late   2 bots: sign "room 2" once room 2 is full: SG refuses them as a full server does ("The server is
          full!"), and Velocity keeps them on the hub with that message
+  drop   2 bots: sign "room 3"; 20 s into the live game their connection breaks, and 15 s later they log in
+         again and press sign "room 1": SG puts them back in their match in room 3 (a skeleton stood in)
+
+--conf sg2 runs with sg2's production config (duos, the tournament deathmatch in a registered arena).
 Each plays one match. The report lists the room SG put each bot in, what the bots read on the signs,
 the rows left in sg_room_joins, and the errors in the three logs.
 """
@@ -28,7 +32,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 MAIN = os.path.abspath(os.path.join(ROOT, "..", "..", ".."))
 DEV = "/Users/glacier/Documents/Minecraft/developments"
-CONF = DEV + "/ArcanaServers/vps-b/sg1"
 HUBSRC = DEV + "/AthenaHub-rooms/src/main/resources/config.yml"
 MAPS = MAIN + "/server/maps"
 
@@ -36,11 +39,16 @@ p = argparse.ArgumentParser()
 p.add_argument("jar"); p.add_argument("sg"); p.add_argument("hub"); p.add_argument("tag")
 p.add_argument("--rooms", type=int, default=3)
 p.add_argument("--map", default="Lobby_Games")       # "A,B" or "all": the rooms vote among them
-p.add_argument("--team-size", type=int, default=1)
+p.add_argument("--team-size", type=int, default=None)    # default: the config's
+p.add_argument("--conf", default="sg1")                   # ArcanaServers vps-b/<conf>
+p.add_argument("--jfr", action="store_true")             # a profile of the SG server (OUT/sg1.jfr)
+p.add_argument("--thread-check", action="store_true")
+p.add_argument("--heap", default="384M")    # -Dathena.threadCheck=true on the SG server
 p.add_argument("--login-gap", type=float, default=0.3)
 p.add_argument("--timeout", type=float, default=1200)
 a = p.parse_args()
 
+CONF = DEV + "/ArcanaServers/vps-b/" + a.conf
 PROXY_PORT, HUB_PORT, SG_PORT, DB_PORT = 25677, 25711, 25712, 33320
 DOCKER = ["docker", "--context", "colima-athena"]
 DBNAME = "athena-hubtest-db"
@@ -147,7 +155,11 @@ if not n: sys.exit("SG config: no database block")
 for k, v in {"lobby": 45, "pre-game": 15, "live-game": 60, "pre-deathmatch": 15, "deathmatch": 60, "end-game": 10}.items():
     sc, n = re.subn(r"(?m)^(  %s: )\d+" % k, r"\g<1>%d" % v, sc)
     if not n: sys.exit("SG config: no durations.%s" % k)
-sc = re.sub(r"(?m)^(rooms|server-name|team-size): .*\n", "", sc) + "\nrooms: %d\nserver-name: sg1\nteam-size: %d\n" % (a.rooms, a.team_size)
+sc = re.sub(r"(?m)^(rooms|server-name): .*\n", "", sc) + "\nrooms: %d\nserver-name: sg1\n" % a.rooms
+if a.team_size is not None:
+    sc = re.sub(r"(?m)^team-size: .*\n", "", sc) + "team-size: %d\n" % a.team_size
+if os.path.isdir(os.path.join(CONF, "plugins", "SurvivalGames", "arenas")):   # the deathmatch arenas
+    shutil.copytree(os.path.join(CONF, "plugins", "SurvivalGames", "arenas"), sg + "/plugins/SurvivalGames/arenas")
 open(sg + "/plugins/SurvivalGames/config.yml", "w").write(sc)
 subprocess.run([os.path.join(HERE, "sgwatch", "build.sh"), sg + "/plugins/SgWatch.jar"], check=True, capture_output=True)
 
@@ -184,18 +196,20 @@ def stop_all():
     subprocess.run(DOCKER + ["rm", "-f", DBNAME], capture_output=True)
 
 
-SERVER = ["java", "-Xms384M", "-Xmx384M", "-XX:+UseParallelGC", "-XX:+UseCompactObjectHeaders", "-jar", "paperclip.jar", "nogui"]
+SERVER = ["java", "-Xms" + a.heap, "-Xmx" + a.heap, "-XX:+UseParallelGC", "-XX:+UseCompactObjectHeaders", "-jar", "paperclip.jar", "nogui"]
 try:
     start("proxy", proxy, ["java", "-Xmx96M", "-jar", "velocity.jar"])
     if not wait_for("proxy", r"Done \("): sys.exit("Velocity did not start")
-    start("sg1", sg, SERVER)
+    start("sg1", sg, SERVER[:-3] + (["-Dathena.threadCheck=true"] if a.thread_check else []) + (["-XX:+UnlockDiagnosticVMOptions", "-XX:+DebugNonSafepoints", "-XX:StartFlightRecording=settings=profile,"
+        "jdk.ExecutionSample#period=5ms,filename=%s/sg1.jfr,dumponexit=true" % OUT] if a.jfr else []) + SERVER[-3:])
     start("hub", hub, SERVER)
     if not wait_for("sg1", r"Done \(") or not wait_for("hub", r"Done \("): sys.exit("a server did not start")
     for (x, y, z), _ in SIGNS.values():
         console("hub", "setblock %d %d %d standing_sign 8" % (x, y, z))
     time.sleep(8)   # two pings of the SG server, so the signs show the rooms before anyone clicks
 
-    groups = [("hop", 1, "room1", "room3"), ("r2", 24, "room2", None), ("r3", 8, "room3", None), ("any", 6, "any", None)]
+    groups = [("hop", 1, "room1", "room3"), ("r2", 24, "room2", None), ("r3", 8, "room3", None), ("drop", 2, "room3", None),
+              ("any", 6, "any", None)]
     bots = []
 
     def bot(name, sign, hop):
@@ -203,6 +217,7 @@ try:
                "--matches", "1", "--seconds", str(a.timeout - 60), "--out", os.path.join(OUT, "bots", name + ".json"),
                "--hub-sign", "%d,%d,%d" % SIGNS[sign][0]]
         if hop: cmd += ["--hop-sign", "%d,%d,%d" % SIGNS[hop][0], "--hop-after", "12"]
+        if name.startswith("drop"): cmd += ["--rejoin", "20,15,%d,%d,%d" % SIGNS["room1"][0]]
         bots.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=open(os.path.join(OUT, "bots", name + ".err"), "w")))
 
     t0 = time.time()
@@ -238,8 +253,8 @@ def sign_text_of(js):
 # --- report -----------------------------------------------------------------------------------------
 sglog = open(os.path.join(OUT, "sg1.out"), errors="replace").read()
 joined = {}
-for m in re.finditer(r"(\w+) joined room (\d+)(?: \(picked (\d+) in the hub\))?", sglog):
-    joined.setdefault(m.group(1), []).append([int(m.group(2)), int(m.group(3)) if m.group(3) else None])
+for m in re.finditer(r"(\w+) joined room (\d+)(?: \((?:picked (\d+) in the hub|(back) to their match)\))?", sglog):
+    joined.setdefault(m.group(1), []).append([int(m.group(2)), int(m.group(3)) if m.group(3) else m.group(4)])
 results = {}
 for f in sorted(os.listdir(os.path.join(OUT, "bots"))):
     if f.endswith(".json"):
@@ -251,7 +266,7 @@ for f in sorted(os.listdir(os.path.join(OUT, "bots"))):
 
 def errors(name):
     lines = open(os.path.join(OUT, name + ".out"), errors="replace").read().splitlines()
-    return [l[:300] for l in lines if re.search(r"ERROR|SEVERE|Exception|WARN.*(sg_room_joins|room|sign)", l)][:40]
+    return [l[:300] for l in lines if re.search(r"ERROR|SEVERE|Exception|WARN.*(sg_room_joins|room|sign|Thread check)", l)][:40]
 
 
 report = {"tag": a.tag, "rooms": a.rooms, "map": a.map, "joined": joined, "bots": results,
@@ -263,11 +278,15 @@ late = [n for n in results if n.startswith("late")]
 refused = [n for n in late if not results[n]["ok"] and results[n]["refused"]]
 print("bots ok %d/%d (the %d late bots are meant to be refused: %d were, with %s)" % (
     ok, len(results), len(late), len(refused), sorted(set(m for n in refused for m in results[n]["refused"]))))
-for g in ("hop", "r2", "r3", "any", "late"):
+for g in ("hop", "r2", "r3", "drop", "any", "late"):
     names = sorted(n for n in joined if n.startswith(g))
-    print(g, {n: joined[n] for n in names} if g in ("hop", "late") else
+    print(g, {n: joined[n] for n in names} if g in ("hop", "late", "drop") else
           "rooms " + str(sorted(set(tuple(map(tuple, joined[n])) for n in names))))
 print("rows left in sg_room_joins:", (rows_end or "").strip() or "none")
 for n in ("proxy", "hub", "sg1"):
     print(n, "errors:", len(report["errors"][n]))
+checks = [l for l in open(os.path.join(OUT, "sg1.out"), errors="replace").read().splitlines() if "Thread check:" in l]
+report["thread_checks"] = checks[:40]
+json.dump(report, open(os.path.join(OUT, "report.json"), "w"), indent=1)
+print("thread check reports:", len(checks))
 print("report:", os.path.join(OUT, "report.json"))

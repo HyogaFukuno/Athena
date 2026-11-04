@@ -21,14 +21,14 @@ production's SG config with the database off and only the --map map, and the SgW
 (sgwatch/) writing ticks.csv. --freeze ROOM:MS@SECONDS (repeatable, ROOM may be "lobby") blocks that
 room's match world's thread (or the server thread) for MS ms, SECONDS after the first bot starts.
 --map takes several maps ("A,B,C", or "all" for every map production has): each room votes among them
-and the bots find each map's centre themselves (sgbot --centre auto). --team-size 2 plays duos.
+and the bots find each map's centre themselves (sgbot --centre auto). --team-size 2 plays duos. --conf sg2
+takes sg2's configs instead of sg1's: duos, and the tournament deathmatch in the registered arenas.
 """
 import argparse, collections, csv, json, os, re, shutil, statistics, subprocess, sys, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 MAIN = os.path.abspath(os.path.join(ROOT, "..", "..", ".."))
-CONF = "/Users/glacier/Documents/Minecraft/developments/ArcanaServers/vps-b/sg1"
 
 p = argparse.ArgumentParser()
 p.add_argument("jar"); p.add_argument("tag")
@@ -56,8 +56,10 @@ p.add_argument("--login-gap", type=float, default=0.3)
 p.add_argument("--timeout", type=float, default=3600)
 p.add_argument("--sg", default=None)               # the SurvivalGames jar (rooms): the real plugin instead of MatchSim
 p.add_argument("--freeze", action="append", default=[])   # ROOM:MS@SECONDS, with --sg
-p.add_argument("--team-size", type=int, default=1)       # with --sg: 2 for duos
+p.add_argument("--team-size", type=int, default=None)    # with --sg: 2 for duos (default: the config's)
+p.add_argument("--conf", default="sg1")                    # ArcanaServers vps-b/<conf>: sg2 plays duos and the tournament in arenas
 a = p.parse_args()
+CONF = "/Users/glacier/Documents/Minecraft/developments/ArcanaServers/vps-b/" + a.conf
 BOTS = a.bots or a.at_once * a.per_match
 H = a.host
 D = "/opt/mc/simbench"
@@ -119,7 +121,12 @@ if a.sg:
     for k, v in durations.items():
         sgconf, n = re.subn(r"(?m)^(  %s: )\d+" % k, r"\g<1>%d" % v, sgconf)
         if not n: sys.exit("SG config: no durations.%s" % k)
-    sgconf = re.sub(r"(?m)^(rooms|team-size): .*\n", "", sgconf) + "\nrooms: %d\nteam-size: %d\n" % (a.at_once, a.team_size)
+    sgconf = re.sub(r"(?m)^rooms: .*\n", "", sgconf) + "\nrooms: %d\n" % a.at_once
+    if a.team_size is not None:
+        sgconf = re.sub(r"(?m)^team-size: .*\n", "", sgconf) + "team-size: %d\n" % a.team_size
+    arenas = os.path.join(CONF, "plugins", "SurvivalGames", "arenas")
+    if os.path.isdir(arenas):   # the deathmatch arenas of the tournament (sg2)
+        shutil.copytree(arenas, os.path.join(RUN, "plugins", "SurvivalGames", "arenas"))
     open(os.path.join(RUN, "plugins", "SurvivalGames", "config.yml"), "w").write(sgconf)
     subprocess.run([os.path.join(HERE, "sgwatch", "build.sh"), os.path.join(RUN, "plugins", "SgWatch.jar")], check=True)
 else:
@@ -153,7 +160,7 @@ ssh("chown -R mc:mc %s %s" % (D, CACHE))
 jar_key = ssh("sha256sum %s/paperclip.jar" % D).split()[0][:12]
 GC = a.gc or ("-XX:+UseG1GC -XX:+ExplicitGCInvokesConcurrent" if a.g1 else None)
 desc = "%s: %d bots, %d at once (%s), %d rounds, live %d s, heap %s%s, jar %s, configs %s, VPS-B" % (
-    a.tag, BOTS, a.at_once, ("SurvivalGames rooms, maps %s%s" % (",".join(MAPS), ", team-size %d" % a.team_size if a.team_size > 1 else ""))
+    a.tag, BOTS, a.at_once, ("SurvivalGames rooms, %s configs, maps %s%s" % (a.conf, ",".join(MAPS), ", team-size %d" % a.team_size if a.team_size else ""))
     if a.sg else ("threaded" if a.threaded else "one thread"), a.rounds, a.live, a.heap,
     (", no System.gc() after a match" if a.no_gc_after_match else "") + (", GC " + GC if GC else "") + (", JIT %r" % a.jit if a.jit is not None else ""), jar_key, conf_rev)
 print(desc, flush=True)

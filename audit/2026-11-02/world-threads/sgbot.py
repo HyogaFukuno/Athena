@@ -18,7 +18,9 @@ a tree) costs it a few ticks instead of the whole route.
 
 Through Velocity and the hub (AthenaHub), --hub-sign X,Y,Z right-clicks that join sign when the bot
 lands on the hub, and plays from the server the sign sends it to. --hop-sign X,Y,Z --hop-after S goes
-back to the hub (/hub) S seconds into its first SG lobby and right-clicks the other sign. --centre auto
+back to the hub (/hub) S seconds into its first SG lobby and right-clicks the other sign. --rejoin
+AFTER,AWAY,X,Y,Z drops the connection AFTER seconds into the live game, and AWAY seconds later logs in again
+through the hub and that sign (a player whose connection broke, coming back to the match). --centre auto
 takes the map's centre from where the pre-game puts the bot (for rooms on different maps).
 """
 import socket, struct, zlib, sys, time, math, threading, collections, json, argparse, os, random, re
@@ -40,6 +42,7 @@ p.add_argument("--spread", default=None)                # "k/n"
 p.add_argument("--hub-sign", default=None)              # "x,y,z": the hub's join sign to right-click first
 p.add_argument("--hop-sign", default=None)              # "x,y,z": back to the hub from the SG lobby, then this sign
 p.add_argument("--hop-after", type=float, default=15.0)
+p.add_argument("--rejoin", default=None)                # "after,away,x,y,z": drop out of the live game and come back
 a = p.parse_args()
 rnd = random.Random(a.seed if a.seed is not None else a.name)
 
@@ -374,10 +377,17 @@ class Bot:
             s.dead = True
 
 
-b = Bot()
-b.send(0x00, vi(47) + st(HOST) + struct.pack(">H", a.port) + vi(2))
-b.send(0x00, st(a.name))
-reader = threading.Thread(target=b.reader, daemon=True); reader.start()
+def connect():
+    """A new connection (and its reader) as this bot's name."""
+    bot = Bot()
+    bot.send(0x00, vi(47) + st(HOST) + struct.pack(">H", a.port) + vi(2))
+    bot.send(0x00, st(a.name))
+    thread = threading.Thread(target=bot.reader, daemon=True); thread.start()
+    return bot, thread
+
+
+b, reader = connect()
+rejoins = []   # (unix time, what): the drops and comebacks of --rejoin
 
 
 def wait_spawn(seconds):
@@ -669,6 +679,27 @@ while not b.dead and time.time() - start < a.seconds and b.matches_done < a.matc
             chest_done.clear(); decided.clear()
     if ph == "live" and not live_since: live_since = time.time()
     if ph != "live" and ph != "deathmatch": live_since = 0.0
+    if a.rejoin and not rejoins and ph == "live" and live_since and now - live_since >= float(a.rejoin.split(",")[0]):
+        # the connection breaks mid-match; the player logs in again later, through the hub as anyone does
+        after, away, sign = a.rejoin.split(",", 2)
+        old = b
+        rejoins.append([round(now, 2), "dropped at %s" % ",".join("%.1f" % v for v in old.pos)])
+        old.dead = True
+        try: old.s.close()
+        except Exception: pass
+        time.sleep(float(away))
+        b, reader = connect()
+        b.matches_done = old.matches_done; b.phases = old.phases; b.stats = old.stats
+        if not wait_spawn(60):
+            fail("never spawned again after dropping out")
+        still(1.0)
+        if not switch("sign " + sign, click_sign(sign)):
+            fail("the hub sign %s did not send us back" % sign)
+        rejoins.append([round(time.time(), 2), "back at %s" % ",".join("%.1f" % v for v in b.pos)])
+        b.set_phase("live")   # the live game goes on (the chat says so if it has moved on)
+        seen_tp = b.teleports; plan = None; chasing = None
+        next_t = time.monotonic()
+        continue
     if ph == "live" and cruise is not None:
         if b.spectator: spectator_tick()
         elif a.spread: spread_tick()
@@ -690,4 +721,4 @@ except Exception: pass
 json.dump({"name": a.name, "ok": ok, "err": b.err, "phases": b.phases, "matches": b.matches_done,
            "spectator": b.spectator, "stats": dict(b.stats), "sent": dict(b.sent), "rx": dict(b.rx), "teleports": b.teleports, "tp_log": b.tp_log, "chunk_log": b.chunk_log,
            "chat": list(b.chatlog), "corr_log": b.corr_log,
-           "switches": b.switches, "signs": b.signs, "sign_log": b.sign_log, "ticks": b.ticks, "mono_to_unix": time.time() - time.monotonic()}, open(a.out, "w"))
+           "switches": b.switches, "signs": b.signs, "sign_log": b.sign_log, "rejoins": rejoins, "ticks": b.ticks, "mono_to_unix": time.time() - time.monotonic()}, open(a.out, "w"))
