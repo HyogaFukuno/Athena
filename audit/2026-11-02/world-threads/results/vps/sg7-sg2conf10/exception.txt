@@ -1,0 +1,16 @@
+[13:19:19 WARN]: [SurvivalGames] Task #41 for SurvivalGames v1.0-SNAPSHOT generated an exception
+java.lang.IllegalStateException: Asynchronous player teleport!
+	at org.spigotmc.AsyncCatcher.catchOp(AsyncCatcher.java:26) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at org.bukkit.craftbukkit.v1_8_R3.entity.CraftPlayer.teleport(CraftPlayer.java:663) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at org.bukkit.craftbukkit.v1_8_R3.entity.CraftEntity.teleport(CraftEntity.java:237) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at net.arcana.survivalgames.arena.Arenas.tryUnload(Arenas.java:432) ~[?:?]
+	at net.arcana.survivalgames.arena.Arenas.unloadOrKeep(Arenas.java:268) ~[?:?]
+	at net.arcana.survivalgames.arena.Arenas.lambda$retainDeathmatchVenues$0(Arenas.java:253) ~[?:?]
+	at org.bukkit.craftbukkit.v1_8_R3.scheduler.CraftTask.run(CraftTask.java:60) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at org.bukkit.craftbukkit.v1_8_R3.scheduler.CraftScheduler.mainThreadHeartbeat(CraftScheduler.java:353) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at net.minecraft.server.v1_8_R3.MinecraftServer.B(MinecraftServer.java:915) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at net.minecraft.server.v1_8_R3.DedicatedServer.B(DedicatedServer.java:413) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at net.minecraft.server.v1_8_R3.MinecraftServer.A(MinecraftServer.java:810) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at net.minecraft.server.v1_8_R3.MinecraftServer.run(MinecraftServer.java:685) ~[patched_1.8.8.jar:git-PandaSpigot-"f5444ee"]
+	at java.base/java.lang.Thread.run(Thread.java:1474) ~[?:?]
+--
