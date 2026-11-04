@@ -32,7 +32,7 @@ MAIN = os.path.abspath(os.path.join(ROOT, "..", "..", ".."))
 
 p = argparse.ArgumentParser()
 p.add_argument("jar"); p.add_argument("tag")
-p.add_argument("--host", default="root@vps-b")
+p.add_argument("--host", default=os.environ.get("VPS_B_HOST"), required="VPS_B_HOST" not in os.environ)  # root@<VPS-B address>, kept out of the repository
 p.add_argument("--at-once", type=int, default=1)
 p.add_argument("--per-match", type=int, default=24)
 p.add_argument("--bots", type=int, default=None)

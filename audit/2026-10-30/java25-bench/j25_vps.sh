@@ -13,7 +13,7 @@
 # J25_PLUGIN=<local SurvivalGames.jar> runs that plugin instead of the one in sgbench3.
 # J25_EXTRA="<JVM flags>" adds flags (through JAVA_TOOL_OPTIONS), e.g. a JFR recording.
 cd "$(dirname "$0")/../../../bench"
-H=${J25_HOST:-root@vps-b}  # VPS-B (rebuilt 2026-10-30; the old box was old-vps-b)
+H=${J25_HOST:?set J25_HOST to root@<VPS-B address>}  # VPS-B; the address stays out of the repository
 D=/opt/mc/sgbench3
 OUT="$1"; shift
 mkdir -p "$OUT"
