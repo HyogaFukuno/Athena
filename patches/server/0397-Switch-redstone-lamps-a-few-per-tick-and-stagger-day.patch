@@ -1,0 +1,360 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 4 Nov 2026 23:23:37 +0900
+Subject: [PATCH] Switch redstone lamps a few per tick, and stagger daylight
+ detectors
+
+A lamp gives no signal, so when it switches makes no difference to a circuit;
+what it costs is relighting around it. Shady_Hollow's street lamps hang off
+daylight detectors, and SurvivalGames' End sets the time to night, so all of
+them switched on one tick: 210-280 ms on VPS-B for one room, 0.5-1.7 s with
+ten rooms sharing the box.
+
+- athena.yml worlds.<name>.redstoneLampsPerTick (default 4): a lamp is queued
+  where vanilla would switch it on, or off once its four-tick delay is up, and
+  the world switches that many per tick after its scheduled ticks, checking the
+  lamp's power again first. 0 switches at once, as vanilla.
+- staggerDaylightDetectors (default true): each detector reads the light on a
+  tick of the second chosen from its position, not all on time % 20 == 0.
+
+Shady_Hollow's End on VPS-B: the longest tick 209-279 ms before, 32-48 ms with
+the defaults, and every lamp ends as vanilla leaves it
+(audit/2026-11-04/lamp-queue/RESULTS.md).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaWorldConfig.java b/src/main/java/athena/server/AthenaWorldConfig.java
+index 13309cc24ea2b2c6c801067135efd5fbdffec0ff..948ce043711a594d2a4e1fcb488bdc6ef7e924ba 100644
+--- a/src/main/java/athena/server/AthenaWorldConfig.java
++++ b/src/main/java/athena/server/AthenaWorldConfig.java
+@@ -59,4 +59,24 @@ public class AthenaWorldConfig {
+             "block was more expensive than the decoration it replaced.\n" +
+             "Default: true")
+     public boolean asyncChunkDecoration = true;
++
++    @Comment("How many redstone lamps may switch on or off in one tick. A lamp gives no signal, so\n" +
++            "when it changes makes no difference to a circuit; what it costs is relighting the\n" +
++            "blocks around it. A map whose street lamps hang off a daylight detector switches all of\n" +
++            "them the same tick when the time changes, and that tick stalls - on one SurvivalGames\n" +
++            "map, for half a second to a second and a half on a small VPS. With a limit, lamps are\n" +
++            "queued where vanilla would switch them and switched this many per tick in the order\n" +
++            "they asked; each is checked against its power again when its turn comes, so every\n" +
++            "lamp ends up as vanilla leaves it. One lamp costs about 1 to 2 ms on a fast CPU and\n" +
++            "ten times that on a small VPS. 200 lamps at 4 a tick light up over two and a half\n" +
++            "seconds. 0 switches every lamp at once, as vanilla.\n" +
++            "Default: 4")
++    public int redstoneLampsPerTick = 4;
++
++    @Comment("When enabled, each daylight detector checks the light on its own tick of the second,\n" +
++            "chosen from its position, instead of every detector on the same tick (the world time\n" +
++            "a multiple of 20). Each still checks once a second. Several detectors then no longer\n" +
++            "switch their circuits on one tick when the time changes.\n" +
++            "Default: true")
++    public boolean staggerDaylightDetectors = true;
+ }
+diff --git a/src/main/java/athena/server/RedstoneLampQueue.java b/src/main/java/athena/server/RedstoneLampQueue.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ca2e589f6de9b3346e3e3f3d16994c5bedb58338
+--- /dev/null
++++ b/src/main/java/athena/server/RedstoneLampQueue.java
+@@ -0,0 +1,55 @@
++package athena.server;
++
++import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
++import java.util.function.LongPredicate;
++
++/**
++ * Athena - redstone lamps waiting to be switched on or off, for one world.
++ * <p>
++ * A lamp carries no signal: whether it is lit changes nothing a circuit can see. What it costs is
++ * the light around it, and a whole map of street lamps wired to one daylight detector all switch
++ * on the same tick, so the world stalls for that tick relighting them. Instead the lamp is queued
++ * where vanilla would switch it, and the world switches a few per tick
++ * ({@link AthenaWorldConfig#redstoneLampsPerTick}). Whether a lamp should be lit is checked again
++ * when it is switched, so a lamp ends up in the state its power asks for, only a little later.
++ * <p>
++ * Positions are kept in the order they were queued, once each. Used only from the world's own
++ * thread.
++ */
++public final class RedstoneLampQueue {
++
++    private final LongLinkedOpenHashSet queued = new LongLinkedOpenHashSet();
++
++    /** Queues a packed block position. Returns false if it was already waiting. */
++    public boolean offer(long position) {
++        return this.queued.add(position);
++    }
++
++    public boolean isEmpty() {
++        return this.queued.isEmpty();
++    }
++
++    public int size() {
++        return this.queued.size();
++    }
++
++    public void clear() {
++        this.queued.clear();
++    }
++
++    /**
++     * Takes positions off the front of the queue and hands each to {@code apply}, until {@code budget}
++     * of them changed a lamp (apply returned true) or the queue is empty. Positions whose lamp had
++     * nothing to do are cheap and do not count. Returns the number that changed.
++     */
++    public int drain(int budget, LongPredicate apply) {
++        int changed = 0;
++
++        while (changed < budget && !this.queued.isEmpty()) {
++            if (apply.test(this.queued.removeFirstLong())) {
++                ++changed;
++            }
++        }
++        return changed;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneLamp.java b/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
+index 2703c443b468f2171a9b194e5bdf04a4895d5e7a..6786e5478cecf9a999768f179abb3d18ba429e2f 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneLamp.java
+@@ -45,6 +45,9 @@ public class BlockRedstoneLamp extends Block {
+             if (this.isOn && !world.isBlockIndirectlyPowered(blockposition)) {
+                 world.scheduleUpdate(blockposition, (Block) this, 4);
+             } else if (!this.isOn && world.isBlockIndirectlyPowered(blockposition)) {
++                if (world.athenaQueueLamp(blockposition)) {
++                    return; // Athena - switched on a few per tick, see World.athenaSwitchLamps
++                }
+                 // CraftBukkit start
+                 if (CraftEventFactory.callRedstoneChange(world, blockposition.getX(), blockposition.getY(), blockposition.getZ(), 0, 15).getNewCurrent() != 15) {
+                     return;
+@@ -59,6 +62,9 @@ public class BlockRedstoneLamp extends Block {
+     public void updateTick(World world, BlockPosition blockposition, IBlockData iblockdata, Random random) {
+         if (!world.isClientSide) {
+             if (this.isOn && !world.isBlockIndirectlyPowered(blockposition)) {
++                if (world.athenaQueueLamp(blockposition)) {
++                    return; // Athena - switched off a few per tick, see World.athenaSwitchLamps
++                }
+                 // CraftBukkit start
+                 if (CraftEventFactory.callRedstoneChange(world, blockposition.getX(), blockposition.getY(), blockposition.getZ(), 15, 0).getNewCurrent() != 0) {
+                     return;
+diff --git a/src/main/java/net/minecraft/server/TileEntityLightDetector.java b/src/main/java/net/minecraft/server/TileEntityLightDetector.java
+index 2b9cb0f68aa05396c710d72d8dc0deb9f04da1bc..78a436dc50f9c333f0204e88cce13cc3b74b19a1 100644
+--- a/src/main/java/net/minecraft/server/TileEntityLightDetector.java
++++ b/src/main/java/net/minecraft/server/TileEntityLightDetector.java
+@@ -6,7 +6,7 @@ public class TileEntityLightDetector extends TileEntity implements IUpdatePlayer
+     public TileEntityLightDetector() {}
+ 
+     public void c() {
+-        if (this.world != null && !this.world.isClientSide && this.world.getTime() % 20L == 0L) {
++        if (this.world != null && !this.world.isClientSide && (this.world.getTime() + this.athenaPhase()) % 20L == 0L) { // Athena - staggered
+             this.blockType = this.getBlockType();
+             if (this.blockType instanceof BlockDaylightDetector) {
+                 ((BlockDaylightDetector) this.blockType).updatePower(this.world, this.position);
+@@ -14,4 +14,22 @@ public class TileEntityLightDetector extends TileEntity implements IUpdatePlayer
+         }
+ 
+     }
++
++    // Athena start - which tick of the second this detector checks on; see AthenaWorldConfig.staggerDaylightDetectors
++    private int athenaPhase() {
++        if (!this.world.athenaConfig.staggerDaylightDetectors) {
++            return 0;
++        }
++        BlockPosition position = this.position;
++        return athenaPhase(position.getX(), position.getY(), position.getZ());
++    }
++
++    static int athenaPhase(int x, int y, int z) {
++        // mixed, so detectors set out at an even spacing do not fall on a few shared ticks
++        long h = x * 0x9E3779B97F4A7C15L ^ z * 0xC2B2AE3D27D4EB4FL ^ y * 0x165667B19E3779F9L;
++        h = (h ^ (h >>> 31)) * 0xBF58476D1CE4E5B9L;
++        h ^= h >>> 29;
++        return (int) Math.floorMod(h, 20L);
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index d7ce8ef96373c316b33c1c0db766a01bb259d83b..41e14d436afc3b83a55d513558373b8337f638fd 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -4008,6 +4008,58 @@ public abstract class World implements IBlockAccess {
+         return this.isBlockIndirectlyGettingPowered(blockposition.getX(), blockposition.getY(), blockposition.getZ());
+     }
+ 
++    // Athena start - redstone lamps switch a few per tick; see athena.server.RedstoneLampQueue
++    public final athena.server.RedstoneLampQueue athenaLampQueue = new athena.server.RedstoneLampQueue();
++
++    /**
++     * Called where a lamp would switch on, or off once its four-tick delay is up. Returns true if
++     * the lamp was queued and the caller must leave it as it is; false (redstoneLampsPerTick is 0)
++     * to switch it now, as vanilla does.
++     */
++    public boolean athenaQueueLamp(BlockPosition blockposition) {
++        if (this.athenaConfig.redstoneLampsPerTick <= 0) {
++            return false;
++        }
++        this.athenaLampQueue.offer(blockposition.asLong());
++        return true;
++    }
++
++    /** Switches up to redstoneLampsPerTick queued lamps. Called once a tick on the world's thread. */
++    public void athenaSwitchLamps() {
++        if (this.athenaLampQueue.isEmpty()) {
++            return;
++        }
++        int budget = this.athenaConfig.redstoneLampsPerTick;
++        this.athenaLampQueue.drain(budget > 0 ? budget : Integer.MAX_VALUE, this::athenaSwitchLamp);
++    }
++
++    /** Puts the lamp at a packed position in the state its power asks for. True if it changed. */
++    private boolean athenaSwitchLamp(long packed) {
++        BlockPosition blockposition = BlockPosition.fromLong(packed);
++        if (!this.isLoaded(blockposition)) {
++            return false; // its chunk is gone; the lamp is saved as it was and checked again when it next updates
++        }
++        Block block = this.getType(blockposition).getBlock();
++        if (block == Blocks.REDSTONE_LAMP) {
++            if (!this.isBlockIndirectlyPowered(blockposition)
++                    || CraftEventFactory.callRedstoneChange(this, blockposition.getX(), blockposition.getY(), blockposition.getZ(), 0, 15).getNewCurrent() != 15) {
++                return false;
++            }
++            this.setTypeAndData(blockposition, Blocks.LIT_REDSTONE_LAMP.getBlockData(), 2);
++            return true;
++        }
++        if (block == Blocks.LIT_REDSTONE_LAMP) {
++            if (this.isBlockIndirectlyPowered(blockposition)
++                    || CraftEventFactory.callRedstoneChange(this, blockposition.getX(), blockposition.getY(), blockposition.getZ(), 15, 0).getNewCurrent() != 0) {
++                return false;
++            }
++            this.setTypeAndData(blockposition, Blocks.REDSTONE_LAMP.getBlockData(), 2);
++            return true;
++        }
++        return false; // no longer a lamp
++    }
++    // Athena end
++
+     public EntityHuman findNearbyPlayer(Entity entity, double d0) {
+         return this.findNearbyPlayer(entity.locX, entity.locY, entity.locZ, d0);
+     }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index dc9754be868007a1fdf0211ff55492cb72e29737..8dac9f80cb640b538989bdae981da34d1aff8dc8 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -270,6 +270,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         this.methodProfiler.endStartSection("tickPending");
+         timings.scheduledBlocks.startTiming(); // Spigot
+         this.tickUpdates(false);
++        this.athenaSwitchLamps(); // Athena - after the scheduled ticks, which switch lamps off
+         timings.scheduledBlocks.stopTiming(); // Spigot
+         this.methodProfiler.endStartSection("tickBlocks");
+         timings.chunkTicks.startTiming(); // Spigot
+diff --git a/src/test/java/athena/server/RedstoneLampQueueTest.java b/src/test/java/athena/server/RedstoneLampQueueTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..da1ed7a9095dc1a801c8805d499b8e9bd54b21da
+--- /dev/null
++++ b/src/test/java/athena/server/RedstoneLampQueueTest.java
+@@ -0,0 +1,61 @@
++package athena.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.junit.Test;
++
++public class RedstoneLampQueueTest {
++
++    @Test
++    public void drainsInTheOrderQueuedUpToTheBudget() {
++        RedstoneLampQueue queue = new RedstoneLampQueue();
++        for (long p = 1; p <= 5; p++) {
++            assertTrue(queue.offer(p));
++        }
++        List<Long> seen = new ArrayList<>();
++        assertEquals(2, queue.drain(2, p -> seen.add(p)));
++        assertEquals(List.of(1L, 2L), seen);
++        assertEquals(3, queue.size());
++        assertEquals(3, queue.drain(10, p -> seen.add(p)));
++        assertEquals(List.of(1L, 2L, 3L, 4L, 5L), seen);
++        assertTrue(queue.isEmpty());
++    }
++
++    @Test
++    public void aLampQueuedTwiceWaitsOnce() {
++        RedstoneLampQueue queue = new RedstoneLampQueue();
++        assertTrue(queue.offer(7));
++        assertTrue(queue.offer(8));
++        assertFalse(queue.offer(7));
++        List<Long> seen = new ArrayList<>();
++        queue.drain(10, p -> seen.add(p));
++        assertEquals(List.of(7L, 8L), seen);
++    }
++
++    @Test
++    public void positionsWithNothingToDoDoNotUseTheBudget() {
++        RedstoneLampQueue queue = new RedstoneLampQueue();
++        for (long p = 1; p <= 10; p++) {
++            queue.offer(p);
++        }
++        List<Long> seen = new ArrayList<>();
++        // only even positions change a lamp
++        assertEquals(2, queue.drain(2, p -> { seen.add(p); return p % 2 == 0; }));
++        assertEquals(List.of(1L, 2L, 3L, 4L), seen);
++        assertEquals(6, queue.size());
++    }
++
++    @Test
++    public void aLampQueuedWhileDrainingWaitsForItsTurn() {
++        RedstoneLampQueue queue = new RedstoneLampQueue();
++        queue.offer(1);
++        List<Long> seen = new ArrayList<>();
++        queue.drain(5, p -> { seen.add(p); if (p == 1) queue.offer(2); return true; });
++        assertEquals(List.of(1L, 2L), seen);
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/TileEntityLightDetectorPhaseTest.java b/src/test/java/net/minecraft/server/TileEntityLightDetectorPhaseTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..38af2588afebff151edcefd9feb3cacc120e6167
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/TileEntityLightDetectorPhaseTest.java
+@@ -0,0 +1,37 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++public class TileEntityLightDetectorPhaseTest {
++
++    @Test
++    public void phasesStayWithinASecond() {
++        for (int x = -40; x <= 40; x += 3) {
++            for (int z = -40; z <= 40; z += 5) {
++                for (int y = 0; y < 256; y += 37) {
++                    int phase = TileEntityLightDetector.athenaPhase(x, y, z);
++                    assertTrue(phase >= 0 && phase < 20);
++                }
++            }
++        }
++        int far = TileEntityLightDetector.athenaPhase(29_999_999, 255, -29_999_999);
++        assertTrue(far >= 0 && far < 20);
++    }
++
++    @Test
++    public void detectorsInARowSpreadOverTheSecond() {
++        // street lamps: one detector every few blocks along a road
++        boolean[] used = new boolean[20];
++        int distinct = 0;
++        for (int i = 0; i < 20; i++) {
++            int phase = TileEntityLightDetector.athenaPhase(i * 4, 70, 12);
++            if (!used[phase]) {
++                used[phase] = true;
++                distinct++;
++            }
++        }
++        assertTrue("only " + distinct + " distinct ticks", distinct >= 10);
++    }
++}
