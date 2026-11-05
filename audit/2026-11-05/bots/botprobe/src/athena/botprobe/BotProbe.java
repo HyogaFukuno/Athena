@@ -120,6 +120,10 @@ public final class BotProbe extends JavaPlugin implements Listener {
         checks.add(this::chest);
         checks.add(this::dieAndRespawn);
         checks.add(this::controllerThrows);
+        checks.add(this::ladder);
+        checks.add(this::ladderDown);
+        checks.add(this::stairs);
+        checks.add(this::stairsUnderARoof);
         checks.add(this::moveEvent);
         checks.add(this::worldThread);
         checks.add(this::spawnIntoThreadedWorld);
@@ -402,6 +406,65 @@ public final class BotProbe extends JavaPlugin implements Listener {
                 done.run();
             });
         });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void walkTo(String name, String check, Location from, Location goal, Runnable done) {
+        spawnAt(name, from, bot -> {
+            var climb = new athena.botprobe.nav.ClimbCheck(goal);
+            bot.setController(climb::tick);
+            int[] waited = {0};
+            int[] task = {0};
+            task[0] = Bukkit.getScheduler().runTaskTimer(this, () -> {
+                if (!climb.arrived && !climb.failed && ++waited[0] < 300) return;
+                Bukkit.getScheduler().cancelTask(task[0]);
+                Location at = bot.getPlayer().getLocation();
+                result(check, climb.arrived && Math.abs(at.getY() - goal.getY()) < 1.5,
+                        "arrived=" + climb.arrived + " failed=" + climb.failed + String.format(" at %.1f,%.1f,%.1f after %d ticks", at.getX(), at.getY(), at.getZ(), waited[0]));
+                bot.remove();
+                done.run();
+            }, 1L, 1L).getTaskId();
+        });
+    }
+
+    /** A wall with a ladder on its west side, and a platform on top going east. */
+    @SuppressWarnings("deprecation")
+    private void tower(int x, int z) {
+        for (int y = 4; y <= 9; y++) {
+            main().getBlockAt(x, y, z).setType(Material.STONE);
+            main().getBlockAt(x - 1, y, z).setTypeIdAndData(Material.LADDER.getId(), (byte) 4, false);
+        }
+        for (int i = 0; i < 5; i++) main().getBlockAt(x + i, 9, z).setType(Material.STONE);
+    }
+
+    private void ladder(Runnable done) {
+        tower(320, 0);
+        walkTo("Bot_Ladder", "up a ladder", at(315, 0), new Location(main(), 323.5, 10, 0.5), done);
+    }
+
+    private void ladderDown(Runnable done) {
+        walkTo("Bot_LadderDn", "down a ladder", new Location(main(), 323.5, 10, 0.5, 90f, 0f), at(315, 0), done);
+    }
+
+    @SuppressWarnings("deprecation")
+    private void staircase(int x, int z) {
+        for (int i = 0; i < 4; i++) {
+            main().getBlockAt(x + i, 4 + i, z).setTypeIdAndData(Material.COBBLESTONE_STAIRS.getId(), (byte) 0, false);
+            for (int y = 4; y < 4 + i; y++) main().getBlockAt(x + i, y, z).setType(Material.STONE);
+        }
+        for (int i = 4; i < 8; i++) for (int y = 4; y <= 7; y++) main().getBlockAt(x + i, y, z).setType(Material.STONE);
+    }
+
+    private void stairs(Runnable done) {
+        staircase(340, 0);
+        walkTo("Bot_Stairs", "up stairs", at(336, 0), new Location(main(), 346.5, 8, 0.5), done);
+    }
+
+    /** Stairs with a roof three blocks above each step, as low as a player can walk them: no room to jump. */
+    private void stairsUnderARoof(Runnable done) {
+        staircase(360, 0);
+        for (int i = 0; i < 4; i++) main().getBlockAt(360 + i, 4 + i + 4, 0).setType(Material.STONE);
+        walkTo("Bot_RoofStair", "up stairs under a roof", at(356, 0), new Location(main(), 366.5, 8, 0.5), done);
     }
 
     private void moveEvent(Runnable done) {

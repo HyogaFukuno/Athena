@@ -20,7 +20,7 @@ RUN = os.path.join(ROOT, "run", "botprobe")
 OUT = os.path.join(ROOT, "run", "botprobe-out")
 PORT = 25691
 BOTS = ["Bot_Login", "Bot_Walk", "Bot_Jump", "Bot_Fall", "Bot_A", "Bot_B", "Bot_Eat", "Bot_Bow", "Bot_Chest", "Bot_Die",
-        "Bot_Throw", "Bot_Thread", "Bot_Direct", "Bot_Remove", "Bot_Kick", "Bot_Show", "Bot_Fill1", "Bot_Fill2"]
+        "Bot_Throw", "Bot_Ladder", "Bot_LadderDn", "Bot_Stairs", "Bot_RoofStair", "Bot_Frozen", "Bot_Thread", "Bot_Direct", "Bot_Remove", "Bot_Kick", "Bot_Show", "Bot_Fill1", "Bot_Fill2"]
 
 jar = os.path.abspath(sys.argv[1])
 shutil.rmtree(RUN, ignore_errors=True); shutil.rmtree(OUT, ignore_errors=True)
