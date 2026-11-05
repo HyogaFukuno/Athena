@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 13:58:24 +0900
+Subject: [PATCH] Boss bar: keep the wither on chunks the player has
+
+Kept 85% of the way to the edge of the view, the wither often stood past the map, in chunks a template never loads and the client never gets, and the client, which draws an entity only in a chunk it has, showed no bar. It now stands as far as 80 blocks ahead, back to the furthest point in a loaded chunk within the player's view, and no nearer than 24.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBossBar.java b/src/main/java/net/minecraft/server/AthenaBossBar.java
+index 693ecac8d3cd479ebe0a22bcf484ac13bf0bc06f..34a00843082654b194fa225849b955bab556eed6 100644
+--- a/src/main/java/net/minecraft/server/AthenaBossBar.java
++++ b/src/main/java/net/minecraft/server/AthenaBossBar.java
+@@ -7,22 +7,19 @@ package net.minecraft.server;
+  * else (not in the world, not tracked), and keeps it ahead of their eyes: the client draws the bar
+  * only while it renders the boss, so the boss has to stay in view.
+  * <p>
+- * It is kept far away, in the fog at the edge of what the player sees ({@link #distance}): a wither
+- * at half its health or less wears its armour, which the client draws even on an invisible wither,
+- * and at 30 blocks a bar below half showed a ghostly shape whenever the player looked around. (An
+- * ender dragon has no armour but the client draws it even when invisible.) 1.7 gets it through the
++ * It is kept as far ahead as the client can draw it ({@link #target}): a wither at half its health or
++ * less wears its armour, which the client draws even on an invisible wither, and at 30 blocks a bar
++ * below half showed a ghostly shape whenever the player looked around. (An ender dragon has no armour
++ * but the client draws it even when invisible.) The client draws an entity only in a chunk it has, so
++ * the wither stays on chunks the player has been sent: put past the map (a template's chunks outside
++ * its bounds are never sent) it showed no bar at all. 1.7 gets it through the
+  * usual translation (a wither, with its name).
+  */
+ public final class AthenaBossBar {
+-    /**
+-     * How far ahead of the player's eyes the wither is kept: 85% of what they see (the smaller of the
+-     * server's view distance and the client's render distance), in the fog, and no further than 100
+-     * blocks, past which the client does not render a wither at all.
+-     */
+-    private double distance() {
+-        int chunks = Math.max(2, Math.min(this.player.viewDistance, this.player.athenaClientViewDistance));
+-        return Math.max(24.0D, Math.min(100.0D, chunks * 16.0D * 0.85D));
+-    }
++    /** The furthest the wither is kept ahead: a wither further away is not drawn by the client. */
++    private static final double MAX_DISTANCE = 80.0D;
++    /** The nearest it is kept, even where nothing further is loaded. */
++    private static final double MIN_DISTANCE = 24.0D;
+     /** Boss bar names longer than this are cut (the name tag's limit). */
+     private static final int MAX_TITLE = 64;
+     /** The wither is moved once it is this far (1 block, in 1/32 blocks, squared) from where the client has it. */
+@@ -99,11 +96,28 @@ public final class AthenaBossBar {
+         this.spawnedIn = this.player.world;
+     }
+ 
+-    /** {@link #distance} blocks ahead of the player's eyes, kept inside the world's height. */
++    /**
++     * Ahead of the player's eyes, kept inside the world's height: as far as {@value #MAX_DISTANCE}
++     * blocks, back to the furthest point in a chunk that is loaded and within the player's view (so
++     * the client has it), and no nearer than {@value #MIN_DISTANCE}.
++     */
+     private double[] target() {
+         Vec3D look = this.player.getLookVec();
+-        double distance = this.distance();
+-        double y = this.player.locY + this.player.getHeadHeight() + look.yCoord * distance;
++        double eyes = this.player.locY + this.player.getHeadHeight();
++        int view = Math.max(2, Math.min(this.player.viewDistance, this.player.athenaClientViewDistance)) - 1;
++        int px = MathHelper.floor(this.player.locX) >> 4;
++        int pz = MathHelper.floor(this.player.locZ) >> 4;
++        double max = Math.min(MAX_DISTANCE, view * 16.0D);
++        double distance = MIN_DISTANCE;
++        for (double d = max; d > MIN_DISTANCE; d -= 8.0D) {
++            int cx = MathHelper.floor(this.player.locX + look.xCoord * d) >> 4;
++            int cz = MathHelper.floor(this.player.locZ + look.zCoord * d) >> 4;
++            if (Math.abs(cx - px) <= view && Math.abs(cz - pz) <= view && this.player.world.getChunkIfLoaded(cx, cz) != null) {
++                distance = d;
++                break;
++            }
++        }
++        double y = eyes + look.yCoord * distance;
+         return new double[] {
+                 this.player.locX + look.xCoord * distance,
+                 Math.max(1.0D, Math.min(254.0D, y)),

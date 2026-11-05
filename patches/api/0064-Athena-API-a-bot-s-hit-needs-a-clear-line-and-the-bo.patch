@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 23:30:57 +0900
+Subject: [PATCH] Athena API: a bot's hit needs a clear line, and the boss bar
+ stays over half
+
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 4509b404588e85cf7d5f96b2be12ffdec284fc02..54903b45d53209b476d22fb5b717262281e6b00f 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -398,10 +398,11 @@ public final class Athena {
+      * over a bar {@code progress} full. Only {@code player} sees it, on 1.7 and 1.8 alike, until
+      * {@link #removeBossBar}; it stays through teleports and changes of world, and goes when they leave.
+      * (Neither version has boss bars of its own: the bar is an invisible wither only they are told
+-     * about, kept far ahead of where they look.)
++     * about, kept ahead of where they look. At half its health a wither shows its armour even when
++     * invisible, so the bar never goes below just over half.)
+      *
+      * @param title the text over the bar, with {@code §} colour codes; at most 64 characters are shown
+-     * @param progress how full the bar is, from 0 (empty) to 1 (full)
++     * @param progress how far along the bar is, from 0 (drawn just over half full) to 1 (full)
+      */
+     public static void setBossBar(Player player, String title, float progress) {
+         getServer().setBossBar(player, title, progress);
+diff --git a/src/main/java/athena/api/bot/Bot.java b/src/main/java/athena/api/bot/Bot.java
+index 3c644c78bec7c2dbfc276f6939d3f03108045908..36788612136315f2c7c1ca9912f76f24591c18b3 100644
+--- a/src/main/java/athena/api/bot/Bot.java
++++ b/src/main/java/athena/api/bot/Bot.java
+@@ -77,10 +77,10 @@ public interface Bot {
+ 
+     /**
+      * A left click on {@code target}: swings, then attacks it as a player's hit, if it is within
+-     * reach: 3 blocks from the bot's eyes to the nearest point of its box, as a client's reach.
+-     * The bot does not have to look at it.
++     * reach: 3 blocks from the bot's eyes to the nearest point of its box, as a client's reach, with
++     * no block in between (a client can't hit through a wall). The bot does not have to look at it.
+      *
+-     * @return whether the hit was made (in reach, not the bot itself, in the bot's world). A hit
++     * @return whether the hit was made (in reach and in sight, not the bot itself, in the bot's world). A hit
+      *         that the events cancel or that does no damage was still made.
+      */
+     boolean attack(Entity target);

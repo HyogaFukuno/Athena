@@ -1,0 +1,91 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 23:30:57 +0900
+Subject: [PATCH] Bots hit only what they can see, and the boss bar stays near
+ and over half
+
+A bot's attack checked only the reach, so bots hit through walls: it now needs a clear line from its eyes to the target's head, middle or feet.
+
+The boss bar's wither was not drawn 80 blocks ahead by a player's client. It is back at 32 blocks, nearer where those chunks are not loaded, and its health stays over half so it never wears the armour that shows on an invisible wither.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBossBar.java b/src/main/java/net/minecraft/server/AthenaBossBar.java
+index 34a00843082654b194fa225849b955bab556eed6..68667030d9ef0847923ef7678e3403c2ff3befd9 100644
+--- a/src/main/java/net/minecraft/server/AthenaBossBar.java
++++ b/src/main/java/net/minecraft/server/AthenaBossBar.java
+@@ -7,19 +7,24 @@ package net.minecraft.server;
+  * else (not in the world, not tracked), and keeps it ahead of their eyes: the client draws the bar
+  * only while it renders the boss, so the boss has to stay in view.
+  * <p>
+- * It is kept as far ahead as the client can draw it ({@link #target}): a wither at half its health or
+- * less wears its armour, which the client draws even on an invisible wither, and at 30 blocks a bar
+- * below half showed a ghostly shape whenever the player looked around. (An ender dragon has no armour
+- * but the client draws it even when invisible.) The client draws an entity only in a chunk it has, so
+- * the wither stays on chunks the player has been sent: put past the map (a template's chunks outside
+- * its bounds are never sent) it showed no bar at all. 1.7 gets it through the
++ * It is kept {@value #MAX_DISTANCE} blocks ahead, or nearer where those chunks are not loaded: the
++ * client draws an entity only in a chunk it has, and past the map (a template's chunks outside its
++ * bounds are never sent) there is no bar. Further away does not work either: at 80 blocks a client
++ * showed none.
++ * <p>
++ * The wither's health never reaches half, so the bar runs from full down to just over half
++ * ({@link #MIN_HEALTH}): at half or less a wither wears its armour, which the client draws even on
++ * an invisible wither, as a ghostly shape ahead of the player. (An ender dragon has no armour, but
++ * the client draws it even when invisible.) 1.7 gets it through the
+  * usual translation (a wither, with its name).
+  */
+ public final class AthenaBossBar {
+-    /** The furthest the wither is kept ahead: a wither further away is not drawn by the client. */
+-    private static final double MAX_DISTANCE = 80.0D;
++    /** How far ahead of the player's eyes the wither is kept. */
++    private static final double MAX_DISTANCE = 32.0D;
+     /** The nearest it is kept, even where nothing further is loaded. */
+-    private static final double MIN_DISTANCE = 24.0D;
++    private static final double MIN_DISTANCE = 16.0D;
++    /** The share of its health the wither has at a progress of 0: over half, or it wears its armour. */
++    private static final float MIN_HEALTH = 0.51F;
+     /** Boss bar names longer than this are cut (the name tag's limit). */
+     private static final int MAX_TITLE = 64;
+     /** The wither is moved once it is this far (1 block, in 1/32 blocks, squared) from where the client has it. */
+@@ -46,9 +51,8 @@ public final class AthenaBossBar {
+     /** Shows {@code title} over a bar {@code progress} (0 to 1) full; sent at once. */
+     public void set(String title, float progress) {
+         this.boss.setCustomName(title.length() > MAX_TITLE ? title.substring(0, MAX_TITLE) : title);
+-        // A boss at 0 health plays its death on the client; the emptiest bar is 1 point of health
+-        float health = Math.max(0.0F, Math.min(1.0F, progress)) * this.boss.getMaxHealth();
+-        this.boss.setHealth(Math.max(1.0F, health));
++        float share = MIN_HEALTH + (1.0F - MIN_HEALTH) * Math.max(0.0F, Math.min(1.0F, progress));
++        this.boss.setHealth(share * this.boss.getMaxHealth());
+         if (this.spawnedIn == this.player.world) {
+             this.player.playerConnection.sendPacket(new PacketPlayOutEntityMetadata(this.boss.getId(), this.boss.getDataWatcher(), true));
+         } else {
+diff --git a/src/main/java/net/minecraft/server/AthenaBot.java b/src/main/java/net/minecraft/server/AthenaBot.java
+index c9b21a049292ba9aa437ce2d3afe1c304c9b88c3..b3b9e634cc4c60a919b5e5105823e121f7aa7a77 100644
+--- a/src/main/java/net/minecraft/server/AthenaBot.java
++++ b/src/main/java/net/minecraft/server/AthenaBot.java
+@@ -172,7 +172,7 @@ public final class AthenaBot implements Bot {
+         net.minecraft.server.Entity entity = ((CraftEntity) target).getHandle();
+         if (entity == this.player || entity.world != this.player.world || entity.dead) return false;
+         if (entity instanceof EntityItem || entity instanceof EntityExperienceOrb || entity instanceof EntityArrow) return false;
+-        if (reachTo(entity) > ATTACK_REACH) return false;
++        if (reachTo(entity) > ATTACK_REACH || !canSee(entity)) return false;
+         // as a 1.8 client: the swing, then the hit
+         this.swing();
+         if (this.player.dead || entity.dead) return true;
+@@ -181,6 +181,17 @@ public final class AthenaBot implements Bot {
+         return true;
+     }
+ 
++    /** Whether no block stands between the bot's eyes and {@code entity}'s head, middle or feet: a client hits what it sees. */
++    private boolean canSee(net.minecraft.server.Entity entity) {
++        Vec3D eyes = new Vec3D(this.player.locX, this.player.locY + (double) this.player.getHeadHeight(), this.player.locZ);
++        double height = entity.boundingBoxMaxY - entity.boundingBoxMinY;
++        for (double share : new double[] {0.9D, 0.5D, 0.1D}) {
++            Vec3D point = new Vec3D(entity.locX, entity.boundingBoxMinY + height * share, entity.locZ);
++            if (this.player.world.rayTrace(eyes, point, false) == null) return true;
++        }
++        return false;
++    }
++
+     /** From the bot's eyes to the nearest point of {@code entity}'s box. */
+     double reachTo(net.minecraft.server.Entity entity) {
+         double x = this.player.locX;

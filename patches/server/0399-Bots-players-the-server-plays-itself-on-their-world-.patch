@@ -1,0 +1,846 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 01:54:19 +0900
+Subject: [PATCH] Bots: players the server plays itself, on their world's
+ thread
+
+AthenaBotPlayer is an EntityPlayer with a connection that goes nowhere (AthenaBotNetworkManager). It logs in through PlayerList like a client, and each tick runs its controller and then the player's own physics from the keys it holds, with PlayerMoveEvent, fall damage and knockback that stays on it. Its clicks (AthenaBot) go through the events and handlers of the client's packets. It is sent no chunks or entities, saves no files, does not count toward a full server, and ticks wherever its own chunk is loaded. PlayerSpawnLocationEvent choosing a world on its own thread is handed over as PlayerInitialSpawnEvent's is.
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 6b4589ad072b472c457091e2c2b6eaf3364028b4..b29d2a4083f9d2851c7aa77874aba69465692ee3 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -390,4 +390,49 @@ public final class AthenaServerImpl implements AthenaServer {
+     public void requestGarbageCollection() {
+         AthenaGcRequests.get().request();
+     }
++
++    // Athena start - bots
++    @Override
++    public CompletableFuture<athena.api.bot.Bot> spawnBot(String name, java.util.UUID id, String skinValue, String skinSignature) {
++        Validate.notNull(name, "Name may not be null");
++        Validate.notNull(id, "Id may not be null");
++        final CompletableFuture<athena.api.bot.Bot> future = new CompletableFuture<athena.api.bot.Bot>();
++        if (!MINECRAFT_NAME.matcher(name).matches()) {
++            future.completeExceptionally(new IllegalArgumentException("Not a Minecraft name: " + name));
++            return future;
++        }
++        final com.mojang.authlib.GameProfile profile = new com.mojang.authlib.GameProfile(id, name);
++        if (skinValue != null) {
++            profile.getProperties().put("textures", new com.mojang.authlib.properties.Property("textures", skinValue, skinSignature));
++        }
++        Runnable login = () -> {
++            try {
++                final net.minecraft.server.AthenaBotPlayer bot = this.server.getServer().getPlayerList().athenaLoginBot(profile);
++                final athena.api.bot.Bot api = this.server.getServer().getPlayerList().athenaBotOf(bot);
++                // handed over to a world on its own thread: complete there, once it has landed
++                if (!bot.athenaRunWhenLanded(() -> future.complete(api))) {
++                    future.complete(api);
++                }
++            } catch (Throwable throwable) {
++                future.completeExceptionally(throwable);
++            }
++        };
++        if (this.server.getServer().isMainThread()) {
++            login.run();
++        } else {
++            this.server.getServer().processQueue.add(login);
++        }
++        return future;
++    }
++
++    @Override
++    public athena.api.bot.Bot getBot(Player player) {
++        return net.minecraft.server.PlayerList.athenaBotOf(player);
++    }
++
++    @Override
++    public Collection<athena.api.bot.Bot> getBots() {
++        return net.minecraft.server.PlayerList.athenaBots();
++    }
++    // Athena end
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaBot.java b/src/main/java/net/minecraft/server/AthenaBot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9b21a049292ba9aa437ce2d3afe1c304c9b88c3
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBot.java
+@@ -0,0 +1,325 @@
++package net.minecraft.server;
++
++import athena.api.bot.Bot;
++import athena.api.bot.BotController;
++import org.bukkit.Location;
++import org.bukkit.block.Block;
++import org.bukkit.block.BlockFace;
++import org.bukkit.craftbukkit.block.CraftBlock;
++import org.bukkit.craftbukkit.entity.CraftEntity;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.craftbukkit.event.CraftEventFactory;
++import org.bukkit.event.Event;
++import org.bukkit.event.block.Action;
++import org.bukkit.event.player.PlayerAnimationEvent;
++import org.bukkit.event.player.PlayerItemHeldEvent;
++import org.bukkit.event.player.PlayerToggleSneakEvent;
++import org.bukkit.event.player.PlayerToggleSprintEvent;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - athena.api.Bot for an AthenaBotPlayer. Each click does what PlayerConnection does with the
++ * client's packet for it, with the same events, on the thread that ticks the bot's world. What
++ * AthenaGuard checks a client for (its timing, its view of the target) is not checked: the server
++ * makes these clicks itself; the reach is checked here instead.
++ */
++public final class AthenaBot implements Bot {
++
++    /** A client's reach for a hit: from the eyes to the target's box. */
++    static final double ATTACK_REACH = 3.0D;
++    /** PlayerConnection's limit for a click on a block, squared: from the eyes to the block's corner. */
++    static final double INTERACT_REACH_SQUARED = 6.0D * 6.0D;
++
++    private final AthenaBotPlayer player;
++
++    AthenaBot(AthenaBotPlayer player) {
++        this.player = player;
++    }
++
++    AthenaBotPlayer handle() {
++        return this.player;
++    }
++
++    private void checkThread(String what) {
++        org.spigotmc.AsyncCatcher.catchOp("bot " + what, this.player.world);
++    }
++
++    @Override
++    public Player getPlayer() {
++        return this.player.getBukkitEntity();
++    }
++
++    @Override
++    public boolean isOnline() {
++        return AthenaBotPlayer.ONLINE.contains(this);
++    }
++
++    @Override
++    public void setMovement(float forward, float strafe) {
++        this.player.forward = clamp(forward);
++        this.player.strafe = clamp(strafe);
++    }
++
++    private static float clamp(float f) {
++        if (Float.isNaN(f)) return 0.0F;
++        return Math.max(-1.0F, Math.min(1.0F, f));
++    }
++
++    @Override
++    public float getForward() {
++        return this.player.forward;
++    }
++
++    @Override
++    public float getStrafe() {
++        return this.player.strafe;
++    }
++
++    @Override
++    public void setJumping(boolean jumping) {
++        this.player.jumping = jumping;
++    }
++
++    @Override
++    public boolean isJumping() {
++        return this.player.jumping;
++    }
++
++    @Override
++    public boolean setSneaking(boolean sneaking) {
++        this.checkThread("sneak");
++        if (this.player.dead || this.player.isSneaking() == sneaking) return !this.player.dead;
++        PlayerToggleSneakEvent event = new PlayerToggleSneakEvent(this.getPlayer(), sneaking);
++        this.player.world.getServer().getPluginManager().callEvent(event);
++        if (event.isCancelled()) return false;
++        this.player.resetIdleTimer();
++        this.player.setSneaking(sneaking);
++        return true;
++    }
++
++    @Override
++    public boolean setSprinting(boolean sprinting) {
++        this.checkThread("sprint");
++        if (this.player.dead || this.player.isSprinting() == sprinting) return !this.player.dead;
++        if (sprinting && !this.player.canSprint()) return false;
++        PlayerToggleSprintEvent event = new PlayerToggleSprintEvent(this.getPlayer(), sprinting);
++        this.player.world.getServer().getPluginManager().callEvent(event);
++        if (event.isCancelled()) return false;
++        this.player.resetIdleTimer();
++        this.player.setSprinting(sprinting);
++        return true;
++    }
++
++    @Override
++    public void look(float yaw, float pitch) {
++        if (!Float.isFinite(yaw) || !Float.isFinite(pitch)) return;
++        float y = MathHelper.wrapAngleTo180_float(yaw);
++        float p = Math.max(-90.0F, Math.min(90.0F, pitch));
++        this.player.yaw = y;
++        this.player.pitch = p;
++        this.player.rotationYawHead = y;
++    }
++
++    @Override
++    public void lookAt(Location target) {
++        double dx = target.getX() - this.player.locX;
++        double dy = target.getY() - (this.player.locY + this.player.getHeadHeight());
++        double dz = target.getZ() - this.player.locZ;
++        double flat = Math.sqrt(dx * dx + dz * dz);
++        if (flat < 1.0E-6D && Math.abs(dy) < 1.0E-6D) return;
++        float yaw = (float) (Math.toDegrees(Math.atan2(dz, dx)) - 90.0D);
++        float pitch = (float) -Math.toDegrees(Math.atan2(dy, flat));
++        this.look(yaw, pitch);
++    }
++
++    /** What the bot looks at within {@code reach} blocks, as PlayerConnection traces it for a click. */
++    private MovingObjectPosition lookedAt(double reach) {
++        float f1 = this.player.pitch;
++        float f2 = this.player.yaw;
++        Vec3D eyes = new Vec3D(this.player.locX, this.player.locY + (double) this.player.getHeadHeight(), this.player.locZ);
++        float f3 = MathHelper.cos(-f2 * 0.017453292F - 3.1415927F);
++        float f4 = MathHelper.sin(-f2 * 0.017453292F - 3.1415927F);
++        float f5 = -MathHelper.cos(-f1 * 0.017453292F);
++        float f6 = MathHelper.sin(-f1 * 0.017453292F);
++        Vec3D end = eyes.add((double) (f4 * f5) * reach, (double) f6 * reach, (double) (f3 * f5) * reach);
++        return this.player.world.rayTrace(eyes, end, false);
++    }
++
++    private double clickReach() {
++        return this.player.playerInteractManager.getGameMode() == WorldSettings.EnumGamemode.CREATIVE ? 5.0D : 4.5D;
++    }
++
++    @Override
++    public void swing() {
++        this.checkThread("swing");
++        if (this.player.dead) return;
++        this.player.resetIdleTimer();
++        MovingObjectPosition hit = this.lookedAt(this.clickReach());
++        if (hit == null || hit.type != MovingObjectPosition.EnumMovingObjectType.BLOCK) {
++            CraftEventFactory.callPlayerInteractEvent(this.player, Action.LEFT_CLICK_AIR, this.player.inventory.getItemInHand());
++        }
++        PlayerAnimationEvent event = new PlayerAnimationEvent(this.getPlayer());
++        this.player.world.getServer().getPluginManager().callEvent(event);
++        if (event.isCancelled()) return;
++        this.player.swingItem();
++    }
++
++    @Override
++    public boolean attack(Entity target) {
++        this.checkThread("attack");
++        if (this.player.dead || this.player.getHealth() <= 0.0F || target == null) return false;
++        net.minecraft.server.Entity entity = ((CraftEntity) target).getHandle();
++        if (entity == this.player || entity.world != this.player.world || entity.dead) return false;
++        if (entity instanceof EntityItem || entity instanceof EntityExperienceOrb || entity instanceof EntityArrow) return false;
++        if (reachTo(entity) > ATTACK_REACH) return false;
++        // as a 1.8 client: the swing, then the hit
++        this.swing();
++        if (this.player.dead || entity.dead) return true;
++        this.player.resetIdleTimer();
++        this.player.attack(entity);
++        return true;
++    }
++
++    /** From the bot's eyes to the nearest point of {@code entity}'s box. */
++    double reachTo(net.minecraft.server.Entity entity) {
++        double x = this.player.locX;
++        double y = this.player.locY + (double) this.player.getHeadHeight();
++        double z = this.player.locZ;
++        double dx = Math.max(Math.max(entity.boundingBoxMinX - x, 0.0D), x - entity.boundingBoxMaxX);
++        double dy = Math.max(Math.max(entity.boundingBoxMinY - y, 0.0D), y - entity.boundingBoxMaxY);
++        double dz = Math.max(Math.max(entity.boundingBoxMinZ - z, 0.0D), z - entity.boundingBoxMaxZ);
++        return Math.sqrt(dx * dx + dy * dy + dz * dz);
++    }
++
++    @Override
++    public boolean useItem() {
++        this.checkThread("use an item");
++        if (this.player.dead) return false;
++        ItemStack itemstack = this.player.inventory.getItemInHand();
++        if (itemstack == null) return false;
++        this.player.resetIdleTimer();
++        // PlayerConnection.processPlayerBlockPlacement with face 255
++        MovingObjectPosition hit = this.lookedAt(this.clickReach());
++        org.bukkit.event.player.PlayerInteractEvent event;
++        if (hit == null || hit.type != MovingObjectPosition.EnumMovingObjectType.BLOCK) {
++            event = CraftEventFactory.callPlayerInteractEvent(this.player, Action.RIGHT_CLICK_AIR, itemstack);
++        } else {
++            event = CraftEventFactory.callPlayerInteractEvent(this.player, Action.RIGHT_CLICK_BLOCK, hit.getBlockPos(), hit.direction, itemstack, true);
++        }
++        if (event.useItemInHand() == Event.Result.DENY) return false;
++        this.player.playerInteractManager.useItem(this.player, this.player.world, itemstack);
++        this.clearEmptyHand();
++        return true;
++    }
++
++    @Override
++    public boolean interact(Block block, BlockFace face) {
++        this.checkThread("click a block");
++        if (this.player.dead || block == null || face == null) return false;
++        WorldServer world = this.player.getServerForPlayer();
++        if (((org.bukkit.craftbukkit.CraftWorld) block.getWorld()).getHandle() != world) return false;
++        BlockPosition position = new BlockPosition(block.getX(), block.getY(), block.getZ());
++        EnumDirection direction = CraftBlock.blockFaceToNotch(face);
++        if (direction == null) return false;
++        double eyeX = this.player.locX;
++        double eyeY = this.player.locY + (double) this.player.getHeadHeight();
++        double eyeZ = this.player.locZ;
++        double dx = eyeX - position.getX();
++        double dy = eyeY - position.getY();
++        double dz = eyeZ - position.getZ();
++        if (dx * dx + dy * dy + dz * dz > INTERACT_REACH_SQUARED) return false;
++        if (position.getY() >= this.player.server.getMaxBuildHeight() || !world.getWorldBorder().contains(position)) return false;
++        this.player.resetIdleTimer();
++        if (!this.player.server.a(world, position, this.player)) {
++            ItemStack itemstack = this.player.inventory.getItemInHand();
++            this.player.playerInteractManager.interact(this.player, world, itemstack, position, direction, 0.5F, 0.5F, 0.5F);
++            this.clearEmptyHand();
++        }
++        return true;
++    }
++
++    /** PlayerConnection's: an item used up (count 0) leaves the hand empty. */
++    private void clearEmptyHand() {
++        ItemStack itemstack = this.player.inventory.getItemInHand();
++        if (itemstack != null && itemstack.count == 0) {
++            this.player.inventory.items[this.player.inventory.itemInHandIndex] = null;
++        }
++    }
++
++    @Override
++    public void releaseItem() {
++        this.checkThread("release an item");
++        if (this.player.dead) return;
++        this.player.resetIdleTimer();
++        if (this.player.isUsingItem()) {
++            this.player.stopUsingItem();
++        }
++    }
++
++    @Override
++    public boolean isUsingItem() {
++        return this.player.isUsingItem();
++    }
++
++    @Override
++    public boolean selectSlot(int slot) {
++        this.checkThread("change the held slot");
++        if (slot < 0 || slot >= PlayerInventory.getHotbarSize()) {
++            throw new IllegalArgumentException("Not a hotbar slot: " + slot);
++        }
++        if (this.player.dead) return false;
++        if (this.player.inventory.itemInHandIndex == slot) return true;
++        PlayerItemHeldEvent event = new PlayerItemHeldEvent(this.getPlayer(), this.player.inventory.itemInHandIndex, slot);
++        this.player.world.getServer().getPluginManager().callEvent(event);
++        this.player.resetIdleTimer();
++        if (event.isCancelled()) return false;
++        if (this.player.isUsingItem()) {
++            this.player.clearItemInUse(); // as the client: switching away stops using the item
++        }
++        this.player.inventory.itemInHandIndex = slot;
++        return true;
++    }
++
++    @Override
++    public void setController(BotController controller) {
++        this.player.controller = controller;
++    }
++
++    @Override
++    public BotController getController() {
++        return this.player.controller;
++    }
++
++    @Override
++    public boolean respawn() {
++        this.checkThread("respawn");
++        if (!this.isOnline() || this.player.getHealth() > 0.0F) return false;
++        // PlayerConnection.processClientStatus, PERFORM_RESPAWN
++        this.player.resetIdleTimer();
++        this.player.server.getPlayerList().moveToWorld(this.player, 0, false);
++        return true;
++    }
++
++    @Override
++    public void remove() {
++        this.checkThread("remove");
++        if (!this.isOnline()) return;
++        PlayerConnection connection = this.player.playerConnection;
++        ChatComponentText reason = new ChatComponentText("Bot removed");
++        connection.networkManager.close(reason);
++        connection.onDisconnect(reason);
++    }
++
++    @Override
++    public String toString() {
++        return "AthenaBot{" + this.player.getName() + "}";
++    }
++
++    /** The bot that a Bukkit player is, or null. */
++    static AthenaBot of(Player player) {
++        if (!(player instanceof CraftPlayer)) return null;
++        EntityPlayer handle = ((CraftPlayer) player).getHandle();
++        return handle instanceof AthenaBotPlayer ? ((AthenaBotPlayer) handle).api : null;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaBotNetworkManager.java b/src/main/java/net/minecraft/server/AthenaBotNetworkManager.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..378f95c1f792464f6c13150bad2c711ef691873e
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBotNetworkManager.java
+@@ -0,0 +1,70 @@
++package net.minecraft.server;
++
++import io.netty.channel.embedded.EmbeddedChannel;
++import io.netty.util.concurrent.Future;
++import io.netty.util.concurrent.GenericFutureListener;
++import io.netty.util.concurrent.ImmediateEventExecutor;
++
++/**
++ * Athena - the connection of a bot (AthenaBotPlayer): no client behind it. Everything sent to it is
++ * dropped as if written, and the listeners that wait for a write (a kick's close) run at once.
++ * <p>
++ * It has a channel, an EmbeddedChannel nothing is ever written to, so that what asks the channel
++ * about the connection gets the answers of an open one, and the close a kick ends with closes it
++ * as it would a real channel. The connection is never on ServerConnection's list, and its own
++ * tick is never run (see processReceivedPackets): the bot does not keep alive, idle or throttle chat.
++ */
++public final class AthenaBotNetworkManager extends NetworkManager {
++
++    private static final java.net.InetSocketAddress LOOPBACK = new java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0);
++    @SuppressWarnings("rawtypes")
++    private static final Future WRITTEN = ImmediateEventExecutor.INSTANCE.newSucceededFuture(null);
++
++    public AthenaBotNetworkManager() {
++        super(EnumProtocolDirection.SERVERBOUND);
++        this.channel = new EmbeddedChannel();
++        this.socketAddress = LOOPBACK;
++        this.preparing = false;
++        this.isPending = false;
++        this.protocol = EnumProtocol.PLAY;
++    }
++
++    @Override
++    public void handle(Packet packet) {
++        this.sendPacket(packet, null, (GenericFutureListener<? extends Future<? super Void>>[]) null);
++    }
++
++    @Override
++    @SuppressWarnings({"unchecked", "rawtypes"})
++    public void sendPacket(Packet packet, GenericFutureListener<? extends Future<? super Void>> listener, GenericFutureListener<? extends Future<? super Void>>... listeners) {
++        if (packet.hasFinishListener()) {
++            packet.onPacketDispatchFinish(this.getPlayer(), null); // what a packet holds until it is written (a chunk's buffer) is let go
++        }
++        try {
++            if (listener != null) {
++                ((GenericFutureListener) listener).operationComplete(WRITTEN);
++            }
++            if (listeners != null) {
++                for (GenericFutureListener<? extends Future<? super Void>> other : listeners) {
++                    if (other != null) ((GenericFutureListener) other).operationComplete(WRITTEN);
++                }
++            }
++        } catch (Exception exception) {
++            throw new RuntimeException(exception);
++        }
++    }
++
++    /** Nothing is ever received, and the connection's tick (keep-alive, idle kick) is not the bot's. */
++    @Override
++    public void processReceivedPackets() {
++    }
++
++    @Override
++    public java.net.SocketAddress getRawAddress() {
++        return LOOPBACK;
++    }
++
++    @Override
++    public void setCompressionTreshold(int i) {
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaBotPlayer.java b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..a9d83bf5f3f9dd5e03a9bd1e5112f45126ef44a7
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+@@ -0,0 +1,159 @@
++package net.minecraft.server;
++
++import com.mojang.authlib.GameProfile;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++/**
++ * Athena - a player the server plays itself (athena.api.bot.Bot, AthenaBot). It is an EntityPlayer
++ * with an AthenaBotNetworkManager for a connection, logged in through the same PlayerList steps as a
++ * client (PlayerList.athenaLoginBot).
++ * <p>
++ * A client moves its player and the server takes the moves from its packets; a bot has no
++ * client, so the server moves it here. Each tick the world ticks the bot (onUpdate), and the bot then
++ * does what a movement packet makes the server do for a client: its controller sets the keys, and
++ * onUpdateEntity runs the player's own physics (EntityLiving.moveEntityWithHeading) from them, with
++ * the client's speeds; then the chunk map follows it. Unlike a player's, the server's physics is the
++ * bot's real movement, so falls hurt it (updateFallState) and knockback stays on it
++ * (EntityHuman.attack).
++ * <p>
++ * It is sent no chunks (EntityPlayer.onUpdate) and no entities (EntityTrackerEntry.updatePlayer);
++ * it keeps the chunks around it loaded, as a player does, out to {@link #VIEW_DISTANCE}.
++ */
++public final class AthenaBotPlayer extends EntityPlayer {
++
++    private static final Logger LOGGER = LogManager.getLogger();
++    /** The chunks it keeps loaded around it, in chunks. Enough for the world to tick it (32 blocks around). */
++    static final int VIEW_DISTANCE = 3;
++    /** The bots online, as the API sees them. */
++    static final java.util.Set<AthenaBot> ONLINE = java.util.concurrent.ConcurrentHashMap.newKeySet();
++
++    final AthenaBot api;
++    float forward;
++    float strafe;
++    boolean jumping;
++    athena.api.bot.BotController controller;
++
++    public AthenaBotPlayer(MinecraftServer server, WorldServer world, GameProfile profile, PlayerInteractManager interactManager) {
++        super(server, world, profile, interactManager);
++        this.viewDistance = Math.min(VIEW_DISTANCE, this.viewDistance);
++        this.api = new AthenaBot(this);
++    }
++
++    @Override
++    public void onUpdate() {
++        super.onUpdate();
++        if (this.dead || this.playerConnection == null || this.playerConnection.athenaQuitDone() || this.athenaInTransit) {
++            return;
++        }
++        if (this.getHealth() > 0.0F && this.controller != null) {
++            World before = this.world;
++            try {
++                this.controller.tick(this.api);
++            } catch (Throwable throwable) {
++                LOGGER.error("Bot " + this.getName() + "'s controller threw", throwable);
++                this.forward = 0.0F;
++                this.strafe = 0.0F;
++                this.jumping = false;
++            }
++            // the controller removed it, or sent it on to another world
++            if (this.dead || this.playerConnection.athenaQuitDone() || this.athenaInTransit || this.world != before) {
++                return;
++            }
++        }
++        this.move();
++    }
++
++    /** What the server does with a client's movement packet, from the bot's keys. */
++    private void move() {
++        // as the client: sprinting stops when the bot stops going forward, runs into a wall or is hungry
++        if (this.isSprinting() && (this.forward < 0.8F || this.positionChanged || !this.canSprint())) {
++            this.api.setSprinting(false);
++        }
++        float scale = this.isSneaking() ? 0.3F : 1.0F;
++        if (this.isUsingItem() && this.vehicle == null) {
++            scale *= 0.2F; // eating, drawing a bow, blocking
++        }
++        this.moveForward = this.forward * scale;
++        this.moveStrafing = this.strafe * scale;
++        this.isJumping = this.jumping;
++        if (this.abilities.isFlying && this.vehicle == null) {
++            // the client's own: flying, jump climbs and sneak sinks
++            if (this.isSneaking()) this.motY -= (double) (this.abilities.getFlySpeed() * 3.0F);
++            if (this.jumping) this.motY += (double) (this.abilities.getFlySpeed() * 3.0F);
++        }
++        // moved by something else since its last move (a teleport): its next PlayerMoveEvent starts from there
++        if (this.locX != this.movedX || this.locY != this.movedY || this.locZ != this.movedZ || this.world != this.movedIn) {
++            this.athenaResetMoveEvent();
++        }
++        this.onUpdateEntity(); // the player's tick: food, item use, potions, then its physics from the keys above
++        if (this.dead || this.athenaInTransit) {
++            return;
++        }
++        this.firePlayerMoveEvent();
++        if (this.dead || this.athenaInTransit || this.playerConnection.athenaQuitDone()) {
++            return;
++        }
++        this.server.getPlayerList().serverUpdateMountedMovingPlayer(this);
++        this.movedX = this.locX;
++        this.movedY = this.locY;
++        this.movedZ = this.locZ;
++        this.movedIn = this.world;
++    }
++
++    // where its last move left it, and where its last PlayerMoveEvent ended (PlayerConnection's lastPos)
++    private double movedX = Double.NaN, movedY, movedZ;
++    private World movedIn;
++    private double eventX, eventY, eventZ;
++    private float eventYaw, eventPitch;
++
++    private void athenaResetMoveEvent() {
++        this.eventX = this.locX;
++        this.eventY = this.locY;
++        this.eventZ = this.locZ;
++        this.eventYaw = this.yaw;
++        this.eventPitch = this.pitch;
++    }
++
++    /**
++     * PlayerMoveEvent as PlayerConnection.processPlayer fires it for a client: once the bot has moved
++     * more than 1/16 of a block or turned more than 10 degrees since the last one. Cancelled, the bot
++     * goes back to where the last one left it; with another destination, it is teleported there.
++     */
++    private void firePlayerMoveEvent() {
++        double dx = this.locX - this.eventX;
++        double dy = this.locY - this.eventY;
++        double dz = this.locZ - this.eventZ;
++        float dyaw = this.yaw - this.eventYaw;
++        float dpitch = this.pitch - this.eventPitch;
++        if (dx * dx + dy * dy + dz * dz <= 1.0D / 256.0D && Math.abs(dyaw) <= 10.0F && Math.abs(dpitch) <= 10.0F) {
++            return;
++        }
++        org.bukkit.entity.Player player = this.getBukkitEntity();
++        org.bukkit.Location from = new org.bukkit.Location(player.getWorld(), this.eventX, this.eventY, this.eventZ, this.eventYaw, this.eventPitch);
++        org.bukkit.Location to = player.getLocation();
++        org.bukkit.event.player.PlayerMoveEvent event = new org.bukkit.event.player.PlayerMoveEvent(player, from, to.clone());
++        this.world.getServer().getPluginManager().callEvent(event);
++        if (event.isCancelled()) {
++            this.setLocation(from.getX(), from.getY(), from.getZ(), from.getYaw(), from.getPitch());
++            this.motX = 0.0D;
++            this.motY = 0.0D;
++            this.motZ = 0.0D;
++        } else if (!to.equals(event.getTo())) {
++            player.teleport(event.getTo(), org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
++        }
++        if (this.athenaInTransit || this.dead) return;
++        this.athenaResetMoveEvent();
++    }
++
++    /** Whether the client would let it sprint: 3 food bars or more (or able to fly), and not using an item. */
++    boolean canSprint() {
++        return (this.getFoodData().getFoodLevel() > 6 || this.abilities.canFly) && !this.isUsingItem() && !this.hasEffect(MobEffectList.BLINDNESS);
++    }
++
++    // a client's player takes its falls from its packets (EntityPlayer.handleFalling); a bot's from its own moves
++    @Override
++    protected void updateFallState(double d0, boolean flag, Block block, BlockPosition blockposition) {
++        this.handleFalling(d0, flag);
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 84c5338ff60107186bcb25b61c4e98d0ca46ed8f..04c0d3b2c7545639699a1a353a3a0c8b2aedb84a 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -1037,7 +1037,9 @@ public abstract class EntityHuman extends EntityLiving {
+                             this.setSprinting(false);
+                         }
+ 
+-                        if (entity instanceof EntityPlayer && entity.velocityChanged) {
++                        // Athena - a bot moves by the server's physics, so its knockback stays on it: a client's
++                        // is sent to the client and taken back here, since the client moves it
++                        if (entity instanceof EntityPlayer && !(entity instanceof AthenaBotPlayer) && entity.velocityChanged) {
+                             // CraftBukkit start - Add Velocity Event
+                             boolean cancelled = false;
+                             Player player = (Player) entity.getBukkitEntity();
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 34c37295723bb6a4ae340709ee550e9d0cd7ebc8..3c27e72111e3e2b05115ebf004828ee829c202f0 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -399,6 +399,10 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+             this.playerConnection.sendPacket(new PacketPlayOutEntityDestroy(aint));
+         }
+ 
++        if (this instanceof AthenaBotPlayer) { // Athena - a bot is sent no chunks: the ones it keeps loaded are only marked sent
++            this.chunkCoordIntPairQueue.clear();
++            this.queuedChunks.clear();
++        } else
+         if (!this.chunkCoordIntPairQueue.isEmpty() && this.chunksInFlight.get() < EntityPlayer.MAX_CHUNKS_IN_FLIGHT) { // Athena - see chunksInFlight
+             ArrayList arraylist = Lists.newArrayList();
+             Iterator iterator1 = this.chunkCoordIntPairQueue.iterator();
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 207e70ea214daabacbb64c51f1cdec4aaf5db9b7..c388cfe4682691a227fedfd3e8f09413c0bd2da4 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -457,6 +457,7 @@ public class EntityTrackerEntry {
+ 
+     public void updatePlayer(EntityPlayer entityplayer) {
+         org.spigotmc.AsyncCatcher.catchOp( "player tracker update", this.tracker.world ); // Spigot // Athena - the thread that ticks this world
++        if (entityplayer instanceof AthenaBotPlayer) return; // Athena - a bot has no client to show entities to
+         if (entityplayer != this.tracker) {
+             if (this.c(entityplayer)) {
+                 if (this.viewerIndex(entityplayer) < 0 && (this.isPlayerWatchingThisChunk(entityplayer) || this.tracker.attachedToPlayer)) { // Athena
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 593208ff241a16f615ba034296456b6fd8cb7650..b6c167cf16bd79604a19a805eeefcfe586e5cb51 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -90,8 +90,9 @@ public abstract class PlayerList {
+         GameProfile gameprofile1 = usercache.getProfileByUUID(gameprofile.getId());
+         String s = gameprofile1 == null ? gameprofile.getName() : gameprofile1.getName();
+ 
+-        usercache.addEntry(gameprofile);
+-        NBTTagCompound nbttagcompound = this.readPlayerDataFromFile(entityplayer);
++        boolean athenaBot = entityplayer instanceof AthenaBotPlayer; // Athena - a bot is not cached, and has no player file
++        if (!athenaBot) usercache.addEntry(gameprofile);
++        NBTTagCompound nbttagcompound = athenaBot ? null : this.readPlayerDataFromFile(entityplayer);
+         // CraftBukkit start - Better rename detection
+         if (nbttagcompound != null && nbttagcompound.hasKey("bukkit")) {
+             NBTTagCompound bukkit = nbttagcompound.getCompound("bukkit");
+@@ -135,10 +136,22 @@ public abstract class PlayerList {
+ 
+         // Spigot start - spawn location event
+         Player bukkitPlayer = entityplayer.getBukkitEntity();
+-        PlayerSpawnLocationEvent ev = new PlayerSpawnLocationEvent(bukkitPlayer, bukkitPlayer.getLocation());
++        Location athenaOffered = bukkitPlayer.getLocation(); // Athena
++        PlayerSpawnLocationEvent ev = new PlayerSpawnLocationEvent(bukkitPlayer, athenaOffered.clone());
+         Bukkit.getPluginManager().callEvent(ev);
+ 
+         Location loc = ev.getSpawnLocation();
++        // Athena start - as for PlayerInitialSpawnEvent above: a world on its own thread is reached by a
++        // hand-over once the login is done, from the main world's spawn
++        if (((CraftWorld) loc.getWorld()).getHandle().athenaIsThreaded()) {
++            athenaHandOver = loc;
++            WorldServer main = this.server.worlds.get(0);
++            BlockPosition spawn = main.getSpawn();
++            loc = new Location(main.getWorld(), spawn.getX() + 0.5D, spawn.getY(), spawn.getZ() + 0.5D);
++        } else if (athenaHandOver != null && !loc.equals(athenaOffered)) {
++            athenaHandOver = null; // the event moved it again, to a world the server thread ticks
++        }
++        // Athena end
+         WorldServer world = ((CraftWorld) loc.getWorld()).getHandle();
+ 
+         entityplayer.spawnIn(world);
+@@ -311,6 +324,7 @@ public abstract class PlayerList {
+     }
+ 
+     protected void savePlayerFile(EntityPlayer entityplayer) {
++        if (entityplayer instanceof AthenaBotPlayer) return; // Athena - a bot saves no player file or statistics
+         this.playerFileData.save(entityplayer);
+         ServerStatisticManager serverstatisticmanager = (ServerStatisticManager) this.playerStatFiles.get(entityplayer.getUniqueID());
+ 
+@@ -401,6 +415,7 @@ public abstract class PlayerList {
+ 
+         worldserver.kill(entityplayer);
+         worldserver.getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer); // Athena - disconnecting: no unload packets
++        if (entityplayer instanceof AthenaBotPlayer) AthenaBotPlayer.ONLINE.remove(((AthenaBotPlayer) entityplayer).api); // Athena
+         this.players.remove(entityplayer);
+         this.playersByName.remove(entityplayer.getName()); // Spigot
+         UUID uuid = entityplayer.getUniqueID();
+@@ -432,6 +447,84 @@ public abstract class PlayerList {
+         return playerQuitEvent.quitMessage(); // CraftBukkit // PandaSpigot - Adventure
+     }
+ 
++    // Athena start - bots
++    /** The players online that are not bots. */
++    int athenaCountWithoutBots() {
++        int count = 0;
++        for (int i = 0; i < this.players.size(); ++i) {
++            if (!(this.players.get(i) instanceof AthenaBotPlayer)) ++count;
++        }
++        return count;
++    }
++
++    /**
++     * Logs a bot in as LoginListener and attemptLogin log a client in, on the server thread: the
++     * same PlayerLoginEvent (from the loopback address, hostname "bot"; not refused for a full
++     * server, since bots do not count), then initializeConnectionToPlayer with a connection that
++     * goes nowhere. Returns the bot, which may already be on its way to a world on its own thread.
++     *
++     * @throws IllegalArgumentException if a player with the name or the id is online
++     * @throws IllegalStateException with the kick message if PlayerLoginEvent refused it
++     */
++    public AthenaBotPlayer athenaLoginBot(GameProfile gameprofile) {
++        org.spigotmc.AsyncCatcher.catchOp("bot login");
++        if (this.getPlayer(gameprofile.getName()) != null) {
++            throw new IllegalArgumentException("A player named " + gameprofile.getName() + " is online");
++        }
++        if (this.uuidToPlayerMap.containsKey(gameprofile.getId())) {
++            throw new IllegalArgumentException("A player with the id " + gameprofile.getId() + " is online");
++        }
++        WorldServer world = this.server.getWorldServer(0);
++        AthenaBotPlayer bot = new AthenaBotPlayer(this.server, world, gameprofile, new PlayerInteractManager(world));
++        java.net.InetAddress loopback = java.net.InetAddress.getLoopbackAddress();
++        PlayerLoginEvent event = new PlayerLoginEvent(bot.getBukkitEntity(), "bot", loopback, loopback);
++
++        if (getProfileBans().isBanned(gameprofile) && !getProfileBans().get(gameprofile).hasExpired()) {
++            event.disallow(PlayerLoginEvent.Result.KICK_BANNED, "You are banned from this server!");
++        } else if (!this.isWhitelisted(gameprofile)) {
++            event.disallow(PlayerLoginEvent.Result.KICK_WHITELIST, org.spigotmc.SpigotConfig.whitelistMessage);
++        }
++        cserver.getPluginManager().callEvent(event);
++        if (event.getResult() != PlayerLoginEvent.Result.ALLOWED) {
++            throw new IllegalStateException(event.getKickMessage());
++        }
++        AthenaBotPlayer.ONLINE.add(bot.api);
++        try {
++            this.initializeConnectionToPlayer(new AthenaBotNetworkManager(), bot);
++        } catch (RuntimeException exception) {
++            AthenaBotPlayer.ONLINE.remove(bot.api);
++            if (this.players.contains(bot)) { // it got as far as the join: it quits again
++                try {
++                    bot.playerConnection.onDisconnect(new ChatComponentText("Bot login failed"));
++                } catch (RuntimeException again) {
++                    exception.addSuppressed(again);
++                    this.players.remove(bot);
++                    this.playersByName.remove(bot.getName());
++                    this.uuidToPlayerMap.remove(bot.getUniqueID(), bot);
++                    this.sendAll(new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.REMOVE_PLAYER, bot));
++                }
++            }
++            throw exception;
++        }
++        return bot;
++    }
++
++    /** The API's bot for {@code bot}. */
++    public athena.api.bot.Bot athenaBotOf(AthenaBotPlayer bot) {
++        return bot.api;
++    }
++
++    /** The bot that {@code player} is, or null for a real player. */
++    public static athena.api.bot.Bot athenaBotOf(org.bukkit.entity.Player player) {
++        return AthenaBot.of(player);
++    }
++
++    /** The bots online now. */
++    public static java.util.Collection<athena.api.bot.Bot> athenaBots() {
++        return java.util.Collections.unmodifiableList(new java.util.ArrayList<athena.api.bot.Bot>(AthenaBotPlayer.ONLINE));
++    }
++    // Athena end
++
+     // CraftBukkit start - Whole method, SocketAddress to LoginListener, added hostname to signature, return EntityPlayer
+     public EntityPlayer attemptLogin(LoginListener loginlistener, GameProfile gameprofile, String hostname) {
+         // Moved from processLogin
+@@ -506,7 +599,7 @@ public abstract class PlayerList {
+             event.disallow(PlayerLoginEvent.Result.KICK_BANNED, s);
+         } else {
+             // return this.players.size() >= this.maxPlayers && !this.f(gameprofile) ? "The server is full!" : null;
+-            if (this.players.size() >= this.maxPlayers && !this.bypassesPlayerLimit(gameprofile)) {
++            if (this.athenaCountWithoutBots() >= this.maxPlayers && !this.bypassesPlayerLimit(gameprofile)) { // Athena - bots do not take a player's place
+                 event.disallow(PlayerLoginEvent.Result.KICK_FULL, org.spigotmc.SpigotConfig.serverFullMessage); // Spigot
+             }
+         }
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index 68842d715aa8b74ddeb9394181e7f23c54766dce..be05cd8b0e633324688da2c9987c15e6a05a443b 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -370,6 +370,15 @@ public class ActivationRange
+             SpigotTimings.checkIfActiveTimer.stopTiming();
+             return true;
+         }
++        // Athena start - a bot moves on its world's ticks as a client's player moves on its packets, which
++        // this never holds up: it ticks wherever its own chunk is loaded, also next to chunks that are not
++        // (the edge of a template's bounds, which are never loaded)
++        if ( entity instanceof net.minecraft.server.AthenaBotPlayer )
++        {
++            SpigotTimings.checkIfActiveTimer.stopTiming();
++            return entity.world.getChunkIfLoaded( MathHelper.floor( entity.locX ) >> 4, MathHelper.floor( entity.locZ ) >> 4 ) != null;
++        }
++        // Athena end
+ 
+         boolean isActive = entity.activatedTick >= entity.world.athenaCurrentTick || entity.defaultActivationState; // Athena - this world's tick
+ 
