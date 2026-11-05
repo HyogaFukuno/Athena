@@ -73,7 +73,7 @@ for k, v in {"lobby": 20, "pre-game": 10, "live-game": a.live, "pre-deathmatch":
     if not n: sys.exit("SG config: no durations.%s" % k)
 sg = re.sub(r"(?m)^rooms: .*\n", "", sg) + "\nrooms: %d\n" % a.rooms
 sg = re.sub(r"(?m)^team-size: .*\n", "", sg) + "team-size: %d\n" % a.team_size
-sg = re.sub(r"(?ms)^bots:\n(  .*\n)*", "", sg)
+sg = re.sub(r"(?m)^bots:\n(?:  .*\n)*", "", sg)
 sg += "bots:\n  enabled: true\n  fill-to: %d\n  min-humans: 0\n  join-at: 15\n  difficulty: %s\n" % (a.fill, a.difficulty)
 open(RUN + "/plugins/SurvivalGames/config.yml", "w").write(sg)
 subprocess.run([os.path.join(HERE, "botwatch", "build.sh"), RUN + "/plugins/botwatch.jar"], check=True)

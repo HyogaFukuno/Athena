@@ -139,7 +139,7 @@ while time.time() - t0 < SECONDS:
             txt = flat(d)
         except ValueError:
             txt = raw
-        if any(k in txt for k in ("eathmatch", "fight", "Round", "won", "Teleport", "until the", "Final", "bye")): log("CHAT " + txt[:160])
+        if any(k in txt for k in ("eathmatch", "fight", "Round", "won", "Teleport", "until the", "Final", "bye", "Only [")): log("CHAT " + txt[:160])
     elif pid == 0x0F:  # spawn mob: the boss bar's boss
         eid = r.varint(); kind = r.u8(); mx, my, mz = r.unpack(">iii")
         far = ((mx / 32.0 - pos[0]) ** 2 + (mz / 32.0 - pos[2]) ** 2) ** 0.5 if pos else -1
