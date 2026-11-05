@@ -83,12 +83,16 @@ while True:
     elif pid == 0x02: break
     elif pid == 0x00: sys.exit("refused: " + r.string())
 c.sock.settimeout(0.05)
+COMPASS = len(sys.argv) > 4 and sys.argv[4] == "compass"; clicked = False; last_use = 0
 seen_mobs = set(); watch = None; got = {}; t0 = time.time(); worlds = 0; chunks = 0; bad = 0; empty = 0; last_send = 0; pos = None; nxt = time.time() + 5
 def log(s): print("%7.1f %s" % (time.time() - t0, s), flush=True)
 while time.time() - t0 < SECONDS:
     now = time.time()
     if pos and now - last_send > 0.05:
         c.send(0x04, struct.pack(">ddd?", pos[0], pos[1], pos[2], True)); last_send = now
+    if COMPASS and pos and not clicked and now - last_use > 5:
+        last_use = now  # right click with what is in hand: the spectator's compass
+        c.send(0x08, struct.pack(">qB", -1, 255) + struct.pack(">h", -1) + bytes(3))
     if watch and now - watch[2] > 3:
         k = (watch[0], watch[1]); log("own chunk %s: %s" % (k, ("mask %x" % got[k]) if k in got else "NOT RECEIVED")); watch = None
     if now > nxt:
@@ -144,6 +148,12 @@ while time.time() - t0 < SECONDS:
         eid = r.varint(); kind = r.u8(); mx, my, mz = r.unpack(">iii")
         far = ((mx / 32.0 - pos[0]) ** 2 + (mz / 32.0 - pos[2]) ** 2) ** 0.5 if pos else -1
         log("SPAWN MOB type=%d %.0f blocks away" % (kind, far))
+    elif pid == 0x2D:  # open window: the spectator's menu
+        wid = r.u8(); kind = r.string(); title = r.string(); slots = r.u8()
+        log("WINDOW %s %s slots=%d" % (kind, title, slots))
+        if not clicked:
+            clicked = True
+            c.send(0x0E, struct.pack(">BhbhB", wid, 0, 0, 1, 0) + struct.pack(">h", -1))  # click the first slot
     elif pid == 0x40:
         log("KICK " + r.string()); break
 log("end: chunks in the last world %d" % chunks)
