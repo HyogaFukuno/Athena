@@ -352,6 +352,10 @@ public final class BotProbe extends JavaPlugin implements Listener {
                         "clicked=" + clicked + " open " + bot.getPlayer().getOpenInventory().getTopInventory().getType());
                 bot.getPlayer().closeInventory();
                 result("too far", !bot.interact(main().getBlockAt(240, 4, 0), BlockFace.UP), "a block 18 away refused");
+                // a wall between the bot and the chest
+                for (int y = 4; y <= 6; y++) for (int z = -2; z <= 2; z++) main().getBlockAt(221, y, z).setType(Material.STONE);
+                result("chest through a wall", !bot.canClick(block) && !bot.interact(block, BlockFace.WEST), "a chest behind a wall refused");
+                for (int y = 4; y <= 6; y++) for (int z = -2; z <= 2; z++) main().getBlockAt(221, y, z).setType(Material.AIR);
                 block.setType(Material.AIR);
                 bot.remove();
                 done.run();

@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 00:24:36 +0900
+Subject: [PATCH] Athena API: a bot clicks only blocks it can see (canClick)
+
+
+diff --git a/src/main/java/athena/api/bot/Bot.java b/src/main/java/athena/api/bot/Bot.java
+index 36788612136315f2c7c1ca9912f76f24591c18b3..59c3900aa30269be2e24bf394cd23e043399a4c8 100644
+--- a/src/main/java/athena/api/bot/Bot.java
++++ b/src/main/java/athena/api/bot/Bot.java
+@@ -96,12 +96,15 @@ public interface Bot {
+ 
+     /**
+      * A right click on {@code face} of {@code block} with the held item, as a player's: opens a chest
+-     * or a door, places a block, presses a button. Within 6 blocks of the bot's eyes.
++     * or a door, places a block, presses a button. Only what {@link #canClick} says it can reach.
+      *
+-     * @return whether the click reached the block (in reach and in the bot's world)
++     * @return whether the click reached the block
+      */
+     boolean interact(Block block, BlockFace face);
+ 
++    /** Whether the bot can click {@code block}: in its world, within 6 blocks of its eyes, and no other block in the way. */
++    boolean canClick(Block block);
++
+     /** Lets go of the right button: shoots a drawn bow, stops eating or blocking. */
+     void releaseItem();
+ 
