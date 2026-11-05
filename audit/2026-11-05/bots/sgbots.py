@@ -110,14 +110,19 @@ if a.vps:
     def run_once():
         ssh("%s new -d -s %s %s" % (TMUX, S, json.dumps(start)))
         pid, t0, cpu0, samples = None, None, None, []
+        began, stopped = time.time(), False
         deadline = time.time() + a.minutes * 60
         while time.time() < deadline:
             time.sleep(5)
             if not up(): break
+            if time.time() - began > 90 and not stopped and "no AOT cache yet" in ssh("head -c 4000 %s/console.out" % D, check=False):
+                print("recording the AOT cache: stopping this run", flush=True)   # a record run measures nothing
+                ssh("%s send-keys -t %s stop Enter" % (TMUX, S), check=False)
+                stopped = True
             if pid is None:
                 pid = (ssh("for p in $(pgrep -u mc -f '[o]rg.bukkit.craftbukkit.Main'); do [ \"$(readlink /proc/$p/cwd)\" = %s ] && echo $p; done; true" % D).split() or [None])[0]
                 continue
-            out = ssh("ps -o time=,rss= -p %s; grep -c BOTWATCH %s/console.out" % (pid, D), check=False).split()
+            out = ssh("ps -o time=,rss= -p %s; free -m | awk '/Swap/{print $3}'" % pid, check=False).split()
             if len(out) < 2: continue
             parts = [float(x) for x in out[0].split("-")[-1].split(":")]
             c = 0.0
@@ -125,7 +130,7 @@ if a.vps:
             if "-" in out[0]: c += float(out[0].split("-")[0]) * 86400
             now = time.time()
             if cpu0 is not None:
-                samples.append((now - t0, (c - cpu0) / (now - tl), int(out[1]) / 1024.0))
+                samples.append((now - t0, (c - cpu0) / (now - tl), int(out[1]) / 1024.0, int(out[2])))
             else:
                 t0 = now
             cpu0, tl = c, now
@@ -143,16 +148,16 @@ if a.vps:
         text, samples = run_once()
     open(OUT + "/server.log", "w").write(text)
     with open(OUT + "/cpu.csv", "w") as f:
-        f.write("seconds,cores,rss_mib\n")
-        for t, c, r in samples: f.write("%.0f,%.3f,%.0f\n" % (t, c, r))
+        f.write("seconds,cores,rss_mib,swap_mib\n")
+        for t, c, r, w in samples: f.write("%.0f,%.3f,%.0f,%d\n" % (t, c, r, w))
     subprocess.run(["scp", "-q", "%s:%s/botwatch.csv" % (H, D), OUT + "/"])
     subprocess.run(["scp", "-q", "%s:%s/gc.log" % (H, D), OUT + "/"], stderr=subprocess.DEVNULL)
     for line in text.splitlines():
         if "match over" in line or "ERROR" in line or "Exception" in line and "io_uring" not in line:
             print(line[:220])
     if samples:
-        cs = [c for _, c, _ in samples]; rs = [r for _, _, r in samples]
-        print("cpu cores mean %.2f max %.2f, rss MiB mean %.0f max %.0f" % (sum(cs) / len(cs), max(cs), sum(rs) / len(rs), max(rs)))
+        cs = [x[1] for x in samples]; rs = [x[2] for x in samples]; ws = [x[3] for x in samples]
+        print("cpu cores mean %.2f max %.2f, rss MiB mean %.0f max %.0f, swap MiB max %d" % (sum(cs) / len(cs), max(cs), sum(rs) / len(rs), max(rs), max(ws)))
     print("finished" if "BOTWATCH DONE" in text else "not finished")
     sys.exit(0)
 

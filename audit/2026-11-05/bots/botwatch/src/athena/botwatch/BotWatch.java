@@ -136,7 +136,31 @@ public final class BotWatch extends JavaPlugin implements Listener {
         }
     }
 
+    // how late the match worlds' ticks are: the gap between two ticks of a world, from a timer on its own thread
+    private final Map<String, long[]> watched = new ConcurrentHashMap<>();
+    private final AtomicLong maxGapMicros = new AtomicLong();
+    private final AtomicInteger gapsOver100 = new AtomicInteger(), gapsOver250 = new AtomicInteger();
+
+    private void watchWorlds() {
+        for (World world : Bukkit.getWorlds()) {
+            if (!world.getName().startsWith("sg-") || !Athena.isWorldThreaded(world)) continue;
+            if (watched.putIfAbsent(world.getName() + world.getUID(), new long[1]) != null) continue;
+            long[] last = watched.get(world.getName() + world.getUID());
+            Athena.runOnWorldTimer(world, () -> {
+                long now = System.nanoTime();
+                if (last[0] != 0) {
+                    long gap = (now - last[0]) / 1000;
+                    maxGapMicros.accumulateAndGet(gap, Math::max);
+                    if (gap > 100_000) gapsOver100.incrementAndGet();
+                    if (gap > 250_000) gapsOver250.incrementAndGet();
+                }
+                last[0] = now;
+            }, 1L, 1L);
+        }
+    }
+
     private void report() {
+        watchWorlds();
         long seconds = (System.currentTimeMillis() - started) / 1000;
         int h = hits.getAndSet(0), c = chests.getAndSet(0), ea = eats.getAndSet(0), s = shots.getAndSet(0);
         double tick = maxTickMicros.getAndSet(0) / 1000.0;
@@ -157,8 +181,8 @@ public final class BotWatch extends JavaPlugin implements Listener {
             write(seconds + "," + world.getName() + "," + alive + "," + bots + "," + h + "," + c + "," + ea + "," + s + ","
                     + String.format("%.0f", walked) + "," + String.format("%.1f", tick) + "\n");
         }
-        getLogger().info(String.format("BOTWATCH t=%ds bots=%d %shits=%d chests=%d eats=%d shots=%d walked=%.0f maxTick=%.1fms joins=%d quits=%d",
-                seconds, bots, worlds, h, c, ea, s, walked, tick, joins.get(), quits.get()));
+        getLogger().info(String.format("BOTWATCH t=%ds bots=%d %shits=%d chests=%d eats=%d shots=%d walked=%.0f maxTick=%.1fms worldGap=%.0fms over100=%d over250=%d joins=%d quits=%d",
+                seconds, bots, worlds, h, c, ea, s, walked, tick, maxGapMicros.getAndSet(0) / 1000.0, gapsOver100.getAndSet(0), gapsOver250.getAndSet(0), joins.get(), quits.get()));
         walked = 0;
         if (Boolean.getBoolean("sgbots.debug")) {
             for (var bot : Athena.getBots()) {
