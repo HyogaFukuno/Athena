@@ -74,6 +74,15 @@ public final class BotWatch extends JavaPlugin implements Listener {
         }, 20L, 20L);
     }
 
+    /** A file rather than the log: on a SIGTERM the log may close first. */
+    @Override
+    public void onDisable() {
+        try (var w = new FileWriter(new File(Bukkit.getWorldContainer(), "botwatch-disabled.txt"))) {
+            w.write(Thread.currentThread().getName() + " " + System.currentTimeMillis() + " bots=" + Athena.getBots().size() + "\n");
+        } catch (IOException ignored) {
+        }
+    }
+
     @EventHandler
     public void tick(ServerTickEndEvent e) {
         long micros = (long) (e.getTickDuration() * 1000);
