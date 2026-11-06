@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 15:24:34 +0900
+Subject: [PATCH] Chunk completions, a quit and a task's future follow the
+ world's owner
+
+Audit 2026-11-06 F1, F2, F7: finishActive with no budget now hands a task to its world's thread as the budgeted form does; a closed connection's quit and the disconnects queued from chat and tab completion run for the player, on whichever thread owns it by then; postToMainThread forwards one task, so its future completes when the runnable has run and carries its failure.
+
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 483472aca328c8118a80c990a9a2eebb5d7fd97a..a8129407a1120ae744ef8be1200abf6de800d632 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -206,7 +206,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         this.onDisconnect(kickReason); // CraftBukkit - fire quit instantly // PandaSpigot - Adventure
+         this.networkManager.disableAutoRead();
+         // CraftBukkit - Don't wait
+-        this.player.getServerForPlayer().postToMainThread(new Runnable() { // Athena - the thread that ticks the player's world
++        WorldServer.athenaRunForEntity(this.player, new Runnable() { // Athena - the thread that ticks the player's world, wherever it has gone by then
+              public void run() {
+                  PlayerConnection.this.networkManager.checkDisconnected();
+             }
+@@ -2102,7 +2102,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         // PandaSpigot start - Async Tab Completion
+         // CraftBukkit start
+         if (tabSpamLimiter.addAndGet(com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().tabSpamIncrement) > com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().tabSpamLimit && !this.minecraftServer.getPlayerList().isOp(this.player.getProfile())) { // PandaSpigot - Split and make configurable
+-            this.player.getServerForPlayer().postToMainThread(() -> this.disconnect("disconnect.spam")); // Athena - the thread that ticks the player's world
++            WorldServer.athenaRunForEntity(this.player, () -> this.disconnect("disconnect.spam")); // Athena - the thread that ticks the player's world
+             return;
+         }
+         // CraftBukkit end
+@@ -2174,7 +2174,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+         if (byteTotal > byteAllowed) {
+             PlayerConnection.logger.warn(this.player.getName() + " tried to send too large of a book. Book Size: " + byteTotal + " - Allowed:  "+ byteAllowed + " - Pages: " + pageList.size());
+-            this.player.getServerForPlayer().postToMainThread(() -> this.disconnect("Book too large!")); // Athena - the thread that ticks the player's world
++            WorldServer.athenaRunForEntity(this.player, () -> this.disconnect("Book too large!")); // Athena - the thread that ticks the player's world
+             return false;
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/ServerConnection.java b/src/main/java/net/minecraft/server/ServerConnection.java
+index 16b3d31af4e475eff54c07ea6b13fef3da8b7e51..635e5ed38b8cc99b0b203c201ac04296701430e2 100644
+--- a/src/main/java/net/minecraft/server/ServerConnection.java
++++ b/src/main/java/net/minecraft/server/ServerConnection.java
+@@ -228,7 +228,7 @@ public class ServerConnection {
+                     if (athenaOwner != null) {
+                         if (!networkmanager.isChannelOpen() && !networkmanager.preparing) {
+                             iterator.remove();
+-                            athenaOwner.postToMainThread(networkmanager::checkDisconnected);
++                            WorldServer.athenaRunForEntity(networkmanager.getPlayer(), networkmanager::checkDisconnected); // follows the player to another thread
+                         }
+                         continue;
+                     }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 968c10981b218f60a65b5c423b58c8cfc451a2bf..a14db3b3a93df411b0ecf751ba1650d92da60503 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1537,15 +1537,28 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+     public ListenableFuture<Object> postToMainThread(Runnable runnable) {
+         AthenaWorldThread thread = this.athenaThread;
+-        if (thread == null) {
+-            return this.server.postToMainThread(() -> this.athenaRunOnOwner(runnable));
++        if (thread == null && this.server.isMainThread()) {
++            return this.server.postToMainThread(runnable);
+         }
+-        if (Thread.currentThread() == thread) {
++        if (thread != null && Thread.currentThread() == thread) {
+             runnable.run();
+             return com.google.common.util.concurrent.Futures.immediateFuture(null);
+         }
+-        com.google.common.util.concurrent.ListenableFutureTask<Object> task = com.google.common.util.concurrent.ListenableFutureTask.create(runnable, null);
+-        thread.post(this, task);
++        // Athena - one task, whichever thread it ends up on: the future completes when the runnable has
++        // run there, not when a queue handed it on
++        com.google.common.util.concurrent.ListenableFutureTask<Object> task = com.google.common.util.concurrent.ListenableFutureTask.create(() -> {
++            try {
++                runnable.run();
++            } catch (RuntimeException | Error failure) {
++                logger.error("A task for world " + this.worldData.getName() + " failed", failure); // most callers never look at the future
++                throw failure;
++            }
++        }, null);
++        if (thread != null) {
++            thread.post(this, task);
++        } else {
++            this.server.postToMainThread(() -> this.athenaRunOnOwner(task));
++        }
+         return task;
+     }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+index 7943e127e3d5e59f655d4ae1cd724060f93fdd8c..e0baf8ea6a213eb9fdb03e1ded6ae5b46629854e 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+@@ -372,8 +372,16 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+      */
+     public void finishActive() throws E {
+         final Queue<Task> finished = this.finished;
+-        while (!finished.isEmpty()) {
+-            finished.poll().finish();
++        Task task;
++
++        while ((task = finished.poll()) != null) {
++            // Athena start - no budget changes how many tasks are finished, not whose they are
++            if (provider.athenaOwner(task.parameter) != null) {
++                athenaQueueFinished(task); // its world moved to its own thread meanwhile
++                continue;
++            }
++            // Athena end
++            task.finish();
+         }
+     }
+ 

@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 15:24:34 +0900
+Subject: [PATCH] Timings stay off once worlds tick on their own threads
+
+Audit 2026-11-06 F8: /timings on could turn them back on beside a world thread.
+
+diff --git a/src/main/java/co/aikar/timings/Timings.java b/src/main/java/co/aikar/timings/Timings.java
+index 0f7be036bc528ee2371fe83512f9066608d3b3a2..210dc210e9a856236ef4707a0b05a1d97f23724b 100644
+--- a/src/main/java/co/aikar/timings/Timings.java
++++ b/src/main/java/co/aikar/timings/Timings.java
+@@ -126,10 +126,25 @@ public final class Timings {
+      * @param enabled Should timings be reported
+      */
+     public static void setTimingsEnabled(boolean enabled) {
++        if (enabled && athenaKeptDisabled) {
++            return; // Athena - see athenaKeepDisabled
++        }
+         timingsEnabled = enabled;
+         reset();
+     }
+ 
++    // Athena start
++    private static volatile boolean athenaKeptDisabled;
++
++    /**
++     * Athena - Timings stay off until the server stops. They keep one stack for the server thread, so
++     * they cannot time worlds ticked by threads of their own.
++     */
++    public static void athenaKeepDisabled() {
++        athenaKeptDisabled = true;
++    }
++    // Athena end
++
+     /**
+      * <p>Sets whether or not the Timings should monitor at Verbose level.</p>
+      *
+diff --git a/src/main/java/co/aikar/timings/TimingsCommand.java b/src/main/java/co/aikar/timings/TimingsCommand.java
+index 3dba3aa17314d2d1977278c55974093c9c46148f..808b1fbe47115bc6d691e93409a5368b49777e47 100644
+--- a/src/main/java/co/aikar/timings/TimingsCommand.java
++++ b/src/main/java/co/aikar/timings/TimingsCommand.java
+@@ -56,7 +56,8 @@ public class TimingsCommand extends BukkitCommand {
+         final String arg = args[0];
+         if ("on".equalsIgnoreCase(arg)) {
+             Timings.setTimingsEnabled(true);
+-            sender.sendMessage("Enabled Timings & Reset");
++            // Athena - worlds on their own threads keep them off
++            sender.sendMessage(Timings.isTimingsEnabled() ? "Enabled Timings & Reset" : ChatColor.RED + "Timings cannot run while worlds tick on their own threads");
+             return true;
+         } else if ("off".equalsIgnoreCase(arg)) {
+             Timings.setTimingsEnabled(false);

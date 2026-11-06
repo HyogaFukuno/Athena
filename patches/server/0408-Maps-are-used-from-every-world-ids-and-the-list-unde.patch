@@ -1,0 +1,249 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 15:24:34 +0900
+Subject: [PATCH] Maps are used from every world: ids and the list under a
+ lock, each map under its own
+
+Audit 2026-11-06 F3: PersistentCollection allocates ids, loads and registers under its monitor and saves from a copy; a WorldMap's trackers, decorations, pixels and renderers are guarded by its monitor, and a holder another thread ticks is left to that thread.
+
+diff --git a/src/main/java/net/minecraft/server/EntityItemFrame.java b/src/main/java/net/minecraft/server/EntityItemFrame.java
+index dda88092c36cc7c42a6ec06bae9eeb2038553621..b088e042b2478f4fe1a62930393e2cf6381ade56 100644
+--- a/src/main/java/net/minecraft/server/EntityItemFrame.java
++++ b/src/main/java/net/minecraft/server/EntityItemFrame.java
+@@ -89,7 +89,9 @@ public class EntityItemFrame extends EntityHanging {
+             if (itemstack.getItem() == Items.FILLED_MAP) {
+                 WorldMap worldmap = ((ItemWorldMap) itemstack.getItem()).getSavedMap(itemstack, this.world);
+ 
++                synchronized (worldmap) { // Athena - see WorldMap
+                 worldmap.decorations.remove(UUID.nameUUIDFromBytes(("frame-" + this.getId()).getBytes(Charsets.US_ASCII))); // Spigot
++                }
+             }
+ 
+             itemstack.setItemFrame((EntityItemFrame) null);
+diff --git a/src/main/java/net/minecraft/server/ItemWorldMap.java b/src/main/java/net/minecraft/server/ItemWorldMap.java
+index dff2c60c3bbead6b00c8045886215a39c69ab97c..6a40532db4ad7b7674f6e37f68d24129c38673ee 100644
+--- a/src/main/java/net/minecraft/server/ItemWorldMap.java
++++ b/src/main/java/net/minecraft/server/ItemWorldMap.java
+@@ -173,6 +173,7 @@ public class ItemWorldMap extends ItemWorldMapBase {
+         if (!world.isClientSide) {
+             WorldMap worldmap = this.getSavedMap(itemstack, world);
+ 
++            synchronized (worldmap) { // Athena - see WorldMap
+             if (entity instanceof EntityHuman) {
+                 EntityHuman entityhuman = (EntityHuman) entity;
+ 
+@@ -182,6 +183,7 @@ public class ItemWorldMap extends ItemWorldMapBase {
+             if (flag) {
+                 this.updateMapData(world, entity, worldmap);
+             }
++            }
+ 
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/PersistentCollection.java b/src/main/java/net/minecraft/server/PersistentCollection.java
+index c4fdd4d908b1d4de83b52d33c8904b756d67413a..8dbae75a53b5f1856cc8708616ebe49e0c84591d 100644
+--- a/src/main/java/net/minecraft/server/PersistentCollection.java
++++ b/src/main/java/net/minecraft/server/PersistentCollection.java
+@@ -31,7 +31,7 @@ public class PersistentCollection {
+         this.loadIdCounts();
+     }
+ 
+-    public PersistentBase get(Class<? extends PersistentBase> oclass, String s) {
++    public synchronized PersistentBase get(Class<? extends PersistentBase> oclass, String s) { // Athena - synchronized: the main world's maps are used from every world
+         PersistentBase persistentbase = (PersistentBase) this.loadedDataMap.get(s);
+ 
+         if (persistentbase != null) {
+@@ -68,7 +68,7 @@ public class PersistentCollection {
+         }
+     }
+ 
+-    public void setData(String s, PersistentBase persistentbase) {
++    public synchronized void setData(String s, PersistentBase persistentbase) { // Athena
+         if (this.loadedDataMap.containsKey(s)) {
+             this.loadedDataList.remove(this.loadedDataMap.remove(s));
+         }
+@@ -77,13 +77,20 @@ public class PersistentCollection {
+         this.loadedDataList.add(persistentbase);
+     }
+ 
+-    public void saveAllData() {
+-        for (int i = 0; i < this.loadedDataList.size(); ++i) {
+-            PersistentBase persistentbase = (PersistentBase) this.loadedDataList.get(i);
++    // Athena - a copy to walk: other threads add to the list
++    public synchronized List<PersistentBase> athenaLoaded() {
++        return Lists.newArrayList(this.loadedDataList);
++    }
+ 
+-            if (persistentbase.isDirty()) {
+-                this.saveData(persistentbase);
+-                persistentbase.setDirty(false);
++    public void saveAllData() {
++        // Athena - each entry under its own lock, the one that guards a map's contents; no other world
++        // waits for these files, unless it is using that map
++        for (PersistentBase persistentbase : this.athenaLoaded()) {
++            synchronized (persistentbase) {
++                if (persistentbase.isDirty()) {
++                    this.saveData(persistentbase);
++                    persistentbase.setDirty(false);
++                }
+             }
+         }
+ 
+@@ -148,7 +155,7 @@ public class PersistentCollection {
+ 
+     }
+ 
+-    public int getUniqueDataId(String s) {
++    public synchronized int getUniqueDataId(String s) { // Athena - read, add one and write as one step
+         Short oshort = (Short) this.idCounts.get(s);
+ 
+         if (oshort == null) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 41e14d436afc3b83a55d513558373b8337f638fd..b10f6ab39e2c190fac17e1f58524bd79326b9b95 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1442,11 +1442,12 @@ public abstract class World implements IBlockAccess {
+         if (entity instanceof EntityHuman) {
+             this.players.remove(entity);
+             // Spigot start
+-            for ( Object o : worldMaps.loadedDataList )
++            for ( Object o : worldMaps.athenaLoaded() ) // Athena - a copy; see PersistentCollection
+             {
+                 if ( o instanceof WorldMap )
+                 {
+                     WorldMap map = (WorldMap) o;
++                    synchronized ( map ) { // Athena - see WorldMap
+                     map.playersHashMap.remove( entity );
+                     for ( Iterator<WorldMap.WorldMapHumanTracker> iter = (Iterator<WorldMap.WorldMapHumanTracker>) map.playersArrayList.iterator(); iter.hasNext(); )
+                     {
+@@ -1455,6 +1456,7 @@ public abstract class World implements IBlockAccess {
+                             iter.remove();
+                         }
+                     }
++                    }
+                 }
+             }
+             // Spigot end
+diff --git a/src/main/java/net/minecraft/server/WorldMap.java b/src/main/java/net/minecraft/server/WorldMap.java
+index 96a7c32c6cdd2e7453353c1de3e6d775b2db3bc4..220d0449d75372dee628f2f4a17b5f722be5ae7f 100644
+--- a/src/main/java/net/minecraft/server/WorldMap.java
++++ b/src/main/java/net/minecraft/server/WorldMap.java
+@@ -16,6 +16,8 @@ import org.bukkit.craftbukkit.map.CraftMapView;
+ 
+ // CraftBukkit end
+ 
++// Athena - a map is one object for every world that holds it: its contents are guarded by this object's
++// monitor. PersistentCollection takes it to save; nothing here calls back into the collection.
+ public class WorldMap extends PersistentBase {
+ 
+     public int centerX;
+@@ -137,7 +139,7 @@ public class WorldMap extends PersistentBase {
+         nbttagcompound.setByteArray("colors", this.colors);
+     }
+ 
+-    public void updateVisiblePlayers(EntityHuman entityhuman, ItemStack itemstack) {
++    public synchronized void updateVisiblePlayers(EntityHuman entityhuman, ItemStack itemstack) {
+         if (!this.playersHashMap.containsKey(entityhuman)) {
+             WorldMap.WorldMapHumanTracker worldmap_worldmaphumantracker = new WorldMap.WorldMapHumanTracker(entityhuman);
+ 
+@@ -152,6 +154,11 @@ public class WorldMap extends PersistentBase {
+         for (int i = 0; i < this.playersArrayList.size(); ++i) {
+             WorldMap.WorldMapHumanTracker worldmap_worldmaphumantracker1 = (WorldMap.WorldMapHumanTracker) this.playersArrayList.get(i);
+ 
++            // Athena - a holder another thread ticks: that thread looks after it, this one can't read its inventory
++            if (!worldmap_worldmaphumantracker1.trackee.dead && !((WorldServer) worldmap_worldmaphumantracker1.trackee.world).athenaSameTickThread((WorldServer) entityhuman.world)) {
++                continue;
++            }
++
+             if (!worldmap_worldmaphumantracker1.trackee.dead && (worldmap_worldmaphumantracker1.trackee.inventory.hasItemStack(itemstack) || itemstack.isOnItemFrame())) {
+                 if (!itemstack.isOnItemFrame() && worldmap_worldmaphumantracker1.trackee.dimension == this.map) {
+                     this.a(0, worldmap_worldmaphumantracker1.trackee.world, worldmap_worldmaphumantracker1.trackee.getUniqueID(), worldmap_worldmaphumantracker1.trackee.locX, worldmap_worldmaphumantracker1.trackee.locZ, (double) worldmap_worldmaphumantracker1.trackee.yaw); // Spigot
+@@ -231,13 +238,13 @@ public class WorldMap extends PersistentBase {
+         this.decorations.put(s, new MapIcon((byte) i, b0, b1, b3));
+     }
+ 
+-    public Packet getMapPacket(ItemStack itemstack, World world, EntityHuman entityhuman) {
++    public synchronized Packet getMapPacket(ItemStack itemstack, World world, EntityHuman entityhuman) {
+         WorldMap.WorldMapHumanTracker worldmap_worldmaphumantracker = (WorldMap.WorldMapHumanTracker) this.playersHashMap.get(entityhuman);
+ 
+         return worldmap_worldmaphumantracker == null ? null : worldmap_worldmaphumantracker.getPacket(itemstack);
+     }
+ 
+-    public void flagDirty(int i, int j) {
++    public synchronized void flagDirty(int i, int j) {
+         super.markDirty();
+         Iterator iterator = this.playersArrayList.iterator();
+ 
+@@ -249,7 +256,7 @@ public class WorldMap extends PersistentBase {
+ 
+     }
+ 
+-    public WorldMap.WorldMapHumanTracker getMapInfo(EntityHuman entityhuman) {
++    public synchronized WorldMap.WorldMapHumanTracker getMapInfo(EntityHuman entityhuman) {
+         WorldMap.WorldMapHumanTracker worldmap_worldmaphumantracker = (WorldMap.WorldMapHumanTracker) this.playersHashMap.get(entityhuman);
+ 
+         if (worldmap_worldmaphumantracker == null) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java b/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
+index 5a063d44adbcde3f3db19a2b8e02d33d7ad52211..325aebb4aa3bca96bb2c638857d8e926c6812291 100644
+--- a/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
++++ b/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
+@@ -43,7 +43,9 @@ public final class CraftMapView implements MapView {
+     }
+ 
+     public boolean isVirtual() {
+-        return renderers.size() > 0 && !(renderers.get(0) instanceof CraftMapRenderer);
++        synchronized (worldMap) { // Athena - WorldMap's monitor guards the renderers and caches as well
++            return renderers.size() > 0 && !(renderers.get(0) instanceof CraftMapRenderer);
++        }
+     }
+ 
+     public Scale getScale() {
+@@ -85,18 +87,23 @@ public final class CraftMapView implements MapView {
+     }
+ 
+     public List<MapRenderer> getRenderers() {
+-        return new ArrayList<MapRenderer>(renderers);
++        synchronized (worldMap) { // Athena
++            return new ArrayList<MapRenderer>(renderers);
++        }
+     }
+ 
+     public void addRenderer(MapRenderer renderer) {
++        synchronized (worldMap) { // Athena
+         if (!renderers.contains(renderer)) {
+             renderers.add(renderer);
+             canvases.put(renderer, new HashMap<CraftPlayer, CraftMapCanvas>());
+             renderer.initialize(this);
+         }
++        }
+     }
+ 
+     public boolean removeRenderer(MapRenderer renderer) {
++        synchronized (worldMap) { // Athena
+         if (renderers.contains(renderer)) {
+             renderers.remove(renderer);
+             for (Map.Entry<CraftPlayer, CraftMapCanvas> entry : canvases.get(renderer).entrySet()) {
+@@ -111,6 +118,7 @@ public final class CraftMapView implements MapView {
+         } else {
+             return false;
+         }
++        }
+     }
+ 
+     private boolean isContextual() {
+@@ -121,6 +129,7 @@ public final class CraftMapView implements MapView {
+     }
+ 
+     public RenderData render(CraftPlayer player) {
++        synchronized (worldMap) { // Athena - the render's buffer is shared; PacketPlayOutMap copies it under this lock
+         boolean context = isContextual();
+         RenderData render = renderCache.get(context ? player : null);
+ 
+@@ -159,6 +168,7 @@ public final class CraftMapView implements MapView {
+         }
+ 
+         return render;
++        }
+     }
+ 
+ }
