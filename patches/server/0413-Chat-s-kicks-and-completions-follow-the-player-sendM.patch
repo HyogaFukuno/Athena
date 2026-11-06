@@ -1,0 +1,288 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 18:05:14 +0900
+Subject: [PATCH] Chat's kicks and completions follow the player; sendMap holds
+ the map; stats failures stop only the stats
+
+Follow-up review of 2026-11-06, R1, R3, R4: every Waitable in PlayerConnection runs for the player, on whichever thread owns it by then; sendMap renders and copies under the map's lock; a stats file that cannot be written is logged and given up.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaThreadStats.java b/src/main/java/net/minecraft/server/AthenaThreadStats.java
+index 4fe8014161d71c51517703e220dc5acbc304ab8e..a4612cbece0a61870cde59520b49f67cebad899d 100644
+--- a/src/main/java/net/minecraft/server/AthenaThreadStats.java
++++ b/src/main/java/net/minecraft/server/AthenaThreadStats.java
+@@ -16,8 +16,11 @@ import java.util.Arrays;
+  * the largest of each window.
+  */
+ final class AthenaThreadStats {
+-    static final String FILE = System.getProperty("athena.threadStats");
+-    static final boolean ENABLED = FILE != null;
++    private static final org.apache.logging.log4j.Logger LOGGER = org.apache.logging.log4j.LogManager.getLogger();
++    static volatile String file = System.getProperty("athena.threadStats");
++    static final boolean ENABLED = file != null;
++    /** The file could not be written: measuring stops, and the worlds go on. */
++    private static volatile boolean failed;
+ 
+     static final int TASKS = 0, CHUNK_IO = 1, CHUNK_GEN = 2, PRELOAD = 3, WORLDS = 4, CONNECTIONS = 5;
+     private static final String[] PHASES = {"tasks", "io", "gen", "preload", "worlds", "conn"};
+@@ -77,11 +80,14 @@ final class AthenaThreadStats {
+     }
+ 
+     private static synchronized void write(String line) {
++        if (failed) return;
+         if (out == null) {
+             try {
+-                out = new PrintWriter(new FileWriter(FILE));
+-            } catch (IOException e) {
+-                throw new IllegalStateException(e);
++                out = new PrintWriter(new FileWriter(file));
++            } catch (IOException | RuntimeException e) {
++                failed = true;
++                LOGGER.warn("Not recording world thread stats: cannot write " + file, e);
++                return;
+             }
+             StringBuilder header = new StringBuilder("millis,worlds,world_count,tasks_queued,ticks,busy_us,cpu_us,max_busy_us,late_us,max_late_us");
+             for (String phase : PHASES) header.append(',').append(phase).append("_us,").append(phase).append("_max_us");
+@@ -89,6 +95,9 @@ final class AthenaThreadStats {
+             out.println(header.append(",longer"));
+         }
+         out.println(line);
+-        out.flush();
++        if (out.checkError()) { // flushes; a PrintWriter does not throw
++            failed = true;
++            LOGGER.warn("Not recording world thread stats any more: writing " + file + " failed");
++        }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index a8129407a1120ae744ef8be1200abf6de800d632..422a63609f8438508f549d4ca99e60ee44c5249c 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -1113,7 +1113,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                             }
+                         };
+ 
+-                        this.player.getServerForPlayer().athenaRunOnTickThread(waitable); // Athena - the thread that ticks the player's world
++                        WorldServer.athenaRunForEntity(this.player, waitable); // Athena - the thread that ticks the player's world, wherever it has gone by then
+ 
+                         try {
+                             waitable.get();
+@@ -1143,7 +1143,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             } else if (getPlayer().isConversing()) {
+                 // Spigot start
+                 final String message = s;
+-                this.player.getServerForPlayer().athenaRunOnTickThread( new Waitable() // Athena - the thread that ticks the player's world
++                WorldServer.athenaRunForEntity( this.player, new Waitable() // Athena - the thread that ticks the player's world, wherever it has gone by then
+                 {
+                     @Override
+                     protected Object evaluate()
+@@ -1190,7 +1190,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         }
+                     };
+ 
+-                    this.player.getServerForPlayer().athenaRunOnTickThread(waitable); // Athena - the thread that ticks the player's world
++                    WorldServer.athenaRunForEntity(this.player, waitable); // Athena - the thread that ticks the player's world, wherever it has gone by then
+ 
+                     try {
+                         waitable.get();
+@@ -1227,7 +1227,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return null;
+                     }
+                 };
+-                this.player.getServerForPlayer().athenaRunOnTickThread(wait); // Athena - the thread that ticks the player's world
++                WorldServer.athenaRunForEntity(this.player, wait); // Athena - the thread that ticks the player's world, wherever it has gone by then
+                 try {
+                     wait.get();
+                     return;
+@@ -1273,7 +1273,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return null;
+                     }};
+                 if (async) {
+-                    this.player.getServerForPlayer().athenaRunOnTickThread(waitable); // Athena - the thread that ticks the player's world
++                    WorldServer.athenaRunForEntity(this.player, waitable); // Athena - the thread that ticks the player's world, wherever it has gone by then
+                 } else {
+                     waitable.run();
+                 }
+@@ -2124,7 +2124,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     return minecraftServer.tabCompleteCommand(player, buffer, blockpos);
+                 }
+             };
+-            this.player.getServerForPlayer().athenaRunOnTickThread(syncCompletions); // Athena - the thread that ticks the player's world
++            WorldServer.athenaRunForEntity(this.player, syncCompletions); // Athena - the thread that ticks the player's world, wherever it has gone by then
+             try {
+                 completions = syncCompletions.get();
+             } catch (InterruptedException | ExecutionException e1) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index c69370e1058cbf93a18b0399ea7a46f30019c663..588481565a44bdee8ad8dd30fb72da0747083131 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -630,6 +630,8 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+     public void sendMap(MapView map) {
+         if (getHandle().playerConnection == null) return;
+ 
++        PacketPlayOutMap packet;
++        synchronized (((CraftMapView) map).athenaLock()) { // Athena - what render returns is shared until it is copied
+         RenderData data = ((CraftMapView) map).render(this);
+         Collection<MapIcon> icons = new ArrayList<MapIcon>();
+         for (MapCursor cursor : data.cursors) {
+@@ -638,7 +640,8 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+             }
+         }
+ 
+-        PacketPlayOutMap packet = new PacketPlayOutMap(map.getId(), map.getScale().getValue(), icons, data.buffer, 0, 0, 0, 0);
++        packet = new PacketPlayOutMap(map.getId(), map.getScale().getValue(), icons, data.buffer, 0, 0, 0, 0);
++        }
+         getHandle().playerConnection.sendPacket(packet);
+     }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java b/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
+index 325aebb4aa3bca96bb2c638857d8e926c6812291..4e8a0114ef0ea8d8d9ef7384e0c5403444cfba14 100644
+--- a/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
++++ b/src/main/java/org/bukkit/craftbukkit/map/CraftMapView.java
+@@ -128,6 +128,11 @@ public final class CraftMapView implements MapView {
+         return false;
+     }
+ 
++    /** Athena - hold this while reading what render returned: the next render reuses it. */
++    public Object athenaLock() {
++        return worldMap;
++    }
++
+     public RenderData render(CraftPlayer player) {
+         synchronized (worldMap) { // Athena - the render's buffer is shared; PacketPlayOutMap copies it under this lock
+         boolean context = isContextual();
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java b/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java
+index aafd94c0643bc624f182341ffa32bb321a95bcaf..140b445b8b1bb0c2ad17aaf0309ee0cd99c8fb26 100644
+--- a/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java
++++ b/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java
+@@ -352,4 +352,131 @@ public class AthenaWorldThreadRecheckTest extends org.bukkit.support.AbstractTes
+     @org.junit.Test public void unboundedFinishNoBudget() throws Exception { unboundedFinish(0); }
+     @org.junit.Test public void unboundedFinishZeroBudget() throws Exception { unboundedFinish(1); }
+     @org.junit.Test public void budgetedFinish() throws Exception { unboundedFinish(2); }
++
++    // The follow-up review of 2026-11-06 (audit/2026-11-06/opus-world-thread-review)
++
++    public static final class ChatConnection extends PlayerConnection {
++        AtomicReference<Boolean> owned;
++        CountDownLatch called;
++        private ChatConnection() { super(null, null, null); }
++        @Override public void disconnect(String reason) {
++            owned.set(this.player.getServerForPlayer().isMainThread());
++            called.countDown();
++        }
++    }
++
++    @org.junit.Test public void movedChatKick() throws Exception {
++        Server s = server(); WorldServer a = world(s), b = world(s);
++        EntityPlayer player = allocate(EntityPlayer.class); player.world = a;
++        ChatConnection connection = allocate(ChatConnection.class);
++        connection.player = player; connection.owned = new AtomicReference<>(); connection.called = new CountDownLatch(1);
++        AthenaWorldThread first = new AthenaWorldThread(a), second = new AthenaWorldThread(b);
++        a.athenaThread = first; b.athenaThread = second;
++        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
++        first.post(a, () -> { entered.countDown(); await(release); });
++        first.start(); second.start();
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread chat = new Thread(() -> {
++            try { connection.processChatMessage(new PacketPlayInChat("\u00a7")); }
++            catch (Throwable t) { failure.set(t); }
++        }, "async-chat");
++        try {
++            await(entered); chat.start();
++            Queue<?> tasks = (Queue<?>) get(first, AthenaWorldThread.class, "tasks");
++            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
++            while (tasks.isEmpty() && System.nanoTime() < end && failure.get() == null) Thread.onSpinWait();
++            check(!tasks.isEmpty(), "chat was not queued: " + failure.get());
++            player.world = b;
++            release.countDown(); await(connection.called); chat.join(5000);
++            check(failure.get() == null && !chat.isAlive(), "chat failed: " + failure.get());
++            check(Boolean.TRUE.equals(connection.owned.get()), "the kick ran on a thread that does not own the player");
++        } finally {
++            release.countDown(); check(first.stopAndJoin(2000) && second.stopAndJoin(2000), "thread did not stop");
++            a.athenaThread = null; b.athenaThread = null; first.handBack(); second.handBack();
++        }
++    }
++
++    public static final class MapPlayer extends org.bukkit.craftbukkit.entity.CraftPlayer {
++        EntityPlayer handle;
++        private MapPlayer() { super(null, null); }
++        @Override public EntityPlayer getHandle() { return handle; }
++    }
++
++    private static final class PausedCursors extends ArrayList<org.bukkit.map.MapCursor> {
++        Thread sender;
++        final CountDownLatch iterating = new CountDownLatch(1), renderedAgain = new CountDownLatch(1);
++        @Override public java.util.Iterator<org.bukkit.map.MapCursor> iterator() {
++            java.util.Iterator<org.bukkit.map.MapCursor> it = super.iterator();
++            if (Thread.currentThread() == sender) { iterating.countDown(); await(renderedAgain); }
++            return it;
++        }
++    }
++
++    @org.junit.Test public void sendMapBesideARender() throws Exception {
++        Object previousBukkit = get(null, org.bukkit.Bukkit.class, "server");
++        org.bukkit.craftbukkit.CraftServer craft = allocate(org.bukkit.craftbukkit.CraftServer.class);
++        set(craft, org.bukkit.craftbukkit.CraftServer.class, "pluginManager", new org.bukkit.plugin.SimplePluginManager(craft, null));
++        set(null, org.bukkit.Bukkit.class, "server", craft);
++        try {
++            sendMapBesideARender0();
++        } finally {
++            set(null, org.bukkit.Bukkit.class, "server", previousBukkit);
++        }
++    }
++
++    private void sendMapBesideARender0() throws Exception {
++        WorldMap map = new WorldMap("map_0");
++        for (org.bukkit.map.MapRenderer renderer : map.mapView.getRenderers()) map.mapView.removeRenderer(renderer);
++        map.mapView.addRenderer(new org.bukkit.map.MapRenderer(false) {
++            @Override public void render(org.bukkit.map.MapView view, org.bukkit.map.MapCanvas canvas, org.bukkit.entity.Player player) {
++                if (canvas.getCursors().size() == 0) canvas.getCursors().addCursor(0, 0, (byte) 0);
++            }
++        });
++        MapPlayer player = allocate(MapPlayer.class);
++        player.handle = allocate(EntityPlayer.class);
++        final AtomicReference<Object> sent = new AtomicReference<>();
++        player.handle.playerConnection = allocate(SendingConnection.class);
++        ((SendingConnection) player.handle.playerConnection).sent = sent;
++        org.bukkit.craftbukkit.map.RenderData data = map.mapView.render(player);
++        PausedCursors cursors = new PausedCursors(); cursors.addAll(data.cursors);
++        set(data, org.bukkit.craftbukkit.map.RenderData.class, "cursors", cursors);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread sender = new Thread(() -> {
++            try { player.sendMap(map.mapView); } catch (Throwable t) { failure.set(t); }
++        }, "map-sender");
++        cursors.sender = sender;
++        sender.start(); await(cursors.iterating);
++        Thread other = new Thread(() -> map.mapView.render(player), "other-world");
++        other.start();
++        other.join(200);
++        check(other.isAlive(), "a render ran while sendMap read the last one");
++        cursors.renderedAgain.countDown();
++        sender.join(5000); other.join(5000);
++        check(failure.get() == null, "sendMap failed: " + failure.get());
++        check(sent.get() != null, "nothing was sent");
++    }
++
++    public static final class SendingConnection extends PlayerConnection {
++        AtomicReference<Object> sent;
++        private SendingConnection() { super(null, null, null); }
++        @Override public void sendPacket(Packet packet) { sent.set(packet); }
++    }
++
++    @org.junit.Test public void statsFileFailure() throws Exception {
++        java.io.File notADirectory = java.io.File.createTempFile("athena", ".stats");
++        notADirectory.deleteOnExit();
++        String previous = AthenaThreadStats.file;
++        AthenaThreadStats.file = new java.io.File(notADirectory, "stats.csv").getPath();
++        try {
++            AthenaThreadStats stats = new AthenaThreadStats();
++            for (int tick = 0; tick < 300; ++tick) {
++                stats.begin(0);
++                stats.mark(AthenaThreadStats.TASKS);
++                stats.end("world", 1, 0);
++            }
++        } finally {
++            AthenaThreadStats.file = previous;
++            set(null, AthenaThreadStats.class, "failed", false);
++        }
++    }
+ }
