@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 14:57:46 +0900
+Subject: [PATCH] Athena API: world thread stalls and failures
+
+WorldThreadStallEvent (asynchronous, from Athena's watchdog) reports a world on
+its own thread that has gone worldThreadStallSeconds without a tick, and again
+when it ticks again. WorldThreadFailureEvent (server thread) reports one whose
+tick threw: it is halted and back on the server thread, and its players are
+sent to the main world after the listeners.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/event/WorldThreadFailureEvent.java b/src/main/java/athena/api/event/WorldThreadFailureEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..530a4f2f583470e21bad20b71398f3c96cdf8036
+--- /dev/null
++++ b/src/main/java/athena/api/event/WorldThreadFailureEvent.java
+@@ -0,0 +1,37 @@
++package athena.api.event;
++
++import org.bukkit.World;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.world.WorldEvent;
++
++/**
++ * Athena - a world on its own thread ({@link athena.api.Athena#startWorldThread}) threw out of its
++ * tick. Its thread has stopped, the world no longer ticks, and the server thread owns it again.
++ * Called on the server thread. A listener can move the players elsewhere (to a lobby, say) and
++ * unload the world; the players still in it after the listeners are sent to the main world's spawn.
++ * The world cannot be given a thread again.
++ */
++public final class WorldThreadFailureEvent extends WorldEvent {
++    private static final HandlerList HANDLERS = new HandlerList();
++
++    private final Throwable cause;
++
++    public WorldThreadFailureEvent(World world, Throwable cause) {
++        super(world);
++        this.cause = cause;
++    }
++
++    /** What the tick threw. */
++    public Throwable getCause() {
++        return this.cause;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}
+diff --git a/src/main/java/athena/api/event/WorldThreadStallEvent.java b/src/main/java/athena/api/event/WorldThreadStallEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..aa29f698c4366889dbd592e39b935dd554d0b2ec
+--- /dev/null
++++ b/src/main/java/athena/api/event/WorldThreadStallEvent.java
+@@ -0,0 +1,51 @@
++package athena.api.event;
++
++import org.bukkit.World;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.Event;
++
++/**
++ * Athena - a world on its own thread ({@link athena.api.Athena#startWorldThread}) has not finished a
++ * tick for {@code worldThreadStallSeconds} (athena.yml), or has finished one again after such a
++ * stall. Asynchronous: called on Athena's watchdog thread, while the world's thread may still be
++ * stuck, so a listener must not touch the world; it can, for instance, ask the server thread to end
++ * that world's game. The server and the other worlds go on ticking regardless.
++ */
++public final class WorldThreadStallEvent extends Event {
++    private static final HandlerList HANDLERS = new HandlerList();
++
++    private final World world;
++    private final long stalledMillis;
++    private final boolean recovered;
++
++    public WorldThreadStallEvent(World world, long stalledMillis, boolean recovered) {
++        super(true);
++        this.world = world;
++        this.stalledMillis = stalledMillis;
++        this.recovered = recovered;
++    }
++
++    /** The world whose thread stalled. */
++    public World getWorld() {
++        return this.world;
++    }
++
++    /** How long the world had gone without finishing a tick. */
++    public long getStalledMillis() {
++        return this.stalledMillis;
++    }
++
++    /** False when the stall is first seen; true when the world has ticked again after it. */
++    public boolean isRecovered() {
++        return this.recovered;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return HANDLERS;
++    }
++
++    public static HandlerList getHandlerList() {
++        return HANDLERS;
++    }
++}

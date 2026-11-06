@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 1 Nov 2026 00:20:56 +0900
+Subject: [PATCH] Athena.getNameSeenBy: command tab completion offers a
+ disguised player's disguise
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 146ba0a7f27ff22da01e9e277155a4aeb94cf6d5..7be552ae354dbb65cb8425da6351ffb002295e66 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -360,6 +360,20 @@ public final class Athena {
+         return getServer().getDisguiseName(player);
+     }
+ 
++    /**
++     * The name {@code viewer} knows {@code player} by: the disguise's for everyone else, the real one
++     * for the player themselves, for the console ({@code viewer} null) and on a server without the
++     * Athena API. For anything that offers player names to a player, such as tab completion: the
++     * real name of a disguised player there tells everyone who they are.
++     */
++    public static String getNameSeenBy(Player viewer, Player player) {
++        if (server == null || viewer == null || viewer.equals(player)) {
++            return player.getName();
++        }
++        String disguise = server.getDisguiseName(player);
++        return disguise != null ? disguise : player.getName();
++    }
++
+     /**
+      * Masks {@code player} as {@code mask}, or takes their mask off if it is null, without telling them
+      * or calling {@link athena.api.event.PlayerMaskChangeEvent}: for a plugin giving back the mask it
+diff --git a/src/main/java/org/bukkit/command/Command.java b/src/main/java/org/bukkit/command/Command.java
+index 627f3b8e88e5d54fb98ee26cf029fd9ae54933f8..1e2ae9ddb815017bf9f3d2119da7611d21f810a1 100644
+--- a/src/main/java/org/bukkit/command/Command.java
++++ b/src/main/java/org/bukkit/command/Command.java
+@@ -100,7 +100,7 @@ public abstract class Command {
+ 
+         ArrayList<String> matchedPlayers = new ArrayList<String>();
+         for (Player player : sender.getServer().getOnlinePlayers()) {
+-            String name = player.getName();
++            String name = athena.api.Athena.getNameSeenBy(senderPlayer, player); // Athena - a disguised player under the disguise
+             if ((senderPlayer == null || senderPlayer.canSee(player)) && StringUtil.startsWithIgnoreCase(name, lastWord)) {
+                 matchedPlayers.add(name);
+             }
+diff --git a/src/test/java/athena/api/AthenaNameSeenByTest.java b/src/test/java/athena/api/AthenaNameSeenByTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d2aa8fcfaccfea66ac869413df0483a5c8f8369a
+--- /dev/null
++++ b/src/test/java/athena/api/AthenaNameSeenByTest.java
+@@ -0,0 +1,103 @@
++package athena.api;
++
++import static org.junit.Assert.assertEquals;
++
++import java.lang.reflect.Field;
++import java.lang.reflect.Proxy;
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import org.bukkit.Server;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.entity.Player;
++import org.junit.After;
++import org.junit.Test;
++
++// Athena - a disguised player's real name is not offered to anyone else in tab completion
++public class AthenaNameSeenByTest {
++
++    private final Map<Player, String> disguises = new HashMap<Player, String>();
++    private List<Player> online = Collections.emptyList();
++
++    private final Server server = (Server) Proxy.newProxyInstance(Server.class.getClassLoader(), new Class<?>[] {Server.class},
++            (proxy, method, args) -> {
++                if (method.getName().equals("getOnlinePlayers")) {
++                    return this.online;
++                }
++                throw new UnsupportedOperationException(method.getName());
++            });
++
++    private Player player(String name) {
++        return (Player) Proxy.newProxyInstance(Player.class.getClassLoader(), new Class<?>[] {Player.class},
++                (proxy, method, args) -> {
++                    switch (method.getName()) {
++                        case "getName": return name;
++                        case "getServer": return this.server;
++                        case "canSee": return true;
++                        case "equals": return proxy == args[0];
++                        case "hashCode": return System.identityHashCode(proxy);
++                        case "toString": return name;
++                        default: throw new UnsupportedOperationException(method.getName());
++                    }
++                });
++    }
++
++    private void installServer() {
++        Athena.setServer((AthenaServer) Proxy.newProxyInstance(AthenaServer.class.getClassLoader(), new Class<?>[] {AthenaServer.class},
++                (proxy, method, args) -> {
++                    if (method.getName().equals("getDisguiseName")) {
++                        return this.disguises.get(args[0]);
++                    }
++                    throw new UnsupportedOperationException(method.getName());
++                }));
++    }
++
++    @After
++    public void clearServer() throws Exception {
++        Field field = Athena.class.getDeclaredField("server");
++        field.setAccessible(true);
++        field.set(null, null);
++    }
++
++    @Test
++    public void othersSeeTheDisguiseTheyThemselvesAndTheConsoleTheRealName() {
++        installServer();
++        Player steve = player("Steve"), alex = player("Alex");
++        this.disguises.put(steve, "SwiftFox482");
++
++        assertEquals("SwiftFox482", Athena.getNameSeenBy(alex, steve));
++        assertEquals("Steve", Athena.getNameSeenBy(steve, steve));
++        assertEquals("Steve", Athena.getNameSeenBy(null, steve));
++        assertEquals("Alex", Athena.getNameSeenBy(steve, alex));
++    }
++
++    @Test
++    public void withoutTheAthenaServerTheRealName() {
++        Player steve = player("Steve");
++        assertEquals("Steve", Athena.getNameSeenBy(player("Alex"), steve));
++    }
++
++    @Test
++    public void commandCompletionMatchesAndOffersTheDisguise() {
++        installServer();
++        Player steve = player("Steve"), alex = player("Alex"), sam = player("Sam");
++        this.disguises.put(steve, "SwiftFox482");
++        this.online = Arrays.asList(steve, alex, sam);
++        Command command = new Command("tell") {
++            @Override
++            public boolean execute(CommandSender sender, String label, String[] args) {
++                return true;
++            }
++        };
++
++        // what is typed is matched against the disguise, and the real name never comes back
++        assertEquals(Collections.singletonList("SwiftFox482"), command.tabComplete(alex, "tell", new String[] {"Sw"}));
++        assertEquals(Arrays.asList("Sam", "SwiftFox482"), command.tabComplete(alex, "tell", new String[] {"S"}));
++        assertEquals(Collections.emptyList(), command.tabComplete(alex, "tell", new String[] {"Ste"}));
++        // the disguised player still completes their own real name
++        assertEquals(Collections.singletonList("Steve"), command.tabComplete(steve, "tell", new String[] {"Ste"}));
++    }
++}

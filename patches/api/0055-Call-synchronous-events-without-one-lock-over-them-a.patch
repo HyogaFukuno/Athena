@@ -1,0 +1,54 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 14:06:01 +0900
+Subject: [PATCH] Call synchronous events without one lock over them all
+
+Worlds ticking on their own threads call their events at the same time; with
+the plugin manager's lock around every synchronous event, one world stuck in a
+listener held up every other world's events. HandlerList already bakes its
+arrays under its own lock and publishes them through a volatile field. The
+Athena API documents that players now go with a world onto its thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index abb78bc4db06b412d3c40a9872437cd24b2ff518..c950fa77f8584a9bee9049541a03ce11c65a9b0c 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -412,11 +412,13 @@ public final class Athena {
+      * thread and the other worlds keep ticking. From then on only that thread may touch the world:
+      * use {@link #runOnWorld} to work on it from elsewhere. Aikar's timings are turned off.
+      *
+-     * <p>Not yet for worlds with players: their packets still run on the server thread. Players
+-     * cannot be teleported into the world, entities cannot be moved between it and other worlds, and
+-     * {@link #preloadChunks} refuses it.
++     * <p>Players in the world go with it: their packets, connection ticks, commands, chat
++     * callbacks and quits run on the world's thread. Not yet: players and entities cannot change
++     * worlds into or out of it (teleports are refused, a respawn stays in the world, a login never
++     * lands in it), {@link #preloadChunks} refuses it, and the main world cannot have its own thread.
+      *
+-     * @throws IllegalStateException if the world has players
++     * @throws IllegalStateException if {@code world} is the main world, or this is called from inside
++     *         the world's own tick
+      */
+     public static void startWorldThread(World world) {
+         getServer().startWorldThread(world);
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index 729b8084d9de1dad3e9a6ed25ed4c60134243519..1ac53c91397bfba3c5d57eb1342374751f8fad54 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -545,9 +545,11 @@ public final class SimplePluginManager implements PluginManager {
+             }
+             fireEvent(event);
+         } else {
+-            synchronized (this) {
+-                fireEvent(event);
+-            }
++            // Athena - no lock: worlds that tick on their own threads call their events at the same
++            // time, and one world stuck in a listener must not hold up the others' events. The
++            // handler lists are already safe to read from any thread (HandlerList bakes them under
++            // its own lock); listeners that share state between worlds must guard it themselves.
++            fireEvent(event);
+         }
+     }
+ 

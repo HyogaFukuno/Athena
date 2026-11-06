@@ -1,0 +1,214 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 20:01:54 +0900
+Subject: [PATCH] Send listener-less packets without listener arrays, wrappers
+ or promises
+
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index 25d8db452b648afcbc7238904c73420cecac0b1b..ba58f93f9f9cb80b4d22cace42fd63558a69d92d 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -20,7 +20,6 @@ import java.net.SocketAddress;
+ import java.util.Queue;
+ import java.util.concurrent.locks.ReentrantReadWriteLock;
+ import javax.crypto.SecretKey;
+-import org.apache.commons.lang3.ArrayUtils;
+ import org.apache.commons.lang3.Validate;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+@@ -233,15 +232,12 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     }
+ 
+     public void handle(Packet packet) {
+-        this.sendPacket(packet, null, (GenericFutureListener<? extends Future<? super Void>>) null); // PandaSpigot
++        this.sendPacket(packet, null, (GenericFutureListener<? extends Future<? super Void>>[]) null); // PandaSpigot // Athena - no listeners: a null array, not an array holding null
+     }
+ 
+     public void sendPacket(Packet packet, GenericFutureListener<? extends Future<? super Void>> genericfuturelistener, GenericFutureListener<? extends Future<? super Void>>... agenericfuturelistener) {
+         // PandaSpigot start - handle oversized packets better
+-        GenericFutureListener<? extends Future<? super Void>>[] listeners = null;
+-        if (genericfuturelistener != null || agenericfuturelistener != null) { // cannot call ArrayUtils.add with both null arguments
+-            listeners = ArrayUtils.add(agenericfuturelistener, 0, genericfuturelistener);
+-        }
++        GenericFutureListener<? extends Future<? super Void>>[] listeners = athenaListeners(genericfuturelistener, agenericfuturelistener); // Athena
+         boolean connected = isConnected();
+         if (!connected && !preparing) {
+             return; // Do nothing
+@@ -275,6 +271,58 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         // PandaSpigot end
+     }
+ 
++    // Athena start - a packet sent with no listeners carries none, and one sent with listeners keeps them all.
++    //
++    // handle(), which every PlayerConnection.sendPacket goes through, passed its "no listeners" as
++    // (GenericFutureListener) null - one null element, so a one-element array - and sendPacket built
++    // a two-element array of nulls from it with ArrayUtils.add. With a listener array the packet then
++    // went to the event loop wrapped in an AthenaPendingWrite. In a 20-player match those three were
++    // 28% of the bytes the whole server allocated. handle() now passes no array, and the listeners are
++    // the non-null ones: Netty's addListeners stops at the first null, so sendPacket(packet, null,
++    // listener) used to put [null, listener] on the write and the listener was never called.
++    @SuppressWarnings("unchecked")
++    private static GenericFutureListener<? extends Future<? super Void>>[] athenaListeners(GenericFutureListener<? extends Future<? super Void>> first, GenericFutureListener<? extends Future<? super Void>>[] rest) {
++        int count = first != null ? 1 : 0;
++
++        if (rest != null) {
++            for (GenericFutureListener<? extends Future<? super Void>> listener : rest) {
++                if (listener != null) {
++                    ++count;
++                }
++            }
++        }
++        if (count == 0) {
++            return null;
++        }
++        GenericFutureListener<? extends Future<? super Void>>[] listeners = new GenericFutureListener[count];
++        int at = 0;
++
++        if (first != null) {
++            listeners[at++] = first;
++        }
++        if (rest != null) {
++            for (GenericFutureListener<? extends Future<? super Void>> listener : rest) {
++                if (listener != null) {
++                    listeners[at++] = listener;
++                }
++            }
++        }
++        return listeners;
++    }
++
++    // Write a packet nothing listens for with the channel's void promise. Every write made a
++    // DefaultChannelPromise and gave it FIRE_EXCEPTION_ON_FAILURE as a listener: 21% of the bytes the
++    // server allocated in a match. The void promise fires a failure through the pipeline the same way.
++    // A handler that adds a listener to the promise it is given cannot take a void one, so plugins that
++    // put handlers into the pipeline through ChannelInitializeListener keep real promises, as does a
++    // server started with -Dathena.disableVoidWritePromises=true.
++    private static final boolean ATHENA_VOID_WRITES = !Boolean.getBoolean("athena.disableVoidWritePromises");
++
++    private static boolean athenaVoidWrites() {
++        return ATHENA_VOID_WRITES && io.papermc.paper.network.ChannelInitializeListenerHolder.getListeners().isEmpty();
++    }
++    // Athena end
++
+     private void dispatchPacket(final Packet packet, final GenericFutureListener<? extends Future<? super Void>>[] agenericfuturelistener) { this.a(packet, agenericfuturelistener); } // PandaSpigot - OBFHELPER
+     private void a(final Packet packet, final GenericFutureListener<? extends Future<? super Void>>[] agenericfuturelistener) {
+         // PandaSpigot start - Add flush parameter
+@@ -337,6 +385,13 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         }
+         try {
+         // PandaSpigot end
++        if (agenericfuturelistener == null && !packet.hasFinishListener() && athenaVoidWrites()) { // Athena - see athenaVoidWrites
++            if (flush) {
++                this.channel.writeAndFlush(packet, this.channel.voidPromise());
++            } else {
++                this.channel.write(packet, this.channel.voidPromise());
++            }
++        } else { // Athena
+         ChannelFuture channelfuture = flush ? this.channel.writeAndFlush(packet) : this.channel.write(packet); // PandaSpigot - Add flush parameter
+ 
+         if (agenericfuturelistener != null) {
+@@ -350,6 +405,7 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         // PandaSpigot end
+ 
+         channelfuture.addListener(ChannelFutureListener.FIRE_EXCEPTION_ON_FAILURE);
++        } // Athena
+         // Athena start - compression starts with the packet after this one, here and now.
+         //
+         // The login turns compression on from a listener on this packet's write, and the packets
+diff --git a/src/test/java/net/minecraft/server/AthenaSendPathTest.java b/src/test/java/net/minecraft/server/AthenaSendPathTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c271c9249f2ad6a6f0d60bae376a5fa14b18f44b
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSendPathTest.java
+@@ -0,0 +1,90 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.channel.embedded.EmbeddedChannel;
++import io.netty.util.concurrent.Future;
++import io.netty.util.concurrent.GenericFutureListener;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.util.concurrent.atomic.AtomicInteger;
++import org.junit.BeforeClass;
++import org.junit.Test;
++
++/**
++ * Athena - packets sent without listeners go out on the void promise and still reach the wire, and
++ * a packet sent with a listener still has it called once the write completes.
++ */
++public class AthenaSendPathTest {
++
++    @BeforeClass
++    public static void bootstrap() throws Exception {
++        DispenserRegistry.register();
++        Field config = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredField("config");
++        config.setAccessible(true);
++        if (config.get(null) == null) {
++            Constructor<com.hpfxd.pandaspigot.config.PandaSpigotConfig> make = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredConstructor();
++            make.setAccessible(true);
++            config.set(null, make.newInstance());
++        }
++    }
++
++    private static NetworkManager connected(EmbeddedChannel channel) {
++        NetworkManager manager = new NetworkManager(EnumProtocolDirection.CLIENTBOUND);
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        channel.pipeline().addLast("prepender", PacketPrepender.INSTANCE)
++                .addLast("encoder", new PacketEncoder(EnumProtocolDirection.CLIENTBOUND))
++                .addLast("packet_handler", manager);
++        channel.pipeline().fireChannelActive();
++        return manager;
++    }
++
++    private static int frames(EmbeddedChannel channel) {
++        channel.flushOutbound();
++        int frames = 0;
++        Object out;
++
++        while ((out = channel.readOutbound()) != null) {
++            ByteBuf buf = (ByteBuf) out;
++            frames += buf.isReadable() ? 1 : 0;
++            buf.release();
++        }
++        return frames;
++    }
++
++    @Test
++    public void packetsWithoutListenersReachTheWire() {
++        EmbeddedChannel channel = new EmbeddedChannel();
++        NetworkManager manager = connected(channel);
++
++        for (int i = 0; i < 3; ++i) {
++            manager.handle(new PacketPlayOutKeepAlive(i));
++        }
++        assertEquals(3, frames(channel));
++        channel.finishAndReleaseAll();
++    }
++
++    @Test
++    public void listenersAreStillCalled() {
++        EmbeddedChannel channel = new EmbeddedChannel();
++        NetworkManager manager = connected(channel);
++        final AtomicInteger called = new AtomicInteger();
++        GenericFutureListener<Future<? super Void>> listener = new GenericFutureListener<Future<? super Void>>() {
++            @Override
++            public void operationComplete(Future<? super Void> future) {
++                assertTrue(future.isSuccess());
++                called.incrementAndGet();
++            }
++        };
++
++        manager.sendPacket(new PacketPlayOutKeepAlive(1), listener);
++        // a listener in the array, as callers that pass several do
++        manager.sendPacket(new PacketPlayOutKeepAlive(2), null, listener);
++        assertEquals(2, frames(channel));
++        assertEquals(2, called.get());
++        channel.finishAndReleaseAll();
++    }
++}

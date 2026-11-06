@@ -1,0 +1,1277 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 21:07:56 +0900
+Subject: [PATCH] Keep shaped blocks' bounds per thread, and fix logins, kicks,
+ stops and unloads around world threads
+
+What a review of the world-thread patches found:
+
+- Blocks are one object for every world, and the shaped ones (stairs, slabs,
+  fences, doors, trapdoors, ladders, walls, ...) write their bounds and read
+  them back. Bounds set after registration now go to a copy for the calling
+  thread (Block.bounds). The furnace swap flag, a redstone wire's update set
+  and power flag and the stair ray trace part are per thread
+  (AthenaThreadState); the torch toggles map is synchronized and the potion
+  effect cache concurrent.
+- A second login of a player in a world on its own thread kicks the old one
+  on that thread; the new login waits in LoginListener's state e.
+- A stop that times out no longer leaves the world with a thread that is
+  gone: the thread hands the world back when its tick ends (athenaTakeBack).
+- A kick from another thread goes to the player's world's thread; if that
+  thread is stuck, the server thread does the player list's half of the
+  disconnect and writes the kick at once (PlayerList.athenaDetach), and so
+  does a second login. A login is not handed over into a stuck world.
+- A player on its way into a world being unloaded or halted lands at the
+  main world's spawn; unloadWorld keeps a world that a player got into.
+- A player handed to another thread has its position and owner moved first,
+  its packets wait until it lands (athenaRunWhenLanded), and teleportAsync
+  completes then. A player that quit on the way arrives nowhere.
+- At shutdown a world whose thread does not stop is not saved. World threads
+  are counted from start(), and a finished chunk load queued for a world
+  just handed back follows it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index ed89bd23fb94b5fa596469622523cfac1f102672..55034d46b840f7785faeb5b9cd549ef14f89d755 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -156,8 +156,15 @@ public final class AthenaServerImpl implements AthenaServer {
+             net.minecraft.server.WorldServer.athenaRunForEntity(handle, () -> {
+                 try {
+                     boolean present = entity instanceof Player ? ((Player) entity).isOnline() : entity.isValid();
+-
+-                    future.complete(present && entity.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN));
++                    boolean moved = present && entity.teleport(to, PlayerTeleportEvent.TeleportCause.PLUGIN);
++
++                    // Athena - a player handed to another world's thread completes once it is in that world,
++                    // on that thread; true only if it got there (a world that went meanwhile sends it to the main world)
++                    if (moved && handle instanceof net.minecraft.server.EntityPlayer
++                            && ((net.minecraft.server.EntityPlayer) handle).athenaRunWhenLanded(() -> future.complete(handle.world == target))) {
++                        return;
++                    }
++                    future.complete(moved);
+                 } catch (Throwable throwable) {
+                     future.completeExceptionally(throwable);
+                 }
+diff --git a/src/main/java/net/minecraft/server/AthenaThreadState.java b/src/main/java/net/minecraft/server/AthenaThreadState.java
+index 4f178f8167195f3044cb18cecaa0b8c596e168c0..39c78a8b9f8272501b4525556ccd13d5c2f420de 100644
+--- a/src/main/java/net/minecraft/server/AthenaThreadState.java
++++ b/src/main/java/net/minecraft/server/AthenaThreadState.java
+@@ -8,7 +8,9 @@ import org.bukkit.TreeType;
+  * birch", "the dispenser already fired its event", "the damage about to be dealt comes from this
+  * block or entity".
+  *
+- * A static is only right while one thread does all of this. The asynchronous chunk decoration
++ * Blocks are shared by every world too, so the scratch some blocks kept in their own fields (the
++ * furnace being swapped, a redstone wire's update, the stair part being ray traced) lives here as
++ * well. A static is only right while one thread does all of this. The asynchronous chunk decoration
+  * already sets instaFall from its own thread, where the server thread could read it in between, and
+  * worlds that tick on their own threads would set the others mid-tick for each other. Each thread
+  * gets its own copy instead; within one thread nothing changes.
+@@ -27,6 +29,15 @@ public final class AthenaThreadState {
+     public org.bukkit.block.Block blockDamage;
+     /** CraftEventFactory.entityDamage: the entity the next damage event comes from. */
+     public Entity entityDamage;
++    /** BlockFurnace.keepInventory: a furnace is being swapped for its lit or unlit self, so it drops nothing. */
++    public boolean furnaceKeepInventory;
++    /** BlockRedstoneWire.canProvidePower: false while a wire asks how much power reaches it from elsewhere. */
++    public boolean redstoneWireProvidesPower = true;
++    /** BlockRedstoneWire.blocksNeedingUpdate: the neighbours a wire update has still to notify. */
++    public final it.unimi.dsi.fastutil.longs.LongOpenHashSet redstoneWireUpdates = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
++    /** BlockStairs.hasRaytraced and rayTracePass: updateShape gives the eighth of a stair being ray traced. */
++    public boolean stairsRaytraced;
++    public int stairsRayTracePass;
+ 
+     private AthenaThreadState() {
+     }
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 2ba354d1b53cb01a8b5b176b54db9f1e21f10e4e..e1f42da4600f52b401b823feb743103055528e1e 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -58,6 +58,7 @@ public final class AthenaWorldThread extends Thread {
+     static void beforeFirstStart() {
+         if (started) return;
+         started = true;
++        org.bukkit.plugin.SimplePluginManager.athenaLockFree = true; // worlds call their events side by side from now on
+         Thread watchdog = new Thread(AthenaWorldThread::watch, "Athena world watchdog");
+         watchdog.setDaemon(true);
+         watchdog.start();
+@@ -227,8 +228,20 @@ public final class AthenaWorldThread extends Thread {
+     }
+ 
+     @Override
+-    public void run() {
++    public synchronized void start() {
++        // counted from here, not from run(): a vanilla command right after the start must already
++        // stop this thread (runWithWorldsStopped)
+         alive.incrementAndGet();
++        try {
++            super.start();
++        } catch (Throwable throwable) {
++            alive.decrementAndGet();
++            throw throwable;
++        }
++    }
++
++    @Override
++    public void run() {
+         long next = System.nanoTime();
+         try {
+             while (this.running) {
+@@ -268,6 +281,17 @@ public final class AthenaWorldThread extends Thread {
+                 this.lastTickEnd = System.nanoTime();
+             }
+             this.runTasks();
++            // a stop that gave up waiting (stopAndJoin) left the world with this thread: hand it back now
++            boolean abandoned;
++            synchronized (this.stopLock) {
++                this.exited = true;
++                abandoned = this.stopAbandoned;
++            }
++            if (abandoned) {
++                LOGGER.warn("World " + this.world.getWorldData().getName() + "'s thread stopped late; the server thread ticks the world again");
++                final AthenaWorldThread self = this;
++                MinecraftServer.getServer().processQueue.add(() -> self.world.athenaTakeBack(self));
++            }
+         } catch (Throwable throwable) {
+             this.failure = throwable;
+             this.running = false;
+@@ -315,10 +339,19 @@ public final class AthenaWorldThread extends Thread {
+         }
+     }
+ 
++    /** Guards the end of a stop between stopAndJoin and the end of run. */
++    private final Object stopLock = new Object();
++    /** The loop has ended and its last tasks ran; guarded by stopLock. */
++    private boolean exited;
++    /** stopAndJoin gave up waiting; the thread hands the world back itself when it gets there. Guarded by stopLock. */
++    private boolean stopAbandoned;
++
+     /**
+-     * Asks the thread to finish its tick and stop, and waits for it.
++     * Asks the thread to finish its tick and stop, and waits for it. The request stands even when the
++     * wait times out: the thread stops once its tick ends, and then hands the world back to the server
++     * thread itself (WorldServer.athenaTakeBack), so the world is never left with a thread that is gone.
+      *
+-     * @return whether it stopped within {@code timeoutMillis}; if not, it still owns the world
++     * @return whether it stopped within {@code timeoutMillis}; if not, it still owns the world for now
+      */
+     boolean stopAndJoin(long timeoutMillis) {
+         this.running = false;
+@@ -328,7 +361,27 @@ public final class AthenaWorldThread extends Thread {
+         } catch (InterruptedException e) {
+             Thread.currentThread().interrupt();
+         }
+-        return !this.isAlive();
++        synchronized (this.stopLock) {
++            if (!this.exited && this.isAlive()) {
++                this.stopAbandoned = true;
++                return false;
++            }
++        }
++        boolean interrupted = false;
++        while (this.isAlive()) { // past its loop: only the last bookkeeping is left
++            try {
++                this.join();
++            } catch (InterruptedException e) {
++                interrupted = true;
++            }
++        }
++        if (interrupted) Thread.currentThread().interrupt();
++        return true;
++    }
++
++    /** Whether the watchdog sees this thread stuck in a tick, or it has died without handing the world back yet. */
++    boolean stalled() {
++        return this.stallReported || this.getState() == Thread.State.TERMINATED;
+     }
+ 
+     boolean failed() {
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index 7b698640869ca2d16ba3391d597f905bed50b6cc..6d675194cf999f507dcb5d6a5c86719f274c05ab 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -20,6 +20,11 @@ public class Block {
+                 : Block.BLOCK_STATE_IDS.get(iblockdata);
+     }
+     private CreativeModeTab creativeTab;
++    // Athena start - see bounds(); declared before anything that could make a Block
++    private static final java.util.concurrent.atomic.AtomicInteger athenaBoundsSlots = new java.util.concurrent.atomic.AtomicInteger();
++    private static volatile boolean athenaBoundsFrozen;
++    private static final ThreadLocal<double[][]> ATHENA_THREAD_BOUNDS = ThreadLocal.withInitial(() -> new double[Block.athenaBoundsSlots.get()][]);
++    // Athena end
+     public static final Block.StepSound soundTypeStone = new Block.StepSound("stone", 1.0F, 1.0F);
+     public static final Block.StepSound soundTypeWood = new Block.StepSound("wood", 1.0F, 1.0F);
+     public static final Block.StepSound soundTypeGravel = new Block.StepSound("gravel", 1.0F, 1.0F);
+@@ -85,12 +90,42 @@ public class Block {
+     }
+     // Spigot end
+ 
+-    protected double minX;
+-    protected double minY;
+-    protected double minZ;
+-    protected double maxX;
+-    protected double maxY;
+-    protected double maxZ;
++    // Athena start - the bounds: minX, minY, minZ, maxX, maxY, maxZ. Vanilla kept them in six fields
++    // of the one Block that every world shares, and the blocks whose shape depends on the spot
++    // (stairs, slabs, fences, doors, ...) write them in updateShape and read them back a moment
++    // later. Worlds ticking on their own threads would read each other's shapes: wrong collisions,
++    // ray traces and movement checks. The bounds set while blocks are registered stay here for every
++    // thread; once registration is over (athenaFreezeBounds), a block that changes them writes a copy
++    // of its own for the calling thread, and every read of that block takes that thread's copy.
++    private final double[] athenaBounds = new double[6];
++    private final int athenaBoundsSlot = Block.athenaBoundsSlots.getAndIncrement();
++    /** Set once this block's bounds have changed after registration: from then on they are per thread. */
++    private volatile boolean athenaBoundsVary;
++
++    /** The bounds the calling thread sees, as minX, minY, minZ, maxX, maxY, maxZ. Do not keep the array. */
++    protected final double[] bounds() {
++        return this.athenaBoundsVary ? this.athenaThreadBounds() : this.athenaBounds;
++    }
++
++    private double[] athenaThreadBounds() {
++        double[][] all = ATHENA_THREAD_BOUNDS.get();
++        if (this.athenaBoundsSlot >= all.length) {
++            all = java.util.Arrays.copyOf(all, Block.athenaBoundsSlots.get());
++            ATHENA_THREAD_BOUNDS.set(all);
++        }
++        double[] mine = all[this.athenaBoundsSlot];
++        if (mine == null) {
++            mine = this.athenaBounds.clone(); // the registered bounds, which no longer change
++            all[this.athenaBoundsSlot] = mine;
++        }
++        return mine;
++    }
++
++    /** At the end of DispenserRegistry.register: bounds set from now on belong to the thread that sets them. */
++    static void athenaFreezeBounds() {
++        Block.athenaBoundsFrozen = true;
++    }
++    // Athena end
+     public Block.StepSound stepSound;
+     public float blockParticleGravity;
+     protected final Material material;
+@@ -278,12 +313,24 @@ public class Block {
+     }
+ 
+     protected final void setBlockBounds(float f, float f1, float f2, float f3, float f4, float f5) {
+-        this.minX = (double) f;
+-        this.minY = (double) f1;
+-        this.minZ = (double) f2;
+-        this.maxX = (double) f3;
+-        this.maxY = (double) f4;
+-        this.maxZ = (double) f5;
++        this.athenaSetBounds((double) f, (double) f1, (double) f2, (double) f3, (double) f4, (double) f5); // Athena
++    }
++
++    // Athena - setBlockBounds in doubles; see bounds()
++    protected final void athenaSetBounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
++        double[] b;
++        if (!Block.athenaBoundsFrozen) {
++            b = this.athenaBounds;
++        } else {
++            if (!this.athenaBoundsVary) this.athenaBoundsVary = true;
++            b = this.athenaThreadBounds();
++        }
++        b[0] = minX;
++        b[1] = minY;
++        b[2] = minZ;
++        b[3] = maxX;
++        b[4] = maxY;
++        b[5] = maxZ;
+     }
+ 
+     public boolean isBlockSolid(IBlockAccess iblockaccess, BlockPosition blockposition, EnumDirection enumdirection) {
+@@ -309,12 +356,13 @@ public class Block {
+     // addCollisionBoxes is the gathering entry point used by World.getCubes; blocks made of several
+     // boxes (stairs, fences, ...) override it the way they used to override addCollisionBoxesToList.
+     public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) {
+-        out[0] = (double) blockposition.getX() + this.minX;
+-        out[1] = (double) blockposition.getY() + this.minY;
+-        out[2] = (double) blockposition.getZ() + this.minZ;
+-        out[3] = (double) blockposition.getX() + this.maxX;
+-        out[4] = (double) blockposition.getY() + this.maxY;
+-        out[5] = (double) blockposition.getZ() + this.maxZ;
++        double[] b = this.bounds(); // Athena - this thread's
++        out[0] = (double) blockposition.getX() + b[0];
++        out[1] = (double) blockposition.getY() + b[1];
++        out[2] = (double) blockposition.getZ() + b[2];
++        out[3] = (double) blockposition.getX() + b[3];
++        out[4] = (double) blockposition.getY() + b[4];
++        out[5] = (double) blockposition.getZ() + b[5];
+         return true;
+     }
+ 
+@@ -483,6 +531,8 @@ public class Block {
+                                                   double d0, double d1, double d2,
+                                                   double d3, double d4, double d5) {
+         this.updateShape(world, blockposition);
++        final double[] b = this.bounds(); // Athena - this thread's
++        final double minX = b[0], minY = b[1], minZ = b[2], maxX = b[3], maxY = b[4], maxZ = b[5];
+         double d6 = (double) blockposition.getX();
+         double d7 = (double) blockposition.getY();
+         double d8 = (double) blockposition.getZ();
+@@ -514,27 +564,27 @@ public class Block {
+             switch (face) {
+             case 0:
+                 if (epsx < (double) 1.0E-7F) continue;
+-                t = (this.minX - d0) / dx;
++                t = (minX - d0) / dx;
+                 break;
+             case 1:
+                 if (epsx < (double) 1.0E-7F) continue;
+-                t = (this.maxX - d0) / dx;
++                t = (maxX - d0) / dx;
+                 break;
+             case 2:
+                 if (epsy < (double) 1.0E-7F) continue;
+-                t = (this.minY - d1) / dy;
++                t = (minY - d1) / dy;
+                 break;
+             case 3:
+                 if (epsy < (double) 1.0E-7F) continue;
+-                t = (this.maxY - d1) / dy;
++                t = (maxY - d1) / dy;
+                 break;
+             case 4:
+                 if (epsz < (double) 1.0E-7F) continue;
+-                t = (this.minZ - d2) / dz;
++                t = (minZ - d2) / dz;
+                 break;
+             default:
+                 if (epsz < (double) 1.0E-7F) continue;
+-                t = (this.maxZ - d2) / dz;
++                t = (maxZ - d2) / dz;
+                 break;
+             }
+ 
+@@ -546,11 +596,11 @@ public class Block {
+             boolean inside;
+ 
+             if (face < 2) {          // isVecInsideYZBounds
+-                inside = py >= this.minY && py <= this.maxY && pz >= this.minZ && pz <= this.maxZ;
++                inside = py >= minY && py <= maxY && pz >= minZ && pz <= maxZ;
+             } else if (face < 4) {   // isVecInsideXZBounds
+-                inside = px >= this.minX && px <= this.maxX && pz >= this.minZ && pz <= this.maxZ;
++                inside = px >= minX && px <= maxX && pz >= minZ && pz <= maxZ;
+             } else {                 // isVecInsideXYBounds
+-                inside = px >= this.minX && px <= this.maxX && py >= this.minY && py <= this.maxY;
++                inside = px >= minX && px <= maxX && py >= minY && py <= maxY;
+             }
+ 
+             if (!inside) continue;
+@@ -624,27 +674,27 @@ public class Block {
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {}
+ 
+     public final double getBlockBoundsMinX() {
+-        return this.minX;
++        return this.bounds()[0]; // Athena - this thread's
+     }
+ 
+     public final double getBlockBoundsMaxX() {
+-        return this.maxX;
++        return this.bounds()[3]; // Athena - this thread's
+     }
+ 
+     public final double getBlockBoundsMinY() {
+-        return this.minY;
++        return this.bounds()[1]; // Athena - this thread's
+     }
+ 
+     public final double getBlockBoundsMaxY() {
+-        return this.maxY;
++        return this.bounds()[4]; // Athena - this thread's
+     }
+ 
+     public final double getBlockBoundsMinZ() {
+-        return this.minZ;
++        return this.bounds()[2]; // Athena - this thread's
+     }
+ 
+     public final double getBlockBoundsMaxZ() {
+-        return this.maxZ;
++        return this.bounds()[5]; // Athena - this thread's
+     }
+ 
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+diff --git a/src/main/java/net/minecraft/server/BlockButtonAbstract.java b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+index d870233214f1647a5c3cf2062c68152a2ba4409d..4a85b297228fd6d1904d74b26f0c0fc15fb1d50c 100644
+--- a/src/main/java/net/minecraft/server/BlockButtonAbstract.java
++++ b/src/main/java/net/minecraft/server/BlockButtonAbstract.java
+@@ -236,7 +236,7 @@ public abstract class BlockButtonAbstract extends Block {
+ 
+     private void checkForArrows(World world, BlockPosition blockposition, IBlockData iblockdata) {
+         this.updateBlockBounds(iblockdata);
+-        List list = world.getEntitiesWithinAABB(EntityArrow.class, new AxisAlignedBB((double) blockposition.getX() + this.minX, (double) blockposition.getY() + this.minY, (double) blockposition.getZ() + this.minZ, (double) blockposition.getX() + this.maxX, (double) blockposition.getY() + this.maxY, (double) blockposition.getZ() + this.maxZ));
++        List list = world.getEntitiesWithinAABB(EntityArrow.class, new AxisAlignedBB((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getY() + this.bounds()[1], (double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getX() + this.bounds()[3], (double) blockposition.getY() + this.bounds()[4], (double) blockposition.getZ() + this.bounds()[5]));
+         boolean flag = !list.isEmpty();
+         boolean flag1 = ((Boolean) iblockdata.get(BlockButtonAbstract.POWERED)).booleanValue();
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockCobbleWall.java b/src/main/java/net/minecraft/server/BlockCobbleWall.java
+index 13092514e95f0e4cd9ef24fb6c3cf86aea8e50e3..518f154a7fc0c3aa9029fa26ab0befbaff6305c3 100644
+--- a/src/main/java/net/minecraft/server/BlockCobbleWall.java
++++ b/src/main/java/net/minecraft/server/BlockCobbleWall.java
+@@ -83,7 +83,8 @@ public class BlockCobbleWall extends Block {
+     @Override
+     public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+         this.updateShape(world, blockposition);
+-        this.maxY = 1.5D;
++        double[] b = this.bounds(); // Athena - this thread's bounds
++        this.athenaSetBounds(b[0], b[1], b[2], b[3], 1.5D, b[5]);
+         return super.getCollisionBounds(world, blockposition, iblockdata, out);
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockFurnace.java b/src/main/java/net/minecraft/server/BlockFurnace.java
+index f35d65d0820ea98055857c0ffde2839f6e3838ad..b8f6fdd19aba3d1b964ca021aac4ff1740274abc 100644
+--- a/src/main/java/net/minecraft/server/BlockFurnace.java
++++ b/src/main/java/net/minecraft/server/BlockFurnace.java
+@@ -7,7 +7,7 @@ public class BlockFurnace extends BlockContainer {
+ 
+     public static final BlockStateDirection FACING = BlockStateDirection.of("facing", EnumDirection.EnumDirectionLimit.HORIZONTAL);
+     private final boolean isBurning;
+-    private static boolean keepInventory;
++    // private static boolean keepInventory; // Athena - per thread: AthenaThreadState.furnaceKeepInventory
+ 
+     protected BlockFurnace(boolean flag) {
+         super(Material.STONE);
+@@ -69,7 +69,7 @@ public class BlockFurnace extends BlockContainer {
+         IBlockData iblockdata = world.getType(blockposition);
+         TileEntity tileentity = world.getTileEntity(blockposition);
+ 
+-        BlockFurnace.keepInventory = true;
++        AthenaThreadState.get().furnaceKeepInventory = true; // Athena - per thread
+         if (flag) {
+             world.setTypeAndData(blockposition, Blocks.LIT_FURNACE.getBlockData().set(BlockFurnace.FACING, iblockdata.get(BlockFurnace.FACING)), 3);
+             world.setTypeAndData(blockposition, Blocks.LIT_FURNACE.getBlockData().set(BlockFurnace.FACING, iblockdata.get(BlockFurnace.FACING)), 3);
+@@ -78,7 +78,7 @@ public class BlockFurnace extends BlockContainer {
+             world.setTypeAndData(blockposition, Blocks.FURNACE.getBlockData().set(BlockFurnace.FACING, iblockdata.get(BlockFurnace.FACING)), 3);
+         }
+ 
+-        BlockFurnace.keepInventory = false;
++        AthenaThreadState.get().furnaceKeepInventory = false; // Athena - per thread
+         if (tileentity != null) {
+             tileentity.validate();
+             world.setTileEntity(blockposition, tileentity);
+@@ -111,7 +111,7 @@ public class BlockFurnace extends BlockContainer {
+ 
+     @Override
+     public void remove(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        if (!BlockFurnace.keepInventory) {
++        if (!AthenaThreadState.get().furnaceKeepInventory) { // Athena - per thread
+             TileEntity tileentity = world.getTileEntity(blockposition);
+ 
+             if (tileentity instanceof TileEntityFurnace) {
+diff --git a/src/main/java/net/minecraft/server/BlockPistonMoving.java b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+index 580306a6f8a9be2edf49174c7c44ff5a4009eb3f..89b12488af9ef357c094a9f26c6901cda46f7293 100644
+--- a/src/main/java/net/minecraft/server/BlockPistonMoving.java
++++ b/src/main/java/net/minecraft/server/BlockPistonMoving.java
+@@ -169,12 +169,13 @@ public class BlockPistonMoving extends BlockContainer {
+ 
+             EnumDirection enumdirection = tileentitypiston.getFacing();
+ 
+-            this.minX = block.getBlockBoundsMinX() - (double) ((float) enumdirection.getAdjacentX() * f);
+-            this.minY = block.getBlockBoundsMinY() - (double) ((float) enumdirection.getAdjacentY() * f);
+-            this.minZ = block.getBlockBoundsMinZ() - (double) ((float) enumdirection.getAdjacentZ() * f);
+-            this.maxX = block.getBlockBoundsMaxX() - (double) ((float) enumdirection.getAdjacentX() * f);
+-            this.maxY = block.getBlockBoundsMaxY() - (double) ((float) enumdirection.getAdjacentY() * f);
+-            this.maxZ = block.getBlockBoundsMaxZ() - (double) ((float) enumdirection.getAdjacentZ() * f);
++            // Athena - one call: the bounds are per thread (Block.bounds)
++            this.athenaSetBounds(block.getBlockBoundsMinX() - (double) ((float) enumdirection.getAdjacentX() * f),
++                    block.getBlockBoundsMinY() - (double) ((float) enumdirection.getAdjacentY() * f),
++                    block.getBlockBoundsMinZ() - (double) ((float) enumdirection.getAdjacentZ() * f),
++                    block.getBlockBoundsMaxX() - (double) ((float) enumdirection.getAdjacentX() * f),
++                    block.getBlockBoundsMaxY() - (double) ((float) enumdirection.getAdjacentY() * f),
++                    block.getBlockBoundsMaxZ() - (double) ((float) enumdirection.getAdjacentZ() * f));
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+index 2a7e0559e94a64889d153b92dc47e56e44998f8a..4f8b9c64df381b120549f71119974ff36bd8467d 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneTorch.java
+@@ -11,7 +11,7 @@ import org.bukkit.event.block.BlockRedstoneEvent; // CraftBukkit
+ 
+ public class BlockRedstoneTorch extends BlockTorch {
+ 
+-    private static Map<World, List<BlockRedstoneTorch.RedstoneUpdateInfo>> toggles = new java.util.WeakHashMap(); // Spigot
++    private static Map<World, List<BlockRedstoneTorch.RedstoneUpdateInfo>> toggles = java.util.Collections.synchronizedMap(new java.util.WeakHashMap()); // Spigot // Athena - one map for every world thread; each list is its world's own
+     private final boolean isOn;
+ 
+     private boolean isBurnedOut(World world, BlockPosition blockposition, boolean flag) {
+diff --git a/src/main/java/net/minecraft/server/BlockRedstoneWire.java b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+index 6e8f7b8bc30a51eea4ca7083e34b1dec9c63460d..e2a045fe1eb8a09a14697c2342fbc5bf85c7d22a 100644
+--- a/src/main/java/net/minecraft/server/BlockRedstoneWire.java
++++ b/src/main/java/net/minecraft/server/BlockRedstoneWire.java
+@@ -18,10 +18,10 @@ public class BlockRedstoneWire extends Block {
+     public static final BlockStateEnum<BlockRedstoneWire.EnumRedstoneWireConnection> SOUTH = BlockStateEnum.of("south", BlockRedstoneWire.EnumRedstoneWireConnection.class);
+     public static final BlockStateEnum<BlockRedstoneWire.EnumRedstoneWireConnection> WEST = BlockStateEnum.of("west", BlockRedstoneWire.EnumRedstoneWireConnection.class);
+     public static final BlockStateInteger POWER = BlockStateInteger.of("power", 0, 15);
+-    private boolean canProvidePower = true;
++    // Athena - canProvidePower and blocksNeedingUpdate are per thread (AthenaThreadState): this block is shared by every world
+     // Athena - packed positions (BlockPosition.asLong). Besides dropping the map's position keys,
+     // this removes the six shift() allocations each wire update used to make.
+-    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet blocksNeedingUpdate = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
++    // private final it.unimi.dsi.fastutil.longs.LongOpenHashSet blocksNeedingUpdate = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+ 
+     public BlockRedstoneWire() {
+         super(Material.ORIENTABLE);
+@@ -69,9 +69,9 @@ public class BlockRedstoneWire extends Block {
+     private IBlockData updateSurroundingRedstone(World world, BlockPosition blockposition, IBlockData iblockdata) {
+         iblockdata = this.calculateCurrentChanges(world, blockposition, blockposition, iblockdata);
+         // Athena - snapshot the packed keys, then apply physics by coordinate
+-        long[] pending = this.blocksNeedingUpdate.toLongArray();
++        long[] pending = AthenaThreadState.get().redstoneWireUpdates.toLongArray();
+ 
+-        this.blocksNeedingUpdate.clear();
++        AthenaThreadState.get().redstoneWireUpdates.clear();
+ 
+         for (int idx = 0; idx < pending.length; ++idx) {
+             long packed = pending[idx];
+@@ -88,10 +88,10 @@ public class BlockRedstoneWire extends Block {
+         byte b0 = 0;
+         int j = this.getPower(world, blockposition1, b0);
+ 
+-        this.canProvidePower = false;
++        AthenaThreadState.get().redstoneWireProvidesPower = false; // Athena - per thread
+         int k = world.isBlockIndirectlyGettingPowered(blockposition);
+ 
+-        this.canProvidePower = true;
++        AthenaThreadState.get().redstoneWireProvidesPower = true; // Athena - per thread
+         if (k > 0 && k > j - 1) {
+             j = k;
+         }
+@@ -146,23 +146,24 @@ public class BlockRedstoneWire extends Block {
+ 
+             // Athena - neighbours packed directly; no shift() allocations
+             int wx = blockposition.getX(), wy = blockposition.getY(), wz = blockposition.getZ();
++            it.unimi.dsi.fastutil.longs.LongOpenHashSet updates = AthenaThreadState.get().redstoneWireUpdates; // Athena - this thread's
+ 
+-            this.blocksNeedingUpdate.add(blockposition.asLong());
++            updates.add(blockposition.asLong());
+             // PaperSpigot start - Fix cannons
+             if (world.paperSpigotConfig.fixCannons) {
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx - 1, wy, wz));
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx + 1, wy, wz));
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy - 1, wz));
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy + 1, wz));
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy, wz - 1));
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx, wy, wz + 1));
++                updates.add(BlockPosition.pack(wx - 1, wy, wz));
++                updates.add(BlockPosition.pack(wx + 1, wy, wz));
++                updates.add(BlockPosition.pack(wx, wy - 1, wz));
++                updates.add(BlockPosition.pack(wx, wy + 1, wz));
++                updates.add(BlockPosition.pack(wx, wy, wz - 1));
++                updates.add(BlockPosition.pack(wx, wy, wz + 1));
+                 return iblockdata;
+             }
+             // PaperSpigot end
+             for (int j1 = 0; j1 < EnumDirection.VALUES.length; ++j1) { // Athena - shared array
+                 EnumDirection enumdirection1 = EnumDirection.VALUES[j1];
+ 
+-                this.blocksNeedingUpdate.add(BlockPosition.pack(wx + enumdirection1.getAdjacentX(), wy + enumdirection1.getAdjacentY(), wz + enumdirection1.getAdjacentZ()));
++                updates.add(BlockPosition.pack(wx + enumdirection1.getAdjacentX(), wy + enumdirection1.getAdjacentY(), wz + enumdirection1.getAdjacentZ()));
+             }
+         }
+ 
+@@ -306,11 +307,11 @@ public class BlockRedstoneWire extends Block {
+     }
+ 
+     public int getStrongPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+-        return !this.canProvidePower ? 0 : this.getWeakPower(iblockaccess, blockposition, iblockdata, enumdirection);
++        return !AthenaThreadState.get().redstoneWireProvidesPower ? 0 : this.getWeakPower(iblockaccess, blockposition, iblockdata, enumdirection);
+     }
+ 
+     public int getWeakPower(IBlockAccess iblockaccess, BlockPosition blockposition, IBlockData iblockdata, EnumDirection enumdirection) {
+-        if (!this.canProvidePower) {
++        if (!AthenaThreadState.get().redstoneWireProvidesPower) {
+             return 0;
+         } else {
+             int i = ((Integer) iblockdata.get(BlockRedstoneWire.POWER)).intValue();
+@@ -375,7 +376,7 @@ public class BlockRedstoneWire extends Block {
+     }
+ 
+     public boolean isPowerSource() {
+-        return this.canProvidePower;
++        return AthenaThreadState.get().redstoneWireProvidesPower;
+     }
+ 
+     public IBlockData fromLegacyData(int i) {
+diff --git a/src/main/java/net/minecraft/server/BlockSnow.java b/src/main/java/net/minecraft/server/BlockSnow.java
+index e7cec560857f6321487d1b934566a615076769f6..06250d847561aadda0c8579ee7cdc1d2398b06e4 100644
+--- a/src/main/java/net/minecraft/server/BlockSnow.java
++++ b/src/main/java/net/minecraft/server/BlockSnow.java
+@@ -24,12 +24,12 @@ public class BlockSnow extends Block {
+         int i = ((Integer) iblockdata.get(BlockSnow.LAYERS)).intValue() - 1;
+         float f = 0.125F;
+ 
+-        out[0] = Math.min((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
+-        out[1] = Math.min((double) blockposition.getY() + this.minY, (double) ((float) blockposition.getY() + (float) i * f));
+-        out[2] = Math.min((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
+-        out[3] = Math.max((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
+-        out[4] = Math.max((double) blockposition.getY() + this.minY, (double) ((float) blockposition.getY() + (float) i * f));
+-        out[5] = Math.max((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        out[0] = Math.min((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getX() + this.bounds()[3]);
++        out[1] = Math.min((double) blockposition.getY() + this.bounds()[1], (double) ((float) blockposition.getY() + (float) i * f));
++        out[2] = Math.min((double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getZ() + this.bounds()[5]);
++        out[3] = Math.max((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getX() + this.bounds()[3]);
++        out[4] = Math.max((double) blockposition.getY() + this.bounds()[1], (double) ((float) blockposition.getY() + (float) i * f));
++        out[5] = Math.max((double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getZ() + this.bounds()[5]);
+         return true;
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/BlockStairs.java b/src/main/java/net/minecraft/server/BlockStairs.java
+index 8d0d6d19c0bec847975fe9e0855fe5b01cd01a33..c97fc715265c9b313ff41e71fd8d9dfe637cccc2 100644
+--- a/src/main/java/net/minecraft/server/BlockStairs.java
++++ b/src/main/java/net/minecraft/server/BlockStairs.java
+@@ -13,8 +13,7 @@ public class BlockStairs extends Block {
+     private static final int[][] O = new int[][]{{4, 5}, {5, 7}, {6, 7}, {4, 6}, {0, 1}, {1, 3}, {2, 3}, {0, 2}};
+     private final Block modelBlock;
+     private final IBlockData modelState;
+-    private boolean hasRaytraced;
+-    private int rayTracePass;
++    // Athena - hasRaytraced and rayTracePass are per thread (AthenaThreadState): this block is shared by every world
+ 
+     protected BlockStairs(IBlockData iblockdata) {
+         super(iblockdata.getBlock().material);
+@@ -30,8 +29,10 @@ public class BlockStairs extends Block {
+ 
+     @Override
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+-        if (this.hasRaytraced) {
+-            this.setBlockBounds(0.5F * (float) (this.rayTracePass % 2), 0.5F * (float) (this.rayTracePass / 4 % 2), 0.5F * (float) (this.rayTracePass / 2 % 2), 0.5F + 0.5F * (float) (this.rayTracePass % 2), 0.5F + 0.5F * (float) (this.rayTracePass / 4 % 2), 0.5F + 0.5F * (float) (this.rayTracePass / 2 % 2));
++        AthenaThreadState state = AthenaThreadState.get(); // Athena - per thread
++        if (state.stairsRaytraced) {
++            int pass = state.stairsRayTracePass;
++            this.setBlockBounds(0.5F * (float) (pass % 2), 0.5F * (float) (pass / 4 % 2), 0.5F * (float) (pass / 2 % 2), 0.5F + 0.5F * (float) (pass % 2), 0.5F + 0.5F * (float) (pass / 4 % 2), 0.5F + 0.5F * (float) (pass / 2 % 2));
+         } else {
+             this.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 1.0F);
+         }
+@@ -510,10 +511,11 @@ public class BlockStairs extends Block {
+         boolean flag = iblockdata.get(BlockStairs.HALF) == BlockStairs.EnumHalf.TOP;
+         int[] aint = BlockStairs.O[i + (flag ? 4 : 0)];
+ 
+-        this.hasRaytraced = true;
++        AthenaThreadState state = AthenaThreadState.get(); // Athena - per thread
++        state.stairsRaytraced = true;
+ 
+         for (int j = 0; j < 8; ++j) {
+-            this.rayTracePass = j;
++            state.stairsRayTracePass = j;
+             if (Arrays.binarySearch(aint, j) < 0) {
+                 amovingobjectposition[j] = super.collisionRayTrace(world, blockposition, d0, d1, d2, d3, d4, d5);
+             }
+diff --git a/src/main/java/net/minecraft/server/BlockStem.java b/src/main/java/net/minecraft/server/BlockStem.java
+index 2353b12e96eb2a5f1d4219d491671852734e994b..00bf1e18a14f6d4648b2b42bc24ab58124cbdb52 100644
+--- a/src/main/java/net/minecraft/server/BlockStem.java
++++ b/src/main/java/net/minecraft/server/BlockStem.java
+@@ -101,10 +101,10 @@ public class BlockStem extends BlockPlant implements IBlockFragilePlantElement,
+     }
+ 
+     public void updateShape(IBlockAccess iblockaccess, BlockPosition blockposition) {
+-        this.maxY = (double) ((float) (((Integer) iblockaccess.getType(blockposition).get(BlockStem.AGE)).intValue() * 2 + 2) / 16.0F);
++        double maxY = (double) ((float) (((Integer) iblockaccess.getType(blockposition).get(BlockStem.AGE)).intValue() * 2 + 2) / 16.0F); // Athena - a local: the bounds are per thread
+         float f = 0.125F;
+ 
+-        this.setBlockBounds(0.5F - f, 0.0F, 0.5F - f, 0.5F + f, (float) this.maxY, 0.5F + f);
++        this.setBlockBounds(0.5F - f, 0.0F, 0.5F - f, 0.5F + f, (float) maxY, 0.5F + f);
+     }
+ 
+     public void dropNaturally(World world, BlockPosition blockposition, IBlockData iblockdata, float f, int i) {
+diff --git a/src/main/java/net/minecraft/server/BlockTripwire.java b/src/main/java/net/minecraft/server/BlockTripwire.java
+index 985979c9d7da7e484300c5f2c9519a585099efce..c525c55147c40a3e2c6f897322f5776a3a44c20d 100644
+--- a/src/main/java/net/minecraft/server/BlockTripwire.java
++++ b/src/main/java/net/minecraft/server/BlockTripwire.java
+@@ -154,7 +154,7 @@ public class BlockTripwire extends Block {
+         IBlockData iblockdata = world.getType(blockposition);
+         boolean flag = ((Boolean) iblockdata.get(BlockTripwire.POWERED)).booleanValue();
+         boolean flag1 = false;
+-        List list = world.getEntities((Entity) null, new AxisAlignedBB((double) blockposition.getX() + this.minX, (double) blockposition.getY() + this.minY, (double) blockposition.getZ() + this.minZ, (double) blockposition.getX() + this.maxX, (double) blockposition.getY() + this.maxY, (double) blockposition.getZ() + this.maxZ));
++        List list = world.getEntities((Entity) null, new AxisAlignedBB((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getY() + this.bounds()[1], (double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getX() + this.bounds()[3], (double) blockposition.getY() + this.bounds()[4], (double) blockposition.getZ() + this.bounds()[5]));
+ 
+         if (!list.isEmpty()) {
+             Iterator iterator = list.iterator();
+diff --git a/src/main/java/net/minecraft/server/BlockWaterLily.java b/src/main/java/net/minecraft/server/BlockWaterLily.java
+index 6a9771965afc0caaabc8242d04bd2f728ed77964..ceeee008fcf6546da82a753f26e2e671b0b9a6cb 100644
+--- a/src/main/java/net/minecraft/server/BlockWaterLily.java
++++ b/src/main/java/net/minecraft/server/BlockWaterLily.java
+@@ -23,12 +23,12 @@ public class BlockWaterLily extends BlockPlant {
+ 
+     @Override
+     public boolean getCollisionBounds(World world, BlockPosition blockposition, IBlockData iblockdata, double[] out) { // Athena - scalar collision shape
+-        out[0] = Math.min((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
+-        out[1] = Math.min((double) blockposition.getY() + this.minY, (double) blockposition.getY() + this.maxY);
+-        out[2] = Math.min((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
+-        out[3] = Math.max((double) blockposition.getX() + this.minX, (double) blockposition.getX() + this.maxX);
+-        out[4] = Math.max((double) blockposition.getY() + this.minY, (double) blockposition.getY() + this.maxY);
+-        out[5] = Math.max((double) blockposition.getZ() + this.minZ, (double) blockposition.getZ() + this.maxZ);
++        out[0] = Math.min((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getX() + this.bounds()[3]);
++        out[1] = Math.min((double) blockposition.getY() + this.bounds()[1], (double) blockposition.getY() + this.bounds()[4]);
++        out[2] = Math.min((double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getZ() + this.bounds()[5]);
++        out[3] = Math.max((double) blockposition.getX() + this.bounds()[0], (double) blockposition.getX() + this.bounds()[3]);
++        out[4] = Math.max((double) blockposition.getY() + this.bounds()[1], (double) blockposition.getY() + this.bounds()[4]);
++        out[5] = Math.max((double) blockposition.getZ() + this.bounds()[2], (double) blockposition.getZ() + this.bounds()[5]);
+         return true;
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/DispenserRegistry.java b/src/main/java/net/minecraft/server/DispenserRegistry.java
+index 24be98444754d78c99e382e9a56b0c2bef253b8e..18dd05d26d52ecdf93a350b2a35ff8f471ed3d3b 100644
+--- a/src/main/java/net/minecraft/server/DispenserRegistry.java
++++ b/src/main/java/net/minecraft/server/DispenserRegistry.java
+@@ -658,6 +658,7 @@ public class DispenserRegistry {
+             Item.registerItems();
+             StatisticList.init();
+             registerDispenserBehaviors();
++            Block.athenaFreezeBounds(); // Athena - bounds set from here on are per thread
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 59908d5b763b080e62a436adf3c203f7b61cc014..34c37295723bb6a4ae340709ee550e9d0cd7ebc8 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -32,6 +32,38 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public PlayerConnection playerConnection;
+     // Athena - between leaving one world and arriving in another ticked by a different thread (PlayerList.moveToWorld)
+     public volatile boolean athenaInTransit;
++    // Athena - what waits for the player to land (its packets, a teleportAsync's future); guarded by itself
++    private final java.util.ArrayList<Runnable> athenaUntilLanded = new java.util.ArrayList<Runnable>();
++
++    /**
++     * Athena - while the player is on its way between two worlds ticked by different threads: keeps
++     * {@code task} to run on the new world's thread once the player is in that world, and answers true.
++     * Otherwise answers false and keeps nothing.
++     */
++    public boolean athenaRunWhenLanded(Runnable task) {
++        synchronized (this.athenaUntilLanded) {
++            if (!this.athenaInTransit) return false;
++            this.athenaUntilLanded.add(task);
++            return true;
++        }
++    }
++
++    /** Athena - the player is in its new world (PlayerList.athenaLand): what waited for that runs now, on that world's thread. */
++    void athenaLanded() {
++        Runnable[] waiting;
++        synchronized (this.athenaUntilLanded) {
++            this.athenaInTransit = false;
++            waiting = this.athenaUntilLanded.toArray(new Runnable[0]);
++            this.athenaUntilLanded.clear();
++        }
++        for (Runnable task : waiting) {
++            try {
++                task.run();
++            } catch (Throwable throwable) {
++                logger.error("A task that waited for " + this.getName() + " to change worlds threw", throwable);
++            }
++        }
++    }
+     // Athena - the player's own tick count: its world's tick plus an offset that a move between worlds
+     // ticked by different threads sets so the count runs on without a jump (World.athenaCurrentTick of
+     // two such worlds differ by however long either has stalled). Player-side timers count this.
+diff --git a/src/main/java/net/minecraft/server/ItemPotion.java b/src/main/java/net/minecraft/server/ItemPotion.java
+index 3d2c5e93c67f002295020cc296b137e45cea268d..4343a8833163fdc95f408df2d081836ea9c0d95a 100644
+--- a/src/main/java/net/minecraft/server/ItemPotion.java
++++ b/src/main/java/net/minecraft/server/ItemPotion.java
+@@ -9,7 +9,7 @@ import java.util.Map;
+ 
+ public class ItemPotion extends Item {
+ 
+-    private Map<Integer, List<MobEffect>> effectCache = Maps.newHashMap();
++    private Map<Integer, List<MobEffect>> effectCache = new java.util.concurrent.ConcurrentHashMap<Integer, List<MobEffect>>(); // Athena - this item is shared by every world thread
+     private static final Map<List<MobEffect>, Integer> SUB_ITEMS_CACHE = Maps.newLinkedHashMap();
+ 
+     public ItemPotion() {
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 72f4d52e9761e7c93d96717580d5ec0f1eeb588f..6a6aab4da5ef38b06c7499b6a49a303b67a0fd11 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -460,7 +460,17 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             MinecraftServer.LOGGER.info("Stopping server");
+             // Athena start - every world back on this thread before plugins are disabled and worlds saved
+             for (WorldServer world : this.worlds) {
+-                world.athenaStopThread(10000L);
++                if (!world.athenaStopThread(10000L)) {
++                    // still in a tick on its own thread: its players are let go from here, and the world
++                    // is not saved, since that thread may be changing it as it is written
++                    world.savingDisabled = true;
++                    MinecraftServer.LOGGER.error("World " + world.getWorldData().getName() + " is not saved: its thread is still ticking");
++                    if (this.v != null) {
++                        for (EntityPlayer player : new ArrayList<EntityPlayer>(this.v.players)) {
++                            if (player.world == world) this.v.athenaDetach(player, "Server closed");
++                        }
++                    }
++                }
+             }
+             athena.server.AthenaThreadCheck.logReport();
+             // Athena end
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index 5ec391c0507ffd4ca687e1e70878ad45d39557ff..b7a7d5877e18485e08326388da645e364a7cbe60 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -636,6 +636,15 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     }
+     // PandaSpigot end
+ 
++    // Athena - a kick that cannot wait for the thread that owns this connection (PlayerList.athenaDetach:
++    // that thread is stuck, and what is queued for it would never go out): the kick is written now and
++    // flushed, and the channel closes behind it
++    void athenaKickNow(IChatBaseComponent reason) {
++        this.clearPacketQueue();
++        this.writePacket(new PacketPlayOutKickDisconnect(reason), null, Boolean.FALSE);
++        this.close(reason);
++    }
++
+     public void close(IChatBaseComponent ichatbasecomponent) {
+         // Spigot Start
+         this.preparing = false;
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 171ee07a3e8f8f10b8d055515b449df440f13fab..483472aca328c8118a80c990a9a2eebb5d7fd97a 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -2415,6 +2415,18 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         return !this.player.joining && !this.networkManager.channel.config().isAutoRead();
+     }
+ 
++    // Athena - PlayerList.athenaDetach: the quit is done on the server thread, so a disconnect that
++    // reaches the player's world later does nothing more
++    void athenaMarkDisconnected() {
++        this.processedDisconnect = true;
++    }
++
++    // Athena - whether the player's quit has been done (PlayerList.disconnect or athenaDetach). Unlike
++    // isDisconnected this holds for a player that has not ticked yet since its login
++    public boolean athenaQuitDone() {
++        return this.processedDisconnect;
++    }
++
+     static class SyntheticClass_1 {
+ 
+         static final int[] a;
+diff --git a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+index 64a90bf4fd157a47ac76389812d297b50efc23ef..45fbd27c6de708149c58ace3ccbf15cd5759ff10 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
++++ b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+@@ -34,6 +34,10 @@ public class PlayerConnectionUtils {
+                             now.postToMainThread(this);
+                             return;
+                         }
++                        // on its way into this world from another thread's: the packet waits until it is in
++                        if (((PlayerConnection) t0).player.athenaRunWhenLanded(this)) {
++                            return;
++                        }
+                     }
+                     packet.processPacket(t0);
+                 }
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index da2156f4acd9eab0a2bfc5f8b23418143ced47e4..17c445ee4bf488a23283e50a53c783ea32bd080e 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -215,7 +215,8 @@ public abstract class PlayerList {
+         // CraftBukkit - Moved from above, added world
+         PlayerList.logger.info(entityplayer.getName() + "[" + s1 + "] logged in with entity id " + entityplayer.getId() + " at ([" + entityplayer.world.worldData.getName() + "]" + entityplayer.locX + ", " + entityplayer.locY + ", " + entityplayer.locZ + ")");
+         // Athena - on to the world on its own thread the spawn event chose; see athenaHandOver above
+-        if (athenaHandOver != null && !playerconnection.isDisconnected()) {
++        // (not into a world whose thread is stuck: the player stays in the main world)
++        if (athenaHandOver != null && !playerconnection.isDisconnected() && !((CraftWorld) athenaHandOver.getWorld()).getHandle().athenaStalled()) {
+             entityplayer.getBukkitEntity().teleport(athenaHandOver, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN);
+         }
+     }
+@@ -452,6 +453,23 @@ public abstract class PlayerList {
+ 
+         while (iterator.hasNext()) {
+             entityplayer = (EntityPlayer) iterator.next();
++            // Athena start - the old player belongs to the thread that ticks its world: it is saved and
++            // kicked there. The new login waits meanwhile (LoginListener's state e: until the old
++            // player has left the list), or times out if that world never gets to it.
++            if (!entityplayer.getServerForPlayer().isMainThread()) {
++                if (entityplayer.getServerForPlayer().athenaStalled()) {
++                    this.athenaDetach(entityplayer, "You logged in from another location");
++                    continue;
++                }
++                final EntityPlayer old = entityplayer;
++                WorldServer.athenaRunForEntity(old, () -> {
++                    if (old.playerConnection.isDisconnected()) return;
++                    PlayerList.this.savePlayerFile(old);
++                    old.playerConnection.disconnect("You logged in from another location");
++                });
++                continue;
++            }
++            // Athena end
+             savePlayerFile(entityplayer); // CraftBukkit - Force the player's inventory to be saved
+             entityplayer.playerConnection.disconnect("You logged in from another location");
+         }
+@@ -643,32 +661,45 @@ public abstract class PlayerList {
+                 this.playersByName.put(entityplayer.getName(), entityplayer);
+                 this.uuidToPlayerMap.put(entityplayer.getUniqueID(), entityplayer);
+             }
+-            entityplayer.athenaInTransit = true;
+             final Location to = location;
+             final org.bukkit.World from = fromWorld;
+             final int clock = entityplayer.athenaTick();
+-            athenaTo.postToMainThread(() -> {
+-                try {
+-                    if (athenaTo.athenaUnloaded) {
+-                        // the world went away before the player got there: the main world instead,
+-                        // on the server thread, which runs the leftover tasks of a stopped world
+-                        WorldServer main = PlayerList.this.server.worlds.get(0);
+-                        BlockPosition spawn = main.getSpawn();
+-                        PlayerList.this.athenaArrive(entityplayer, from, new Location(main.getWorld(), spawn.getX() + 0.5D, spawn.getY(), spawn.getZ() + 0.5D), avoidSuffocation, clock);
+-                        return;
+-                    }
+-                    PlayerList.this.athenaArrive(entityplayer, from, to, avoidSuffocation, clock);
+-                } finally {
+-                    entityplayer.athenaInTransit = false;
+-                }
+-            });
+-            entityplayer.world = athenaTo; // from here the new world's thread owns the player
++            // where it is going, already: getLocation() after teleport() answers the destination
++            entityplayer.setLocation(to.getX(), to.getY(), to.getZ(), to.getYaw(), to.getPitch());
++            entityplayer.athenaInTransit = true;
++            entityplayer.world = athenaTo; // from here the new world's thread owns the player; its packets wait until it lands
++            athenaTo.postToMainThread(() -> PlayerList.this.athenaLand(entityplayer, athenaTo, from, to, avoidSuffocation, clock));
+             return entityplayer;
+         }
+         this.athenaArrive(entityplayer, fromWorld, location, avoidSuffocation, entityplayer.athenaTick());
+         return entityplayer;
+     }
+ 
++    /**
++     * The end of a move handed to another thread, on the thread that ticks {@code to}: the player
++     * arrives, and what waited for it runs. A world that is going (unloaded, being unloaded, halted
++     * after its thread threw) takes no one: the player goes on to the main world's spawn instead.
++     */
++    private void athenaLand(final EntityPlayer entityplayer, WorldServer to, final org.bukkit.World from, Location location, final boolean avoidSuffocation, final int clock) {
++        final WorldServer main = this.server.worlds.get(0);
++        if (to != main && (to.athenaUnloaded || to.athenaClosing || to.athenaHalted)) {
++            BlockPosition spawn = main.getSpawn();
++            final Location fallback = new Location(main.getWorld(), spawn.getX() + 0.5D, spawn.getY(), spawn.getZ() + 0.5D);
++            entityplayer.setLocation(fallback.getX(), fallback.getY(), fallback.getZ(), fallback.getYaw(), fallback.getPitch());
++            entityplayer.world = main;
++            main.postToMainThread(() -> PlayerList.this.athenaLand(entityplayer, main, from, fallback, avoidSuffocation, clock));
++            return;
++        }
++        try {
++            // a player that left on the way has had its quit (PlayerList.disconnect) and saved: it arrives nowhere
++            if (!entityplayer.playerConnection.isDisconnected() && !entityplayer.playerConnection.athenaQuitDone()) {
++                this.athenaArrive(entityplayer, from, location, avoidSuffocation, clock);
++            }
++        } finally {
++            entityplayer.athenaLanded();
++        }
++    }
++
+     // The second half of moveToWorld: the player into the new world, on the thread that ticks it.
+     private void athenaArrive(EntityPlayer entityplayer, org.bukkit.World fromWorld, Location location, boolean avoidSuffocation, int clock) {
+         EntityPlayer entityplayer1 = entityplayer;
+@@ -1187,6 +1218,66 @@ public abstract class PlayerList {
+     }
+     // Athena end
+ 
++    /**
++     * Athena - a player whose world's thread is stuck (AthenaWorldThread's watchdog has reported it)
++     * cannot be kicked there. The server thread does the player list's half of a disconnect instead:
++     * PlayerQuitEvent, out of the lists, others told, the connection closed. The world's half (out of
++     * its entities, chunk map and tracker) is left queued for that world's thread, in case it comes
++     * back. The player's data is saved as it stands. Server thread.
++     */
++    public void athenaDetach(EntityPlayer entityplayer, String reason) {
++        org.spigotmc.AsyncCatcher.catchOp("detach a player from a stuck world");
++        PlayerConnection connection = entityplayer.playerConnection;
++        if (connection == null || connection.isDisconnected()) return;
++        connection.athenaMarkDisconnected();
++        PlayerList.logger.warn(entityplayer.getName() + " was disconnected from " + entityplayer.world.getWorldData().getName() + ", whose thread is stuck: " + reason);
++
++        PlayerQuitEvent playerQuitEvent = new PlayerQuitEvent(cserver.getPlayer(entityplayer), net.kyori.adventure.text.Component.translatable("multiplayer.player.left").arguments(net.kyori.adventure.text.Component.text(entityplayer.getName())).color(net.kyori.adventure.text.format.NamedTextColor.YELLOW));
++        cserver.getPluginManager().callEvent(playerQuitEvent);
++        try {
++            this.savePlayerFile(entityplayer); // the stuck thread may be partway through changing it; as it stands
++        } catch (Throwable throwable) {
++            PlayerList.logger.warn("Could not save " + entityplayer.getName() + " while its world is stuck", throwable);
++        }
++
++        this.players.remove(entityplayer);
++        this.playersByName.remove(entityplayer.getName());
++        UUID uuid = entityplayer.getUniqueID();
++        if (this.uuidToPlayerMap.get(uuid) == entityplayer) {
++            this.uuidToPlayerMap.remove(uuid);
++            this.playerStatFiles.remove(uuid);
++        }
++        PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.REMOVE_PLAYER, entityplayer);
++        for (int i = 0; i < this.players.size(); i++) {
++            EntityPlayer other = (EntityPlayer) this.players.get(i);
++            if (other.getBukkitEntity().canSee(entityplayer.getBukkitEntity())) {
++                other.playerConnection.sendPacket(packet);
++            } else {
++                other.getBukkitEntity().removeDisconnectingPlayer(entityplayer.getBukkitEntity());
++            }
++        }
++        cserver.getScoreboardManager().removePlayer(entityplayer.getBukkitEntity());
++        net.kyori.adventure.text.Component quitMessage = playerQuitEvent.quitMessage();
++        if (quitMessage != null && !quitMessage.equals(net.kyori.adventure.text.Component.empty())) {
++            this.sendMessage(com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(quitMessage));
++        }
++
++        connection.networkManager.athenaKickNow(new ChatComponentText(reason));
++        connection.networkManager.disableAutoRead();
++
++        final WorldServer world = entityplayer.getServerForPlayer();
++        world.athenaRunOnTickThread(() -> {
++            if (entityplayer.world != world) return;
++            if (entityplayer.vehicle != null && !(entityplayer.vehicle instanceof EntityPlayer)) {
++                world.removeEntity(entityplayer.vehicle);
++            }
++            world.kill(entityplayer);
++            world.getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer);
++        });
++        ChunkIOExecutor.adjustPoolSize(this.getPlayerCount());
++        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.adjustPoolSize(this.getPlayerCount());
++    }
++
+     public void savePlayers() {
+         for (int i = 0; i < this.players.size(); ++i) {
+             // Athena start - each player is saved on the thread that ticks its world, which is the one
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index e5949bc705e0286e7e602d7aa3967baf7afa0ee0..c65bb94cb8089def256d9eecd259747d451ce2be 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1666,16 +1666,43 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread == null) return true;
+         if (!thread.stopAndJoin(timeoutMillis)) {
+-            MinecraftServer.LOGGER.error("World " + this.worldData.getName() + "'s thread did not stop within " + timeoutMillis + " ms; it keeps the world");
++            MinecraftServer.LOGGER.error("World " + this.worldData.getName() + "'s thread did not stop within " + timeoutMillis + " ms; it keeps the world until its tick ends, then hands it back to the server thread");
+             return false;
+         }
++        if (thread.failed()) {
++            this.athenaRecoverFailedThread(thread); // it threw on its way out: halted, as any failure
++            return true;
++        }
++        this.athenaTakeBack(thread);
++        return true;
++    }
++
++    /**
++     * The world back on the server thread from {@code thread}, which has left its loop: what is still
++     * queued for it, its preloads and its finished chunk loads go along. Server thread; after a stop,
++     * or posted by the thread itself when the stop gave up waiting for it (AthenaWorldThread.stopAndJoin).
++     */
++    void athenaTakeBack(AthenaWorldThread thread) {
++        if (this.athenaThread != thread) return;
++        if (thread.failed()) {
++            this.athenaRecoverFailedThread(thread);
++            return;
++        }
+         this.athenaThread = null;
+         thread.handBack();
+         AthenaChunkPreloader.INSTANCE.adoptAll(thread.preloader);
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.handBack(this);
+         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.handBack(this);
+-        return true;
+     }
++
++    /** Whether this world's thread is stuck in a tick (the watchdog has reported it) or gone without handing the world back yet. */
++    public boolean athenaStalled() {
++        AthenaWorldThread thread = this.athenaThread;
++        return thread != null && thread.stalled();
++    }
++
++    /** Set by CraftServer.unloadWorld while it stops this world's thread: players on their way here go to the main world instead. */
++    public volatile boolean athenaClosing;
+     // Athena end
+ 
+     static class BlockActionDataList extends ArrayList<BlockActionData> {
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 923986051c6545d84a821807b16c11cc1ab4bb56..ff6097f70027ce87d2c823304dc20976ac286030 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1085,10 +1085,21 @@ public final class CraftServer implements Server {
+             return false;
+         }
+ 
+-        // Athena - a world on its own thread comes back to this thread first
++        // Athena start - a world on its own thread comes back to this thread first. Meanwhile players on
++        // their way in go to the main world instead (PlayerList.athenaLand), and any that got in before
++        // that keep the world loaded, as players always have
++        boolean athenaThreaded = handle.athenaIsThreaded();
++        handle.athenaClosing = true;
+         if (!handle.athenaStopThread(10000L)) {
++            handle.athenaClosing = false;
+             return false;
+         }
++        if (handle.players.size() > 0) {
++            handle.athenaClosing = false;
++            if (athenaThreaded && !handle.athenaHalted) handle.athenaStartThread();
++            return false;
++        }
++        // Athena end
+ 
+         // Athena - save=false must also settle decoration before the world and its files disappear.
+         net.minecraft.server.ChunkDecorationExecutor.flush(handle);
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 9ac74aae36047152d53a0f18dcee2bcbf656486f..c69370e1058cbf93a18b0399ea7a46f30019c663 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -401,15 +401,38 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+ 
+     @Override
+     public void kickPlayer(String message) {
++        if (this.athenaKickElsewhere(() -> this.kickPlayer(message), message == null ? "" : message)) return; // Athena
+         org.spigotmc.AsyncCatcher.catchOp( "player kick", getHandle().world ); // Spigot // Athena - the thread that ticks the player's world
+         if (getHandle().playerConnection == null) return;
+ 
+         getHandle().playerConnection.disconnect(message == null ? "" : message);
+     }
+ 
++    /**
++     * Athena - a kick from a thread that does not tick the player's world: it runs on the one that
++     * does, later. If that world's thread is stuck, the server thread disconnects the player without
++     * it (PlayerList.athenaDetach). Answers whether the kick was handed on.
++     */
++    private boolean athenaKickElsewhere(Runnable kick, String reason) {
++        final EntityPlayer handle = getHandle();
++        final net.minecraft.server.WorldServer world = handle.getServerForPlayer();
++        if (world.isMainThread()) return false;
++        if (world.athenaStalled()) {
++            if (net.minecraft.server.MinecraftServer.getServer().isMainThread()) {
++                server.getHandle().athenaDetach(handle, reason);
++            } else {
++                net.minecraft.server.MinecraftServer.getServer().processQueue.add(() -> server.getHandle().athenaDetach(handle, reason));
++            }
++        } else {
++            net.minecraft.server.WorldServer.athenaRunForEntity(handle, kick);
++        }
++        return true;
++    }
++
+     // PandaSpigot start - Adventure
+     @Override
+     public void kick(net.kyori.adventure.text.Component message) {
++        if (this.athenaKickElsewhere(() -> this.kick(message), message == null ? "" : com.hpfxd.pandaspigot.adventure.PandaAdventure.asVanilla(message).getUnformattedText())) return; // Athena
+         org.spigotmc.AsyncCatcher.catchOp( "player kick", getHandle().world ); // Athena - the thread that ticks the player's world
+         if (getHandle().playerConnection == null) return;
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+index 4bb24a6b3796d75b6e7013994cd15486cde3cc41..7943e127e3d5e59f655d4ae1cd724060f93fdd8c 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+@@ -93,7 +93,7 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+ 
+         public void run() {
+             if (initAsync()) {
+-                athenaFinishedQueue(this).add(this); // Athena - the owning world's queue, or the server thread's
++                athenaQueueFinished(this); // Athena - the owning world's queue, or the server thread's
+             }
+         }
+ 
+@@ -230,9 +230,21 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+     // Athena - completed tasks of worlds that tick on their own threads, finished there (finishActive(owner, ...))
+     final Map<Object, Queue<Task>> athenaOwnerFinished = new java.util.concurrent.ConcurrentHashMap<Object, Queue<Task>>();
+ 
+-    Queue<Task> athenaFinishedQueue(Task task) {
++    /** Queues a completed task for the thread that finishes it: its world's own, or the server thread. */
++    void athenaQueueFinished(Task task) {
+         Object owner = provider.athenaOwner(task.parameter);
+-        return owner == null ? finished : athenaOwnerFinished.computeIfAbsent(owner, key -> new ConcurrentLinkedQueue<Task>());
++        if (owner == null) {
++            finished.add(task);
++            return;
++        }
++        Queue<Task> queue = athenaOwnerFinished.computeIfAbsent(owner, key -> new ConcurrentLinkedQueue<Task>());
++        queue.add(task);
++        // the world may have gone back to the server thread meanwhile and its queue been handed back
++        // already (athenaHandBack): then the task follows it there, and a queue left empty is dropped
++        if (provider.athenaOwner(task.parameter) != owner && queue.remove(task)) {
++            if (queue.isEmpty()) athenaOwnerFinished.remove(owner, queue);
++            athenaQueueFinished(task);
++        }
+     }
+     final ThreadPoolExecutor pool;
+ 
+@@ -386,7 +398,7 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+ 
+         while ((task = finished.poll()) != null) {
+             if (provider.athenaOwner(task.parameter) != null) {
+-                athenaFinishedQueue(task).add(task); // its world moved to its own thread meanwhile
++                athenaQueueFinished(task); // its world moved to its own thread meanwhile
+                 continue;
+             }
+             task.finish();
+@@ -410,7 +422,7 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+ 
+         while ((task = finished.poll()) != null) {
+             if (provider.athenaOwner(task.parameter) != owner) {
+-                athenaFinishedQueue(task).add(task);
++                athenaQueueFinished(task);
+                 continue;
+             }
+             task.finish();
+diff --git a/src/test/java/net/minecraft/server/AthenaBlockBoundsThreadsTest.java b/src/test/java/net/minecraft/server/AthenaBlockBoundsThreadsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a9eb9849265aea5e8504ea3c826cc3213a9a883
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaBlockBoundsThreadsTest.java
+@@ -0,0 +1,62 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNull;
++
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.atomic.AtomicReference;
++
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * A block is one object for every world, and the shaped ones (slabs, stairs, ...) write their bounds
++ * and read them back. Worlds on their own threads do that at the same time; each thread must read
++ * back what it wrote (Block.bounds).
++ */
++public class AthenaBlockBoundsThreadsTest extends AbstractTestingBase {
++
++    @Test
++    public void eachThreadReadsItsOwnBounds() throws InterruptedException {
++        final Block slab = Blocks.STONE_SLAB;
++        final AtomicReference<String> failure = new AtomicReference<String>();
++        final CountDownLatch go = new CountDownLatch(1);
++        Thread[] threads = new Thread[4];
++        for (int n = 0; n < threads.length; n++) {
++            final float top = 0.25F + 0.125F * n; // every thread its own shape
++            threads[n] = new Thread(() -> {
++                try {
++                    go.await();
++                    for (int i = 0; i < 200000 && failure.get() == null; i++) {
++                        slab.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, top, 1.0F);
++                        Thread.yield();
++                        if (slab.getBlockBoundsMaxY() != (double) top) {
++                            failure.compareAndSet(null, "read " + slab.getBlockBoundsMaxY() + " after setting " + top);
++                        }
++                    }
++                } catch (InterruptedException e) {
++                    Thread.currentThread().interrupt();
++                }
++            });
++            threads[n].start();
++        }
++        go.countDown();
++        for (Thread thread : threads) thread.join();
++        assertNull(failure.get());
++    }
++
++    @Test
++    public void aNewThreadSeesTheRegisteredBounds() throws InterruptedException {
++        final Block snow = Blocks.SNOW_LAYER;
++        final double[] seen = new double[2];
++        Thread before = new Thread(() -> seen[0] = snow.getBlockBoundsMaxY());
++        before.start();
++        before.join();
++        snow.setBlockBounds(0.0F, 0.0F, 0.0F, 1.0F, 0.75F, 1.0F); // this thread only
++        Thread after = new Thread(() -> seen[1] = snow.getBlockBoundsMaxY());
++        after.start();
++        after.join();
++        assertEquals(seen[0], seen[1], 0.0D);
++        assertEquals(0.75D, snow.getBlockBoundsMaxY(), 0.0D);
++    }
++}

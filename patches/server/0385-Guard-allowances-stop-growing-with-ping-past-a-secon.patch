@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 1 Nov 2026 00:20:56 +0900
+Subject: [PATCH] Guard: allowances stop growing with ping past a second
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 8ebd101da31a4a09fe41c7b332aebf950abb550e..9c9bfad075b249e6f75ef2ec2da75af4f4b31fea 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -132,6 +132,18 @@ public final class AthenaGuard {
+         AthenaGuard.maxReach = maxReach;
+     }
+ 
++    // Athena - the most lag any allowance stretches for. ping is the average round trip of the
++    // keep-alives, and a client makes it as large as it likes by answering them late - up to the
++    // 30 s timeout. Each allowance below grows with it: at 20 s of ping a single hit allowed 410
++    // ticks of knockback-sized moves. Past a second a player cannot really fight anyway, and the
++    // reach check's lookback already stopped at 20 ticks.
++    static final int MAX_LAG_MILLIS = 1000;
++
++    /** The ticks of lag an allowance adds for this ping: one per 50 ms, at most MAX_LAG_MILLIS' worth. */
++    static int lagTicks(int ping) {
++        return Math.max(0, Math.min(ping, MAX_LAG_MILLIS)) / 50;
++    }
++
+     /** Whether the server's own reading of the ground replaces the client's onGround flag. */
+     static boolean authoritative() {
+         return enabled && enforce && movement;
+@@ -189,8 +201,8 @@ public final class AthenaGuard {
+ 
+         this.grantH = Math.max(this.grantH, h);
+         this.grantV = Math.max(this.grantV, y);
+-        this.grantUntil = MinecraftServer.currentTick + 10 + this.player.ping / 50;
+-        this.grantMoves = 10 + this.player.ping / 50;
++        this.grantUntil = MinecraftServer.currentTick + 10 + lagTicks(this.player.ping);
++        this.grantMoves = 10 + lagTicks(this.player.ping);
+         this.grantSentTick = MinecraftServer.currentTick;
+     }
+ 
+@@ -242,7 +254,7 @@ public final class AthenaGuard {
+         this.awaitX = packet.athenaX();
+         this.awaitY = packet.athenaY();
+         this.awaitZ = packet.athenaZ();
+-        this.awaitBudget = (packet.athenaAbsolute() ? 40 : 4) + this.player.ping / 50;
++        this.awaitBudget = (packet.athenaAbsolute() ? 40 : 4) + lagTicks(this.player.ping);
+     }
+ 
+     /** Called on the Netty thread as a movement packet arrives; the clock is the arrival time. */
+@@ -662,7 +674,7 @@ public final class AthenaGuard {
+             this.speedAmp = s;
+             this.jumpAmp = j;
+             this.walkSpeed = w;
+-            this.effectsGraceUntil = tick + 20 + this.player.ping / 50;
++            this.effectsGraceUntil = tick + 20 + lagTicks(this.player.ping);
+         } else if (tick > this.effectsGraceUntil) {
+             this.speedAmp = s;
+             this.jumpAmp = j;
+@@ -788,7 +800,7 @@ public final class AthenaGuard {
+         // the attack was made a tick before the move that follows it, so the eye may be off by that move
+         double slack = Math.min(this.lastH, 1.0D) + 0.03D;
+         double reach = maxReach + 0.1D + slack;
+-        int lookback = Math.min(20, 4 + (this.player.ping + 49) / 50);
++        int lookback = Math.min(20, 4 + lagTicks(this.player.ping + 49));
+         double best = Double.MAX_VALUE;
+         double bestMinX = 0, bestMinY = 0, bestMinZ = 0, bestMaxX = 0, bestMaxY = 0, bestMaxZ = 0;
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardLagTest.java b/src/test/java/net/minecraft/server/AthenaGuardLagTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..672fb84c685528400e46fa1d727e535e4029efb7
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardLagTest.java
+@@ -0,0 +1,30 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import org.junit.Test;
++
++// Athena - a client that answers keep-alives late inflates its ping at will: the guard's allowances
++// stop growing at AthenaGuard.MAX_LAG_MILLIS
++public class AthenaGuardLagTest {
++
++    @Test
++    public void oneTickPerFiftyMillisecondsUpToTheCap() {
++        assertEquals(0, AthenaGuard.lagTicks(0));
++        assertEquals(0, AthenaGuard.lagTicks(49));
++        assertEquals(1, AthenaGuard.lagTicks(50));
++        assertEquals(6, AthenaGuard.lagTicks(320));
++        assertEquals(AthenaGuard.MAX_LAG_MILLIS / 50, AthenaGuard.lagTicks(AthenaGuard.MAX_LAG_MILLIS));
++    }
++
++    @Test
++    public void aPingInflatedByLateKeepAlivesBuysNoMore() {
++        assertEquals(20, AthenaGuard.lagTicks(20000));
++        assertEquals(20, AthenaGuard.lagTicks(Integer.MAX_VALUE));
++    }
++
++    @Test
++    public void aNegativePingCountsAsNone() {
++        assertEquals(0, AthenaGuard.lagTicks(-1));
++    }
++}

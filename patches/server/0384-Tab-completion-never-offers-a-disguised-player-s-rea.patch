@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 1 Nov 2026 00:20:56 +0900
+Subject: [PATCH] Tab completion never offers a disguised player's real name to
+ anyone else
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index cefedbab5ac3ec163e315e382a64568b2d43c3c6..8b835d74d2ed25047497217d9ea028e8eb6cbc29 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1735,11 +1735,54 @@ public final class CraftServer implements Server {
+         }
+         org.bukkit.event.server.TabCompleteEvent tabEvent = new org.bukkit.event.server.TabCompleteEvent(player, message, offers, message.startsWith("/"), blockPosition != null ? new Location(player.getWorld(), blockPosition.getX(), blockPosition.getY(), blockPosition.getZ()) : null);
+         getPluginManager().callEvent(tabEvent);
+-        return tabEvent.isCancelled() ? Collections.emptyList() : tabEvent.getCompletions();
++        return tabEvent.isCancelled() ? Collections.emptyList() : athenaWithoutRealNames(player, tabEvent.getCompletions()); // Athena - /disguise
+         // PandaSpigot end
+     }
+     // PaperSpigot end
+ 
++    // Athena start - /disguise: a disguised player's real name is never offered to anyone else.
++    //
++    // The chat and the commands' own completion offer the disguise (Athena.getNameSeenBy), but a
++    // plugin's completion, a vanilla command's or a TabCompleteEvent handler builds its list from
++    // getName(), and the real name in it says who is under the disguise. Such a name is left out
++    // rather than swapped for the disguise: the plugin matched it against what was typed, and the
++    // disguise standing in for a real name that starts with those letters would give it away too.
++    private List<String> athenaWithoutRealNames(Player viewer, List<String> completions) {
++        if (completions.isEmpty()) {
++            return completions;
++        }
++        java.util.Set<String> hidden = null;
++
++        for (EntityPlayer player : this.playerList.players) {
++            if (player.athenaDisguise != null && player.getBukkitEntity() != viewer) {
++                if (hidden == null) {
++                    hidden = new java.util.TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
++                }
++                hidden.add(player.getName());
++            }
++        }
++        return hidden == null ? completions : athenaWithout(completions, hidden);
++    }
++
++    /** The completions that are not in {@code hidden} (a case-insensitive set); the list itself when none is. */
++    static List<String> athenaWithout(List<String> completions, java.util.Set<String> hidden) {
++        List<String> kept = null;
++
++        for (int i = 0; i < completions.size(); ++i) {
++            String completion = completions.get(i);
++
++            if (completion != null && hidden.contains(completion)) {
++                if (kept == null) {
++                    kept = new ArrayList<String>(completions.subList(0, i));
++                }
++            } else if (kept != null) {
++                kept.add(completion);
++            }
++        }
++        return kept == null ? completions : kept;
++    }
++    // Athena end
++
+     public List<String> tabCompleteCommand(Player player, String message) {
+         return tabCompleteCommand(player, message, null); // PaperSpigot - location tab-completes. Original code here moved below
+     }
+@@ -1779,8 +1822,9 @@ public final class CraftServer implements Server {
+         PlayerChatTabCompleteEvent event = new PlayerChatTabCompleteEvent(player, message, completions);
+         String token = event.getLastToken();
+         for (Player p : getOnlinePlayers()) {
+-            if (player.canSee(p) && StringUtil.startsWithIgnoreCase(p.getName(), token)) {
+-                completions.add(p.getName());
++            String name = athena.api.Athena.getNameSeenBy(player, p); // Athena - a disguised player under the disguise
++            if (player.canSee(p) && StringUtil.startsWithIgnoreCase(name, token)) {
++                completions.add(name);
+             }
+         }
+         pluginManager.callEvent(event);
+diff --git a/src/test/java/org/bukkit/craftbukkit/AthenaTabCompleteDisguiseTest.java b/src/test/java/org/bukkit/craftbukkit/AthenaTabCompleteDisguiseTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5b8f1a91c848a4bca2a16bd029c2dbcb20f339c5
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/AthenaTabCompleteDisguiseTest.java
+@@ -0,0 +1,40 @@
++package org.bukkit.craftbukkit;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertSame;
++
++import java.util.Arrays;
++import java.util.Collections;
++import java.util.List;
++import java.util.Set;
++import java.util.TreeSet;
++import org.junit.Test;
++
++// Athena - the last step of tab completion leaves out a disguised player's real name, whoever put
++// it in the list (a plugin, a vanilla command, a TabCompleteEvent handler)
++public class AthenaTabCompleteDisguiseTest {
++
++    private static Set<String> hidden(String... names) {
++        Set<String> set = new TreeSet<String>(String.CASE_INSENSITIVE_ORDER);
++        set.addAll(Arrays.asList(names));
++        return set;
++    }
++
++    @Test
++    public void realNamesAreLeftOutIgnoringCaseAndTheOrderKept() {
++        List<String> completions = Arrays.asList("alex", "Steve", "SwiftFox482", "STEVE", "sam");
++        assertEquals(Arrays.asList("alex", "SwiftFox482", "sam"), CraftServer.athenaWithout(completions, hidden("steve")));
++    }
++
++    @Test
++    public void aListWithNoRealNameIsReturnedAsItIs() {
++        List<String> completions = Collections.unmodifiableList(Arrays.asList("alex", "sam"));
++        assertSame(completions, CraftServer.athenaWithout(completions, hidden("Steve")));
++    }
++
++    @Test
++    public void aNullEntryIsKept() {
++        // TabCompleteEvent handlers can put anything in; filtering must not throw on it
++        assertEquals(Arrays.asList(null, "sam"), CraftServer.athenaWithout(Arrays.asList(null, "Steve", "sam"), hidden("Steve")));
++    }
++}

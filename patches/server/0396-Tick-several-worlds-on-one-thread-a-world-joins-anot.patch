@@ -1,0 +1,630 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 22:54:06 +0900
+Subject: [PATCH] Tick several worlds on one thread: a world joins another's
+ thread and leaves it alone
+
+AthenaWorldThread ticks a list of worlds. WorldServer.athenaJoinThread puts a
+world on the thread that ticks another, so players and entities move between
+them at once and one thread owns both; athenaStopThread on a world that shares
+its thread takes that world off at the end of a tick (or, if the thread is
+stuck, once it gets there) and leaves the thread to the others. Tasks are
+tagged with their world and follow a world that left. The watchdog, the
+world-stopped section for vanilla commands and the failure handling work per
+thread; a thread that throws halts all its worlds. An unload that gives up
+puts the world back on its thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 55034d46b840f7785faeb5b9cd549ef14f89d755..6b4589ad072b472c457091e2c2b6eaf3364028b4 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -344,6 +344,13 @@ public final class AthenaServerImpl implements AthenaServer {
+         ((CraftWorld) world).getHandle().athenaStartThread();
+     }
+ 
++    @Override
++    public void joinWorldThread(World world, World owner) {
++        Validate.notNull(world, "World may not be null");
++        Validate.notNull(owner, "Owner may not be null");
++        ((CraftWorld) world).getHandle().athenaJoinThread(((CraftWorld) owner).getHandle());
++    }
++
+     @Override
+     public boolean stopWorldThread(World world) {
+         Validate.notNull(world, "World may not be null");
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index e1f42da4600f52b401b823feb743103055528e1e..3bf7c3896976ff9af13cc00bdce1afd8a542c9ab 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -1,22 +1,27 @@
+ package net.minecraft.server;
+ 
++import java.util.List;
+ import java.util.Queue;
+ import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CopyOnWriteArrayList;
+ import java.util.concurrent.TimeUnit;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
+ 
+ /**
+- * Athena - a world that ticks on its own thread instead of the server thread.
++ * Athena - worlds that tick on a thread of their own instead of the server thread.
+  *
+  * The thread runs the same per-world tick the server thread runs for the other worlds
+- * (MinecraftServer.athenaTickWorld) every 50 ms, plus the tasks queued for the world
+- * (WorldServer.postToMainThread, Athena.runOnWorld). While it runs, only this thread may touch
+- * the world: AsyncCatcher.catchOp(reason, world) and WorldServer.isMainThread answer for it. A
+- * stall here (a slow plugin, a long chunk load) holds up this world alone; the server thread and
+- * the other worlds keep their 20 ticks a second, and the watchdog below reports the stall. A
+- * throwable out of the tick stops this world's thread instead of the server: the server thread takes
+- * the world back, halted (WorldServer.athenaRecoverFailedThread).
++ * (MinecraftServer.athenaTickWorld) every 50 ms, plus the tasks queued for its worlds
++ * (WorldServer.postToMainThread, Athena.runOnWorld). It starts with one world
++ * (WorldServer.athenaStartThread); more may join it (WorldServer.athenaJoinThread), so that the worlds
++ * of one game - a match's map and its deathmatch arenas - are ticked by one thread and move players
++ * and entities between them as worlds on the server thread do. While it runs, only this thread may
++ * touch its worlds: AsyncCatcher.catchOp(reason, world) and WorldServer.isMainThread answer for it. A
++ * stall here (a slow plugin, a long chunk load) holds up these worlds alone; the server thread and
++ * the other threads keep their 20 ticks a second, and the watchdog below reports the stall. A
++ * throwable out of the tick stops this thread instead of the server: the server thread takes its
++ * worlds back, halted (WorldServer.athenaRecoverFailedThread).
+  */
+ public final class AthenaWorldThread extends Thread {
+ 
+@@ -25,16 +30,24 @@ public final class AthenaWorldThread extends Thread {
+     /** How far behind the thread may fall before it stops trying to catch up, in ticks. */
+     private static final int MAX_CATCH_UP = 20;
+ 
+-    final WorldServer world;
+-    /** The chunk preloads of this world; see AthenaChunkPreloader.forWorld. */
++    /**
++     * The worlds this thread ticks, in the order they came: the one it was started for, then those
++     * that joined. Added to by the server thread (athenaJoinThread), taken from by this thread between
++     * two ticks (leave); read by anyone.
++     */
++    final List<WorldServer> worlds = new CopyOnWriteArrayList<WorldServer>();
++    /** The chunk preloads of these worlds; see AthenaChunkPreloader.forWorld. */
+     final AthenaChunkPreloader preloader = new AthenaChunkPreloader(this);
+-    private final Queue<Runnable> tasks = new ConcurrentLinkedQueue<Runnable>();
++    /** Tasks for its worlds, each tagged with its world: one that has left this thread meanwhile is passed on to its new owner. */
++    private final Queue<Task> tasks = new ConcurrentLinkedQueue<Task>();
++    /** Worlds the server thread asked to take off this thread (leave). */
++    private final Queue<Leave> leaving = new ConcurrentLinkedQueue<Leave>();
+     private volatile boolean running = true;
+     /** System.nanoTime() when the last tick ended, for a watchdog and for tests. */
+     volatile long lastTickEnd = System.nanoTime();
+     /** Ticks this thread has run. */
+     volatile long ticks;
+-    /** Set when a tick threw: the thread stopped and the world no longer ticks. */
++    /** Set when a tick threw: the thread stopped and its worlds no longer tick. */
+     volatile Throwable failure;
+     /** Set by the watchdog while it has reported this thread stalled. */
+     volatile boolean stallReported;
+@@ -43,12 +56,32 @@ public final class AthenaWorldThread extends Thread {
+     /** For tests only (set by reflection): the name of a world whose next tick throws. */
+     static volatile String crashForTest;
+ 
++    private static final class Task {
++        final WorldServer world;
++        final Runnable runnable;
++
++        Task(WorldServer world, Runnable runnable) {
++            this.world = world;
++            this.runnable = runnable;
++        }
++    }
++
+     AthenaWorldThread(WorldServer world) {
+         super("World thread - " + world.getWorldData().getName());
+-        this.world = world;
++        this.worlds.add(world);
+         this.setDaemon(true);
+     }
+ 
++    /** The names of its worlds, for the log. */
++    String worldNames() {
++        StringBuilder names = new StringBuilder();
++        for (WorldServer world : this.worlds) {
++            if (names.length() > 0) names.append(", ");
++            names.append(world.getWorldData().getName());
++        }
++        return names.toString();
++    }
++
+     private static volatile boolean started;
+ 
+     /**
+@@ -73,6 +106,16 @@ public final class AthenaWorldThread extends Thread {
+     /** Set once the thread has stopped and its leftover tasks went to the server thread. */
+     private volatile boolean handedBack;
+ 
++    /** The live world threads, each once, in the order of their first world. */
++    static java.util.Set<AthenaWorldThread> threads(MinecraftServer server) {
++        java.util.Set<AthenaWorldThread> threads = new java.util.LinkedHashSet<AthenaWorldThread>();
++        for (WorldServer world : server.worlds) {
++            AthenaWorldThread thread = world.athenaThread;
++            if (thread != null) threads.add(thread);
++        }
++        return threads;
++    }
++
+     // ---- the watchdog ----
+ 
+     /** How long a world thread may go without finishing a tick before it is reported; athena.yml. */
+@@ -84,8 +127,8 @@ public final class AthenaWorldThread extends Thread {
+ 
+     /**
+      * Once a second: a world thread that has not finished a tick for stallMillis is reported once,
+-     * with its stack, and WorldThreadStallEvent is called; once it ticks again that is reported too.
+-     * Spigot's watchdog, which stops the server, watches the server thread only.
++     * with its stack, and WorldThreadStallEvent is called for each of its worlds; once it ticks again
++     * that is reported too. Spigot's watchdog, which stops the server, watches the server thread only.
+      */
+     private static void watch() {
+         while (true) {
+@@ -93,21 +136,21 @@ public final class AthenaWorldThread extends Thread {
+                 Thread.sleep(1000L);
+                 MinecraftServer server = MinecraftServer.getServer();
+                 if (server == null) continue;
+-                for (WorldServer world : server.worlds) {
+-                    AthenaWorldThread thread = world.athenaThread;
+-                    if (thread == null || !thread.isAlive() || thread.failed()) continue;
++                for (AthenaWorldThread thread : threads(server)) {
++                    if (!thread.isAlive() || thread.failed()) continue;
+                     long since = thread.millisSinceTick();
++                    String names = thread.worldNames();
+                     if (!thread.stallReported && since >= stallMillis) {
+                         thread.stallReported = true;
+                         StringBuilder stack = new StringBuilder();
+                         for (StackTraceElement element : thread.getStackTrace()) {
+                             stack.append("\n\tat ").append(element);
+                         }
+-                        LOGGER.error("World " + world.getWorldData().getName() + " has not finished a tick for " + since + " ms; the server and the other worlds go on. Its thread is at:" + stack);
++                        LOGGER.error("World " + names + " has not finished a tick for " + since + " ms; the server and the other worlds go on. Its thread is at:" + stack);
+                         thread.callStall(since, false);
+                     } else if (thread.stallReported && since < 1000L) {
+                         thread.stallReported = false;
+-                        LOGGER.warn("World " + world.getWorldData().getName() + " is ticking again after " + thread.lastStallMillis + " ms");
++                        LOGGER.warn("World " + names + " is ticking again after " + thread.lastStallMillis + " ms");
+                         thread.callStall(thread.lastStallMillis, true);
+                     }
+                     thread.lastStallMillis = thread.stallReported ? Math.max(thread.lastStallMillis, since) : 0L;
+@@ -121,10 +164,12 @@ public final class AthenaWorldThread extends Thread {
+     }
+ 
+     private void callStall(long millis, boolean recovered) {
+-        try {
+-            org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.WorldThreadStallEvent(this.world.getWorld(), millis, recovered));
+-        } catch (Throwable throwable) {
+-            LOGGER.warn("A WorldThreadStallEvent listener threw", throwable);
++        for (WorldServer world : this.worlds) {
++            try {
++                org.bukkit.Bukkit.getPluginManager().callEvent(new athena.api.event.WorldThreadStallEvent(world.getWorld(), millis, recovered));
++            } catch (Throwable throwable) {
++                LOGGER.warn("A WorldThreadStallEvent listener threw", throwable);
++            }
+         }
+     }
+ 
+@@ -157,7 +202,7 @@ public final class AthenaWorldThread extends Thread {
+      * world. A world thread that does not reach the end of its tick within {@code timeoutMillis}
+      * (a stall) leaves the task not run.
+      *
+-     * @return null once the task ran; else the name of the world whose thread did not stop
++     * @return null once the task ran; else the names of the worlds whose thread did not stop
+      */
+     public static String runWithWorldsStopped(Runnable task, long timeoutMillis) {
+         org.spigotmc.AsyncCatcher.catchOp("stop the world threads");
+@@ -167,9 +212,8 @@ public final class AthenaWorldThread extends Thread {
+         }
+         MinecraftServer server = MinecraftServer.getServer();
+         java.util.List<AthenaWorldThread> threads = new java.util.ArrayList<AthenaWorldThread>();
+-        for (WorldServer world : server.worlds) {
+-            AthenaWorldThread thread = world.athenaThread;
+-            if (thread != null && thread.isAlive() && !thread.failed()) threads.add(thread);
++        for (AthenaWorldThread thread : threads(server)) {
++            if (thread.isAlive() && !thread.failed()) threads.add(thread);
+         }
+         Stop current = new Stop();
+         stop = current;
+@@ -179,7 +223,7 @@ public final class AthenaWorldThread extends Thread {
+             for (AthenaWorldThread thread : threads) {
+                 while (!current.arrived.contains(thread) && thread.isAlive() && !thread.failed()) {
+                     if (System.nanoTime() > deadline) {
+-                        return thread.world.getWorldData().getName();
++                        return thread.worldNames();
+                     }
+                     java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
+                 }
+@@ -209,21 +253,89 @@ public final class AthenaWorldThread extends Thread {
+         if (interrupted) Thread.currentThread().interrupt();
+     }
+ 
+-    /** Queues {@code task} to run on this thread before its next tick. */
+-    void post(Runnable task) {
+-        this.tasks.add(task);
++    /** Queues {@code task} for {@code world} to run on this thread before its next tick. */
++    void post(WorldServer world, Runnable task) {
++        this.tasks.add(new Task(world, task));
+         if (this.handedBack) {
+             // posted by someone who still saw this thread after it stopped: the server thread runs it
+             this.handBack();
+         }
+     }
+ 
+-    /** After the thread stopped: the tasks still queued go to the server thread, which owns the world again. */
++    /** After the thread stopped: the tasks still queued go to the server thread, which owns its worlds again. */
+     void handBack() {
+         this.handedBack = true;
+-        Runnable task;
++        Task task;
+         while ((task = this.tasks.poll()) != null) {
+-            MinecraftServer.getServer().processQueue.add(task);
++            MinecraftServer.getServer().processQueue.add(task.runnable);
++        }
++    }
++
++    // ---- worlds joining and leaving ----
++
++    /** WorldServer.athenaJoinThread: {@code world}, whose athenaThread is already this, is ticked from the next tick on. Server thread. */
++    void join(WorldServer world) {
++        this.worlds.add(world);
++    }
++
++    /** A request to take one world off this thread; see leave. */
++    private static final class Leave {
++        final WorldServer world;
++        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
++        /** leave gave up waiting; guarded by this. */
++        boolean abandoned;
++
++        Leave(WorldServer world) {
++            this.world = world;
++        }
++    }
++
++    /**
++     * Takes {@code world} off this thread, which goes on ticking its other worlds: at the end of the
++     * tick in progress, this thread sets the world's athenaThread to null, and from then on the server
++     * thread owns it and tasks still queued here for it are passed on there. Waits for that. Server
++     * thread.
++     *
++     * @return whether it happened within {@code timeoutMillis}; if not, the request stands and this
++     *         thread hands the world over once its tick ends (WorldServer.athenaAfterLeave)
++     */
++    boolean leave(WorldServer world, long timeoutMillis) {
++        Leave leave = new Leave(world);
++        this.leaving.add(leave);
++        java.util.concurrent.locks.LockSupport.unpark(this);
++        boolean done = false;
++        try {
++            done = leave.done.await(timeoutMillis, TimeUnit.MILLISECONDS);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++        if (done) return true;
++        synchronized (leave) {
++            if (leave.done.getCount() == 0L) return true;
++            leave.abandoned = true;
++            return false;
++        }
++    }
++
++    /** At the top of the loop: lets go of the worlds the server thread asked for. */
++    private void runLeaves() {
++        Leave leave;
++        while ((leave = this.leaving.poll()) != null) {
++            final WorldServer world = leave.world;
++            this.worlds.remove(world);
++            if (world.athenaThread == this) world.athenaThread = null; // the server thread's from here
++            boolean abandoned;
++            synchronized (leave) {
++                leave.done.countDown();
++                abandoned = leave.abandoned;
++            }
++            if (abandoned) {
++                LOGGER.warn("World " + world.getWorldData().getName() + " left its thread late; the server thread ticks it again");
++                MinecraftServer.getServer().processQueue.add(world::athenaAfterLeave);
++            }
++        }
++        if (this.worlds.isEmpty()) {
++            this.running = false; // nothing left to tick
+         }
+     }
+ 
+@@ -243,9 +355,12 @@ public final class AthenaWorldThread extends Thread {
+     @Override
+     public void run() {
+         long next = System.nanoTime();
++        MinecraftServer server = MinecraftServer.getServer();
+         try {
+             while (this.running) {
+                 this.waitIfStopped();
++                this.runLeaves();
++                if (!this.running) break;
+                 long now = System.nanoTime();
+                 if (now < next) {
+                     java.util.concurrent.locks.LockSupport.parkNanos(next - now);
+@@ -258,22 +373,33 @@ public final class AthenaWorldThread extends Thread {
+                 next += TICK_NANOS;
+ 
+                 this.runTasks();
++                List<WorldServer> worlds = this.worlds;
+                 String crash = crashForTest;
+-                if (crash != null && crash.equals(this.world.getWorldData().getName())) {
+-                    crashForTest = null;
+-                    throw new IllegalStateException("A tick of " + crash + " that a test made fail");
++                if (crash != null) {
++                    for (WorldServer world : worlds) {
++                        if (crash.equals(world.getWorldData().getName())) {
++                            crashForTest = null;
++                            throw new IllegalStateException("A tick of " + crash + " that a test made fail");
++                        }
++                    }
+                 }
+-                ++this.world.athenaCurrentTick;
+-                // the server thread's tick, for one world: chunk loads that finished, time updates, the
+-                // world, then the connections of the players in it; their packets are batched the same way
++                for (WorldServer world : worlds) ++world.athenaCurrentTick;
++                // the server thread's tick, for these worlds: chunk loads that finished, time updates, the
++                // worlds, then the connections of the players in them; their packets are batched the same way
+                 NetworkManager.athenaBeginBatch();
+                 try {
+-                    org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick(this.world);
+-                    org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(this.world);
++                    for (WorldServer world : worlds) {
++                        org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick(world);
++                        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(world);
++                    }
+                     this.preloader.tick();
+-                    this.world.sendWorldTimeUpdate(false);
+-                    MinecraftServer.getServer().athenaTickWorld(this.world);
+-                    this.tickConnections();
++                    for (WorldServer world : worlds) {
++                        world.sendWorldTimeUpdate(false);
++                        server.athenaTickWorld(world);
++                    }
++                    for (WorldServer world : worlds) {
++                        this.tickConnections(world);
++                    }
+                 } finally {
+                     NetworkManager.athenaEndBatch();
+                 }
+@@ -281,36 +407,40 @@ public final class AthenaWorldThread extends Thread {
+                 this.lastTickEnd = System.nanoTime();
+             }
+             this.runTasks();
+-            // a stop that gave up waiting (stopAndJoin) left the world with this thread: hand it back now
++            // a stop that gave up waiting (stopAndJoin) left the worlds with this thread: hand them back now
+             boolean abandoned;
+             synchronized (this.stopLock) {
+                 this.exited = true;
+                 abandoned = this.stopAbandoned;
+             }
+             if (abandoned) {
+-                LOGGER.warn("World " + this.world.getWorldData().getName() + "'s thread stopped late; the server thread ticks the world again");
++                LOGGER.warn("World " + this.worldNames() + "'s thread stopped late; the server thread ticks the world again");
+                 final AthenaWorldThread self = this;
+-                MinecraftServer.getServer().processQueue.add(() -> self.world.athenaTakeBack(self));
++                for (final WorldServer world : this.worlds) {
++                    server.processQueue.add(() -> world.athenaTakeBack(self));
++                }
+             }
+         } catch (Throwable throwable) {
+             this.failure = throwable;
+             this.running = false;
+-            LOGGER.error("World " + this.world.getWorldData().getName() + " stopped ticking: its thread threw", throwable);
+-            // the server thread takes the world back; until then nothing ticks it
++            LOGGER.error("World " + this.worldNames() + " stopped ticking: its thread threw", throwable);
++            // the server thread takes the worlds back; until then nothing ticks them
+             final AthenaWorldThread self = this;
+-            MinecraftServer.getServer().processQueue.add(() -> self.world.athenaRecoverFailedThread(self));
++            for (final WorldServer world : this.worlds) {
++                server.processQueue.add(() -> world.athenaRecoverFailedThread(self));
++            }
+         } finally {
+             alive.decrementAndGet();
+         }
+     }
+ 
+     /**
+-     * ServerConnection.networkTick for the players in this world: each connection's queued packets
++     * ServerConnection.networkTick for the players in {@code world}: each connection's queued packets
+      * and its tick (keep-alive, chat throttle, idle kick). A closed connection is left to the server
+      * thread, which takes it off its list and posts its disconnect here.
+      */
+-    private void tickConnections() {
+-        Object[] players = this.world.players.toArray();
++    private void tickConnections(WorldServer world) {
++        Object[] players = world.players.toArray();
+         for (Object human : players) {
+             if (!(human instanceof EntityPlayer)) continue;
+             PlayerConnection connection = ((EntityPlayer) human).playerConnection;
+@@ -329,12 +459,17 @@ public final class AthenaWorldThread extends Thread {
+     }
+ 
+     private void runTasks() {
+-        Runnable task;
++        Task task;
+         while ((task = this.tasks.poll()) != null) {
++            if (task.world != null && task.world.athenaThread != this) {
++                // its world has left this thread (leave): its new owner runs it
++                task.world.athenaRunOnTickThread(task.runnable);
++                continue;
++            }
+             try {
+-                task.run();
++                task.runnable.run();
+             } catch (Throwable throwable) {
+-                LOGGER.error("A task for world " + this.world.getWorldData().getName() + " threw", throwable);
++                LOGGER.error("A task for world " + (task.world != null ? task.world.getWorldData().getName() : this.worldNames()) + " threw", throwable);
+             }
+         }
+     }
+@@ -343,15 +478,15 @@ public final class AthenaWorldThread extends Thread {
+     private final Object stopLock = new Object();
+     /** The loop has ended and its last tasks ran; guarded by stopLock. */
+     private boolean exited;
+-    /** stopAndJoin gave up waiting; the thread hands the world back itself when it gets there. Guarded by stopLock. */
++    /** stopAndJoin gave up waiting; the thread hands the worlds back itself when it gets there. Guarded by stopLock. */
+     private boolean stopAbandoned;
+ 
+     /**
+      * Asks the thread to finish its tick and stop, and waits for it. The request stands even when the
+-     * wait times out: the thread stops once its tick ends, and then hands the world back to the server
+-     * thread itself (WorldServer.athenaTakeBack), so the world is never left with a thread that is gone.
++     * wait times out: the thread stops once its tick ends, and then hands its worlds back to the server
++     * thread itself (WorldServer.athenaTakeBack), so a world is never left with a thread that is gone.
+      *
+-     * @return whether it stopped within {@code timeoutMillis}; if not, it still owns the world for now
++     * @return whether it stopped within {@code timeoutMillis}; if not, it still owns its worlds for now
+      */
+     boolean stopAndJoin(long timeoutMillis) {
+         this.running = false;
+@@ -379,7 +514,7 @@ public final class AthenaWorldThread extends Thread {
+         return true;
+     }
+ 
+-    /** Whether the watchdog sees this thread stuck in a tick, or it has died without handing the world back yet. */
++    /** Whether the watchdog sees this thread stuck in a tick, or it has died without handing its worlds back yet. */
+     boolean stalled() {
+         return this.stallReported || this.getState() == Thread.State.TERMINATED;
+     }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index c65bb94cb8089def256d9eecd259747d451ce2be..dc9754be868007a1fdf0211ff55492cb72e29737 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1544,7 +1544,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             return com.google.common.util.concurrent.Futures.immediateFuture(null);
+         }
+         com.google.common.util.concurrent.ListenableFutureTask<Object> task = com.google.common.util.concurrent.ListenableFutureTask.create(runnable, null);
+-        thread.post(task);
++        thread.post(this, task);
+         return task;
+     }
+ 
+@@ -1589,7 +1589,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     public void athenaRunOnTickThread(Runnable task) {
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread != null) {
+-            thread.post(task);
++            thread.post(this, task);
+         } else {
+             this.server.processQueue.add(task);
+         }
+@@ -1621,6 +1621,40 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         thread.start();
+     }
+ 
++    /**
++     * Moves this world's ticking onto the thread that already ticks {@code owner}, so the two are
++     * ticked by one thread: players and entities move between them at once, as between worlds on the
++     * server thread, and that thread alone touches both. Call on the server thread, which owns this
++     * world until then and does not touch it after.
++     */
++    public void athenaJoinThread(WorldServer owner) {
++        org.spigotmc.AsyncCatcher.catchOp("join a world thread");
++        AthenaWorldThread thread = owner.athenaThread;
++        if (thread == null) {
++            throw new IllegalStateException("World " + owner.worldData.getName() + " does not tick on a thread of its own; start one for it first");
++        }
++        if (thread.failed() || !thread.isAlive()) {
++            throw new IllegalStateException("World " + owner.worldData.getName() + "'s thread has stopped");
++        }
++        if (this.athenaThread == thread) return;
++        if (this.athenaThread != null) {
++            throw new IllegalStateException("World " + this.worldData.getName() + " already ticks on a thread of its own; stop it first");
++        }
++        if (this.athenaHalted) {
++            throw new IllegalStateException("World " + this.worldData.getName() + " stopped ticking after its thread threw; it cannot be given a thread again");
++        }
++        if (this.athenaInTick) {
++            throw new IllegalStateException("Cannot move world " + this.worldData.getName() + " to another thread from inside its own tick; do it from a scheduler task or a command");
++        }
++        if (this == this.server.worlds.get(0)) {
++            throw new IllegalStateException("The main world " + this.worldData.getName() + " cannot tick on its own thread");
++        }
++        ChunkDecorationExecutor.flush(this);
++        this.athenaCurrentTick = MinecraftServer.currentTick;
++        this.athenaThread = thread; // the thread's from here; it ticks it from its next tick on
++        thread.join(this);
++    }
++
+     /**
+      * After this world's thread threw (AthenaWorldThread.run): the server thread takes the world back,
+      * halted - it owns it but no longer ticks it - calls WorldThreadFailureEvent, and sends the players
+@@ -1665,6 +1699,15 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         org.spigotmc.AsyncCatcher.catchOp("stop a world thread");
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread == null) return true;
++        if (thread.worlds.size() > 1 && !thread.failed()) {
++            // the thread goes on with its other worlds; only this one comes back
++            if (!thread.leave(this, timeoutMillis)) {
++                MinecraftServer.LOGGER.error("World " + this.worldData.getName() + "'s thread did not let it go within " + timeoutMillis + " ms; it keeps the world until its tick ends, then hands it back to the server thread");
++                return false;
++            }
++            this.athenaAfterLeave();
++            return true;
++        }
+         if (!thread.stopAndJoin(timeoutMillis)) {
+             MinecraftServer.LOGGER.error("World " + this.worldData.getName() + "'s thread did not stop within " + timeoutMillis + " ms; it keeps the world until its tick ends, then hands it back to the server thread");
+             return false;
+@@ -1695,6 +1738,33 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.handBack(this);
+     }
+ 
++    /**
++     * For a stop that may have to be undone (CraftServer.unloadWorld): puts this world back on the
++     * thread it has now if that one still ticks other worlds, else on a new thread of its own.
++     */
++    public Runnable athenaThreadRestorer() {
++        final AthenaWorldThread thread = this.athenaThread;
++        if (thread == null) return () -> {};
++        return () -> {
++            if (this.athenaHalted || this.athenaThread != null) return;
++            if (thread.isAlive() && !thread.failed()) {
++                for (WorldServer other : thread.worlds) {
++                    if (other != this && other.athenaThread == thread) {
++                        this.athenaJoinThread(other);
++                        return;
++                    }
++                }
++            }
++            this.athenaStartThread();
++        };
++    }
++
++    /** After this world left a thread that ticks others too (AthenaWorldThread.leave): its finished chunk loads come back here. Server thread. */
++    void athenaAfterLeave() {
++        org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.handBack(this);
++        org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.handBack(this);
++    }
++
+     /** Whether this world's thread is stuck in a tick (the watchdog has reported it) or gone without handing the world back yet. */
+     public boolean athenaStalled() {
+         AthenaWorldThread thread = this.athenaThread;
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index ff6097f70027ce87d2c823304dc20976ac286030..4f14e628015ba66e106d7c7f04bb8f207de29946 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1088,7 +1088,7 @@ public final class CraftServer implements Server {
+         // Athena start - a world on its own thread comes back to this thread first. Meanwhile players on
+         // their way in go to the main world instead (PlayerList.athenaLand), and any that got in before
+         // that keep the world loaded, as players always have
+-        boolean athenaThreaded = handle.athenaIsThreaded();
++        Runnable athenaRestoreThread = handle.athenaThreadRestorer();
+         handle.athenaClosing = true;
+         if (!handle.athenaStopThread(10000L)) {
+             handle.athenaClosing = false;
+@@ -1096,7 +1096,7 @@ public final class CraftServer implements Server {
+         }
+         if (handle.players.size() > 0) {
+             handle.athenaClosing = false;
+-            if (athenaThreaded && !handle.athenaHalted) handle.athenaStartThread();
++            athenaRestoreThread.run();
+             return false;
+         }
+         // Athena end

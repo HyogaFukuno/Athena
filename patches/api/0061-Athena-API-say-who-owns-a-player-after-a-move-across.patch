@@ -1,0 +1,117 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 21:07:56 +0900
+Subject: [PATCH] Athena API: say who owns a player after a move across
+ threads, and lock events until worlds have threads
+
+teleportAsync completes once a player handed to another world's thread is in
+that world, on that thread; the javadoc says what may follow a cross-thread
+teleport, that a kick from any thread works even when the player's world is
+stuck, that reading a world belongs on its thread too, and that a stop which
+times out hands the world back later. SimplePluginManager calls synchronous
+events under its lock again until the first world thread starts
+(athenaLockFree), as Bukkit does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 5d88087e9642deb286dc64033db6f630c5809fc9..75efaad9c6a0cd3d2d0570d422704c9e082787b6 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -227,8 +227,15 @@ public final class Athena {
+      * from any thread. It does not make the work after the teleport any lighter: for many players at
+      * once, see {@link #teleportGradually(List, List, int)}.
+      *
++     * <p>A player moved into a world that another thread ticks is handed over: {@code Player.teleport}
++     * returns as soon as the player has left, and from then on only the new world's thread may touch
++     * the player. This future completes once the player is in the new world, on that world's thread,
++     * so what follows the move belongs in {@code thenAccept}.
++     *
+      * @return completes on the thread that ticks the entity's world: true if the entity was
+-     *         teleported, false if it was gone by then or a plugin cancelled the teleport
++     *         teleported, false if it was gone by then or a plugin cancelled the teleport; for a player
++     *         handed to another thread, true once it is in the new world (false if that world went away
++     *         meanwhile and the player was sent to the main world instead)
+      */
+     public static CompletableFuture<Boolean> teleportAsync(Entity entity, Location location) {
+         return getServer().teleportAsync(entity, location);
+@@ -410,20 +417,29 @@ public final class Athena {
+     /**
+      * Moves {@code world}'s ticking off the server thread onto a thread of its own. A stall in that
+      * world (a slow listener, a long chunk load) then holds up that world alone, and the server
+-     * thread and the other worlds keep ticking. From then on only that thread may touch the world:
+-     * use {@link #runOnWorld} to work on it from elsewhere. Aikar's timings are turned off.
++     * thread and the other worlds keep ticking. From then on only that thread may touch the world -
++     * reading it too: {@code World.getPlayers()} and {@code getEntities()} walk lists that thread
++     * changes. Use {@link #runOnWorld} to work on it from elsewhere. Aikar's timings are turned off.
+      *
+      * <p>Players in the world go with it: their packets, connection ticks, commands, chat
+      * callbacks and quits run on the world's thread. A player moves between worlds ticked by
+      * different threads in two steps: it leaves on its old world's thread and arrives on the new
+      * one's, so {@code teleport} returns before the player is there, and a player on the way cannot
+-     * be teleported again. A login aimed at such a world lands in the main world and is then moved.
++     * be teleported again. After such a {@code teleport} the calling thread no longer owns the player:
++     * {@code getLocation} already answers the destination, but changes to the player (effects, game
++     * mode, inventory) belong after {@link #teleportAsync}'s future, which completes on the new
++     * world's thread once the player is there. A player headed for a world that is unloaded or halted
++     * meanwhile lands at the main world's spawn. A login aimed at such a world lands in the main world
++     * and is then moved.
+      * Other entities move the same way: written out and removed on the old world's thread, made again
+      * on the new one's (riders and leashes stay behind). The main world cannot have its own thread.
+      *
+      * <p>Vanilla commands then run on the server thread with every world thread waiting between two
+      * ticks, since they may touch any world; one typed in a world on its own thread runs a moment
+-     * later. A scoreboard may be changed from any thread, and so may who hides whom.
++     * later. A scoreboard may be changed from any thread, and so may who hides whom. A kick from
++     * another thread is passed on to the player's world's thread; if that thread is stuck (see
++     * {@link athena.api.event.WorldThreadStallEvent}), the server thread disconnects the player
++     * itself, so a stuck world never keeps its players from leaving or logging in again.
+      *
+      * @throws IllegalStateException if {@code world} is the main world, or this is called from inside
+      *         the world's own tick
+@@ -436,7 +452,8 @@ public final class Athena {
+      * Hands {@code world}'s ticking back to the server thread: waits up to 10 seconds for its thread
+      * to finish the tick it is in. Unloading a world does this itself.
+      *
+-     * @return false if the thread did not stop in time; it then still owns the world
++     * @return false if the thread did not stop in time; it then still owns the world until its tick
++     *         ends, and hands the world back to the server thread by itself then
+      */
+     public static boolean stopWorldThread(World world) {
+         return getServer().stopWorldThread(world);
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index 1ac53c91397bfba3c5d57eb1342374751f8fad54..457d472d093ed1df14962020b5234c36735e420d 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -535,6 +535,12 @@ public final class SimplePluginManager implements PluginManager {
+      *
+      * @param event Event details
+      */
++    /**
++     * Athena - set by the server when the first world starts ticking on its own thread: synchronous
++     * events are no longer called under one lock from then on. Until then, as in Bukkit.
++     */
++    public static volatile boolean athenaLockFree;
++
+     public void callEvent(Event event) {
+         if (event.isAsynchronous()) {
+             if (Thread.holdsLock(this)) {
+@@ -544,12 +550,16 @@ public final class SimplePluginManager implements PluginManager {
+                 throw new IllegalStateException(event.getEventName() + " cannot be triggered asynchronously from primary server thread.");
+             }
+             fireEvent(event);
+-        } else {
+-            // Athena - no lock: worlds that tick on their own threads call their events at the same
++        } else if (athenaLockFree) {
++            // Athena - no lock once worlds tick on their own threads: they call their events at the same
+             // time, and one world stuck in a listener must not hold up the others' events. The
+             // handler lists are already safe to read from any thread (HandlerList bakes them under
+             // its own lock); listeners that share state between worlds must guard it themselves.
+             fireEvent(event);
++        } else {
++            synchronized (this) {
++                fireEvent(event);
++            }
+         }
+     }
+ 

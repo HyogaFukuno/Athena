@@ -1,0 +1,12 @@
+== base/server-classes
+[14:46:29 ERROR]: java.lang.NullPointerException: Cannot invoke "java.lang.CharSequence.length()" because "seq" is null
+  client fails on PacketPlayOutScoreboardTeam: io.netty.handler.codec.CorruptedFrameException: Bad VarInt decoded
+RESULT,threshold=-1,bad_packet_bytes=17,frames=2,broken_frames=1,first_packet=PacketPlayOutScoreboardTeam,keepalive_read=true
+[14:46:29 ERROR]: java.lang.NullPointerException: Cannot invoke "java.lang.CharSequence.length()" because "seq" is null
+  client fails on PacketPlayOutScoreboardTeam: io.netty.handler.codec.CorruptedFrameException: Bad VarInt decoded
+RESULT,threshold=256,bad_packet_bytes=20,frames=2,broken_frames=1,first_packet=PacketPlayOutScoreboardTeam,keepalive_read=true
+== <repo>/PandaSpigot-Server/build/classes/java/main
+[14:46:30 ERROR]: Dropped a PacketPlayOutScoreboardTeam that failed to write
+RESULT,threshold=-1,bad_packet_bytes=0,frames=1,broken_frames=0,first_packet=PacketPlayOutKeepAlive,keepalive_read=true
+RESULT,threshold=256,bad_packet_bytes=0,frames=1,broken_frames=0,first_packet=PacketPlayOutKeepAlive,keepalive_read=true
+[14:46:30 ERROR]: Dropped a PacketPlayOutScoreboardTeam that failed to write

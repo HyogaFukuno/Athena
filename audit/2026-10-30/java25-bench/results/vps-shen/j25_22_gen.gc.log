@@ -1,0 +1,320 @@
+[2026-10-30T19:36:19.155+0900] Min heap equals to max heap, disabling ShenandoahUncommit
+[2026-10-30T19:36:19.158+0900] Heuristics ergonomically sets -XX:GCTimeRatio=70
+[2026-10-30T19:36:19.158+0900] Heuristics ergonomically sets -XX:+ExplicitGCInvokesConcurrent
+[2026-10-30T19:36:19.158+0900] Heuristics ergonomically sets -XX:+ShenandoahImplicitGCInvokesConcurrent
+[2026-10-30T19:36:19.158+0900] Heuristics ergonomically sets -XX:+UseCondCardMark
+[2026-10-30T19:36:19.158+0900] Using Shenandoah
+[2026-10-30T19:36:20.732+0900] Trigger (Young): Learning 1 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:36:20.733+0900] GC(0) Concurrent reset (Young) 0.225ms
+[2026-10-30T19:36:20.733+0900] GC(0) Pause Init Mark (Young) 0.033ms
+[2026-10-30T19:36:20.735+0900] GC(0) Concurrent remembered set scanning 0.287ms
+[2026-10-30T19:36:20.747+0900] GC(0) Concurrent marking roots 12.051ms
+[2026-10-30T19:36:20.829+0900] GC(0) Concurrent marking (Young) 81.695ms
+[2026-10-30T19:36:20.829+0900] GC(0) Pause Final Mark (Young) 0.124ms
+[2026-10-30T19:36:20.832+0900] GC(0) Concurrent thread roots 1.320ms
+[2026-10-30T19:36:20.832+0900] GC(0) Concurrent weak references (Young) 0.876ms
+[2026-10-30T19:36:20.837+0900] GC(0) Concurrent weak roots (Young) 4.225ms
+[2026-10-30T19:36:20.837+0900] GC(0) Concurrent cleanup (Young) 37M->35M(144M) 0.025ms
+[2026-10-30T19:36:20.840+0900] GC(0) Concurrent strong roots 3.329ms
+[2026-10-30T19:36:20.874+0900] GC(0) Concurrent evacuation 33.869ms
+[2026-10-30T19:36:20.875+0900] GC(0) Concurrent Init Update Refs (Young) 1.162ms
+[2026-10-30T19:36:20.875+0900] GC(0) Pause Init Update Refs 0.004ms
+[2026-10-30T19:36:20.913+0900] GC(0) Concurrent update references 35.875ms
+[2026-10-30T19:36:20.915+0900] GC(0) Concurrent update thread roots 2.209ms
+[2026-10-30T19:36:20.916+0900] GC(0) Pause Final Update Refs 0.063ms
+[2026-10-30T19:36:20.917+0900] GC(0) Concurrent cleanup (Young) 42M->16M(144M) 0.036ms
+[2026-10-30T19:36:20.917+0900] GC(0) Concurrent reset after collect (Young) 0.435ms
+[2026-10-30T19:36:21.064+0900] Trigger (Young): Learning 2 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:36:21.065+0900] GC(1) Concurrent reset (Young) 0.226ms
+[2026-10-30T19:36:21.065+0900] GC(1) Pause Init Mark (Young) 0.024ms
+[2026-10-30T19:36:21.067+0900] GC(1) Concurrent remembered set scanning 0.086ms
+[2026-10-30T19:36:21.073+0900] GC(1) Concurrent marking roots 6.429ms
+[2026-10-30T19:36:21.124+0900] GC(1) Concurrent marking (Young) 50.309ms
+[2026-10-30T19:36:21.124+0900] GC(1) Pause Final Mark (Young) 0.090ms
+[2026-10-30T19:36:21.124+0900] GC(1) Concurrent thread roots 0.358ms
+[2026-10-30T19:36:21.125+0900] GC(1) Concurrent weak references (Young) 0.125ms
+[2026-10-30T19:36:21.126+0900] GC(1) Concurrent weak roots (Young) 1.483ms
+[2026-10-30T19:36:21.126+0900] GC(1) Concurrent cleanup (Young) 31M->21M(144M) 0.019ms
+[2026-10-30T19:36:21.130+0900] GC(1) Concurrent strong roots 3.443ms
+[2026-10-30T19:36:21.142+0900] GC(1) Concurrent evacuation 12.030ms
+[2026-10-30T19:36:21.142+0900] GC(1) Concurrent Init Update Refs (Young) 0.068ms
+[2026-10-30T19:36:21.142+0900] GC(1) Pause Init Update Refs 0.003ms
+[2026-10-30T19:36:21.171+0900] GC(1) Concurrent update references 29.159ms
+[2026-10-30T19:36:21.171+0900] GC(1) Concurrent update thread roots 0.197ms
+[2026-10-30T19:36:21.171+0900] GC(1) Pause Final Update Refs 0.051ms
+[2026-10-30T19:36:21.171+0900] GC(1) Concurrent cleanup (Young) 34M->27M(144M) 0.009ms
+[2026-10-30T19:36:21.172+0900] GC(1) Concurrent reset after collect (Young) 0.147ms
+[2026-10-30T19:36:21.235+0900] Trigger (Young): Learning 3 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:36:21.235+0900] GC(2) Concurrent reset (Young) 0.069ms
+[2026-10-30T19:36:21.235+0900] GC(2) Pause Init Mark (Young) 0.018ms
+[2026-10-30T19:36:21.251+0900] GC(2) Concurrent remembered set scanning 15.549ms
+[2026-10-30T19:36:21.258+0900] GC(2) Concurrent marking roots 7.245ms
+[2026-10-30T19:36:21.306+0900] GC(2) Concurrent marking (Young) 48.301ms
+[2026-10-30T19:36:21.307+0900] GC(2) Pause Final Mark (Young) 0.129ms
+[2026-10-30T19:36:21.309+0900] GC(2) Concurrent thread roots 2.513ms
+[2026-10-30T19:36:21.309+0900] GC(2) Concurrent weak references (Young) 0.097ms
+[2026-10-30T19:36:21.310+0900] GC(2) Concurrent weak roots (Young) 0.506ms
+[2026-10-30T19:36:21.310+0900] GC(2) Concurrent cleanup (Young) 46M->27M(144M) 0.026ms
+[2026-10-30T19:36:21.312+0900] GC(2) Concurrent strong roots 2.443ms
+[2026-10-30T19:36:21.314+0900] GC(2) Concurrent evacuation 1.279ms
+[2026-10-30T19:36:21.314+0900] GC(2) Concurrent Init Update Refs (Young) 0.064ms
+[2026-10-30T19:36:21.314+0900] GC(2) Pause Init Update Refs 0.002ms
+[2026-10-30T19:36:21.344+0900] GC(2) Concurrent update references 30.086ms
+[2026-10-30T19:36:21.345+0900] GC(2) Concurrent update thread roots 0.752ms
+[2026-10-30T19:36:21.345+0900] GC(2) Pause Final Update Refs 0.084ms
+[2026-10-30T19:36:21.347+0900] GC(2) Concurrent cleanup (Young) 27M->24M(144M) 0.025ms
+[2026-10-30T19:36:21.347+0900] GC(2) Concurrent reset after collect (Young) 0.200ms
+[2026-10-30T19:36:21.683+0900] Trigger (Young): Learning 4 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:36:21.683+0900] GC(3) Concurrent reset (Young) 0.062ms
+[2026-10-30T19:36:21.684+0900] GC(3) Pause Init Mark (Young) 0.025ms
+[2026-10-30T19:36:21.695+0900] GC(3) Concurrent remembered set scanning 11.009ms
+[2026-10-30T19:36:21.702+0900] GC(3) Concurrent marking roots 7.492ms
+[2026-10-30T19:36:21.745+0900] GC(3) Concurrent marking (Young) 43.244ms
+[2026-10-30T19:36:21.746+0900] GC(3) Pause Final Mark (Young) 0.128ms
+[2026-10-30T19:36:21.747+0900] GC(3) Concurrent thread roots 0.933ms
+[2026-10-30T19:36:21.747+0900] GC(3) Concurrent weak references (Young) 0.097ms
+[2026-10-30T19:36:21.749+0900] GC(3) Concurrent weak roots (Young) 2.025ms
+[2026-10-30T19:36:21.749+0900] GC(3) Concurrent cleanup (Young) 40M->28M(144M) 0.026ms
+[2026-10-30T19:36:21.752+0900] GC(3) Concurrent strong roots 3.524ms
+[2026-10-30T19:36:21.759+0900] GC(3) Concurrent evacuation 6.799ms
+[2026-10-30T19:36:21.760+0900] GC(3) Concurrent Init Update Refs (Young) 0.158ms
+[2026-10-30T19:36:21.760+0900] GC(3) Pause Init Update Refs 0.006ms
+[2026-10-30T19:36:21.785+0900] GC(3) Concurrent update references 25.479ms
+[2026-10-30T19:36:21.786+0900] GC(3) Concurrent update thread roots 1.086ms
+[2026-10-30T19:36:21.786+0900] GC(3) Pause Final Update Refs 0.050ms
+[2026-10-30T19:36:21.787+0900] GC(3) Concurrent cleanup (Young) 32M->22M(144M) 0.019ms
+[2026-10-30T19:36:21.787+0900] GC(3) Concurrent reset after collect (Young) 0.197ms
+[2026-10-30T19:36:21.880+0900] Trigger (Young): Learning 5 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:36:21.880+0900] GC(4) Concurrent reset (Young) 0.073ms
+[2026-10-30T19:36:21.880+0900] GC(4) Pause Init Mark (Young) 0.026ms
+[2026-10-30T19:36:21.888+0900] GC(4) Concurrent remembered set scanning 7.757ms
+[2026-10-30T19:36:21.897+0900] GC(4) Concurrent marking roots 8.575ms
+[2026-10-30T19:36:21.941+0900] GC(4) Concurrent marking (Young) 43.715ms
+[2026-10-30T19:36:21.941+0900] GC(4) Pause Final Mark (Young) 0.093ms
+[2026-10-30T19:36:21.942+0900] GC(4) Concurrent thread roots 0.707ms
+[2026-10-30T19:36:21.942+0900] GC(4) Concurrent weak references (Young) 0.086ms
+[2026-10-30T19:36:21.943+0900] GC(4) Concurrent weak roots (Young) 1.057ms
+[2026-10-30T19:36:21.943+0900] GC(4) Concurrent cleanup (Young) 41M->41M(144M) 0.011ms
+[2026-10-30T19:36:21.958+0900] GC(4) Concurrent strong roots 15.038ms
+[2026-10-30T19:36:21.970+0900] GC(4) Concurrent evacuation 11.697ms
+[2026-10-30T19:36:21.970+0900] GC(4) Concurrent Init Update Refs (Young) 0.123ms
+[2026-10-30T19:36:21.970+0900] GC(4) Pause Init Update Refs 0.006ms
+[2026-10-30T19:36:21.995+0900] GC(4) Concurrent update references 25.090ms
+[2026-10-30T19:36:21.996+0900] GC(4) Concurrent update thread roots 0.465ms
+[2026-10-30T19:36:21.996+0900] GC(4) Pause Final Update Refs 0.075ms
+[2026-10-30T19:36:21.996+0900] GC(4) Concurrent cleanup (Young) 49M->28M(144M) 0.029ms
+[2026-10-30T19:36:21.997+0900] GC(4) Concurrent reset after collect (Young) 0.268ms
+[2026-10-30T19:36:22.297+0900] Trigger (Young): Average GC time (149.69 ms) is above the time for average allocation rate (224 MB/s) to deplete free headroom (33645K) (margin of error = 1.80)
+[2026-10-30T19:36:22.297+0900] GC(5) Concurrent reset (Young) 0.121ms
+[2026-10-30T19:36:22.297+0900] GC(5) Pause Init Mark (Young) 0.038ms
+[2026-10-30T19:36:22.323+0900] GC(5) Concurrent remembered set scanning 24.721ms
+[2026-10-30T19:36:22.327+0900] GC(5) Concurrent marking roots 4.608ms
+[2026-10-30T19:36:22.354+0900] GC(5) Concurrent marking (Young) 26.552ms
+[2026-10-30T19:36:22.354+0900] GC(5) Pause Final Mark (Young) 0.164ms
+[2026-10-30T19:36:22.355+0900] GC(5) Concurrent thread roots 0.171ms
+[2026-10-30T19:36:22.355+0900] GC(5) Concurrent weak references (Young) 0.164ms
+[2026-10-30T19:36:22.358+0900] GC(5) Concurrent weak roots (Young) 2.789ms
+[2026-10-30T19:36:22.358+0900] GC(5) Concurrent cleanup (Young) 101M->101M(144M) 0.016ms
+[2026-10-30T19:36:22.363+0900] GC(5) Concurrent strong roots 5.120ms
+[2026-10-30T19:36:22.374+0900] GC(5) Concurrent evacuation 10.134ms
+[2026-10-30T19:36:22.374+0900] GC(5) Concurrent Init Update Refs (Young) 0.151ms
+[2026-10-30T19:36:22.374+0900] GC(5) Pause Init Update Refs 0.003ms
+[2026-10-30T19:36:22.395+0900] GC(5) Concurrent update references 20.783ms
+[2026-10-30T19:36:22.395+0900] GC(5) Concurrent update thread roots 0.359ms
+[2026-10-30T19:36:22.395+0900] GC(5) Pause Final Update Refs 0.070ms
+[2026-10-30T19:36:22.396+0900] GC(5) Concurrent cleanup (Young) 109M->29M(144M) 0.043ms
+[2026-10-30T19:36:22.397+0900] GC(5) Concurrent reset after collect (Young) 1.572ms
+[2026-10-30T19:36:22.599+0900] Trigger (Young): Average GC time (136.23 ms) is above the time for average allocation rate (295 MB/s) to deplete free headroom (35635K) (margin of error = 1.82)
+[2026-10-30T19:36:22.599+0900] GC(6) Concurrent reset (Young) 0.055ms
+[2026-10-30T19:36:22.600+0900] GC(6) Pause Init Mark (Young) 0.014ms
+[2026-10-30T19:36:22.612+0900] GC(6) Concurrent remembered set scanning 12.201ms
+[2026-10-30T19:36:22.617+0900] GC(6) Concurrent marking roots 4.902ms
+[2026-10-30T19:36:22.644+0900] GC(6) Concurrent marking (Young) 27.597ms
+[2026-10-30T19:36:22.645+0900] GC(6) Pause Final Mark (Young) 0.156ms
+[2026-10-30T19:36:22.646+0900] GC(6) Concurrent thread roots 0.333ms
+[2026-10-30T19:36:22.646+0900] GC(6) Concurrent weak references (Young) 0.163ms
+[2026-10-30T19:36:22.647+0900] GC(6) Concurrent weak roots (Young) 1.126ms
+[2026-10-30T19:36:22.647+0900] GC(6) Concurrent cleanup (Young) 101M->101M(144M) 0.011ms
+[2026-10-30T19:36:22.650+0900] GC(6) Concurrent strong roots 3.329ms
+[2026-10-30T19:36:22.655+0900] GC(6) Concurrent evacuation 4.192ms
+[2026-10-30T19:36:22.655+0900] GC(6) Concurrent Init Update Refs (Young) 0.684ms
+[2026-10-30T19:36:22.655+0900] GC(6) Pause Init Update Refs 0.002ms
+[2026-10-30T19:36:22.666+0900] GC(6) Concurrent update references 10.334ms
+[2026-10-30T19:36:22.667+0900] GC(6) Concurrent update thread roots 1.442ms
+[2026-10-30T19:36:22.668+0900] GC(6) Pause Final Update Refs 0.130ms
+[2026-10-30T19:36:22.670+0900] GC(6) Concurrent cleanup (Young) 110M->35M(144M) 0.059ms
+[2026-10-30T19:36:22.671+0900] GC(6) Concurrent reset after collect (Young) 0.367ms
+[2026-10-30T19:36:32.210+0900] Trigger (Young): Free (14685K) is below minimum threshold (14745K)
+[2026-10-30T19:36:32.210+0900] GC(7) Concurrent reset (Young) 0.068ms
+[2026-10-30T19:36:32.210+0900] GC(7) Pause Init Mark (Young) 0.021ms
+[2026-10-30T19:36:32.225+0900] GC(7) Concurrent remembered set scanning 12.462ms
+[2026-10-30T19:36:32.229+0900] GC(7) Concurrent marking roots 4.013ms
+[2026-10-30T19:36:32.258+0900] GC(7) Concurrent marking (Young) 29.159ms
+[2026-10-30T19:36:32.258+0900] GC(7) Pause Final Mark (Young) 0.144ms
+[2026-10-30T19:36:32.259+0900] GC(7) Concurrent thread roots 0.791ms
+[2026-10-30T19:36:32.259+0900] GC(7) Concurrent weak references (Young) 0.193ms
+[2026-10-30T19:36:32.266+0900] GC(7) Concurrent weak roots (Young) 6.077ms
+[2026-10-30T19:36:32.266+0900] GC(7) Concurrent cleanup (Young) 123M->122M(144M) 0.017ms
+[2026-10-30T19:36:32.273+0900] GC(7) Concurrent strong roots 7.349ms
+[2026-10-30T19:36:32.283+0900] GC(7) Concurrent evacuation 9.805ms
+[2026-10-30T19:36:32.283+0900] GC(7) Concurrent Init Update Refs (Young) 0.073ms
+[2026-10-30T19:36:32.283+0900] GC(7) Pause Init Update Refs 0.002ms
+[2026-10-30T19:36:32.304+0900] GC(7) Concurrent update references 20.616ms
+[2026-10-30T19:36:32.306+0900] GC(7) Concurrent update thread roots 2.207ms
+[2026-10-30T19:36:32.306+0900] GC(7) Pause Final Update Refs 0.050ms
+[2026-10-30T19:36:32.306+0900] GC(7) Concurrent cleanup (Young) 127M->31M(144M) 0.048ms
+[2026-10-30T19:36:32.307+0900] GC(7) Concurrent reset after collect (Young) 0.571ms
+[2026-10-30T19:36:54.349+0900] Trigger (Young): Free (14729K) is below minimum threshold (14745K)
+[2026-10-30T19:36:54.349+0900] GC(8) Concurrent reset (Young) 0.518ms
+[2026-10-30T19:36:54.350+0900] GC(8) Pause Init Mark (Young) 0.033ms
+[2026-10-30T19:36:54.374+0900] GC(8) Concurrent remembered set scanning 21.584ms
+[2026-10-30T19:36:54.385+0900] GC(8) Concurrent marking roots 11.587ms
+[2026-10-30T19:36:54.422+0900] GC(8) Concurrent marking (Young) 36.083ms
+[2026-10-30T19:36:54.422+0900] GC(8) Pause Final Mark (Young) 0.123ms
+[2026-10-30T19:36:54.422+0900] GC(8) Concurrent thread roots 0.230ms
+[2026-10-30T19:36:54.422+0900] GC(8) Concurrent weak references (Young) 0.041ms
+[2026-10-30T19:36:54.423+0900] GC(8) Concurrent weak roots (Young) 0.915ms
+[2026-10-30T19:36:54.423+0900] GC(8) Concurrent cleanup (Young) 123M->71M(144M) 0.042ms
+[2026-10-30T19:36:54.429+0900] GC(8) Concurrent strong roots 5.566ms
+[2026-10-30T19:36:54.440+0900] GC(8) Concurrent evacuation 10.904ms
+[2026-10-30T19:36:54.440+0900] GC(8) Concurrent Init Update Refs (Young) 0.067ms
+[2026-10-30T19:36:54.440+0900] GC(8) Pause Init Update Refs 0.002ms
+[2026-10-30T19:36:54.450+0900] GC(8) Concurrent update references 9.729ms
+[2026-10-30T19:36:54.450+0900] GC(8) Concurrent update thread roots 0.318ms
+[2026-10-30T19:36:54.450+0900] GC(8) Pause Final Update Refs 0.048ms
+[2026-10-30T19:36:54.450+0900] GC(8) Concurrent cleanup (Young) 77M->32M(144M) 0.025ms
+[2026-10-30T19:36:54.450+0900] GC(8) Concurrent reset after collect (Young) 0.359ms
+[2026-10-30T19:36:56.103+0900] Trigger (Young): Average GC time (119.35 ms) is above the time for average allocation rate (62090 KB/s) to deplete free headroom (7384K) (margin of error = 1.86)
+[2026-10-30T19:36:56.104+0900] GC(9) Concurrent reset (Young) 0.311ms
+[2026-10-30T19:36:56.107+0900] GC(9) Pause Init Mark (Young) 0.060ms
+[2026-10-30T19:36:56.117+0900] GC(9) Concurrent remembered set scanning 7.040ms
+[2026-10-30T19:36:56.141+0900] GC(9) Concurrent marking roots 23.787ms
+[2026-10-30T19:36:56.189+0900] GC(9) Concurrent marking (Young) 48.679ms
+[2026-10-30T19:36:56.190+0900] GC(9) Pause Final Mark (Young) 0.166ms
+[2026-10-30T19:36:56.191+0900] GC(9) Concurrent thread roots 0.216ms
+[2026-10-30T19:36:56.191+0900] GC(9) Concurrent weak references (Young) 0.040ms
+[2026-10-30T19:36:56.193+0900] GC(9) Concurrent weak roots (Young) 1.064ms
+[2026-10-30T19:36:56.193+0900] GC(9) Concurrent cleanup (Young) 122M->112M(144M) 0.019ms
+[2026-10-30T19:36:56.199+0900] GC(9) Concurrent strong roots 6.351ms
+[2026-10-30T19:36:56.234+0900] GC(9) Concurrent evacuation 34.994ms
+[2026-10-30T19:36:56.236+0900] GC(9) Concurrent Init Update Refs (Young) 2.403ms
+[2026-10-30T19:36:56.237+0900] GC(9) Pause Init Update Refs 0.005ms
+[2026-10-30T19:36:56.285+0900] GC(9) Concurrent update references 43.323ms
+[2026-10-30T19:36:56.285+0900] GC(9) Concurrent update thread roots 0.498ms
+[2026-10-30T19:36:56.287+0900] GC(9) Pause Final Update Refs 0.068ms
+[2026-10-30T19:36:56.289+0900] GC(9) Concurrent cleanup (Young) 124M->52M(144M) 0.056ms
+[2026-10-30T19:36:56.290+0900] GC(9) Concurrent reset after collect (Young) 0.401ms
+[2026-10-30T19:36:57.896+0900] Trigger (Young): Average GC time (228.27 ms) is above the time for average allocation rate (36168 KB/s) to deplete free headroom (8084K) (margin of error = 1.91)
+[2026-10-30T19:36:57.897+0900] GC(10) Concurrent reset (Young) 0.083ms
+[2026-10-30T19:36:57.897+0900] GC(10) Pause Init Mark (Young) 0.036ms
+[2026-10-30T19:36:57.904+0900] GC(10) Concurrent remembered set scanning 4.430ms
+[2026-10-30T19:36:57.917+0900] GC(10) Concurrent marking roots 13.281ms
+[2026-10-30T19:36:57.949+0900] GC(10) Concurrent marking (Young) 31.433ms
+[2026-10-30T19:36:57.949+0900] GC(10) Pause Final Mark (Young) 0.181ms
+[2026-10-30T19:36:57.949+0900] GC(10) Concurrent thread roots 0.298ms
+[2026-10-30T19:36:57.950+0900] GC(10) Concurrent weak references (Young) 0.066ms
+[2026-10-30T19:36:57.952+0900] GC(10) Concurrent weak roots (Young) 2.804ms
+[2026-10-30T19:36:57.952+0900] GC(10) Concurrent cleanup (Young) 124M->117M(144M) 0.018ms
+[2026-10-30T19:36:57.958+0900] GC(10) Concurrent strong roots 5.962ms
+[2026-10-30T19:36:57.965+0900] GC(10) Concurrent evacuation 6.508ms
+[2026-10-30T19:36:57.965+0900] GC(10) Concurrent Init Update Refs (Young) 0.093ms
+[2026-10-30T19:36:57.965+0900] GC(10) Pause Init Update Refs 0.002ms
+[2026-10-30T19:36:57.980+0900] GC(10) Concurrent update references 14.765ms
+[2026-10-30T19:36:57.980+0900] GC(10) Concurrent update thread roots 0.270ms
+[2026-10-30T19:36:57.980+0900] GC(10) Pause Final Update Refs 0.078ms
+[2026-10-30T19:36:57.980+0900] GC(10) Concurrent cleanup (Young) 123M->54M(144M) 0.038ms
+[2026-10-30T19:36:57.981+0900] GC(10) Concurrent reset after collect (Young) 0.532ms
+[2026-10-30T19:36:57.982+0900] Trigger (Old): Old has overgrown, live at end of previous OLD marking: 9216K, current usage: 20992K, percent growth: 127.8%
+[2026-10-30T19:36:57.982+0900] GC(11) Concurrent reset (Young) 0.274ms
+[2026-10-30T19:36:57.982+0900] GC(11) Pause Init Mark (Young) 0.028ms
+[2026-10-30T19:36:57.991+0900] GC(11) Concurrent remembered set scanning 8.677ms
+[2026-10-30T19:36:58.000+0900] GC(11) Concurrent marking roots 8.994ms
+[2026-10-30T19:36:58.024+0900] GC(11) Concurrent marking (Young) 24.005ms
+[2026-10-30T19:36:58.024+0900] GC(11) Pause Final Mark (Young) 0.097ms
+[2026-10-30T19:36:58.025+0900] GC(11) Concurrent thread roots 0.205ms
+[2026-10-30T19:36:58.025+0900] GC(11) Concurrent weak references (Young) 0.050ms
+[2026-10-30T19:36:58.026+0900] GC(11) Concurrent weak roots (Young) 0.863ms
+[2026-10-30T19:36:58.026+0900] GC(11) Concurrent cleanup (Young) 56M->56M(144M) 0.008ms
+[2026-10-30T19:36:58.029+0900] GC(11) Concurrent strong roots 3.834ms
+[2026-10-30T19:36:58.037+0900] GC(11) Concurrent evacuation 7.363ms
+[2026-10-30T19:36:58.037+0900] GC(11) Concurrent Init Update Refs (Young) 0.167ms
+[2026-10-30T19:36:58.037+0900] GC(11) Pause Init Update Refs 0.014ms
+[2026-10-30T19:36:58.055+0900] GC(11) Concurrent update references 18.061ms
+[2026-10-30T19:36:58.060+0900] GC(11) Concurrent update thread roots 4.318ms
+[2026-10-30T19:36:58.060+0900] GC(11) Pause Final Update Refs 0.092ms
+[2026-10-30T19:36:58.060+0900] GC(11) Concurrent cleanup (Young) 65M->47M(144M) 0.016ms
+[2026-10-30T19:36:58.060+0900] GC(11) Concurrent reset after collect (Young) 0.002ms
+[2026-10-30T19:36:58.120+0900] GC(11) Concurrent marking (Old) 60.260ms
+[2026-10-30T19:36:58.121+0900] GC(11) Pause Final Mark (Old) 0.160ms
+[2026-10-30T19:36:58.121+0900] GC(11) Concurrent weak references (Old) 0.037ms
+[2026-10-30T19:36:58.121+0900] GC(11) Concurrent weak roots (Old) 0.757ms
+[2026-10-30T19:36:58.122+0900] GC(11) Concurrent cleanup (Old) 49M->49M(144M) 0.008ms
+[2026-10-30T19:38:25.696+0900] Trigger (Young): Free (14592K) is below minimum threshold (14745K)
+[2026-10-30T19:38:25.698+0900] GC(12) Concurrent reset (Young) 1.984ms
+[2026-10-30T19:38:25.700+0900] GC(12) Pause Init Mark (Young) 0.087ms
+[2026-10-30T19:38:25.719+0900] GC(12) Concurrent remembered set scanning 18.729ms
+[2026-10-30T19:38:25.747+0900] GC(12) Concurrent marking roots 28.015ms
+[2026-10-30T19:38:25.788+0900] GC(12) Concurrent marking (Young) 41.107ms
+[2026-10-30T19:38:25.789+0900] GC(12) Pause Final Mark (Young) 0.504ms
+[2026-10-30T19:38:25.789+0900] GC(12) Concurrent thread roots 0.280ms
+[2026-10-30T19:38:25.790+0900] GC(12) Concurrent weak references (Young) 0.163ms
+[2026-10-30T19:38:25.791+0900] GC(12) Concurrent weak roots (Young) 1.171ms
+[2026-10-30T19:38:25.791+0900] GC(12) Concurrent cleanup (Young) 121M->109M(144M) 0.024ms
+[2026-10-30T19:38:25.800+0900] GC(12) Concurrent strong roots 8.997ms
+[2026-10-30T19:38:25.814+0900] GC(12) Concurrent evacuation 13.895ms
+[2026-10-30T19:38:25.814+0900] GC(12) Concurrent Init Update Refs (Young) 0.152ms
+[2026-10-30T19:38:25.815+0900] GC(12) Pause Init Update Refs 0.007ms
+[2026-10-30T19:38:25.869+0900] GC(12) Concurrent update references 54.336ms
+[2026-10-30T19:38:25.880+0900] GC(12) Concurrent update thread roots 11.226ms
+[2026-10-30T19:38:25.881+0900] GC(12) Pause Final Update Refs 0.194ms
+[2026-10-30T19:38:25.881+0900] GC(12) Concurrent cleanup (Young) 114M->47M(144M) 0.044ms
+[2026-10-30T19:38:25.881+0900] GC(12) Concurrent reset after collect (Young) 0.559ms
+[2026-10-30T19:38:25.882+0900] Trigger (Old): Resume preparing to mark old
+[2026-10-30T19:38:25.891+0900] GC(13) Coalescing and filling (Old) 8.099ms
+[2026-10-30T19:40:59.016+0900] Trigger (Young): Free (14730K) is below minimum threshold (14745K)
+[2026-10-30T19:40:59.017+0900] GC(14) Concurrent reset (Young) 0.750ms
+[2026-10-30T19:40:59.018+0900] GC(14) Pause Init Mark (Young) 0.088ms
+[2026-10-30T19:40:59.042+0900] GC(14) Concurrent remembered set scanning 24.339ms
+[2026-10-30T19:40:59.077+0900] GC(14) Concurrent marking roots 34.691ms
+[2026-10-30T19:40:59.099+0900] GC(14) Concurrent marking (Young) 21.569ms
+[2026-10-30T19:40:59.099+0900] GC(14) Pause Final Mark (Young) 0.179ms
+[2026-10-30T19:40:59.099+0900] GC(14) Concurrent thread roots 0.209ms
+[2026-10-30T19:40:59.099+0900] GC(14) Concurrent weak references (Young) 0.036ms
+[2026-10-30T19:40:59.101+0900] GC(14) Concurrent weak roots (Young) 1.338ms
+[2026-10-30T19:40:59.101+0900] GC(14) Concurrent cleanup (Young) 123M->92M(144M) 0.053ms
+[2026-10-30T19:40:59.111+0900] GC(14) Concurrent strong roots 9.784ms
+[2026-10-30T19:40:59.114+0900] GC(14) Concurrent evacuation 2.865ms
+[2026-10-30T19:40:59.114+0900] GC(14) Concurrent Init Update Refs (Young) 0.123ms
+[2026-10-30T19:40:59.114+0900] GC(14) Pause Init Update Refs 0.006ms
+[2026-10-30T19:40:59.119+0900] GC(14) Concurrent update references 5.434ms
+[2026-10-30T19:40:59.120+0900] GC(14) Concurrent update thread roots 0.200ms
+[2026-10-30T19:40:59.120+0900] GC(14) Pause Final Update Refs 0.067ms
+[2026-10-30T19:40:59.120+0900] GC(14) Concurrent cleanup (Young) 93M->47M(144M) 0.145ms
+[2026-10-30T19:40:59.120+0900] GC(14) Concurrent reset after collect (Young) 0.347ms
+[2026-10-30T19:40:59.121+0900] Trigger (Old): Old has overgrown, live at end of previous OLD marking: 23612K, current usage: 38103K, percent growth: 61.4%
+[2026-10-30T19:40:59.122+0900] GC(15) Concurrent reset (Young) 0.504ms
+[2026-10-30T19:40:59.122+0900] GC(15) Pause Init Mark (Young) 0.022ms
+[2026-10-30T19:40:59.128+0900] GC(15) Concurrent remembered set scanning 6.053ms
+[2026-10-30T19:40:59.137+0900] GC(15) Concurrent marking roots 8.514ms
+[2026-10-30T19:40:59.143+0900] GC(15) Concurrent marking (Young) 6.079ms
+[2026-10-30T19:40:59.143+0900] GC(15) Pause Final Mark (Young) 0.081ms
+[2026-10-30T19:40:59.143+0900] GC(15) Concurrent thread roots 0.297ms
+[2026-10-30T19:40:59.144+0900] GC(15) Concurrent weak references (Young) 0.080ms
+[2026-10-30T19:40:59.144+0900] GC(15) Concurrent weak roots (Young) 0.810ms
+[2026-10-30T19:40:59.144+0900] GC(15) Concurrent cleanup (Young) 47M->47M(144M) 0.014ms
+[2026-10-30T19:40:59.150+0900] GC(15) Concurrent strong roots 5.257ms
+[2026-10-30T19:40:59.151+0900] GC(15) Concurrent evacuation 0.913ms
+[2026-10-30T19:40:59.151+0900] GC(15) Concurrent Init Update Refs (Young) 0.091ms
+[2026-10-30T19:40:59.151+0900] GC(15) Pause Init Update Refs 0.006ms
+[2026-10-30T19:40:59.155+0900] GC(15) Concurrent update references 4.188ms
+[2026-10-30T19:40:59.155+0900] GC(15) Concurrent update thread roots 0.304ms
+[2026-10-30T19:40:59.156+0900] GC(15) Pause Final Update Refs 0.097ms
+[2026-10-30T19:40:59.156+0900] GC(15) Concurrent cleanup (Young) 48M->47M(144M) 0.017ms
+[2026-10-30T19:40:59.156+0900] GC(15) Concurrent reset after collect (Young) 0.002ms
+[2026-10-30T19:40:59.225+0900] GC(15) Concurrent marking (Old) 67.987ms
+[2026-10-30T19:40:59.225+0900] GC(15) Pause Final Mark (Old) 0.125ms
+[2026-10-30T19:40:59.225+0900] GC(15) Concurrent weak references (Old) 0.052ms
+[2026-10-30T19:40:59.226+0900] GC(15) Concurrent weak roots (Old) 0.758ms
+[2026-10-30T19:40:59.226+0900] GC(15) Concurrent cleanup (Old) 47M->47M(144M) 0.011ms
+[2026-10-30T19:40:59.227+0900] Trigger (Old): Resume preparing to mark old
+[2026-10-30T19:40:59.239+0900] GC(16) Coalescing and filling (Old) 12.532ms

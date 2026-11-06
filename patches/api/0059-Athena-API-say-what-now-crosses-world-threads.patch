@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 22:46:20 +0900
+Subject: [PATCH] Athena API: say what now crosses world threads
+
+Entities other than players move between worlds ticked by different threads,
+vanilla commands run with every world thread waiting, and scoreboards and
+hiding players may be used from any thread.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 232a061759e4ce02d281dd484b5265d52f90128a..c3b1becfa812d0dc7918fafb20a23f6b00f6bae8 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -418,8 +418,12 @@ public final class Athena {
+      * different threads in two steps: it leaves on its old world's thread and arrives on the new
+      * one's, so {@code teleport} returns before the player is there, and a player on the way cannot
+      * be teleported again. A login aimed at such a world lands in the main world and is then moved.
+-     * Entities other than players do not move between worlds ticked by different threads, and the
+-     * main world cannot have its own thread.
++     * Other entities move the same way: written out and removed on the old world's thread, made again
++     * on the new one's (riders and leashes stay behind). The main world cannot have its own thread.
++     *
++     * <p>Vanilla commands then run on the server thread with every world thread waiting between two
++     * ticks, since they may touch any world; one typed in a world on its own thread runs a moment
++     * later. A scoreboard may be changed from any thread, and so may who hides whom.
+      *
+      * @throws IllegalStateException if {@code world} is the main world, or this is called from inside
+      *         the world's own tick

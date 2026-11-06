@@ -1,0 +1,10 @@
+name: WorldThreadsProbe
+main: athena.wtprobe.WorldThreadsProbe
+version: 1
+load: POSTWORLD
+commands:
+  wt:
+    description: world threads test harness
+    permission: wtprobe.use
+  wtping:
+    description: logs the thread a player's command runs on

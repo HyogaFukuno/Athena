@@ -1,0 +1,1136 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 13:31:18 +0900
+Subject: [PATCH] Tick chosen worlds on their own threads
+
+A world given its own thread (Athena.startWorldThread) is ticked there every
+50 ms by AthenaWorldThread with the same per-world tick the server thread runs
+for the others (MinecraftServer.athenaTickWorld), so a stall in it holds up that
+world alone and a stall on the server thread leaves it ticking. The world's
+postToMainThread and isMainThread answer for its thread, AsyncCatcher checks
+work on one world against that world's thread, and timers that counted
+MinecraftServer.currentTick count the world's own tick (World.athenaCurrentTick,
+which is currentTick for the worlds the server thread ticks). The server thread
+stops a world's thread before unloading it and at shutdown, and autosaves it
+there. Timings are turned off when the first world thread starts.
+
+Not for players yet: a world with players cannot get its own thread, players
+cannot be teleported into one, entities cannot change worlds into or out of one,
+and chunk preloads refuse one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 3b70074c79cc30b253d6696ba2b3160646530e7b..117327de7bcb1daffe941dc91c95a2778255176c 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -61,16 +61,16 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void pinChunks(Location center, int radius) {
+-        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
++        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks", ((CraftWorld) center.getWorld()).getHandle()); // Athena - the thread that ticks the world
+ 
+         ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.pin(square[0], square[1], square[2], square[3]);
+     }
+ 
+     @Override
+     public void addPinnedChunks(Location center, int radius) {
+-        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
++        org.spigotmc.AsyncCatcher.catchOp("Athena pin chunks", ((CraftWorld) center.getWorld()).getHandle()); // Athena - the thread that ticks the world
+ 
+         ((CraftWorld) center.getWorld()).getHandle().chunkProviderServer.addPin(square[0], square[1], square[2], square[3]);
+     }
+@@ -80,6 +80,10 @@ public final class AthenaServerImpl implements AthenaServer {
+         org.spigotmc.AsyncCatcher.catchOp("Athena chunk preload"); // Athena - server thread only; see the class comment
+         int[] square = chunkSquare(center, radius);
+         checkPerTick(perTick);
++        // Athena - the preload queue is drained by the server thread's tick
++        if (((CraftWorld) center.getWorld()).getHandle().athenaIsThreaded()) {
++            throw new IllegalStateException("Cannot preload chunks in " + center.getWorld().getName() + ", which ticks on its own thread");
++        }
+ 
+         return net.minecraft.server.AthenaChunkPreloader.INSTANCE.preload(((CraftWorld) center.getWorld()).getHandle(),
+                 square[0], square[1], square[2], square[3], perTick);
+@@ -87,8 +91,8 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public List<Block> tileEntityBlocks(Chunk chunk) {
+-        org.spigotmc.AsyncCatcher.catchOp("Athena tile entity lookup"); // Athena - server thread only; see the class comment
+         Validate.notNull(chunk, "Chunk may not be null");
++        org.spigotmc.AsyncCatcher.catchOp("Athena tile entity lookup", ((CraftChunk) chunk).getHandle().world); // Athena - the thread that ticks the world
+         net.minecraft.server.Chunk handle = ((CraftChunk) chunk).getHandle();
+         World world = chunk.getWorld();
+         List<Block> blocks = new ArrayList<Block>(handle.tileEntities.size());
+@@ -119,8 +123,8 @@ public final class AthenaServerImpl implements AthenaServer {
+ 
+     @Override
+     public void unpinChunks(World world) {
+-        org.spigotmc.AsyncCatcher.catchOp("Athena unpin chunks"); // Athena - server thread only; see the class comment
+         Validate.notNull(world, "World may not be null");
++        org.spigotmc.AsyncCatcher.catchOp("Athena unpin chunks", ((CraftWorld) world).getHandle()); // Athena - the thread that ticks the world
+         ((CraftWorld) world).getHandle().chunkProviderServer.unpin();
+     }
+ 
+@@ -305,4 +309,37 @@ public final class AthenaServerImpl implements AthenaServer {
+             throw new IllegalArgumentException("perTick must be at least 1, was " + perTick);
+         }
+     }
++
++    // ---- worlds on their own threads ----
++
++    @Override
++    public void startWorldThread(World world) {
++        Validate.notNull(world, "World may not be null");
++        ((CraftWorld) world).getHandle().athenaStartThread();
++    }
++
++    @Override
++    public boolean stopWorldThread(World world) {
++        Validate.notNull(world, "World may not be null");
++        return ((CraftWorld) world).getHandle().athenaStopThread(10000L);
++    }
++
++    @Override
++    public boolean isWorldThreaded(World world) {
++        Validate.notNull(world, "World may not be null");
++        return ((CraftWorld) world).getHandle().athenaIsThreaded();
++    }
++
++    @Override
++    public boolean isWorldThread(World world) {
++        Validate.notNull(world, "World may not be null");
++        return ((CraftWorld) world).getHandle().isMainThread();
++    }
++
++    @Override
++    public void runOnWorld(World world, Runnable task) {
++        Validate.notNull(world, "World may not be null");
++        Validate.notNull(task, "Task may not be null");
++        ((CraftWorld) world).getHandle().athenaRunOnTickThread(task);
++    }
+ }
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1b4f03e5a6a5ac4d8c28d415385a85fbe727d6f1
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -0,0 +1,151 @@
++package net.minecraft.server;
++
++import java.util.Queue;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.TimeUnit;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++/**
++ * Athena - a world that ticks on its own thread instead of the server thread.
++ *
++ * The thread runs the same per-world tick the server thread runs for the other worlds
++ * (MinecraftServer.athenaTickWorld) every 50 ms, plus the tasks queued for the world
++ * (WorldServer.postToMainThread, Athena.runOnWorld). While it runs, only this thread may touch
++ * the world: AsyncCatcher.catchOp(reason, world) and WorldServer.isMainThread answer for it. A
++ * stall here (a slow plugin, a long chunk load) holds up this world alone; the server thread and
++ * the other worlds keep their 20 ticks a second. A throwable out of the tick stops this world's
++ * thread (the world then stops ticking) instead of the server.
++ *
++ * Players may not be in such a world yet: their packets and connection ticks still run on the
++ * server thread. Athena.setWorldThreaded refuses a world with players, and teleports into it are
++ * refused.
++ */
++public final class AthenaWorldThread extends Thread {
++
++    private static final Logger LOGGER = LogManager.getLogger();
++    private static final long TICK_NANOS = 50_000_000L;
++    /** How far behind the thread may fall before it stops trying to catch up, in ticks. */
++    private static final int MAX_CATCH_UP = 20;
++
++    final WorldServer world;
++    private final Queue<Runnable> tasks = new ConcurrentLinkedQueue<Runnable>();
++    private volatile boolean running = true;
++    /** System.nanoTime() when the last tick ended, for a watchdog and for tests. */
++    volatile long lastTickEnd = System.nanoTime();
++    /** Ticks this thread has run. */
++    volatile long ticks;
++    /** Set when a tick threw: the thread stopped and the world no longer ticks. */
++    volatile Throwable failure;
++
++    AthenaWorldThread(WorldServer world) {
++        super("World thread - " + world.getWorldData().getName());
++        this.world = world;
++        this.setDaemon(true);
++    }
++
++    private static volatile boolean started;
++
++    /**
++     * Before the first world thread starts: Aikar's timings keep one stack for the server thread and
++     * log an error for every timer stopped on another thread, so they are turned off.
++     */
++    static void beforeFirstStart() {
++        if (started) return;
++        started = true;
++        if (co.aikar.timings.Timings.isTimingsEnabled()) {
++            // what the server does when it stops: Timings.setTimingsEnabled only resets the data on the
++            // next tick, while this turns every timer off at once
++            co.aikar.timings.SpigotTimings.stopServer();
++            LOGGER.info("Timings turned off: worlds on their own threads cannot be timed");
++        }
++    }
++
++    /** Set once the thread has stopped and its leftover tasks went to the server thread. */
++    private volatile boolean handedBack;
++
++    /** Queues {@code task} to run on this thread before its next tick. */
++    void post(Runnable task) {
++        this.tasks.add(task);
++        if (this.handedBack) {
++            // posted by someone who still saw this thread after it stopped: the server thread runs it
++            this.handBack();
++        }
++    }
++
++    /** After the thread stopped: the tasks still queued go to the server thread, which owns the world again. */
++    void handBack() {
++        this.handedBack = true;
++        Runnable task;
++        while ((task = this.tasks.poll()) != null) {
++            MinecraftServer.getServer().processQueue.add(task);
++        }
++    }
++
++    @Override
++    public void run() {
++        long next = System.nanoTime();
++        try {
++            while (this.running) {
++                long now = System.nanoTime();
++                if (now < next) {
++                    java.util.concurrent.locks.LockSupport.parkNanos(next - now);
++                    continue;
++                }
++                // a long stall (a frozen tick, a debugger) is not made up with a burst of ticks
++                if (now - next > MAX_CATCH_UP * TICK_NANOS) {
++                    next = now;
++                }
++                next += TICK_NANOS;
++
++                this.runTasks();
++                ++this.world.athenaCurrentTick;
++                this.world.sendWorldTimeUpdate(false);
++                MinecraftServer.getServer().athenaTickWorld(this.world);
++                ++this.ticks;
++                this.lastTickEnd = System.nanoTime();
++            }
++            this.runTasks();
++        } catch (Throwable throwable) {
++            this.failure = throwable;
++            this.running = false;
++            LOGGER.error("World " + this.world.getWorldData().getName() + " stopped ticking: its thread threw", throwable);
++        }
++    }
++
++    private void runTasks() {
++        Runnable task;
++        while ((task = this.tasks.poll()) != null) {
++            try {
++                task.run();
++            } catch (Throwable throwable) {
++                LOGGER.error("A task for world " + this.world.getWorldData().getName() + " threw", throwable);
++            }
++        }
++    }
++
++    /**
++     * Asks the thread to finish its tick and stop, and waits for it.
++     *
++     * @return whether it stopped within {@code timeoutMillis}; if not, it still owns the world
++     */
++    boolean stopAndJoin(long timeoutMillis) {
++        this.running = false;
++        java.util.concurrent.locks.LockSupport.unpark(this);
++        try {
++            this.join(timeoutMillis);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++        return !this.isAlive();
++    }
++
++    boolean failed() {
++        return this.failure != null;
++    }
++
++    /** Milliseconds since the last tick ended. */
++    long millisSinceTick() {
++        return TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - this.lastTickEnd);
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/Block.java b/src/main/java/net/minecraft/server/Block.java
+index a88ffaaf5e9b017994f00a32923e63167c1e82b3..7b698640869ca2d16ba3391d597f905bed50b6cc 100644
+--- a/src/main/java/net/minecraft/server/Block.java
++++ b/src/main/java/net/minecraft/server/Block.java
+@@ -377,11 +377,11 @@ public class Block {
+     }
+ 
+     public void onPlace(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        org.spigotmc.AsyncCatcher.catchOp( "block onPlace"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "block onPlace", world ); // Spigot // Athena - the thread that ticks this world
+     }
+ 
+     public void remove(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        org.spigotmc.AsyncCatcher.catchOp( "block remove"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "block remove", world ); // Spigot // Athena - the thread that ticks this world
+     }
+ 
+     public int quantityDropped(Random random) {
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index c59a74badb2eaddb63ff2fc348335b3fb993bd4d..f7e9110b1ceb184bfc90eb642a4e9aafa162e961 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -2211,6 +2211,11 @@ public abstract class Entity implements ICommandListener {
+         if (true) {
+             WorldServer worldserver = ((CraftWorld) getBukkitEntity().getLocation().getWorld()).getHandle();
+             WorldServer worldserver1 = ((CraftWorld) exit.getWorld()).getHandle();
++            // Athena start - moving between worlds touches both; not while either ticks on its own thread
++            if (worldserver != worldserver1 && (worldserver.athenaIsThreaded() || worldserver1.athenaIsThreaded())) {
++                return;
++            }
++            // Athena end
+             int i = worldserver1.dimension;
+             // CraftBukkit end
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityItem.java b/src/main/java/net/minecraft/server/EntityItem.java
+index 1b89262f7e0c9e7706254e0bf25ea340380e91c4..8ee632e8616ccae546d9c9157ecb8fa1a7687bff 100644
+--- a/src/main/java/net/minecraft/server/EntityItem.java
++++ b/src/main/java/net/minecraft/server/EntityItem.java
+@@ -15,7 +15,7 @@ public class EntityItem extends Entity {
+     private String thrower;
+     private String owner;
+     public float hoverStart;
+-    private int lastTick = MinecraftServer.currentTick; // CraftBukkit
++    private int lastTick = this.world != null ? this.world.athenaCurrentTick : MinecraftServer.currentTick; // CraftBukkit // Athena - this world's tick
+ 
+     public EntityItem(World world, double d0, double d1, double d2) {
+         super(world);
+@@ -61,10 +61,10 @@ public class EntityItem extends Entity {
+         } else {
+             super.onUpdate();
+             // CraftBukkit start - Use wall time for pickup and despawn timers
+-            int elapsedTicks = MinecraftServer.currentTick - this.lastTick;
++            int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
+             if (this.pickupDelay != 32767) this.pickupDelay -= elapsedTicks;
+             if (this.age != -32768) this.age += elapsedTicks;
+-            this.lastTick = MinecraftServer.currentTick;
++            this.lastTick = this.world.athenaCurrentTick; // Athena - this world's tick
+             // CraftBukkit end
+ 
+             this.lastX = this.locX;
+@@ -126,10 +126,10 @@ public class EntityItem extends Entity {
+     @Override
+     public void inactiveTick() {
+         // CraftBukkit start - Use wall time for pickup and despawn timers
+-        int elapsedTicks = MinecraftServer.currentTick - this.lastTick;
++        int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
+         if (this.pickupDelay != 32767) this.pickupDelay -= elapsedTicks;
+         if (this.age != -32768) this.age += elapsedTicks;
+-        this.lastTick = MinecraftServer.currentTick;
++        this.lastTick = this.world.athenaCurrentTick; // Athena - this world's tick
+         // CraftBukkit end
+ 
+         if (!this.world.isClientSide && this.age >= world.spigotConfig.itemDespawnRate) { // Spigot
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index ee1db1fcb04a5b53d2864f68536b80ed68f1e24b..a747ef777aee291517e8065fa12f5bf9093dfe99 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -585,7 +585,7 @@ public abstract class EntityLiving extends Entity {
+     }
+ 
+     public void addEffect(MobEffect mobeffect) {
+-        org.spigotmc.AsyncCatcher.catchOp( "effect add"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "effect add", this.world ); // Spigot // Athena - the thread that ticks this world
+         // CraftBukkit start
+         if (isTickingEffects) {
+             effectsToProcess.add(mobeffect);
+diff --git a/src/main/java/net/minecraft/server/EntitySenses.java b/src/main/java/net/minecraft/server/EntitySenses.java
+index 5c01b0038cc75eeb388981a228679bbbe0111940..43448361cc373551b707244f558fe621a5c08d03 100644
+--- a/src/main/java/net/minecraft/server/EntitySenses.java
++++ b/src/main/java/net/minecraft/server/EntitySenses.java
+@@ -39,8 +39,8 @@ public class EntitySenses {
+ 
+     public boolean canSee(Entity entity) {
+         // Athena start - empty the cache on the first question of a tick rather than for every mob
+-        if (this.cachedForTick != MinecraftServer.currentTick) {
+-            this.cachedForTick = MinecraftServer.currentTick;
++        if (this.cachedForTick != this.entityObj.world.athenaCurrentTick) { // Athena - this world's tick
++            this.cachedForTick = this.entityObj.world.athenaCurrentTick; // Athena - this world's tick
+             this.seenEntities.clear();
+             this.unseenEntities.clear();
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index 693a25715b1bd8eecdeb5371652d9e57780ca2c9..8014fba5bf137368dfcd44af47b35e38a574e835 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -132,7 +132,7 @@ public class EntityTracker {
+     }
+ 
+     public void addEntity(Entity entity, int i, final int j, boolean flag) {
+-        org.spigotmc.AsyncCatcher.catchOp( "entity track"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "entity track", this.world ); // Spigot // Athena - the thread that ticks this world
+         i = org.spigotmc.TrackingRange.getEntityTrackingRange(entity, i); // Spigot
+         if (i > this.maxTrackingDistanceThreshold) {
+             i = this.maxTrackingDistanceThreshold;
+@@ -184,7 +184,7 @@ public class EntityTracker {
+     }
+ 
+     public void untrackEntity(Entity entity) {
+-        org.spigotmc.AsyncCatcher.catchOp( "entity untrack"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "entity untrack", this.world ); // Spigot // Athena - the thread that ticks this world
+         if (entity instanceof EntityPlayer) {
+             EntityPlayer entityplayer = (EntityPlayer) entity;
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index f67c0a3d65f98c764e9cf17594a40df37eb6dec8..207e70ea214daabacbb64c51f1cdec4aaf5db9b7 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -456,7 +456,7 @@ public class EntityTrackerEntry {
+     }
+ 
+     public void updatePlayer(EntityPlayer entityplayer) {
+-        org.spigotmc.AsyncCatcher.catchOp( "player tracker update"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "player tracker update", this.tracker.world ); // Spigot // Athena - the thread that ticks this world
+         if (entityplayer != this.tracker) {
+             if (this.c(entityplayer)) {
+                 if (this.viewerIndex(entityplayer) < 0 && (this.isPlayerWatchingThisChunk(entityplayer) || this.tracker.attachedToPlayer)) { // Athena
+@@ -686,7 +686,7 @@ public class EntityTrackerEntry {
+     }
+ 
+     public void clear(EntityPlayer entityplayer) {
+-        org.spigotmc.AsyncCatcher.catchOp( "player tracker clear"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "player tracker clear", this.tracker.world ); // Spigot // Athena - the thread that ticks this world
+         if (this.removeViewer(entityplayer)) { // Athena
+             entityplayer.removeEntity(this.tracker);
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityZombie.java b/src/main/java/net/minecraft/server/EntityZombie.java
+index 37088c4f13c0dc46b23485e66e7d2baf323948c7..bd7e06871239a70e17f23977a405b0292c525cf3 100644
+--- a/src/main/java/net/minecraft/server/EntityZombie.java
++++ b/src/main/java/net/minecraft/server/EntityZombie.java
+@@ -23,7 +23,7 @@ public class EntityZombie extends EntityMonster {
+     private boolean isBreakDoorsTaskSet = false;
+     private float zombieWidth = -1.0F;
+     private float zombieHeight;
+-    private int lastTick = MinecraftServer.currentTick; // CraftBukkit - add field
++    private int lastTick = this.world != null ? this.world.athenaCurrentTick : MinecraftServer.currentTick; // CraftBukkit - add field // Athena - this world's tick
+ 
+     public EntityZombie(World world) {
+         super(world);
+@@ -208,8 +208,8 @@ public class EntityZombie extends EntityMonster {
+             int i = this.getConversionTimeBoost();
+ 
+             // CraftBukkit start - Use wall time instead of ticks for villager conversion
+-            int elapsedTicks = MinecraftServer.currentTick - this.lastTick;
+-            this.lastTick = MinecraftServer.currentTick;
++            int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
++            this.lastTick = this.world.athenaCurrentTick; // Athena - this world's tick
+             i *= elapsedTicks;
+             // CraftBukkit end
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 681c6e8af8d77701a785d9dab0e952bb0f5e13d7..60d1d6acc80dbd40d3e06a426bb5cddab1ecb3c3 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -106,7 +106,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     // private long ab = az(); // Athena - the tick schedule is athenaNextTick, on the monotonic clock
+ 
+     // CraftBukkit start
+-    public List<WorldServer> worlds = new ArrayList<WorldServer>();
++    public List<WorldServer> worlds = new java.util.concurrent.CopyOnWriteArrayList<WorldServer>(); // Athena - read by world threads while the server thread adds and removes worlds
+     public org.bukkit.craftbukkit.CraftServer server;
+     public OptionSet options;
+     public org.bukkit.command.ConsoleCommandSender console;
+@@ -458,6 +458,11 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         // CraftBukkit end
+         if (!this.N) {
+             MinecraftServer.LOGGER.info("Stopping server");
++            // Athena start - every world back on this thread before plugins are disabled and worlds saved
++            for (WorldServer world : this.worlds) {
++                world.athenaStopThread(10000L);
++            }
++            // Athena end
+             SpigotTimings.stopServer(); // Spigot
+ 
+             // CraftBukkit start
+@@ -819,6 +824,24 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             // Also pass flag to only save modified chunks
+             server.playerCommandState = true;
+             for (World world : worlds) {
++                // Athena start - a world on its own thread saves there
++                if (((WorldServer) world).athenaThread != null) {
++                    final WorldServer saved = (WorldServer) world;
++                    saved.postToMainThread(() -> {
++                        // CraftWorld.save(false) without its "manual save" check, which only knows the server thread
++                        boolean oldSave = saved.savingDisabled;
++                        saved.savingDisabled = false;
++                        try {
++                            saved.save(false, null);
++                        } catch (ExceptionWorldConflict ex) {
++                            LOGGER.warn("Autosave of " + saved.getWorldData().getName() + " failed", ex);
++                        } finally {
++                            saved.savingDisabled = oldSave;
++                        }
++                    });
++                    continue;
++                }
++                // Athena end
+                 world.getWorld().save(false);
+             }
+             server.playerCommandState = false;
+@@ -852,6 +875,13 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     }
+ 
+     public void B() {
++        // Athena start - the worlds this thread ticks see currentTick as their tick for the whole of it,
++        // packets and tasks included, as everything did before World.athenaCurrentTick
++        for (int w = 0; w < this.worlds.size(); ++w) {
++            WorldServer world = this.worlds.get(w);
++            if (world.athenaThread == null) world.athenaCurrentTick = MinecraftServer.currentTick;
++        }
++        // Athena end
+         SpigotTimings.minecraftSchedulerTimer.startTiming(); // Spigot
+         this.methodProfiler.startSection("jobs");
+         Queue queue = this.j;
+@@ -893,6 +923,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         // Send time updates to everyone, it will get the right time from the world the player is in.
+         // PandaSpigot start - Optimize World Time Updates
+         for (final WorldServer world : this.worlds) {
++            if (world.athenaThread != null) continue; // Athena - its own thread sends them
+             world.sendWorldTimeUpdate(false);
+         }
+         // PandaSpigot end
+@@ -901,98 +932,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         int i;
+ 
+         for (i = 0; i < this.worlds.size(); ++i) {
+-            long j = System.nanoTime();
+-
+-            // if (i == 0 || this.getAllowNether()) {
+-                WorldServer worldserver = this.worlds.get(i);
+-                worldserver.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
+-                worldserver.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
+-
+-                this.methodProfiler.startSection(worldserver.getWorldData().getName());
+-                /* Drop global time updates
+-                if (this.ticks % 20 == 0) {
+-                    this.methodProfiler.a("timeSync");
+-                    this.v.a(new PacketPlayOutUpdateTime(worldserver.getTime(), worldserver.getDayTime(), worldserver.getGameRules().getBoolean("doDaylightCycle")), worldserver.worldProvider.getDimension());
+-                    this.methodProfiler.b();
+-                }
+-                // CraftBukkit end */
+-
+-                this.methodProfiler.startSection("tick");
+-
+-                CrashReport crashreport;
+-
+-                try {
+-                    worldserver.timings.doTick.startTiming(); // Spigot
+-                    worldserver.doTick();
+-                    worldserver.timings.doTick.stopTiming(); // Spigot
+-                } catch (Throwable throwable) {
+-                    // Spigot Start
+-                    try {
+-                    crashreport = CrashReport.makeCrashReport(throwable, "Exception ticking world");
+-                    } catch (Throwable t){
+-                        throw new RuntimeException("Error generating crash report", t);
+-                    }
+-                    // Spigot End
+-                    worldserver.addWorldInfoToCrashReport(crashreport);
+-                    throw new ReportedException(crashreport);
+-                }
+-
+-                try {
+-                    worldserver.timings.tickEntities.startTiming(); // Spigot
+-                    worldserver.tickEntities();
+-                    worldserver.timings.tickEntities.stopTiming(); // Spigot
+-                } catch (Throwable throwable1) {
+-                    // Spigot Start
+-                    try {
+-                    crashreport = CrashReport.makeCrashReport(throwable1, "Exception ticking world entities");
+-                    } catch (Throwable t){
+-                        throw new RuntimeException("Error generating crash report", t);
+-                    }
+-                    // Spigot End
+-                    worldserver.addWorldInfoToCrashReport(crashreport);
+-                    throw new ReportedException(crashreport);
+-                }
+-
+-                this.methodProfiler.endSection();
+-                this.methodProfiler.startSection("tracker");
+-                worldserver.timings.tracker.startTiming(); // Spigot
+-                // PandaSpigot start - controlled flush for entity tracker packets
+-                List<NetworkManager> disabledFlushes = new ArrayList<>(worldserver.players.size());
+-                for (EntityHuman player : worldserver.players) {
+-                    if (!(player instanceof EntityPlayer)) continue; // skip non-player entities
+-                    PlayerConnection connection = ((EntityPlayer) player).playerConnection;
+-                    if (connection != null) {
+-                        connection.networkManager.disableAutomaticFlush();
+-                        disabledFlushes.add(connection.networkManager);
+-                    }
+-                }
+-                try {
+-                // PandaSpigot end
+-                if (this.getPlayerList().getPlayerCount() > 0) { // PandaSpigot - Skip updating entity tracker if zero players online
+-                worldserver.getTracker().updatePlayers();
+-                } // PandaSpigot
+-                // PandaSpigot start - controlled flush for entity tracker packets
+-                } finally {
+-                    for (NetworkManager networkManager : disabledFlushes) {
+-                        networkManager.enableAutomaticFlush();
+-                    }
+-                }
+-                // PandaSpigot end
+-                worldserver.timings.tracker.stopTiming(); // Spigot
+-                this.methodProfiler.endSection();
+-                this.methodProfiler.endSection();
+-                // Athena start - index consistency audit; see AthenaIndexAudit
+-                if (AthenaIndexAudit.enabled()) {
+-                    AthenaIndexAudit.auditCreatureCensus(worldserver);
+-                    AthenaIndexAudit.auditEntityBuckets(worldserver);
+-                    AthenaIndexAudit.auditSectionLiquids(worldserver);
+-                    AthenaIndexAudit.auditPlayerInstanceChunks(worldserver.getPlayerChunkMap()); // Athena
+-                }
+-                // Athena end
+-                worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
+-            // } // CraftBukkit
+-
+-            // this.i[i][this.ticks % 100] = System.nanoTime() - j; // CraftBukkit
++            WorldServer worldserver = this.worlds.get(i);
++            if (worldserver.athenaThread != null) continue; // Athena - it ticks on its own thread; see AthenaWorldThread
++            this.athenaTickWorld(worldserver); // Athena - the per-world tick, shared with AthenaWorldThread
+         }
+ 
+         // Athena - index consistency audit summary
+@@ -1019,6 +961,106 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         this.methodProfiler.endSection();
+     }
+ 
++    // Athena start - one world's tick, the body of the loop in B(): the server thread runs it for the
++    // worlds it ticks, an AthenaWorldThread for its own world
++    public void athenaTickWorld(WorldServer worldserver) {
++        worldserver.athenaInTick = true;
++        try {
++            this.athenaTickWorld0(worldserver);
++        } finally {
++            worldserver.athenaInTick = false;
++        }
++    }
++
++    private void athenaTickWorld0(WorldServer worldserver) {
++        worldserver.hasEntityMoveEvent = io.papermc.paper.event.entity.EntityMoveEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
++        worldserver.hasPhysicsEvent = org.bukkit.event.block.BlockPhysicsEvent.getHandlerList().getRegisteredListeners().length > 0; // PandaSpigot
++
++        this.methodProfiler.startSection(worldserver.getWorldData().getName());
++        /* Drop global time updates
++        if (this.ticks % 20 == 0) {
++            this.methodProfiler.a("timeSync");
++            this.v.a(new PacketPlayOutUpdateTime(worldserver.getTime(), worldserver.getDayTime(), worldserver.getGameRules().getBoolean("doDaylightCycle")), worldserver.worldProvider.getDimension());
++            this.methodProfiler.b();
++        }
++        // CraftBukkit end */
++
++        this.methodProfiler.startSection("tick");
++
++        CrashReport crashreport;
++
++        try {
++            worldserver.timings.doTick.startTiming(); // Spigot
++            worldserver.doTick();
++            worldserver.timings.doTick.stopTiming(); // Spigot
++        } catch (Throwable throwable) {
++            // Spigot Start
++            try {
++            crashreport = CrashReport.makeCrashReport(throwable, "Exception ticking world");
++            } catch (Throwable t){
++                throw new RuntimeException("Error generating crash report", t);
++            }
++            // Spigot End
++            worldserver.addWorldInfoToCrashReport(crashreport);
++            throw new ReportedException(crashreport);
++        }
++
++        try {
++            worldserver.timings.tickEntities.startTiming(); // Spigot
++            worldserver.tickEntities();
++            worldserver.timings.tickEntities.stopTiming(); // Spigot
++        } catch (Throwable throwable1) {
++            // Spigot Start
++            try {
++            crashreport = CrashReport.makeCrashReport(throwable1, "Exception ticking world entities");
++            } catch (Throwable t){
++                throw new RuntimeException("Error generating crash report", t);
++            }
++            // Spigot End
++            worldserver.addWorldInfoToCrashReport(crashreport);
++            throw new ReportedException(crashreport);
++        }
++
++        this.methodProfiler.endSection();
++        this.methodProfiler.startSection("tracker");
++        worldserver.timings.tracker.startTiming(); // Spigot
++        // PandaSpigot start - controlled flush for entity tracker packets
++        List<NetworkManager> disabledFlushes = new ArrayList<>(worldserver.players.size());
++        for (EntityHuman player : worldserver.players) {
++            if (!(player instanceof EntityPlayer)) continue; // skip non-player entities
++            PlayerConnection connection = ((EntityPlayer) player).playerConnection;
++            if (connection != null) {
++                connection.networkManager.disableAutomaticFlush();
++                disabledFlushes.add(connection.networkManager);
++            }
++        }
++        try {
++        // PandaSpigot end
++        if (this.getPlayerList().getPlayerCount() > 0) { // PandaSpigot - Skip updating entity tracker if zero players online
++        worldserver.getTracker().updatePlayers();
++        } // PandaSpigot
++        // PandaSpigot start - controlled flush for entity tracker packets
++        } finally {
++            for (NetworkManager networkManager : disabledFlushes) {
++                networkManager.enableAutomaticFlush();
++            }
++        }
++        // PandaSpigot end
++        worldserver.timings.tracker.stopTiming(); // Spigot
++        this.methodProfiler.endSection();
++        this.methodProfiler.endSection();
++        // Athena start - index consistency audit; see AthenaIndexAudit
++        if (AthenaIndexAudit.enabled()) {
++            AthenaIndexAudit.auditCreatureCensus(worldserver);
++            AthenaIndexAudit.auditEntityBuckets(worldserver);
++            AthenaIndexAudit.auditSectionLiquids(worldserver);
++            AthenaIndexAudit.auditPlayerInstanceChunks(worldserver.getPlayerChunkMap()); // Athena
++        }
++        // Athena end
++        worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
++    }
++    // Athena end
++
+     public boolean getAllowNether() {
+         return true;
+     }
+diff --git a/src/main/java/net/minecraft/server/NavigationAbstract.java b/src/main/java/net/minecraft/server/NavigationAbstract.java
+index 7a27157de44af2609956fec10322e55eabc82520..bd4d2fde97e66e6b07baa97aa29bb5ada76aa870 100644
+--- a/src/main/java/net/minecraft/server/NavigationAbstract.java
++++ b/src/main/java/net/minecraft/server/NavigationAbstract.java
+@@ -84,7 +84,7 @@ public abstract class NavigationAbstract {
+ 
+     public boolean tryMoveToEntityLiving(Entity entity, double d0) {
+         // PaperSpigot start - Pathfinding optimizations
+-        if (this.pathfindFailures > 10 && this.currentPath == null && MinecraftServer.currentTick < this.lastFailure + 40) {
++        if (this.pathfindFailures > 10 && this.currentPath == null && this.worldObj.athenaCurrentTick < this.lastFailure + 40) { // Athena - this world's tick
+             return false;
+         }
+         PathEntity pathentity = this.getPathToEntityLiving(entity);
+@@ -95,7 +95,7 @@ public abstract class NavigationAbstract {
+             return true;
+         } else {
+             this.pathfindFailures++;
+-            this.lastFailure = MinecraftServer.currentTick;
++            this.lastFailure = this.worldObj.athenaCurrentTick; // Athena - this world's tick
+             return false;
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/TileEntityBrewingStand.java b/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
+index 74d0e7fc493fb2c676a3a6b568885cf3ea9f41d8..1fe156cb35efbd3aeeaa69db5a21371c4498175b 100644
+--- a/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
++++ b/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
+@@ -66,8 +66,8 @@ public class TileEntityBrewingStand extends TileEntityContainer implements IUpda
+ 
+     public void c() {
+         // CraftBukkit start - Use wall time instead of ticks for brewing
+-        int elapsedTicks = MinecraftServer.currentTick - this.lastTick;
+-        this.lastTick = MinecraftServer.currentTick;
++        int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
++        this.lastTick = this.world.athenaCurrentTick; // Athena
+ 
+         if (this.brewTime > 0) {
+             this.brewTime -= elapsedTicks;
+diff --git a/src/main/java/net/minecraft/server/TileEntityFurnace.java b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+index 8797aece28ee3880badf0eca4123341e84b61cb3..defedcc113f7ecf101c934b717bb920a9883fa50 100644
+--- a/src/main/java/net/minecraft/server/TileEntityFurnace.java
++++ b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+@@ -181,8 +181,8 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+         boolean flag1 = false;
+ 
+         // CraftBukkit start - Use wall time instead of ticks for cooking
+-        int elapsedTicks = MinecraftServer.currentTick - this.lastTick;
+-        this.lastTick = MinecraftServer.currentTick;
++        int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
++        this.lastTick = this.world.athenaCurrentTick; // Athena
+ 
+         // CraftBukkit - moved from below
+         if (this.isBurning() && this.canBurn()) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 0e42d20bb7c5c8321880537fb0174ec9771a0c9f..5fd4777a32a1c01e2548c313dc925eb2d0b68c4a 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -171,6 +171,15 @@ public abstract class World implements IBlockAccess {
+ 
+     public final org.spigotmc.SpigotWorldConfig spigotConfig; // Spigot
+     public final org.spigotmc.ActivationRange.Bounds athenaActivationBounds = new org.spigotmc.ActivationRange.Bounds(); // Athena - see ActivationRange.Bounds
++    // Athena - this world's tick count, for the timers vanilla and Spigot keep against
++    // MinecraftServer.currentTick (activation, item and zombie ages, furnace catch-up). The server
++    // thread sets it to currentTick before each tick of the worlds it runs, so for those nothing
++    // changes; a world on its own thread (AthenaWorldThread) counts on from there by itself.
++    public int athenaCurrentTick = MinecraftServer.currentTick;
++    /** Athena - whether this world ticks on its own thread; see WorldServer.athenaThread. */
++    public boolean athenaIsThreaded() {
++        return false;
++    }
+ 
+     public final org.github.paperspigot.PaperSpigotWorldConfig paperSpigotConfig; // PaperSpigot
+ 
+@@ -1328,7 +1337,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public boolean addEntity(Entity entity, SpawnReason spawnReason) { // Changed signature, added SpawnReason
+-        org.spigotmc.AsyncCatcher.catchOp( "entity add"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "entity add", this ); // Spigot // Athena - the thread that ticks this world
+         if (entity == null) return false;
+         // CraftBukkit end
+         int i = MathHelper.floor(entity.locX / 16.0D);
+@@ -1453,7 +1462,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void removeEntity(Entity entity) {
+-        org.spigotmc.AsyncCatcher.catchOp( "entity remove"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "entity remove", this ); // Spigot // Athena - the thread that ticks this world
+         entity.die();
+         if (entity instanceof EntityHuman) {
+             this.players.remove(entity);
+@@ -3814,7 +3823,7 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void loadEntities(Collection<Entity> collection) {
+-        org.spigotmc.AsyncCatcher.catchOp( "entity world add"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "entity world add", this ); // Spigot // Athena - the thread that ticks this world
+         // CraftBukkit start
+         // this.entityList.addAll(collection);
+         Iterator iterator = collection.iterator();
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 2c657e4cbfb58e2b0bf77edadf7f737158f7457f..58444e47f65cf88449742870b72947636ec7cb08 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -511,7 +511,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         // find the chunks cost a match server ~20% of its thread, every tick. Done every 20th tick
+         // instead, that work lands at most a second later; the client lights its own blocks, and
+         // Spigot sends chunks whether or not they have ticked (Chunk.isReady).
+-        if (MinecraftServer.currentTick % 20 != 0 && this.athenaChunkWalkIsIdle()) {
++        if (this.athenaCurrentTick % 20 != 0 && this.athenaChunkWalkIsIdle()) { // Athena - this world's tick
+             return;
+         }
+         // Athena end
+@@ -1493,14 +1493,90 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         return (Entity) this.entitiesByUUID.get(uuid);
+     }
+ 
++    // Athena start - "the main thread" of a world is the thread that ticks it: its AthenaWorldThread
++    // if it has one, else the server thread. Packets of players in the world, and tasks for it, run there.
++    public volatile AthenaWorldThread athenaThread;
++    /** Set while some thread is inside this world's tick (MinecraftServer.athenaTickWorld). */
++    volatile boolean athenaInTick;
++
+     public ListenableFuture<Object> postToMainThread(Runnable runnable) {
+-        return this.server.postToMainThread(runnable);
++        AthenaWorldThread thread = this.athenaThread;
++        if (thread == null) {
++            return this.server.postToMainThread(runnable);
++        }
++        if (Thread.currentThread() == thread) {
++            runnable.run();
++            return com.google.common.util.concurrent.Futures.immediateFuture(null);
++        }
++        com.google.common.util.concurrent.ListenableFutureTask<Object> task = com.google.common.util.concurrent.ListenableFutureTask.create(runnable, null);
++        thread.post(task);
++        return task;
+     }
+ 
+     public boolean isMainThread() {
+-        return this.server.isMainThread();
++        AthenaWorldThread thread = this.athenaThread;
++        return thread == null ? this.server.isMainThread() : Thread.currentThread() == thread;
++    }
++
++    @Override
++    public boolean athenaIsThreaded() {
++        return this.athenaThread != null;
++    }
++
++    /**
++     * Runs {@code task} on the thread that ticks this world, before that thread's next tick: queued
++     * to its AthenaWorldThread, or to the server thread's queue (MinecraftServer.processQueue).
++     */
++    public void athenaRunOnTickThread(Runnable task) {
++        AthenaWorldThread thread = this.athenaThread;
++        if (thread != null) {
++            thread.post(task);
++        } else {
++            this.server.processQueue.add(task);
++        }
+     }
+ 
++    /**
++     * Moves this world's ticking to its own thread. Call on the server thread, which owns the world
++     * until then and does not touch it after.
++     */
++    public void athenaStartThread() {
++        org.spigotmc.AsyncCatcher.catchOp("start a world thread");
++        if (this.athenaThread != null) return;
++        if (this.athenaInTick) {
++            // the server thread would go on ticking the rest of this tick while the new thread starts its own
++            throw new IllegalStateException("Cannot start world " + this.worldData.getName() + "'s thread from inside its own tick; start it from a scheduler task or a command");
++        }
++        if (!this.players.isEmpty()) {
++            throw new IllegalStateException("World " + this.worldData.getName() + " has players; worlds with players cannot tick on their own thread yet");
++        }
++        AthenaWorldThread.beforeFirstStart();
++        AthenaWorldThread thread = new AthenaWorldThread(this);
++        this.athenaCurrentTick = MinecraftServer.currentTick;
++        this.athenaThread = thread;
++        thread.start();
++    }
++
++    /**
++     * Hands this world's ticking back to the server thread: waits for its thread to finish the
++     * current tick. Call on the server thread.
++     *
++     * @return false if the thread did not stop in time; it then still owns the world
++     */
++    public boolean athenaStopThread(long timeoutMillis) {
++        org.spigotmc.AsyncCatcher.catchOp("stop a world thread");
++        AthenaWorldThread thread = this.athenaThread;
++        if (thread == null) return true;
++        if (!thread.stopAndJoin(timeoutMillis)) {
++            MinecraftServer.LOGGER.error("World " + this.worldData.getName() + "'s thread did not stop within " + timeoutMillis + " ms; it keeps the world");
++            return false;
++        }
++        this.athenaThread = null;
++        thread.handBack();
++        return true;
++    }
++    // Athena end
++
+     static class BlockActionDataList extends ArrayList<BlockActionData> {
+ 
+         private BlockActionDataList() {}
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 8b835d74d2ed25047497217d9ea028e8eb6cbc29..52488633a943e1b48c85fcfc9b7d84bfa1c3f372 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -140,7 +140,7 @@ public final class CraftServer implements Server {
+     private final SimplePluginManager pluginManager = new SimplePluginManager(this, commandMap); // PandaSpigot
+     protected final MinecraftServer console;
+     protected final DedicatedPlayerList playerList;
+-    private final Map<String, World> worlds = new LinkedHashMap<String, World>();
++    private final Map<String, World> worlds = java.util.Collections.synchronizedMap(new LinkedHashMap<String, World>()); // Athena - world threads look worlds up too
+     private YamlConfiguration configuration;
+     private YamlConfiguration commandsConfiguration;
+     private final Yaml yaml = new Yaml(new SafeConstructor());
+@@ -1081,6 +1081,11 @@ public final class CraftServer implements Server {
+             return false;
+         }
+ 
++        // Athena - a world on its own thread comes back to this thread first
++        if (!handle.athenaStopThread(10000L)) {
++            return false;
++        }
++
+         // Athena - save=false must also settle decoration before the world and its files disappear.
+         net.minecraft.server.ChunkDecorationExecutor.flush(handle);
+         if (save) {
+@@ -1142,11 +1147,13 @@ public final class CraftServer implements Server {
+ 
+     @Override
+     public World getWorld(UUID uid) {
++        synchronized (worlds) { // Athena - a synchronized map is iterated under its lock
+         for (World world : worlds.values()) {
+             if (world.getUID().equals(uid)) {
+                 return world;
+             }
+         }
++        } // Athena
+         return null;
+     }
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+index 2138ca61be8bed0d805769daa02e0092eda9c1f1..01b144e5d0485666dca2340d8348495c8f9c0725 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftWorld.java
+@@ -199,7 +199,7 @@ public class CraftWorld implements World {
+     }
+ 
+     public boolean unloadChunkRequest(int x, int z, boolean safe) {
+-        org.spigotmc.AsyncCatcher.catchOp( "chunk unload"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "chunk unload", this.world ); // Spigot // Athena - the thread that ticks this world
+         if (safe && isChunkInUse(x, z)) {
+             return false;
+         }
+@@ -210,7 +210,7 @@ public class CraftWorld implements World {
+     }
+ 
+     public boolean unloadChunk(int x, int z, boolean save, boolean safe) {
+-        org.spigotmc.AsyncCatcher.catchOp( "chunk unload"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "chunk unload", this.world ); // Spigot // Athena - the thread that ticks this world
+         if (safe && isChunkInUse(x, z)) {
+             return false;
+         }
+@@ -294,7 +294,7 @@ public class CraftWorld implements World {
+     }
+ 
+     public boolean loadChunk(int x, int z, boolean generate) {
+-        org.spigotmc.AsyncCatcher.catchOp( "chunk load"); // Spigot
++        org.spigotmc.AsyncCatcher.catchOp( "chunk load", this.world ); // Spigot // Athena - the thread that ticks this world
+         chunkLoadCount++;
+         if (generate) {
+             // Use the default variant of loadChunk when generate == true.
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index ce3c56a1c454826a9a58d15d607c8fc84f6403ab..6c920438e8f1119b372e937bc319f45df3cb2890 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -247,6 +247,11 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+ 
+         // Spigot start
+         if (!location.getWorld().equals(getWorld())) {
++          // Athena start - moving an entity between worlds touches both; not while either ticks on its own thread
++          if (entity.world.athenaIsThreaded() || ((CraftWorld) location.getWorld()).getHandle().athenaIsThreaded()) {
++              return false;
++          }
++          // Athena end
+           entity.teleportTo(location, cause.equals(TeleportCause.NETHER_PORTAL));
+           return true;
+         }
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 4fecd243e7b58ded532d7a505f26692b1d354616..8af69696e1264465444e99402d7d0d4b8cb32cfb 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -635,6 +635,13 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+             return false;
+         }
+ 
++        // Athena start - players cannot be in a world on its own thread yet: their packets still run on the server thread
++        if (((CraftWorld) location.getWorld()).getHandle().athenaIsThreaded()) {
++            net.minecraft.server.MinecraftServer.LOGGER.warn("Refused to teleport " + getName() + " into " + location.getWorld().getName() + ", which ticks on its own thread");
++            return false;
++        }
++        // Athena end
++
+         // From = Players current Location
+         Location from = this.getLocation();
+         // To = Players new Location if Teleport is Successful
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index 970aa96fd63c08b0b5c8382e5be8b883ec4c9d63..68842d715aa8b74ddeb9394181e7f23c54766dce 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -122,7 +122,7 @@ public class ActivationRange
+         for ( Entity player : (List<Entity>) (List) world.players )
+         {
+ 
+-            player.activatedTick = MinecraftServer.currentTick;
++            player.activatedTick = world.athenaCurrentTick; // Athena - this world's tick
+             // Athena - grow expanded inline (min/max mirrors the AxisAlignedBB constructor)
+             b.maxBBMinX = Math.min( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
+             b.maxBBMaxX = Math.max( player.boundingBoxMinX - maxRange, player.boundingBoxMaxX + maxRange );
+@@ -212,11 +212,11 @@ public class ActivationRange
+             {
+                 Entity entity = slice.get( index );
+                 // Athena end
+-                if ( MinecraftServer.currentTick > entity.activatedTick )
++                if ( entity.world.athenaCurrentTick > entity.activatedTick ) // Athena - this world's tick
+                 {
+                     if ( entity.defaultActivationState )
+                     {
+-                        entity.activatedTick = MinecraftServer.currentTick;
++                        entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
+                         continue;
+                     }
+                     switch ( entity.activationType )
+@@ -224,20 +224,20 @@ public class ActivationRange
+                         case 1:
+                             if ( AxisAlignedBBHelper.intersects( b.monsterBBMinX, b.monsterBBMinY, b.monsterBBMinZ, b.monsterBBMaxX, b.monsterBBMaxY, b.monsterBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
+                             }
+                             break;
+                         case 2:
+                             if ( AxisAlignedBBHelper.intersects( b.animalBBMinX, b.animalBBMinY, b.animalBBMinZ, b.animalBBMaxX, b.animalBBMaxY, b.animalBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
+                             }
+                             break;
+                         case 3:
+                         default:
+                             if ( AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
+                             }
+                     }
+                 }
+@@ -287,10 +287,10 @@ public class ActivationRange
+         {
+             Entity entity = entities.get( index );
+ 
+-            if ( MinecraftServer.currentTick > entity.activatedTick && !entity.defaultActivationState
++            if ( entity.world.athenaCurrentTick > entity.activatedTick && !entity.defaultActivationState // Athena - this world's tick
+                     && AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) )
+             {
+-                entity.activatedTick = MinecraftServer.currentTick;
++                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
+             }
+         }
+     }
+@@ -371,18 +371,18 @@ public class ActivationRange
+             return true;
+         }
+ 
+-        boolean isActive = entity.activatedTick >= MinecraftServer.currentTick || entity.defaultActivationState;
++        boolean isActive = entity.activatedTick >= entity.world.athenaCurrentTick || entity.defaultActivationState; // Athena - this world's tick
+ 
+         // Should this entity tick?
+         if ( !isActive )
+         {
+-            if ( ( MinecraftServer.currentTick - entity.activatedTick - 1 ) % 20 == 0 )
++            if ( ( entity.world.athenaCurrentTick - entity.activatedTick - 1 ) % 20 == 0 ) // Athena - this world's tick
+             {
+                 // Check immunities every 20 ticks.
+                 if ( checkEntityImmunities( entity ) )
+                 {
+                     // Triggered some sort of immunity, give 20 full ticks before we check again.
+-                    entity.activatedTick = MinecraftServer.currentTick + 20;
++                    entity.activatedTick = entity.world.athenaCurrentTick + 20; // Athena - this world's tick
+                 }
+                 isActive = true;
+             }
+diff --git a/src/main/java/org/spigotmc/AsyncCatcher.java b/src/main/java/org/spigotmc/AsyncCatcher.java
+index cc038ef3e2b6028240cd52848338eadf7c468060..1fdc1ff4b44223b8278e9551ef4c24e1bb928f2f 100644
+--- a/src/main/java/org/spigotmc/AsyncCatcher.java
++++ b/src/main/java/org/spigotmc/AsyncCatcher.java
+@@ -15,4 +15,15 @@ public class AsyncCatcher
+             throw new IllegalStateException( "Asynchronous " + reason + "!" );
+         }
+     }
++
++    // Athena start - for work on one world: the thread that ticks it, which is its AthenaWorldThread
++    // if it has one (WorldServer.isMainThread), may do it; the server thread may not then
++    public static void catchOp(String reason, net.minecraft.server.World world)
++    {
++        if ( enabled && !( world instanceof net.minecraft.server.WorldServer ? ( (net.minecraft.server.WorldServer) world ).isMainThread() : Thread.currentThread() == MinecraftServer.getServer().primaryThread ) )
++        {
++            throw new IllegalStateException( "Asynchronous " + reason + "!" );
++        }
++    }
++    // Athena end
+ }

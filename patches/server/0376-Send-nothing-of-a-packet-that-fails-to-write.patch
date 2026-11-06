@@ -1,0 +1,155 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 14:47:13 +0900
+Subject: [PATCH] Send nothing of a packet that fails to write
+
+
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 1bf2d049ef5014ef7ad968e2c0b3113f6e42a661..6ac212159c591dd10ff098260e0294e2d831df04 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -142,6 +142,11 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+         }
+ 
+         ByteBuf in = (ByteBuf) msg;
++
++        if (!in.isReadable()) {
++            prepender.write(in, promise); // a packet PacketEncoder dropped: no frame for it either
++            return;
++        }
+         ByteBuf out = null;
+ 
+         try {
+diff --git a/src/main/java/net/minecraft/server/PacketEncoder.java b/src/main/java/net/minecraft/server/PacketEncoder.java
+index 934439ce6c8b0df8d01da32363c3f17265973f7f..fb1d048d0f5bf1d23444c302314120452101cf53 100644
+--- a/src/main/java/net/minecraft/server/PacketEncoder.java
++++ b/src/main/java/net/minecraft/server/PacketEncoder.java
+@@ -65,7 +65,16 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+ 
+                 packet.writePacketData(packetdataserializer);
+             } catch (Throwable throwable) {
+-                PacketEncoder.logger.error(throwable);
++                // Athena start - send none of a packet that failed part way, and say which it was.
++                //
++                // What it had written - its id and the fields before the one that threw - went out as
++                // a packet of its own, which the client cannot read: a team packet with a null player
++                // name reached the client as 17 bytes it failed on with "Bad VarInt decoded", and the
++                // log named only the exception. The prepender and the compressor pass the empty
++                // buffer through, so nothing at all is written for it; the next packet is unaffected.
++                bytebuf.clear();
++                PacketEncoder.logger.error("Dropped a {} that failed to write", packet.getClass().getSimpleName(), throwable);
++                // Athena end
+             }
+ 
+         }
+diff --git a/src/main/java/net/minecraft/server/PacketPrepender.java b/src/main/java/net/minecraft/server/PacketPrepender.java
+index e1b138089e3dea28cd273f228a0a6b0240e7590c..c241e8408852ce2a4f62c92eca7145ceab3faad7 100644
+--- a/src/main/java/net/minecraft/server/PacketPrepender.java
++++ b/src/main/java/net/minecraft/server/PacketPrepender.java
+@@ -12,6 +12,7 @@ public class PacketPrepender extends MessageToByteEncoder<ByteBuf> {
+     private PacketPrepender() {} // PandaSpigot - private
+ 
+     protected void a(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, ByteBuf bytebuf1) throws Exception {
++        if (!bytebuf.isReadable()) return; // Athena - a packet PacketEncoder dropped: no frame for it
+         // PandaSpigot start
+         com.hpfxd.pandaspigot.network.VarIntUtil.writeVarInt(bytebuf1, bytebuf.readableBytes());
+         bytebuf1.writeBytes(bytebuf);
+diff --git a/src/test/java/net/minecraft/server/AthenaEncoderFailureTest.java b/src/test/java/net/minecraft/server/AthenaEncoderFailureTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d361df264614b8fc1501b0e3b0866ab34ac89a9
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaEncoderFailureTest.java
+@@ -0,0 +1,93 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.lang.reflect.Field;
++import java.util.Collection;
++import org.junit.BeforeClass;
++import org.junit.Test;
++
++/**
++ * Athena - a packet that throws part way through writePacketData puts nothing on the wire, with
++ * and without compression, and the packet after it reaches the client intact.
++ */
++public class AthenaEncoderFailureTest {
++
++    @BeforeClass
++    public static void bootstrap() {
++        DispenserRegistry.register();
++    }
++
++    /** A team packet that writes most of itself and then throws on a null player name. */
++    @SuppressWarnings("unchecked")
++    private static PacketPlayOutScoreboardTeam failingTeam() throws Exception {
++        PacketPlayOutScoreboardTeam team = new PacketPlayOutScoreboardTeam();
++        Field players = PacketPlayOutScoreboardTeam.class.getDeclaredField("players");
++
++        players.setAccessible(true);
++        ((Collection<String>) players.get(team)).add(null);
++        return team;
++    }
++
++    private static EmbeddedChannel channel(int threshold) {
++        EmbeddedChannel channel = new EmbeddedChannel();
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        channel.pipeline().addLast("prepender", PacketPrepender.INSTANCE)
++                .addLast("encoder", new PacketEncoder(EnumProtocolDirection.CLIENTBOUND));
++        if (threshold >= 0) {
++            channel.pipeline().addBefore("encoder", "compress", new PacketCompressor(threshold));
++        }
++        return channel;
++    }
++
++    private static ByteBuf drain(EmbeddedChannel channel) {
++        ByteBuf all = Unpooled.buffer();
++        ByteBuf next;
++
++        while ((next = channel.readOutbound()) != null) {
++            all.writeBytes(next);
++            next.release();
++        }
++        return all;
++    }
++
++    private static void check(int threshold) throws Exception {
++        EmbeddedChannel channel = channel(threshold);
++
++        channel.writeOutbound(failingTeam());
++        assertFalse("nothing of the failed packet is written", drain(channel).isReadable());
++
++        channel.writeOutbound(new PacketPlayOutKeepAlive(42));
++        PacketDataSerializer wire = new PacketDataSerializer(drain(channel));
++        PacketDataSerializer frame = new PacketDataSerializer(wire.readSlice(wire.readVarIntFromBuffer()));
++
++        if (threshold >= 0) {
++            assertEquals("uncompressed", 0, frame.readVarIntFromBuffer());
++        }
++        Packet packet = EnumProtocol.PLAY.getPacket(EnumProtocolDirection.CLIENTBOUND, frame.readVarIntFromBuffer());
++
++        assertTrue(packet instanceof PacketPlayOutKeepAlive);
++        packet.readPacketData(frame);
++        assertFalse(frame.isReadable());
++        assertFalse("one frame, the keep-alive", wire.isReadable());
++        assertNull(channel.readOutbound());
++        channel.finishAndReleaseAll();
++    }
++
++    @Test
++    public void failedPacketWritesNothingUncompressed() throws Exception {
++        check(-1);
++    }
++
++    @Test
++    public void failedPacketWritesNothingCompressed() throws Exception {
++        check(256);
++    }
++}

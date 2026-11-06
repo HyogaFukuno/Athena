@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 640" width="960" height="640" font-family="'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#52514e"/>
+    </marker>
+  </defs>
+  <rect width="960" height="640" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="38" font-size="20" font-weight="700" fill="#0b0b0b">今の形：1 JVM に部屋（試合）がいくつも。試合のワールドは部屋ごとのスレッドで回る</text>
+
+  <rect x="24" y="56" width="912" height="500" rx="10" fill="#ffffff" stroke="#52514e"/>
+  <text x="42" y="82" font-size="16" font-weight="700" fill="#0b0b0b">sg（JVM 1 つ。Athena feature/world-threads ＋ SurvivalGames feature/rooms）</text>
+
+  <!-- server thread -->
+  <rect x="42" y="96" width="876" height="128" rx="8" fill="#fdeee6" stroke="#eb6834"/>
+  <text x="58" y="120" font-size="15" font-weight="700" fill="#0b0b0b">Server thread（今までどおり 1 本。全体のこと）</text>
+  <g font-size="13" fill="#0b0b0b">
+    <rect x="58" y="132" width="200" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="68" y="155">ログイン・満員の判定</text>
+    <rect x="266" y="132" width="200" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="276" y="155">ロビーのワールド</text>
+    <rect x="474" y="132" width="214" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="484" y="155">ワールドの読み込み・破棄</text>
+    <rect x="696" y="132" width="206" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="706" y="155">Bukkit のスケジューラ</text>
+    <rect x="58" y="176" width="200" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="68" y="199">コンソール・MOTD</text>
+    <rect x="266" y="176" width="422" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="276" y="199">ロビーと Cleanup の間の部屋（部屋の持ち主）</text>
+    <rect x="696" y="176" width="206" height="36" rx="6" fill="#ffffff" stroke="#eb6834"/><text x="706" y="199">見張り（止まった部屋）</text>
+  </g>
+
+  <!-- world threads -->
+  <g font-size="13" fill="#0b0b0b">
+    <rect x="42" y="250" width="876" height="78" rx="8" fill="#e6f0fc" stroke="#2a78d6"/>
+    <text x="58" y="272" font-size="15" font-weight="700">World thread（部屋 1）</text>
+    <rect x="58" y="282" width="236" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="68" y="305">試合のマップ sg-1-Plantations</text>
+    <rect x="302" y="282" width="300" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="312" y="305">デスマッチ会場 sg-1-dm-…-0〜5</text>
+    <rect x="610" y="282" width="292" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="620" y="305">部屋 1 の SG（試合の状態・脱落…）</text>
+
+    <rect x="42" y="338" width="876" height="78" rx="8" fill="#e6f0fc" stroke="#2a78d6"/>
+    <text x="58" y="360" font-size="15" font-weight="700">World thread（部屋 2）</text>
+    <rect x="58" y="370" width="236" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="68" y="393">試合のマップ sg-2-Mortal_Skies</text>
+    <rect x="302" y="370" width="300" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="312" y="393">デスマッチ会場 sg-2-dm-…</text>
+    <rect x="610" y="370" width="292" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="620" y="393">部屋 2 の SG</text>
+
+    <text x="480" y="440" font-size="16" fill="#52514e" text-anchor="middle">⋮（試合中の部屋の数だけ。1 GB の箱で 10 部屋が目安）</text>
+
+    <rect x="42" y="456" width="876" height="78" rx="8" fill="#e6f0fc" stroke="#2a78d6"/>
+    <text x="58" y="478" font-size="15" font-weight="700">World thread（部屋 N）</text>
+    <rect x="58" y="488" width="236" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="68" y="511">試合のマップ sg-N-…</text>
+    <rect x="302" y="488" width="300" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="312" y="511">デスマッチ会場 sg-N-dm-…</text>
+    <rect x="610" y="488" width="292" height="36" rx="6" fill="#ffffff" stroke="#2a78d6"/><text x="620" y="511">部屋 N の SG</text>
+  </g>
+
+  <!-- arrows between server thread and world threads -->
+  <line x1="300" y1="224" x2="300" y2="248" stroke="#52514e" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <line x1="620" y1="224" x2="620" y2="248" stroke="#52514e" stroke-width="2" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <text x="308" y="242" font-size="12" fill="#52514e">プレイヤーの受け渡し（2 段階）</text>
+  <text x="628" y="242" font-size="12" fill="#52514e">頼みごと（runOnWorld・Room#execute）</text>
+
+  <!-- legend -->
+  <g font-size="13" fill="#0b0b0b">
+    <rect x="24" y="574" width="16" height="16" rx="3" fill="#fdeee6" stroke="#eb6834"/><text x="48" y="587">Server thread：全体のこと（ログイン・ロビー・ワールドの出し入れ）</text>
+    <rect x="24" y="600" width="16" height="16" rx="3" fill="#e6f0fc" stroke="#2a78d6"/><text x="48" y="613">World thread：その部屋のワールドだけ。1 本が止まっても、ほかの部屋とロビーは止まらない</text>
+  </g>
+</svg>

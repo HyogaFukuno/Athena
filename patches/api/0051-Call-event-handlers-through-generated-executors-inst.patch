@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 15:04:33 +0900
+Subject: [PATCH] Call event handlers through generated executors instead of
+ Method.invoke
+
+
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+index bc6b9d12fe2e008fbac6c7fcc30495e5ff3591c9..36db84437012ee5feb5c48c0c6db2a4f802829fc 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+@@ -291,7 +291,21 @@ public final class JavaPluginLoader implements PluginLoader {
+                 }
+             }
+ 
+-            EventExecutor executor = new co.aikar.timings.TimedEventExecutor(new EventExecutor() { // Spigot
++            // Athena start - call the handler directly where it can be; see athenaDirectExecutor
++            final EventExecutor direct = athenaDirectExecutor(method);
++            EventExecutor executor = new co.aikar.timings.TimedEventExecutor(direct != null ? new EventExecutor() {
++                public void execute(Listener listener, Event event) throws EventException {
++                    try {
++                        if (!eventClass.isInstance(event)) {
++                            return;
++                        }
++                        direct.execute(listener, event);
++                    } catch (Throwable t) {
++                        throw new EventException(t);
++                    }
++                }
++            } : new EventExecutor() { // Spigot
++                // Athena end
+                 public void execute(Listener listener, Event event) throws EventException {
+                     try {
+                         if (!eventClass.isAssignableFrom(event.getClass())) {
+@@ -314,6 +328,36 @@ public final class JavaPluginLoader implements PluginLoader {
+         return ret;
+     }
+ 
++    // Athena start - an EventExecutor that calls the handler method itself.
++    //
++    // Every handler was called through Method.invoke. Since Java 18 that is a method handle held in
++    // a field, which the JIT cannot treat as a constant, so the handler never inlined into the
++    // dispatch however hot the event. LambdaMetafactory defines a small class, in the listener
++    // class's own nest, whose execute is an ordinary call to the handler - private handlers
++    // included. A handler it cannot take (static, or on a class a lookup cannot reach, such as a
++    // hidden one) keeps the reflective path; so does a listener class whose loader cannot see
++    // EventExecutor. Exceptions from the handler reach the caller wrapped in EventException, as
++    // before, with the handler's exception as the cause.
++    private static EventExecutor athenaDirectExecutor(Method method) {
++        if (java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
++            return null;
++        }
++        try {
++            Class<?> owner = method.getDeclaringClass();
++            java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.privateLookupIn(owner, java.lang.invoke.MethodHandles.lookup());
++            java.lang.invoke.MethodHandle handler = lookup.unreflect(method);
++            java.lang.invoke.MethodType erased = java.lang.invoke.MethodType.methodType(void.class, Listener.class, Event.class);
++            java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(lookup, "execute",
++                    java.lang.invoke.MethodType.methodType(EventExecutor.class), erased, handler,
++                    java.lang.invoke.MethodType.methodType(void.class, owner, method.getParameterTypes()[0]));
++
++            return (EventExecutor) site.getTarget().invoke();
++        } catch (Throwable t) {
++            return null;
++        }
++    }
++    // Athena end
++
+     public void enablePlugin(final Plugin plugin) {
+         Validate.isTrue(plugin instanceof JavaPlugin, "Plugin is not associated with this PluginLoader");
+ 
+diff --git a/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java b/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..00d77152d766b636d7749d3751aee5cd3c845674
+--- /dev/null
++++ b/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java
+@@ -0,0 +1,152 @@
++package org.bukkit.plugin.java;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.util.Map;
++import java.util.Set;
++import org.bukkit.TestServer;
++import org.bukkit.event.Event;
++import org.bukkit.event.EventException;
++import org.bukkit.event.EventHandler;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.Listener;
++import org.bukkit.event.TestEvent;
++import org.bukkit.plugin.RegisteredListener;
++import org.bukkit.plugin.TestPlugin;
++import org.junit.Test;
++
++/**
++ * Athena - handlers called through a generated executor behave as they did through Method.invoke:
++ * private, inherited and static handlers run, a handler for a subclass event skips the parent
++ * event its handler list shares, and a handler's exception arrives as the EventException's cause.
++ */
++public class AthenaEventExecutorTest {
++
++    public static class ParentEvent extends Event {
++        private static final HandlerList handlers = new HandlerList();
++
++        @Override
++        public HandlerList getHandlers() {
++            return handlers;
++        }
++
++        public static HandlerList getHandlerList() {
++            return handlers;
++        }
++    }
++
++    /** Shares ParentEvent's handler list, as EntityDamageByEntityEvent shares EntityDamageEvent's. */
++    public static class ChildEvent extends ParentEvent {
++    }
++
++    static int statics;
++
++    public static class Base implements Listener {
++        int inherited;
++
++        @EventHandler
++        public void onInherited(TestEvent event) {
++            ++this.inherited;
++        }
++    }
++
++    public static class Handlers extends Base {
++        int privates;
++        int children;
++        final RuntimeException failure = new IllegalStateException("from the handler");
++
++        @EventHandler
++        private void onPrivate(TestEvent event) {
++            ++this.privates;
++        }
++
++        @EventHandler
++        public void onChild(ChildEvent event) {
++            ++this.children;
++        }
++
++        @EventHandler
++        public static void onStatic(TestEvent event) {
++            ++statics;
++        }
++    }
++
++    public static class Throwing implements Listener {
++        final RuntimeException failure = new IllegalStateException("from the handler");
++
++        @EventHandler
++        public void onEvent(TestEvent event) {
++            throw this.failure;
++        }
++    }
++
++    private static void call(Map<Class<? extends Event>, Set<RegisteredListener>> listeners, Class<? extends Event> type, Event event) throws EventException {
++        for (RegisteredListener listener : listeners.get(type)) {
++            listener.callEvent(event);
++        }
++    }
++
++    private static Map<Class<? extends Event>, Set<RegisteredListener>> register(Listener listener) {
++        return new JavaPluginLoader(TestServer.getInstance()).createRegisteredListeners(listener, new TestPlugin("test"));
++    }
++
++    @Test
++    public void privateInheritedAndStaticHandlersRun() throws EventException {
++        Handlers handlers = new Handlers();
++        Map<Class<? extends Event>, Set<RegisteredListener>> listeners = register(handlers);
++        int before = statics;
++
++        call(listeners, TestEvent.class, new TestEvent(false));
++        assertEquals(1, handlers.privates);
++        assertEquals(1, handlers.inherited);
++        assertEquals(before + 1, statics);
++    }
++
++    @Test
++    public void subclassHandlerSkipsTheParentEvent() throws EventException {
++        Handlers handlers = new Handlers();
++        Map<Class<? extends Event>, Set<RegisteredListener>> listeners = register(handlers);
++
++        call(listeners, ChildEvent.class, new ParentEvent());
++        assertEquals(0, handlers.children);
++        call(listeners, ChildEvent.class, new ChildEvent());
++        assertEquals(1, handlers.children);
++    }
++
++    @Test
++    public void handlerExceptionIsTheCause() {
++        Throwing throwing = new Throwing();
++
++        try {
++            call(register(throwing), TestEvent.class, new TestEvent(false));
++            fail("no EventException");
++        } catch (EventException e) {
++            assertSame(throwing.failure, e.getCause());
++        }
++    }
++
++    @Test
++    public void publicHandlersDoNotGoThroughReflection() throws Exception {
++        // the executor the loader made for a public handler is not the reflective one
++        RegisteredListener listener = register(new Throwing()).get(TestEvent.class).iterator().next();
++        java.lang.reflect.Field field = RegisteredListener.class.getDeclaredField("executor");
++
++        field.setAccessible(true);
++        Object timed = field.get(listener);
++        java.lang.reflect.Field inner = timed.getClass().getDeclaredField("executor");
++
++        inner.setAccessible(true);
++        Object executor = inner.get(timed);
++        boolean reflective = false;
++
++        for (java.lang.reflect.Field f : executor.getClass().getDeclaredFields()) {
++            reflective |= f.getType() == java.lang.reflect.Method.class;
++        }
++        assertFalse("the generated path holds no Method", reflective);
++        assertTrue(executor.getClass().getDeclaredFields().length > 0);
++    }
++}

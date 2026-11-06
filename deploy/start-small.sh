@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
-# Athena - start one small minigame server (a ~320 MB share of a box). Run it from the server
+# Athena - start one small minigame server (a ~260 MB share of a box). Run it from the server
 # directory, the one holding paperclip.jar:
 #
 #   cd /opt/mc/arena1 && /path/to/start-small.sh
 #
-# Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through whole SurvivalGames matches: the live
-# heap is ~40 MB plus ~11 KB per loaded chunk. 144M assumes the plugin pins the play area and
-# preloads it in pre-game (Athena.pinChunks / preloadChunks): the map then sits in the heap from the
-# start (~1,200 chunks, live heap up to ~100 MB) and the live game reads no chunk. That way 144M ran
-# 15-minute matches on Par_72 and Lobby_Games with no full GC outside pre-game; 128M had three on
-# Par_72 (120-165 ms). Without the pin, chunks unloaded and reloaded fill the old generation and
-# 160M ran a full GC every 3-5 minutes. RSS ~305 MB, 0.13 vCPU in the live game. What it does, and why:
+# Measured on a ConoHa 1 GB / 2 vCPU VPS with 20 bots through three SurvivalGames matches in one JVM
+# (as the live servers run: they go back to the lobby after a match, they never restart): the live
+# heap is ~50 MB after a full GC with the play area pinned and preloaded (Athena.pinChunks /
+# preloadChunks; ~1,300 chunks on Lobby_Games). Those chunks live the whole match, so they reach the
+# old generation, and when the match's world is unloaded they stay there as garbage until a full GC:
+# ~16 MB more after every match, back to ~48 MB after the full GC (76-94 ms, two ticks) that came in
+# the third match at 144M and at 128M alike - 128M only takes 5-16 MB less. SurvivalGames now asks
+# for that full GC in the lobby, a second after unloading the world, so none comes during a match
+# and the old generation starts every match nearly empty. Without the pin, chunks unloaded and
+# reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
+# With the flags below and that GC: RSS ~259 MB of which ~177 MB is the server's own, 0.056 vCPU in
+# a match.
+# What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
 #   jar to the class path at run time, which keeps the server's classes out of the AOT cache.
@@ -30,7 +36,7 @@
 #   (flock), so two servers starting together do the work once; the second waits and reuses it.
 # - The cache belongs to one jar, one JDK and one flag set. The first run under a new key records
 #   (AOTMode=record), each server into its own record-<server>.aotconf; the next server to start
-#   builds the shared cache from the newest record, and every start after that uses it. Stop the
+#   builds the shared cache from the largest record, and every start after that uses it. Stop the
 #   recording run with "stop" so its record is written. A cache that does not fit is ignored by the
 #   JVM with a warning, never fatal.
 # - Recording and creating are separate steps (AOTMode=record, then AOTMode=create before the
@@ -43,18 +49,39 @@
 #   5-6 full GCs of 50-200 ms in a match's first two minutes; at 50% of 32 MB one ~190 ms one was
 #   left in a 15-minute match; at 50% of 48 MB none. The cap is only reserved: the cache commits
 #   what it uses (~21 MB), so it costs no memory.
+# - TieredStopAtLevel=1 compiles with C1 only. C2 spent 19 s of CPU in a server's first match, 7 s in
+#   its second (56% and 37% of the process), and its compiler arenas, code and profiles kept ~38 MB
+#   more memory per server for good. With C1 alone the first match takes 40% less CPU and the
+#   pre-game preload 0.09 instead of 0.29 vCPU, which is what servers starting together (after a
+#   deploy) compete for. C1 code is slower: once C2 has finished, a match takes ~0.056 instead of
+#   ~0.042 vCPU and a tick 1.2 instead of 0.7 ms, against a 50 ms budget - memory, not CPU, is what
+#   limits how many servers fit on a box.
+# - UseMaximumCompactionOnSystemGC off: the full GC SurvivalGames asks for in the lobby (System.gc())
+#   otherwise compacts the whole old generation, live prefix included. Left as it is, the prefix
+#   skips forwarding and moving: forward 12 -> 3-5 ms, compaction 13 -> 8-11 ms of a ~85 ms pause.
+# - The AOT cache holds the classes its recording run loaded. A run that only starts and stops leaves
+#   out the ~800 classes the first players' login loads and the ~150 of the first map: on a fresh
+#   cache those loaded from the jar in one tick each (115-219 ms and 73-95 ms). Recorded through a
+#   whole match instead - the first run under a new key plays one with bots or players before it is
+#   stopped - the first login took 41 ms.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
+# - --enable-native-access and --sun-misc-unsafe-memory-access=allow say out loud what the server
+#   needs from Java 25: Netty's epoll/io_uring and jline load native libraries (JEP 472), and Netty
+#   allocates with sun.misc.Unsafe (JEP 471/498). Java 25 allows both and warns, with six WARNING
+#   lines at every start; a future release will refuse them unless asked for, as here.
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
-HEAP="${HEAP:-144M}"
+HEAP="${HEAP:-128M}"
 PAPERCLIP="paperclip.jar"
 MAIN="org.bukkit.craftbukkit.Main"
 
 FLAGS=(
     "-Xms$HEAP" "-Xmx$HEAP"
     -XX:+UseParallelGC
+    -XX:TieredStopAtLevel=1
+    -XX:-UseMaximumCompactionOnSystemGC
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=48m
@@ -64,6 +91,8 @@ FLAGS=(
     -XX:ArchiveRelocationMode=0
     -XX:+HeapDumpOnOutOfMemoryError
     -XX:HeapDumpPath=oom.hprof
+    --enable-native-access=ALL-UNNAMED
+    --sun-misc-unsafe-memory-access=allow
 )
 
 export MALLOC_ARENA_MAX=2
@@ -108,7 +137,10 @@ if [ ! -f "$PATCHED" ]; then
 fi
 
 if [ ! -f "$AOT" ]; then
-    RECORD="$(ls -t "$DIR"/record-*.aotconf 2>/dev/null | head -1 || true)"
+    # the largest record, not the newest: it is the run that loaded the most classes. A run that only
+    # started and stopped (a restart after a deploy) is newer than a bot match on sgbench3, and a cache
+    # built from it leaves the first login and the first map to load their classes in the match
+    RECORD="$(ls -S "$DIR"/record-*.aotconf 2>/dev/null | head -1 || true)"
     if [ -n "$RECORD" ] && [ -s "$RECORD" ]; then
         echo "[start-small] building the shared AOT cache from $(basename "$RECORD")"
         if "$JAVA" "${FLAGS[@]}" -XX:AOTMode=create -XX:AOTConfiguration="$RECORD" -XX:AOTCache="$AOT.tmp.$$" -cp "$PATCHED"; then
@@ -120,10 +152,14 @@ if [ ! -f "$AOT" ]; then
     fi
 fi
 
-# Keep this key and the two most recently used others; a server still running from an older one
-# keeps its open files either way
+# Keep this key and the two most recently used others, and any used in the last week; a server still
+# running from an older one keeps its open files either way. The week is what keeps a key another
+# server has just chosen: it touched it under this lock, but has not opened its jar yet, and three
+# servers starting on three other keys meanwhile would otherwise push it out of the newest three.
 touch "$DIR"
-ls -1dt "$ROOT"/*/ 2>/dev/null | tail -n +4 | while read -r old; do rm -rf "$old"; done
+ls -1dt "$ROOT"/*/ 2>/dev/null | tail -n +4 | while read -r old; do
+    if [ -n "$(find "$old" -maxdepth 0 -mtime +7)" ]; then rm -rf "$old"; fi
+done
 
 command -v flock >/dev/null && flock -u 9
 exec 9>&-

@@ -1,0 +1,9 @@
+P02: the CPU network compression costs during a match, Bayside, 20 flybot2 bots, 40 s window, base jar,
+networkCompressionLevel 1 (production). network-compression-threshold 256 (production) against -1
+(no compression), in this order. CPU in ms per second (process total / Netty threads / server thread):
+threshold 256: process 150  netty 34.7  server 60.6
+threshold -1 : process 146  netty 32.4  server 57.8
+threshold 256: process  88  netty 22.9  server 27.3
+threshold -1 : process 106  netty 22.5  server 30.4
+Compression of the play packets is 0.4-2.3 ms/s of Netty CPU, 1-2 % of the process: libdeflate, at
+best halving it, is under 1 %. Chunk frames were all compressed before the window (window_compressor_cpu_ms 0).

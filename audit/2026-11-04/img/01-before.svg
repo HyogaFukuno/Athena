@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" width="960" height="470" font-family="'Hiragino Sans','Noto Sans JP','Yu Gothic',sans-serif">
+  <rect width="960" height="470" rx="10" fill="#fcfcfb"/>
+  <text x="24" y="38" font-size="20" font-weight="700" fill="#0b0b0b">前の形：1 サーバー = 1 JVM = 1 本のスレッド = 1 試合</text>
+
+  <!-- the box -->
+  <rect x="24" y="58" width="912" height="318" rx="10" fill="none" stroke="#9a9993" stroke-dasharray="6 4"/>
+  <text x="40" y="82" font-size="14" fill="#52514e">VPS-B（2 vCPU・1 GB）</text>
+
+  <!-- sg1 -->
+  <g>
+    <rect x="44" y="96" width="430" height="262" rx="10" fill="#ffffff" stroke="#52514e"/>
+    <text x="62" y="122" font-size="16" font-weight="700" fill="#0b0b0b">sg1（JVM 1 つ・試合 1 つ・約 170 MiB）</text>
+    <text x="62" y="148" font-size="13" fill="#52514e">Server thread（1 本）が 50 ms ごとに、全部を順に回す</text>
+    <g font-size="13" fill="#0b0b0b">
+      <rect x="62" y="162" width="394" height="34" rx="6" fill="#cde2fb"/><text x="76" y="184">① 届いたパケット・ログイン・コマンド</text>
+      <rect x="62" y="202" width="394" height="34" rx="6" fill="#cde2fb"/><text x="76" y="224">② ロビーのワールド</text>
+      <rect x="62" y="242" width="394" height="34" rx="6" fill="#cde2fb"/><text x="76" y="264">③ 試合のマップ（デスマッチ会場も）</text>
+      <rect x="62" y="282" width="394" height="34" rx="6" fill="#cde2fb"/><text x="76" y="304">④ SG プラグイン（Bukkit のスケジューラ）</text>
+    </g>
+    <text x="62" y="342" font-size="13" fill="#52514e">→ 次の 50 ms でまた ① から</text>
+  </g>
+
+  <!-- sg2 -->
+  <g>
+    <rect x="490" y="96" width="430" height="262" rx="10" fill="#ffffff" stroke="#52514e"/>
+    <text x="508" y="122" font-size="16" font-weight="700" fill="#0b0b0b">sg2（JVM 1 つ・試合 1 つ・約 170 MiB）</text>
+    <text x="508" y="148" font-size="13" fill="#52514e">中身は sg1 と同じ（デュオ）</text>
+    <g font-size="13" fill="#0b0b0b">
+      <rect x="508" y="162" width="394" height="34" rx="6" fill="#cde2fb"/><text x="522" y="184">① 届いたパケット・ログイン・コマンド</text>
+      <rect x="508" y="202" width="394" height="34" rx="6" fill="#cde2fb"/><text x="522" y="224">② ロビーのワールド</text>
+      <rect x="508" y="242" width="394" height="34" rx="6" fill="#cde2fb"/><text x="522" y="264">③ 試合のマップ（デスマッチ会場も）</text>
+      <rect x="508" y="282" width="394" height="34" rx="6" fill="#cde2fb"/><text x="522" y="304">④ SG プラグイン（Bukkit のスケジューラ）</text>
+    </g>
+    <text x="508" y="342" font-size="13" fill="#52514e">→ 次の 50 ms でまた ① から</text>
+  </g>
+
+  <!-- notes -->
+  <g font-size="14" fill="#0b0b0b">
+    <text x="24" y="406">・どこか 1 か所が重い・止まると、そのサーバーの全員（ロビーも試合も）が止まる</text>
+    <text x="24" y="430">・試合を増やすには JVM を増やすしかない（1 試合ごとに anon 約 170 MiB。本体とロビーを試合ごとに持つ）</text>
+    <text x="24" y="454">・1 GB の箱には 2 試合（48 人）まで</text>
+  </g>
+</svg>

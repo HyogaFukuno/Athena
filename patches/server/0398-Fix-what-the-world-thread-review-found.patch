@@ -1,0 +1,1012 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 23:48:46 +0900
+Subject: [PATCH] Fix what the world thread review found
+
+audit/2026-11-05/world-threads-review, each with a test (AthenaWorldThreadsReviewTest):
+- The JVM's shutdown hook no longer dies before anything is saved: it asks the server thread to stop, and stops the server itself only if that thread is stuck or gone.
+- A potion with no effects no longer puts null in the effect cache's ConcurrentHashMap.
+- The online player list is read from one snapshot everywhere, not by size and get while other threads shrink it.
+- Stronghold and fortress starts run one at a time: their pieces work in statics and shared weights.
+- A task queued for a world goes to the world's thread if the world got one meanwhile, also from a thread's hand-back.
+- A world keeps its own clock, whichever thread ticks it; furnaces and brewing stands start from it.
+- The fireworks recipe's result and the craft view are per thread.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 3bf7c3896976ff9af13cc00bdce1afd8a542c9ab..056316c28b83c9213978b7e4c44228e3a49eee6b 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -267,7 +267,9 @@ public final class AthenaWorldThread extends Thread {
+         this.handedBack = true;
+         Task task;
+         while ((task = this.tasks.poll()) != null) {
+-            MinecraftServer.getServer().processQueue.add(task.runnable);
++            // for a world, to wherever it is by then: it may be on another thread when the queue runs
++            final Task handed = task;
++            MinecraftServer.getServer().processQueue.add(handed.world != null ? () -> handed.world.athenaRunOnOwner(handed.runnable) : handed.runnable);
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ContainerPlayer.java b/src/main/java/net/minecraft/server/ContainerPlayer.java
+index 77f48340138c43b60fe49c2f3420de6c3af6d7ac..cd03202159db17fb3ddb4fe109aaa4fb08ebe795 100644
+--- a/src/main/java/net/minecraft/server/ContainerPlayer.java
++++ b/src/main/java/net/minecraft/server/ContainerPlayer.java
+@@ -64,7 +64,7 @@ public class ContainerPlayer extends Container {
+     public void onCraftMatrixChanged(IInventory iinventory) {
+         // this.resultInventory.setItem(0, CraftingManager.getInstance().craft(this.craftInventory, this.h.world));
+         // CraftBukkit start (Note: the following line would cause an error if called during construction)
+-        CraftingManager.getInstance().lastCraftView = getBukkitView();
++        CraftingManager.getInstance().lastCraftView.set(getBukkitView());
+         ItemStack craftResult;
+         try {
+             craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.thePlayer.world);
+@@ -72,7 +72,7 @@ public class ContainerPlayer extends Container {
+             // Athena - the view is only for the PrepareItemCraftEvent this call fires. Left in the static
+             // CraftingManager it keeps the container, and through it the world of the last crafting
+             // table used: an unloaded match world, chunks and all, until someone crafts again.
+-            CraftingManager.getInstance().lastCraftView = null;
++            CraftingManager.getInstance().lastCraftView.remove();
+         }
+         this.resultInventory.setItem(0, craftResult);
+         if (super.listeners.size() < 1) {
+diff --git a/src/main/java/net/minecraft/server/ContainerWorkbench.java b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+index c96f0ad936b75e884a7a4d446fc391c33204902c..e29e341c704f3fce7971b594cf9e602b88412959 100644
+--- a/src/main/java/net/minecraft/server/ContainerWorkbench.java
++++ b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+@@ -53,7 +53,7 @@ public class ContainerWorkbench extends Container {
+     public void onCraftMatrixChanged(IInventory iinventory) {
+         // this.resultInventory.setItem(0, CraftingManager.getInstance().craft(this.craftInventory, this.g));
+         // CraftBukkit start
+-        CraftingManager.getInstance().lastCraftView = getBukkitView();
++        CraftingManager.getInstance().lastCraftView.set(getBukkitView());
+         ItemStack craftResult;
+         try {
+             craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.worldObj);
+@@ -61,7 +61,7 @@ public class ContainerWorkbench extends Container {
+             // Athena - the view is only for the PrepareItemCraftEvent this call fires. Left in the static
+             // CraftingManager it keeps the container, and through it the world of the last crafting
+             // table used: an unloaded match world, chunks and all, until someone crafts again.
+-            CraftingManager.getInstance().lastCraftView = null;
++            CraftingManager.getInstance().lastCraftView.remove();
+         }
+         this.resultInventory.setItem(0, craftResult);
+         if (super.listeners.size() < 1) {
+diff --git a/src/main/java/net/minecraft/server/CraftingManager.java b/src/main/java/net/minecraft/server/CraftingManager.java
+index df7b864d03728664cab6e1faf244fcc55d3a7929..9ca7579ee4308f66ceadd7014373b970221d9f03 100644
+--- a/src/main/java/net/minecraft/server/CraftingManager.java
++++ b/src/main/java/net/minecraft/server/CraftingManager.java
+@@ -18,7 +18,9 @@ public class CraftingManager {
+     public List<IRecipe> recipes = Lists.newArrayList();
+     // CraftBukkit start
+     public IRecipe lastRecipe;
+-    public org.bukkit.inventory.InventoryView lastCraftView;
++    // Athena - per thread: containers on different world threads craft at once, and each sets this for the
++    // PrepareItemCraftEvent of its own call
++    public final ThreadLocal<org.bukkit.inventory.InventoryView> lastCraftView = new ThreadLocal<org.bukkit.inventory.InventoryView>();
+     // CraftBukkit end
+ 
+     public static CraftingManager getInstance() {
+@@ -296,7 +298,7 @@ public class CraftingManager {
+         // CraftBukkit start - INVENTORY_PRE_CRAFT event
+         inventorycrafting.currentRecipe = irecipe;
+         ItemStack result = irecipe.craftItem(inventorycrafting);
+-        return CraftEventFactory.callPreCraftEvent(inventorycrafting, result, lastCraftView, false);
++        return CraftEventFactory.callPreCraftEvent(inventorycrafting, result, lastCraftView.get(), false);
+         // CraftBukkit end
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ItemPotion.java b/src/main/java/net/minecraft/server/ItemPotion.java
+index 4343a8833163fdc95f408df2d081836ea9c0d95a..7bb29dffd239fd159784b31839edf57cd6969c39 100644
+--- a/src/main/java/net/minecraft/server/ItemPotion.java
++++ b/src/main/java/net/minecraft/server/ItemPotion.java
+@@ -10,6 +10,18 @@ import java.util.Map;
+ public class ItemPotion extends Item {
+ 
+     private Map<Integer, List<MobEffect>> effectCache = new java.util.concurrent.ConcurrentHashMap<Integer, List<MobEffect>>(); // Athena - this item is shared by every world thread
++    // Athena - what the cache holds for a potion with no effects (a water bottle): the map takes no null, and callers get null as ever
++    private static final List<MobEffect> NO_EFFECTS = java.util.Collections.emptyList();
++
++    private List<MobEffect> athenaCachedEffects(int data) {
++        List<MobEffect> list = this.effectCache.get(data);
++        if (list == null) {
++            list = PotionBrewer.getEffects(data, false);
++            this.effectCache.put(data, list != null ? list : NO_EFFECTS);
++            return list;
++        }
++        return list == NO_EFFECTS ? null : list;
++    }
+     private static final Map<List<MobEffect>, Integer> SUB_ITEMS_CACHE = Maps.newLinkedHashMap();
+ 
+     public ItemPotion() {
+@@ -35,26 +47,12 @@ public class ItemPotion extends Item {
+ 
+             return arraylist;
+         } else {
+-            List list = (List) this.effectCache.get(itemstack.getData());
+-
+-            if (list == null) {
+-                list = PotionBrewer.getEffects(itemstack.getData(), false);
+-                this.effectCache.put(itemstack.getData(), list);
+-            }
+-
+-            return list;
++            return this.athenaCachedEffects(itemstack.getData());
+         }
+     }
+ 
+     public List<MobEffect> getEffects(int i) {
+-        List list = (List) this.effectCache.get(i);
+-
+-        if (list == null) {
+-            list = PotionBrewer.getEffects(i, false);
+-            this.effectCache.put(i, list);
+-        }
+-
+-        return list;
++        return this.athenaCachedEffects(i);
+     }
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 6a6aab4da5ef38b06c7499b6a49a303b67a0fd11..fcc33ebd767a1856b454f8de2185467289663e22 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -449,6 +449,33 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     private final Object stopLock = new Object();
+     // CraftBukkit end
+ 
++    // Athena start - the JVM's shutdown hook (SIGTERM, Ctrl+C). Everything the stop touches belongs to the
++    // server thread, which is still running, so it is asked to stop and does it itself, as for /stop.
++    // Only if it is stuck or gone does the hook stop the server from here, with thread checks off.
++    /** How long the shutdown hook waits for the server thread to stop the server. */
++    private static final long ATHENA_HOOK_WAIT_MILLIS = 30000L;
++    private final java.util.concurrent.CountDownLatch athenaStopDone = new java.util.concurrent.CountDownLatch(1);
++
++    public void athenaStopFromShutdownHook() throws ExceptionWorldConflict, InterruptedException {
++        this.athenaStopFromShutdownHook(ATHENA_HOOK_WAIT_MILLIS);
++    }
++
++    void athenaStopFromShutdownHook(long waitMillis) throws ExceptionWorldConflict, InterruptedException {
++        Thread main = this.primaryThread;
++        if (main != null && main.isAlive() && main != Thread.currentThread()) {
++            this.safeShutdown();
++            long end = System.currentTimeMillis() + waitMillis;
++            while (main.isAlive() && System.currentTimeMillis() < end) {
++                if (this.athenaStopDone.await(100L, java.util.concurrent.TimeUnit.MILLISECONDS)) return;
++            }
++            if (this.athenaStopDone.getCount() == 0L) return;
++            LOGGER.warn("The server thread did not stop the server: stopping from the shutdown hook");
++        }
++        org.spigotmc.AsyncCatcher.enabled = false; // no owner thread is left to run on
++        this.stop();
++    }
++    // Athena end
++
+     public void stop() throws ExceptionWorldConflict { // CraftBukkit - added throws
+         // CraftBukkit start - prevent double stopping on multiple threads
+         synchronized(stopLock) {
+@@ -456,11 +483,12 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             hasStopped = true;
+         }
+         // CraftBukkit end
++        try { // Athena
+         if (!this.N) {
+             MinecraftServer.LOGGER.info("Stopping server");
+             // Athena start - every world back on this thread before plugins are disabled and worlds saved
+             for (WorldServer world : this.worlds) {
+-                if (!world.athenaStopThread(10000L)) {
++                if (!world.athenaStopThreadForShutdown(10000L)) {
+                     // still in a tick on its own thread: its players are let go from here, and the world
+                     // is not saved, since that thread may be changing it as it is written
+                     world.savingDisabled = true;
+@@ -516,6 +544,11 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             }
+             //Spigot end
+         }
++        // Athena start
++        } finally {
++            this.athenaStopDone.countDown();
++        }
++        // Athena end
+     }
+ 
+     public String getServerIp() {
+@@ -813,12 +846,14 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         }
+         if (i - this.X >= 5000000000L) {
+             this.X = i;
+-            this.r.setPlayerSample(new ServerPing.ServerPingPlayerSample(this.J(), this.I()));
+-            GameProfile[] agameprofile = new GameProfile[Math.min(this.I(), 12)];
+-            int j = MathHelper.nextInt(this.s, 0, this.I() - agameprofile.length);
++            // Athena - the count and the sample from one snapshot: other threads leave and move
++            EntityPlayer[] online = this.v.players.toArray(new EntityPlayer[0]);
++            this.r.setPlayerSample(new ServerPing.ServerPingPlayerSample(this.J(), online.length));
++            GameProfile[] agameprofile = new GameProfile[Math.min(online.length, 12)];
++            int j = MathHelper.nextInt(this.s, 0, online.length - agameprofile.length);
+ 
+             for (int k = 0; k < agameprofile.length; ++k) {
+-                agameprofile[k] = ((EntityPlayer) this.v.getPlayerList().get(j + k)).getProfile();
++                agameprofile[k] = online[j + k].getProfile();
+             }
+ 
+             Collections.shuffle(Arrays.asList(agameprofile));
+@@ -886,11 +921,11 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     }
+ 
+     public void B() {
+-        // Athena start - the worlds this thread ticks see currentTick as their tick for the whole of it,
+-        // packets and tasks included, as everything did before World.athenaCurrentTick
++        // Athena start - each world keeps its own clock, whichever thread ticks it: a world that comes back
++        // here goes on from its own tick, since timers, ages and other deadlines are counted on it
+         for (int w = 0; w < this.worlds.size(); ++w) {
+             WorldServer world = this.worlds.get(w);
+-            if (world.athenaThread == null) world.athenaCurrentTick = MinecraftServer.currentTick;
++            if (world.athenaThread == null) ++world.athenaCurrentTick;
+         }
+         // Athena end
+         SpigotTimings.minecraftSchedulerTimer.startTiming(); // Spigot
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 17c445ee4bf488a23283e50a53c783ea32bd080e..593208ff241a16f615ba034296456b6fd8cb7650 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -349,8 +349,7 @@ public abstract class PlayerList {
+                 : PacketPlayOutPlayerInfo.athenaSeenBy(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.ADD_PLAYER, null, entityplayer);
+ 
+         final List<EntityPlayer> onlinePlayers = Lists.newArrayListWithExpectedSize(this.players.size() - 1); // PandaSpigot - use single player info update packet
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            EntityPlayer entityplayer1 = (EntityPlayer) this.players.get(i);
++        for (EntityPlayer entityplayer1 : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+             if (entityplayer1.getBukkitEntity().canSee(entityplayer.getBukkitEntity())) {
+                 entityplayer1.playerConnection.sendPacket(entityplayer1 == entityplayer ? packet : seenByOthers); // Athena - /disguise
+@@ -415,8 +414,7 @@ public abstract class PlayerList {
+         // CraftBukkit start
+         //  this.sendAll(new PacketPlayOutPlayerInfo(EnumPlayerInfoAction.REMOVE_PLAYER, new EntityPlayer[] { entityplayer}));
+         PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.REMOVE_PLAYER, entityplayer);
+-        for (int i = 0; i < players.size(); i++) {
+-            EntityPlayer entityplayer2 = (EntityPlayer) this.players.get(i);
++        for (EntityPlayer entityplayer2 : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+             if (entityplayer2.getBukkitEntity().canSee(entityplayer.getBukkitEntity())) {
+                 entityplayer2.playerConnection.sendPacket(packet);
+@@ -442,10 +440,9 @@ public abstract class PlayerList {
+ 
+         EntityPlayer entityplayer;
+ 
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            entityplayer = (EntityPlayer) this.players.get(i);
+-            if (entityplayer.getUniqueID().equals(uuid)) {
+-                arraylist.add(entityplayer);
++        for (EntityPlayer online : this.players) { // Athena - a snapshot: other threads leave and move
++            if (online.getUniqueID().equals(uuid)) {
++                arraylist.add(online);
+             }
+         }
+ 
+@@ -527,8 +524,7 @@ public abstract class PlayerList {
+         UUID uuid = EntityHuman.a(gameprofile);
+         ArrayList arraylist = Lists.newArrayList();
+ 
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            EntityPlayer entityplayer = (EntityPlayer) this.players.get(i);
++        for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+             if (entityplayer.getUniqueID().equals(uuid)) {
+                 arraylist.add(entityplayer);
+@@ -1012,20 +1008,19 @@ public abstract class PlayerList {
+     }
+ 
+     public void sendAll(Packet packet) {
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            ((EntityPlayer) this.players.get(i)).playerConnection.sendPacket(packet);
++        for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
++            entityplayer.playerConnection.sendPacket(packet);
+         }
+ 
+     }
+ 
+     // CraftBukkit start - add a world/entity limited version
+     public void sendAll(Packet packet, EntityHuman entityhuman) {
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            EntityPlayer entityplayer =  this.players.get(i);
++        for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+             if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
+                 continue;
+             }
+-            ((EntityPlayer) this.players.get(i)).playerConnection.sendPacket(packet);
++            entityplayer.playerConnection.sendPacket(packet);
+         }
+     }
+ 
+@@ -1038,8 +1033,7 @@ public abstract class PlayerList {
+     // CraftBukkit end
+ 
+     public void sendPacketToAllPlayersInDimension(Packet packet, int i) {
+-        for (int j = 0; j < this.players.size(); ++j) {
+-            EntityPlayer entityplayer = (EntityPlayer) this.players.get(j);
++        for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+             if (entityplayer.dimension == i) {
+                 entityplayer.playerConnection.sendPacket(packet);
+@@ -1073,8 +1067,7 @@ public abstract class PlayerList {
+         if (scoreboardteambase == null) {
+             this.sendMessage(ichatbasecomponent);
+         } else {
+-            for (int i = 0; i < this.players.size(); ++i) {
+-                EntityPlayer entityplayer = (EntityPlayer) this.players.get(i);
++            for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+                 if (entityplayer.getScoreboardTeam() != scoreboardteambase) {
+                     entityplayer.sendMessage(ichatbasecomponent);
+@@ -1103,20 +1096,22 @@ public abstract class PlayerList {
+     }
+ 
+     public String[] getAllUsernames() {
+-        String[] astring = new String[this.players.size()];
++        EntityPlayer[] online = this.players.toArray(new EntityPlayer[0]); // Athena - one snapshot: other threads leave and move
++        String[] astring = new String[online.length];
+ 
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            astring[i] = ((EntityPlayer) this.players.get(i)).getName();
++        for (int i = 0; i < online.length; ++i) {
++            astring[i] = online[i].getName();
+         }
+ 
+         return astring;
+     }
+ 
+     public GameProfile[] getAllProfiles() {
+-        GameProfile[] agameprofile = new GameProfile[this.players.size()];
++        EntityPlayer[] online = this.players.toArray(new EntityPlayer[0]); // Athena - one snapshot: other threads leave and move
++        GameProfile[] agameprofile = new GameProfile[online.length];
+ 
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            agameprofile[i] = ((EntityPlayer) this.players.get(i)).getProfile();
++        for (int i = 0; i < online.length; ++i) {
++            agameprofile[i] = online[i].getProfile();
+         }
+ 
+         return agameprofile;
+@@ -1169,8 +1164,7 @@ public abstract class PlayerList {
+     }
+ 
+     public void sendPacketNearby(EntityHuman entityhuman, double d0, double d1, double d2, double d3, int i, Packet packet) {
+-        for (int j = 0; j < this.players.size(); ++j) {
+-            EntityPlayer entityplayer = (EntityPlayer) this.players.get(j);
++        for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+             // CraftBukkit start - Test if player receiving packet can see the source of the packet
+             if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
+@@ -1248,8 +1242,7 @@ public abstract class PlayerList {
+             this.playerStatFiles.remove(uuid);
+         }
+         PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.REMOVE_PLAYER, entityplayer);
+-        for (int i = 0; i < this.players.size(); i++) {
+-            EntityPlayer other = (EntityPlayer) this.players.get(i);
++        for (EntityPlayer other : this.players) { // Athena - a snapshot: other threads leave and move
+             if (other.getBukkitEntity().canSee(entityplayer.getBukkitEntity())) {
+                 other.playerConnection.sendPacket(packet);
+             } else {
+@@ -1279,16 +1272,15 @@ public abstract class PlayerList {
+     }
+ 
+     public void savePlayers() {
+-        for (int i = 0; i < this.players.size(); ++i) {
++        for (final EntityPlayer player : this.players) { // Athena - a snapshot: other threads leave and move
+             // Athena start - each player is saved on the thread that ticks its world, which is the one
+             // that may be changing its inventory meanwhile
+-            final EntityPlayer player = (EntityPlayer) this.players.get(i);
+             if (player.world instanceof WorldServer && !((WorldServer) player.world).isMainThread()) {
+                 WorldServer.athenaRunForEntity(player, () -> PlayerList.this.savePlayerFile(player));
+                 continue;
+             }
+             // Athena end
+-            this.savePlayerFile((EntityPlayer) this.players.get(i));
++            this.savePlayerFile(player);
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/PlayerListBox.java b/src/main/java/net/minecraft/server/PlayerListBox.java
+index 492d51ce0417530ddcb8ad1d5bf1514963e46a46..ed5fa517678c40723ab82cff0010bdf9bf474b4a 100644
+--- a/src/main/java/net/minecraft/server/PlayerListBox.java
++++ b/src/main/java/net/minecraft/server/PlayerListBox.java
+@@ -19,8 +19,8 @@ public class PlayerListBox extends JList implements IUpdatePlayerListBox {
+         if (this.ticks++ % 20 == 0) {
+             Vector vector = new Vector();
+ 
+-            for (int i = 0; i < this.server.getPlayerList().getPlayerList().size(); ++i) {
+-                vector.add(((EntityPlayer) this.server.getPlayerList().getPlayerList().get(i)).getName());
++            for (EntityPlayer player : this.server.getPlayerList().getPlayerList()) { // Athena - a snapshot: other threads leave and move
++                vector.add(player.getName());
+             }
+ 
+             this.setListData(vector);
+diff --git a/src/main/java/net/minecraft/server/RecipeFireworks.java b/src/main/java/net/minecraft/server/RecipeFireworks.java
+index d664cab99767662d7837aedcaee2740510a20a54..b11743080a6ca47ce8a44b50112b40b3ca46532c 100644
+--- a/src/main/java/net/minecraft/server/RecipeFireworks.java
++++ b/src/main/java/net/minecraft/server/RecipeFireworks.java
+@@ -6,7 +6,9 @@ import java.util.ArrayList;
+ 
+ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // CraftBukkit - added extends
+ 
+-    private ItemStack a;
++    // Athena - this recipe is shared by every world thread, and matches leaves its result here for craftItem:
++    // one per thread, since a world's matches and craftItem run one after the other on its own thread
++    private final ThreadLocal<ItemStack> athenaResult = new ThreadLocal<ItemStack>();
+ 
+     // CraftBukkit start - Delegate to new parent class with bogus info
+     public RecipeFireworks() {
+@@ -15,7 +17,7 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+     // CraftBukkit end
+ 
+     public boolean matches(InventoryCrafting inventorycrafting, World world) {
+-        this.a = null;
++        this.athenaResult.remove();
+         int i = 0;
+         int j = 0;
+         int k = 0;
+@@ -61,7 +63,7 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+             NBTTagCompound nbttagcompound1;
+ 
+             if (j >= 1 && i == 1 && i1 == 0) {
+-                this.a = new ItemStack(Items.FIREWORKS);
++                this.athenaResult.set(new ItemStack(Items.FIREWORKS));
+                 if (l > 0) {
+                     nbttagcompound = new NBTTagCompound();
+                     nbttagcompound1 = new NBTTagCompound();
+@@ -78,12 +80,12 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+                     nbttagcompound1.set("Explosions", nbttaglist);
+                     nbttagcompound1.setByte("Flight", (byte) j);
+                     nbttagcompound.set("Fireworks", nbttagcompound1);
+-                    this.a.setTag(nbttagcompound);
++                    this.athenaResult.get().setTag(nbttagcompound);
+                 }
+ 
+                 return true;
+             } else if (j == 1 && i == 0 && l == 0 && k > 0 && j1 <= 1) {
+-                this.a = new ItemStack(Items.FIREWORK_CHARGE);
++                this.athenaResult.set(new ItemStack(Items.FIREWORK_CHARGE));
+                 nbttagcompound = new NBTTagCompound();
+                 nbttagcompound1 = new NBTTagCompound();
+                 byte b0 = 0;
+@@ -120,7 +122,7 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+                 nbttagcompound1.setIntArray("Colors", aint);
+                 nbttagcompound1.setByte("Type", b0);
+                 nbttagcompound.set("Explosion", nbttagcompound1);
+-                this.a.setTag(nbttagcompound);
++                this.athenaResult.get().setTag(nbttagcompound);
+                 return true;
+             } else if (j == 0 && i == 0 && l == 1 && k > 0 && k == i1) {
+                 ArrayList arraylist1 = Lists.newArrayList();
+@@ -132,8 +134,8 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+                         if (itemstack3.getItem() == Items.DYE) {
+                             arraylist1.add(Integer.valueOf(ItemDye.dyeColors[itemstack3.getData() & 15]));
+                         } else if (itemstack3.getItem() == Items.FIREWORK_CHARGE) {
+-                            this.a = itemstack3.cloneItemStack();
+-                            this.a.count = 1;
++                            this.athenaResult.set(itemstack3.cloneItemStack());
++                            this.athenaResult.get().count = 1;
+                         }
+                     }
+                 }
+@@ -144,8 +146,8 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+                     aint1[l2] = ((Integer) arraylist1.get(l2)).intValue();
+                 }
+ 
+-                if (this.a != null && this.a.hasTag()) {
+-                    NBTTagCompound nbttagcompound2 = this.a.getTag().getCompound("Explosion");
++                if (this.athenaResult.get() != null && this.athenaResult.get().hasTag()) {
++                    NBTTagCompound nbttagcompound2 = this.athenaResult.get().getTag().getCompound("Explosion");
+ 
+                     if (nbttagcompound2 == null) {
+                         return false;
+@@ -165,7 +167,7 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+     }
+ 
+     public ItemStack craftItem(InventoryCrafting inventorycrafting) {
+-        return this.a.cloneItemStack();
++        return this.athenaResult.get().cloneItemStack();
+     }
+ 
+     public int getRecipeSize() {
+@@ -173,7 +175,7 @@ public class RecipeFireworks extends ShapelessRecipes implements IRecipe { // Cr
+     }
+ 
+     public ItemStack getRecipeOutput() {
+-        return this.a;
++        return this.athenaResult.get();
+     }
+ 
+     public ItemStack[] getRemainingItems(InventoryCrafting inventorycrafting) {
+diff --git a/src/main/java/net/minecraft/server/RecipeRepair.java b/src/main/java/net/minecraft/server/RecipeRepair.java
+index c2cbb69d1f2874d8875911b226e7c45ab2eaa721..aa5acb2b8e7122c73f5f795178c9d3449528b692 100644
+--- a/src/main/java/net/minecraft/server/RecipeRepair.java
++++ b/src/main/java/net/minecraft/server/RecipeRepair.java
+@@ -74,7 +74,7 @@ public class RecipeRepair extends ShapelessRecipes implements IRecipe { // Craft
+                 ingredients.add(itemstack.cloneItemStack());
+                 ShapelessRecipes recipe = new ShapelessRecipes(result.cloneItemStack(), ingredients);
+                 inventorycrafting.currentRecipe = recipe;
+-                result = org.bukkit.craftbukkit.event.CraftEventFactory.callPreCraftEvent(inventorycrafting, result, CraftingManager.getInstance().lastCraftView, true);
++                result = org.bukkit.craftbukkit.event.CraftEventFactory.callPreCraftEvent(inventorycrafting, result, CraftingManager.getInstance().lastCraftView.get(), true);
+                 return result;
+                 // return new ItemStack(itemstack2.getItem(), 1, i1);
+                 // CraftBukkit end
+diff --git a/src/main/java/net/minecraft/server/TileEntityBrewingStand.java b/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
+index 1fe156cb35efbd3aeeaa69db5a21371c4498175b..08047c5af17483a53466a74ca70f7e1006cd0015 100644
+--- a/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
++++ b/src/main/java/net/minecraft/server/TileEntityBrewingStand.java
+@@ -19,7 +19,7 @@ public class TileEntityBrewingStand extends TileEntityContainer implements IUpda
+     private boolean[] filledSlots;
+     private Item ingredientID;
+     private String customName;
+-    private int lastTick = MinecraftServer.currentTick; // CraftBukkit - add field
++    private int lastTick = -1; // Athena - this world's tick of the last update; none yet
+ 
+     public TileEntityBrewingStand() {}
+ 
+@@ -66,7 +66,7 @@ public class TileEntityBrewingStand extends TileEntityContainer implements IUpda
+ 
+     public void c() {
+         // CraftBukkit start - Use wall time instead of ticks for brewing
+-        int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
++        int elapsedTicks = this.lastTick < 0 ? 1 : this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
+         this.lastTick = this.world.athenaCurrentTick; // Athena
+ 
+         if (this.brewTime > 0) {
+diff --git a/src/main/java/net/minecraft/server/TileEntityFurnace.java b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+index defedcc113f7ecf101c934b717bb920a9883fa50..e29d138b1af61348dc20d1bd7629e8168ff8bfc2 100644
+--- a/src/main/java/net/minecraft/server/TileEntityFurnace.java
++++ b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+@@ -24,7 +24,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+     private String furnaceCustomName;
+ 
+     // CraftBukkit start - add fields and methods
+-    private int lastTick = MinecraftServer.currentTick;
++    private int lastTick = -1; // Athena - this world's tick of the last update; none yet
+     private int maxStack = MAX_STACK;
+     public List<HumanEntity> transaction = new java.util.ArrayList<HumanEntity>();
+ 
+@@ -181,7 +181,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+         boolean flag1 = false;
+ 
+         // CraftBukkit start - Use wall time instead of ticks for cooking
+-        int elapsedTicks = this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
++        int elapsedTicks = this.lastTick < 0 ? 1 : this.world.athenaCurrentTick - this.lastTick; // Athena - this world's tick
+         this.lastTick = this.world.athenaCurrentTick; // Athena
+ 
+         // CraftBukkit - moved from below
+diff --git a/src/main/java/net/minecraft/server/WorldGenNether.java b/src/main/java/net/minecraft/server/WorldGenNether.java
+index d5729af9bb372087054e8931f36ddd4df245665a..86dfdc069228af38c6d325f415bfcb3142cd62ff 100644
+--- a/src/main/java/net/minecraft/server/WorldGenNether.java
++++ b/src/main/java/net/minecraft/server/WorldGenNether.java
+@@ -46,21 +46,24 @@ public class WorldGenNether extends StructureGenerator {
+ 
+         public WorldGenNetherStart(World world, Random random, int i, int j) {
+             super(i, j);
+-            WorldGenNetherPieces.WorldGenNetherPiece15 worldgennetherpieces_worldgennetherpiece15 = new WorldGenNetherPieces.WorldGenNetherPiece15(random, (i << 4) + 2, (j << 4) + 2);
++            // Athena - the piece weights are shared and counted in: one start at a time, on any world's thread
++            synchronized (WorldGenNetherPieces.class) {
++                WorldGenNetherPieces.WorldGenNetherPiece15 worldgennetherpieces_worldgennetherpiece15 = new WorldGenNetherPieces.WorldGenNetherPiece15(random, (i << 4) + 2, (j << 4) + 2);
+ 
+-            this.components.add(worldgennetherpieces_worldgennetherpiece15);
+-            worldgennetherpieces_worldgennetherpiece15.buildComponent((StructurePiece) worldgennetherpieces_worldgennetherpiece15, this.components, random);
+-            List list = worldgennetherpieces_worldgennetherpiece15.e;
++                this.components.add(worldgennetherpieces_worldgennetherpiece15);
++                worldgennetherpieces_worldgennetherpiece15.buildComponent((StructurePiece) worldgennetherpieces_worldgennetherpiece15, this.components, random);
++                List list = worldgennetherpieces_worldgennetherpiece15.e;
+ 
+-            while (!list.isEmpty()) {
+-                int k = random.nextInt(list.size());
+-                StructurePiece structurepiece = (StructurePiece) list.remove(k);
++                while (!list.isEmpty()) {
++                    int k = random.nextInt(list.size());
++                    StructurePiece structurepiece = (StructurePiece) list.remove(k);
+ 
+-                structurepiece.buildComponent((StructurePiece) worldgennetherpieces_worldgennetherpiece15, this.components, random);
+-            }
++                    structurepiece.buildComponent((StructurePiece) worldgennetherpieces_worldgennetherpiece15, this.components, random);
++                }
+ 
+-            this.updateBoundingBox();
+-            this.setRandomHeight(world, random, 48, 70);
++                this.updateBoundingBox();
++                this.setRandomHeight(world, random, 48, 70);
++            }
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/WorldGenStronghold.java b/src/main/java/net/minecraft/server/WorldGenStronghold.java
+index 91a7e05d1e6e101239530cb2b67a9dc3e5be853a..996994ae0540c397c3663e3b8718004ee3be46ea 100644
+--- a/src/main/java/net/minecraft/server/WorldGenStronghold.java
++++ b/src/main/java/net/minecraft/server/WorldGenStronghold.java
+@@ -120,22 +120,26 @@ public class WorldGenStronghold extends StructureGenerator {
+ 
+         public WorldGenStronghold2Start(World world, Random random, int i, int j) {
+             super(i, j);
+-            WorldGenStrongholdPieces.prepareStructurePieces();
+-            WorldGenStrongholdPieces.WorldGenStrongholdStart worldgenstrongholdpieces_worldgenstrongholdstart = new WorldGenStrongholdPieces.WorldGenStrongholdStart(0, random, (i << 4) + 2, (j << 4) + 2);
++            // Athena - WorldGenStrongholdPieces works in statics, its weights among them: one start at a time,
++            // whichever world's thread it is on
++            synchronized (WorldGenStrongholdPieces.class) {
++                WorldGenStrongholdPieces.prepareStructurePieces();
++                WorldGenStrongholdPieces.WorldGenStrongholdStart worldgenstrongholdpieces_worldgenstrongholdstart = new WorldGenStrongholdPieces.WorldGenStrongholdStart(0, random, (i << 4) + 2, (j << 4) + 2);
+ 
+-            this.components.add(worldgenstrongholdpieces_worldgenstrongholdstart);
+-            worldgenstrongholdpieces_worldgenstrongholdstart.buildComponent((StructurePiece) worldgenstrongholdpieces_worldgenstrongholdstart, this.components, random);
+-            List list = worldgenstrongholdpieces_worldgenstrongholdstart.c;
++                this.components.add(worldgenstrongholdpieces_worldgenstrongholdstart);
++                worldgenstrongholdpieces_worldgenstrongholdstart.buildComponent((StructurePiece) worldgenstrongholdpieces_worldgenstrongholdstart, this.components, random);
++                List list = worldgenstrongholdpieces_worldgenstrongholdstart.c;
+ 
+-            while (!list.isEmpty()) {
+-                int k = random.nextInt(list.size());
+-                StructurePiece structurepiece = (StructurePiece) list.remove(k);
++                while (!list.isEmpty()) {
++                    int k = random.nextInt(list.size());
++                    StructurePiece structurepiece = (StructurePiece) list.remove(k);
+ 
+-                structurepiece.buildComponent((StructurePiece) worldgenstrongholdpieces_worldgenstrongholdstart, this.components, random);
+-            }
++                    structurepiece.buildComponent((StructurePiece) worldgenstrongholdpieces_worldgenstrongholdstart, this.components, random);
++                }
+ 
+-            this.updateBoundingBox();
+-            this.markAvailableHeight(world, random, 10);
++                this.updateBoundingBox();
++                this.markAvailableHeight(world, random, 10);
++            }
+         }
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 8dac9f80cb640b538989bdae981da34d1aff8dc8..968c10981b218f60a65b5c423b58c8cfc451a2bf 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1538,7 +1538,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     public ListenableFuture<Object> postToMainThread(Runnable runnable) {
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread == null) {
+-            return this.server.postToMainThread(runnable);
++            return this.server.postToMainThread(() -> this.athenaRunOnOwner(runnable));
+         }
+         if (Thread.currentThread() == thread) {
+             runnable.run();
+@@ -1592,7 +1592,19 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         if (thread != null) {
+             thread.post(this, task);
+         } else {
+-            this.server.processQueue.add(task);
++            this.server.processQueue.add(() -> this.athenaRunOnOwner(task));
++        }
++    }
++
++    /**
++     * On the server thread, for a task queued for this world there: runs it, or hands it on if the world
++     * has moved to a thread of its own since (a scheduler task can start one before the queue runs).
++     */
++    void athenaRunOnOwner(Runnable task) {
++        if (this.athenaThread != null) {
++            this.athenaRunOnTickThread(task);
++        } else {
++            task.run();
+         }
+     }
+ 
+@@ -1617,7 +1629,6 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         ChunkDecorationExecutor.flush(this); // decorations queued so far finish here; from now on it decorates on its own thread
+         AthenaWorldThread.beforeFirstStart();
+         AthenaWorldThread thread = new AthenaWorldThread(this);
+-        this.athenaCurrentTick = MinecraftServer.currentTick;
+         this.athenaThread = thread;
+         thread.start();
+     }
+@@ -1651,7 +1662,6 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             throw new IllegalStateException("The main world " + this.worldData.getName() + " cannot tick on its own thread");
+         }
+         ChunkDecorationExecutor.flush(this);
+-        this.athenaCurrentTick = MinecraftServer.currentTick;
+         this.athenaThread = thread; // the thread's from here; it ticks it from its next tick on
+         thread.join(this);
+     }
+@@ -1698,6 +1708,15 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+      */
+     public boolean athenaStopThread(long timeoutMillis) {
+         org.spigotmc.AsyncCatcher.catchOp("stop a world thread");
++        return this.athenaStopThreadForShutdown(timeoutMillis);
++    }
++
++    /**
++     * athenaStopThread for MinecraftServer.stop, which may run on the JVM's shutdown hook when the server
++     * thread is stuck or gone (MinecraftServer.athenaStopFromShutdownHook). No thread check: the
++     * server stops however it got here, and the stop is the only caller left.
++     */
++    boolean athenaStopThreadForShutdown(long timeoutMillis) {
+         AthenaWorldThread thread = this.athenaThread;
+         if (thread == null) return true;
+         if (thread.worlds.size() > 1 && !thread.failed()) {
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
+index 144d075eb04a930177e45553b34f45bd03eb662a..0a62a4d4b4f53a94057577ec8e0135e3460d1323 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/ServerShutdownThread.java
+@@ -14,9 +14,11 @@ public class ServerShutdownThread extends Thread {
+     @Override
+     public void run() {
+         try {
+-            server.stop();
++            server.athenaStopFromShutdownHook(); // Athena - the server thread stops it, if it can
+         } catch (ExceptionWorldConflict ex) {
+             ex.printStackTrace();
++        } catch (InterruptedException ex) { // Athena
++            Thread.currentThread().interrupt();
+         } finally {
+             try {
+                 // PandaSpigot start - Use TerminalConsoleAppender
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldThreadsReviewTest.java b/src/test/java/net/minecraft/server/AthenaWorldThreadsReviewTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f80c1f40b5f0d81003006d8bc93e4ea138f18ca3
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaWorldThreadsReviewTest.java
+@@ -0,0 +1,263 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++/** The world thread review of 2026-11-05 (audit/2026-11-05/world-threads-review): each finding, as a test. */
++public class AthenaWorldThreadsReviewTest extends AbstractTestingBase {
++
++    /** A server that is never started; only its per-world tick body is replaced. */
++    public static final class Server extends DedicatedServer {
++        private Server() { super(null); }
++        @Override public void athenaTickWorld(WorldServer world) { }
++    }
++
++    private Object previousServer;
++    private Object previousStarted;
++
++    private static Object get(Object target, Class<?> type, String name) throws Exception {
++        Field field = type.getDeclaredField(name);
++        field.setAccessible(true);
++        return field.get(target);
++    }
++
++    @Before
++    public void remember() throws Exception {
++        this.previousServer = get(null, MinecraftServer.class, "l");
++        this.previousStarted = get(null, AthenaWorldThread.class, "started");
++    }
++
++    @After
++    public void restore() throws Exception {
++        AthenaAuditFixtures.set(null, MinecraftServer.class, "l", this.previousServer);
++        AthenaAuditFixtures.set(null, AthenaWorldThread.class, "started", this.previousStarted);
++        org.spigotmc.AsyncCatcher.enabled = true;
++    }
++
++    private static Server server() throws Exception {
++        Server server = AthenaAuditFixtures.allocate(Server.class);
++        AthenaAuditFixtures.set(server, MinecraftServer.class, "primaryThread", Thread.currentThread());
++        AthenaAuditFixtures.set(server, MinecraftServer.class, "serverThread", Thread.currentThread());
++        AthenaAuditFixtures.set(server, MinecraftServer.class, "stopLock", new Object());
++        AthenaAuditFixtures.set(server, MinecraftServer.class, "athenaStopDone", new CountDownLatch(1));
++        AthenaAuditFixtures.set(null, MinecraftServer.class, "l", server);
++        server.worlds = new CopyOnWriteArrayList<>();
++        server.processQueue = new ConcurrentLinkedQueue<>();
++        return server;
++    }
++
++    private static WorldServer world(Server server) throws Exception {
++        WorldServer world = AthenaAuditFixtures.allocate(WorldServer.class);
++        AthenaAuditFixtures.set(world, WorldServer.class, "server", server);
++        AthenaAuditFixtures.set(world, World.class, "players", new ArrayList<>());
++        AthenaAuditFixtures.set(world, World.class, "seaLevel", 63);
++        world.worldData = new WorldData();
++        world.worldData.setWorldName("review");
++        server.worlds.add(world);
++        return world;
++    }
++
++    private static void await(CountDownLatch latch) {
++        try {
++            assertTrue("timed out", latch.await(10L, TimeUnit.SECONDS));
++        } catch (InterruptedException exception) {
++            throw new AssertionError(exception);
++        }
++    }
++
++    // 1: the JVM's shutdown hook
++    @Test
++    public void theShutdownHookStopsTheServerFromAnotherThread() throws Exception {
++        Server server = server();
++        world(server);
++        AthenaAuditFixtures.set(server, MinecraftServer.class, "N", true); // past the world threads, nothing to save in this fixture
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread hook = new Thread(() -> {
++            try {
++                server.athenaStopFromShutdownHook(50L);
++            } catch (Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "shutdown-hook");
++        hook.start();
++        hook.join();
++        assertNull(failure.get());
++        assertEquals(true, get(server, MinecraftServer.class, "hasStopped"));
++        assertFalse("it asks the server thread first", server.isRunning());
++    }
++
++    @Test
++    public void aWorldsThreadStopsFromTheShutdownHook() throws Exception {
++        WorldServer world = world(server());
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread hook = new Thread(() -> {
++            try {
++                assertTrue(world.athenaStopThreadForShutdown(100L));
++            } catch (Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "shutdown-hook");
++        hook.start();
++        hook.join();
++        assertNull(failure.get());
++    }
++
++    // 2: potions with no effects
++    @Test
++    public void aPotionWithNoEffectsHasNoneTwice() {
++        for (int data : new int[] {0, 16, 32, 64}) {
++            assertNull(Items.POTION.getEffects(data));
++            assertNull("from the cache", Items.POTION.getEffects(data));
++        }
++        assertNotNull(Items.POTION.getEffects(8193));
++    }
++
++    // 3: the online list, shrunk by other threads
++    private static final class SnapshotOnly extends CopyOnWriteArrayList<EntityPlayer> {
++        @Override public int size() { throw new AssertionError("size() and get(i) see different lists"); }
++        @Override public EntityPlayer get(int index) { throw new AssertionError("size() and get(i) see different lists"); }
++    }
++
++    @Test
++    public void theOnlineListIsReadFromOneSnapshot() throws Exception {
++        DedicatedPlayerList list = AthenaAuditFixtures.allocate(DedicatedPlayerList.class);
++        AthenaAuditFixtures.set(list, PlayerList.class, "players", new SnapshotOnly());
++        assertEquals(0, list.getAllUsernames().length);
++        assertEquals(0, list.getAllProfiles().length);
++        list.savePlayers();
++        list.sendAll(null);
++    }
++
++    // 4: strongholds generated at once
++    @Test
++    public void strongholdsStartInParallel() throws Exception {
++        Server server = server();
++        CountDownLatch go = new CountDownLatch(1);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        AtomicInteger completed = new AtomicInteger();
++        List<Thread> threads = new ArrayList<>();
++        for (int n = 0; n < 4; ++n) {
++            final int seed = n;
++            final WorldServer own = world(server);
++            Thread thread = new Thread(() -> {
++                await(go);
++                for (int i = 0; i < 300 && failure.get() == null; ++i) {
++                    try {
++                        new WorldGenStronghold.WorldGenStronghold2Start(own, new Random(seed * 300L + i), 0, 0);
++                        completed.incrementAndGet();
++                    } catch (Throwable throwable) {
++                        failure.compareAndSet(null, throwable);
++                    }
++                }
++            }, "stronghold-" + n);
++            threads.add(thread);
++            thread.start();
++        }
++        go.countDown();
++        for (Thread thread : threads) thread.join();
++        assertNull(failure.get());
++        assertEquals(1200, completed.get());
++    }
++
++    // 5: a task queued before the world got its thread
++    @Test
++    public void aTaskQueuedBeforeAThreadRunsOnThatThread() throws Exception {
++        Server server = server();
++        world(server); // the main world cannot have a thread
++        WorldServer world = world(server);
++        CountDownLatch ran = new CountDownLatch(1);
++        AtomicReference<Boolean> owned = new AtomicReference<>();
++        world.athenaRunOnTickThread(() -> {
++            owned.set(world.isMainThread() && Thread.currentThread() != server.primaryThread);
++            ran.countDown();
++        });
++        AthenaAuditFixtures.set(null, AthenaWorldThread.class, "started", true);
++        world.athenaStartThread();
++        try {
++            server.processQueue.remove().run();
++            await(ran);
++            assertEquals(true, owned.get());
++        } finally {
++            world.athenaStopThread(2000L);
++        }
++    }
++
++    // 6: the world's clock through a change of thread
++    @Test
++    public void aWorldsClockSurvivesAThread() throws Exception {
++        Server server = server();
++        world(server);
++        WorldServer world = world(server);
++        world.athenaCurrentTick = 1000;
++        AthenaAuditFixtures.set(null, AthenaWorldThread.class, "started", true);
++        world.athenaStartThread();
++        assertTrue("not set to the server's clock", world.athenaCurrentTick >= 1000);
++        world.athenaStopThread(2000L);
++        int back = world.athenaCurrentTick;
++        assertTrue(back >= 1000);
++    }
++
++    // 7: crafting on two world threads at once
++    @Test
++    public void fireworksCraftOnTwoThreadsAtOnce() throws Exception {
++        RecipeFireworks recipe = (RecipeFireworks) CraftingManager.getInstance().getRecipes().stream()
++                .filter(r -> r instanceof RecipeFireworks).findFirst().get();
++        InventoryCrafting rockets = new InventoryCrafting(null, 3, 3);
++        rockets.getContents()[0] = new ItemStack(Items.GUNPOWDER);
++        rockets.getContents()[1] = new ItemStack(Items.PAPER);
++        InventoryCrafting other = new InventoryCrafting(null, 3, 3);
++        other.getContents()[0] = new ItemStack(Items.STICK);
++        CountDownLatch matched = new CountDownLatch(1), checkedOther = new CountDownLatch(1);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        AtomicReference<ItemStack> crafted = new AtomicReference<>();
++        Thread first = new Thread(() -> {
++            try {
++                assertTrue(recipe.matches(rockets, null));
++                matched.countDown();
++                await(checkedOther);
++                crafted.set(recipe.craftItem(rockets));
++            } catch (Throwable throwable) {
++                failure.set(throwable);
++            }
++        }, "world-a");
++        Thread second = new Thread(() -> {
++            await(matched);
++            recipe.matches(other, null);
++            checkedOther.countDown();
++        }, "world-b");
++        first.start();
++        second.start();
++        first.join();
++        second.join();
++        assertNull(failure.get());
++        assertEquals(Items.FIREWORKS, crafted.get().getItem());
++    }
++
++    @Test
++    public void theCraftViewIsPerThread() throws Exception {
++        CraftingManager manager = CraftingManager.getInstance();
++        Thread other = new Thread(() -> manager.lastCraftView.set(null));
++        manager.lastCraftView.remove();
++        other.start();
++        other.join();
++        assertNull(manager.lastCraftView.get());
++    }
++}

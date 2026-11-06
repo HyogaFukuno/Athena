@@ -1,0 +1,52 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 3 Nov 2026 22:54:06 +0900
+Subject: [PATCH] Athena API: tick several worlds on one thread
+ (joinWorldThread)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 75efaad9c6a0cd3d2d0570d422704c9e082787b6..a6f956c569e4dc3d8aedcefed190f520bff0938e 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -448,9 +448,25 @@ public final class Athena {
+         getServer().startWorldThread(world);
+     }
+ 
++    /**
++     * Moves {@code world}'s ticking onto the thread that already ticks {@code owner} (see
++     * {@link #startWorldThread}), so one thread ticks both. Players and other entities then move
++     * between the two at once, as between worlds on the server thread - {@code teleport} returns with
++     * the player there - and that thread alone touches both, so a game kept in several worlds (a
++     * match's map and its deathmatch arenas) has one thread to run on. A stall in either holds up
++     * both. {@link #stopWorldThread} takes one of them back and leaves the thread to the others.
++     *
++     * @throws IllegalStateException if {@code owner} has no thread of its own, {@code world} already
++     *         has one or is the main world, or this is called from inside {@code world}'s own tick
++     */
++    public static void joinWorldThread(World world, World owner) {
++        getServer().joinWorldThread(world, owner);
++    }
++
+     /**
+      * Hands {@code world}'s ticking back to the server thread: waits up to 10 seconds for its thread
+-     * to finish the tick it is in. Unloading a world does this itself.
++     * to finish the tick it is in. A thread that ticks other worlds too ({@link #joinWorldThread})
++     * goes on with them. Unloading a world does this itself.
+      *
+      * @return false if the thread did not stop in time; it then still owns the world until its tick
+      *         ends, and hands the world back to the server thread by itself then
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 1fed1eac34834ae95c353818ad591bf9e70671d2..792b8c73b1458218f5ed069c948cb39b98072abc 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -66,6 +66,8 @@ public interface AthenaServer {
+ 
+     void startWorldThread(World world);
+ 
++    void joinWorldThread(World world, World owner);
++
+     boolean stopWorldThread(World world);
+ 
+     boolean isWorldThreaded(World world);

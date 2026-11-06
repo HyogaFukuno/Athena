@@ -21,6 +21,7 @@ tasks {
                 "Main-Class" to "com.hpfxd.pandaspigot.paperclip.Paperclip",
                 "Multi-Release" to true,
                 "Launcher-Agent-Class" to agentClass,
+                "Enable-Native-Access" to "ALL-UNNAMED", // Athena - java -jar paperclip.jar: epoll, io_uring and jline load native code (JEP 472)
                 "Premain-Class" to agentClass,
             )
         }

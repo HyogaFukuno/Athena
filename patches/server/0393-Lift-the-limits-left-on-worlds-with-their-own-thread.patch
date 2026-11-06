@@ -1,0 +1,929 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 22:46:20 +0900
+Subject: [PATCH] Lift the limits left on worlds with their own threads
+
+Vanilla commands (and command blocks) run on the server thread while every
+world thread waits between two ticks (AthenaWorldThread.runWithWorldsStopped):
+they swap MinecraftServer.worldServer for the whole server and may touch any
+world, so two threads running them at once broke each other. One typed in a
+world on its own thread is handed to the server thread; a world that does not
+stop within five seconds leaves the command not run, and the sender is told.
+While the worlds wait the server thread counts as every world's own.
+
+Entities other than players move between worlds ticked by different threads in
+two steps, as players do: written out and removed on the old world's thread,
+made again on the new one's and given the Bukkit entity.
+
+hidePlayer and showPlayer keep the hidden set thread-safe and do the tracker's
+part on the viewer's world thread, so a world may hide its spectators from
+players in other worlds; a new profile re-registers each viewer there too.
+
+Each scoreboard holds its own lock in every method, scores change under it, a
+team's members are a concurrent set and lists come back as copies, so plugins
+may change one scoreboard from several threads.
+
+A player respawning from a world on its own thread no longer reads the main
+world's chunks (or a bed's) from that thread: it takes the main world's spawn
+as set and is lifted out of blocks on arrival. The thread check found it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index c6d2fce018c5264ddfcbec5781d1e7a1cc488e09..2ba354d1b53cb01a8b5b176b54db9f1e21f10e4e 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -127,6 +127,87 @@ public final class AthenaWorldThread extends Thread {
+         }
+     }
+ 
++    // ---- running something with every world thread stopped ----
++
++    /** World threads started and not yet finished. */
++    private static final java.util.concurrent.atomic.AtomicInteger alive = new java.util.concurrent.atomic.AtomicInteger();
++    /** Set while the server thread runs something with the world threads stopped. */
++    private static volatile Stop stop;
++
++    private static final class Stop {
++        final java.util.Set<AthenaWorldThread> arrived = java.util.concurrent.ConcurrentHashMap.newKeySet();
++        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
++    }
++
++    /** Whether any world ticks on a thread of its own. */
++    public static boolean anyRunning() {
++        return alive.get() > 0;
++    }
++
++    /** Whether the calling thread is the server thread inside runWithWorldsStopped. */
++    public static boolean worldsStopped() {
++        return stop != null && MinecraftServer.getServer().isMainThread();
++    }
++
++    /**
++     * On the server thread: runs {@code task} while every world thread waits between two of its
++     * ticks, so the task may touch any world, as everything could before worlds had threads. Vanilla
++     * commands run so: they swap MinecraftServer.worldServer for the whole server and touch every
++     * world. A world thread that does not reach the end of its tick within {@code timeoutMillis}
++     * (a stall) leaves the task not run.
++     *
++     * @return null once the task ran; else the name of the world whose thread did not stop
++     */
++    public static String runWithWorldsStopped(Runnable task, long timeoutMillis) {
++        org.spigotmc.AsyncCatcher.catchOp("stop the world threads");
++        if (stop != null || alive.get() == 0) {
++            task.run();
++            return null;
++        }
++        MinecraftServer server = MinecraftServer.getServer();
++        java.util.List<AthenaWorldThread> threads = new java.util.ArrayList<AthenaWorldThread>();
++        for (WorldServer world : server.worlds) {
++            AthenaWorldThread thread = world.athenaThread;
++            if (thread != null && thread.isAlive() && !thread.failed()) threads.add(thread);
++        }
++        Stop current = new Stop();
++        stop = current;
++        try {
++            for (AthenaWorldThread thread : threads) java.util.concurrent.locks.LockSupport.unpark(thread);
++            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
++            for (AthenaWorldThread thread : threads) {
++                while (!current.arrived.contains(thread) && thread.isAlive() && !thread.failed()) {
++                    if (System.nanoTime() > deadline) {
++                        return thread.world.getWorldData().getName();
++                    }
++                    java.util.concurrent.locks.LockSupport.parkNanos(100_000L);
++                }
++            }
++            task.run();
++            return null;
++        } finally {
++            stop = null;
++            current.release.countDown();
++        }
++    }
++
++    /** At the top of the loop: waits while the server thread runs something with the world threads stopped. */
++    private void waitIfStopped() {
++        Stop current = stop;
++        if (current == null) return;
++        current.arrived.add(this);
++        boolean interrupted = false;
++        while (true) {
++            try {
++                current.release.await();
++                break;
++            } catch (InterruptedException e) {
++                interrupted = true;
++            }
++        }
++        if (interrupted) Thread.currentThread().interrupt();
++    }
++
+     /** Queues {@code task} to run on this thread before its next tick. */
+     void post(Runnable task) {
+         this.tasks.add(task);
+@@ -147,9 +228,11 @@ public final class AthenaWorldThread extends Thread {
+ 
+     @Override
+     public void run() {
++        alive.incrementAndGet();
+         long next = System.nanoTime();
+         try {
+             while (this.running) {
++                this.waitIfStopped();
+                 long now = System.nanoTime();
+                 if (now < next) {
+                     java.util.concurrent.locks.LockSupport.parkNanos(next - now);
+@@ -192,6 +275,8 @@ public final class AthenaWorldThread extends Thread {
+             // the server thread takes the world back; until then nothing ticks it
+             final AthenaWorldThread self = this;
+             MinecraftServer.getServer().processQueue.add(() -> self.world.athenaRecoverFailedThread(self));
++        } finally {
++            alive.decrementAndGet();
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/CommandBlockListenerAbstract.java b/src/main/java/net/minecraft/server/CommandBlockListenerAbstract.java
+index 1a1ca8b1be617210cddef8f88cf40cd0bf59ff2e..58cb74e3362dfd499a02d008f797a28637700d14 100644
+--- a/src/main/java/net/minecraft/server/CommandBlockListenerAbstract.java
++++ b/src/main/java/net/minecraft/server/CommandBlockListenerAbstract.java
+@@ -124,6 +124,21 @@ public abstract class CommandBlockListenerAbstract implements ICommandListener {
+ 
+     // CraftBukkit start
+     public static int executeCommand(ICommandListener sender, org.bukkit.command.CommandSender bSender, String command) {
++        // Athena start - as VanillaCommandWrapper.execute: on the server thread with every world thread
++        // stopped (this swaps MinecraftServer.worldServer and expands selectors over every world). A
++        // command block in a world on its own thread hands it over and counts no success
++        if (AthenaWorldThread.anyRunning() && !AthenaWorldThread.worldsStopped()) {
++            final int[] result = new int[1];
++            final String line = command;
++            Runnable run = () -> AthenaWorldThread.runWithWorldsStopped(() -> result[0] = executeCommand(sender, bSender, line), 5000L);
++            if (MinecraftServer.getServer().isMainThread()) {
++                run.run();
++                return result[0];
++            }
++            MinecraftServer.getServer().processQueue.add(run);
++            return 0;
++        }
++        // Athena end
+         org.bukkit.command.SimpleCommandMap commandMap = sender.getWorld().getServer().getCommandMap();
+         Joiner joiner = Joiner.on(" ");
+         if (command.startsWith("/")) {
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index da7a0aea1363c65b8d2cc0388e43cabdef092a2f..7015837020ec3b68898cfe64552c1c0801d2b360 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -2212,8 +2212,9 @@ public abstract class Entity implements ICommandListener {
+         if (true) {
+             WorldServer worldserver = ((CraftWorld) getBukkitEntity().getLocation().getWorld()).getHandle();
+             WorldServer worldserver1 = ((CraftWorld) exit.getWorld()).getHandle();
+-            // Athena start - moving between worlds touches both: only between worlds the same thread ticks
++            // Athena start - moving between worlds ticked by different threads: in two steps, as a player
+             if (worldserver != worldserver1 && !worldserver.athenaSameTickThread(worldserver1)) {
++                this.athenaTeleportAcross(worldserver1, exit, portal);
+                 return;
+             }
+             // Athena end
+@@ -2270,6 +2271,65 @@ public abstract class Entity implements ICommandListener {
+         }
+     }
+ 
++    // Athena start
++    /**
++     * teleportTo between worlds ticked by different threads. On this thread (the old world's) the
++     * entity is written out and removed; on the new world's thread a new one is made from that, put at
++     * {@code exit} (through the travel agent for a portal) and added, and the Bukkit entity is handed
++     * over to it, as teleportTo does. Riders and leashes do not come along. If the new world is gone by
++     * then, the entity is gone too.
++     */
++    private void athenaTeleportAcross(final WorldServer to, Location exit, final boolean portal) {
++        final String type = EntityTypes.getEntityString(this);
++        if (type == null) return;   // players have their own way (PlayerList.moveToWorld); others without a type cannot be rebuilt
++        final NBTTagCompound data = new NBTTagCompound();
++        this.writeToNBT(data);
++        final int cooldown = this.portalCooldown;
++        final BlockPosition portalPos = this.lastPortalPos;
++        final Vec3D portalVec = this.lastPortalVec;
++        final EnumDirection direction = this.teleportDirection;
++        final org.bukkit.craftbukkit.entity.CraftEntity bukkit = this.getBukkitEntity();
++        final org.bukkit.util.Vector velocity = bukkit.getVelocity();
++        final Location target = exit.clone();
++        if (this instanceof EntityInsentient) {
++            ((EntityInsentient) this).unleash(true, false); // as teleportTo: no duped leads
++        }
++        this.mount(null);
++        if (this.passenger != null) this.passenger.mount(null);
++        this.world.kill(this);
++        to.athenaRunOnTickThread(new Runnable() {
++            public void run() {
++                if (to.athenaUnloaded) return;
++                Entity entity = EntityTypes.createEntityByName(type, to);
++                if (entity == null) return;
++                entity.readFromNBT(data);
++                entity.dimension = to.dimension;
++                entity.portalCooldown = cooldown;
++                entity.lastPortalPos = portalPos;
++                entity.lastPortalVec = portalVec;
++                entity.teleportDirection = direction;
++                boolean before = to.chunkProviderServer.forceChunkLoad;
++                to.chunkProviderServer.forceChunkLoad = true;
++                try {
++                    target.setWorld(to.getWorld());
++                    if (portal) {
++                        to.getTravelAgent().adjustExit(entity, target, velocity);
++                    }
++                    entity.setPositionRotation(target.getX(), target.getY(), target.getZ(), target.getYaw(), target.getPitch());
++                    entity.motX = velocity.getX();
++                    entity.motY = velocity.getY();
++                    entity.motZ = velocity.getZ();
++                    to.addEntity(entity);
++                } finally {
++                    to.chunkProviderServer.forceChunkLoad = before;
++                }
++                bukkit.setHandle(entity);
++                entity.bukkitEntity = bukkit;
++            }
++        });
++    }
++    // Athena end
++
+     public float getExplosionResistance(Explosion explosion, World world, BlockPosition blockposition, IBlockData iblockdata) {
+         return iblockdata.getBlock().getExplosionResistance(this);
+     }
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 7d49ea9280ce0251a299762ce7063bff80ba390f..da2156f4acd9eab0a2bfc5f8b23418143ced47e4 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -590,7 +590,9 @@ public abstract class PlayerList {
+         if (location == null) {
+             boolean isBedSpawn = false;
+             CraftWorld cworld = (CraftWorld) this.server.server.getWorld(entityplayer.spawnWorld);
+-            if (cworld != null && blockposition != null) {
++            // Athena - a bed in a world another thread ticks is not looked at (its blocks are that thread's):
++            // the player respawns at the main world's spawn
++            if (cworld != null && blockposition != null && cworld.getHandle().isMainThread()) {
+                 blockposition1 = EntityHuman.getBed(cworld.getHandle(), blockposition, flag1);
+                 if (blockposition1 != null) {
+                     isBedSpawn = true;
+@@ -603,7 +605,15 @@ public abstract class PlayerList {
+ 
+             if (location == null) {
+                 cworld = (CraftWorld) this.server.server.getWorlds().get(0);
++                // Athena start - finding a safe spot reads the main world's chunks; from another world's thread
++                // (a player dying in a world on its own thread) take the spawn as set, and arriving there
++                // (athenaArrive, avoidSuffocation) lifts the player out of any blocks
++                if (cworld.getHandle().isMainThread()) {
+                 blockposition = entityplayer1.getSpawnPoint(this.server, cworld.getHandle()); // PandaSpigot - Fix spawn point radius on respawn
++                } else {
++                    blockposition = cworld.getHandle().getSpawn();
++                }
++                // Athena end
+                 location = new Location(cworld, blockposition.getX() + 0.5, blockposition.getY(), blockposition.getZ() + 0.5);
+             }
+ 
+diff --git a/src/main/java/net/minecraft/server/Scoreboard.java b/src/main/java/net/minecraft/server/Scoreboard.java
+index 96245bd822f42fabafb9d8807438c12eabcc27f0..033808fb450386f1121429659965c71bc2789daf 100644
+--- a/src/main/java/net/minecraft/server/Scoreboard.java
++++ b/src/main/java/net/minecraft/server/Scoreboard.java
+@@ -9,6 +9,8 @@ import java.util.List;
+ import java.util.Map;
+ 
+ 
++// Athena - one scoreboard is changed from the threads of several worlds (the main one is everyone's):
++// every public method holds this scoreboard's lock, and collections come back as copies
+ public class Scoreboard {
+ 
+     private final Map<String, ScoreboardObjective> objectivesByName = Maps.newHashMap();
+@@ -21,11 +23,11 @@ public class Scoreboard {
+ 
+     public Scoreboard() {}
+ 
+-    public ScoreboardObjective getObjective(String s) {
++    public synchronized ScoreboardObjective getObjective(String s) {
+         return (ScoreboardObjective) this.objectivesByName.get(s);
+     }
+ 
+-    public ScoreboardObjective registerObjective(String s, IScoreboardCriteria iscoreboardcriteria) {
++    public synchronized ScoreboardObjective registerObjective(String s, IScoreboardCriteria iscoreboardcriteria) {
+         if (s.length() > 16) {
+             throw new IllegalArgumentException("The objective name '" + s + "' is too long!");
+         } else {
+@@ -45,13 +47,13 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public Collection<ScoreboardObjective> getObjectivesForCriteria(IScoreboardCriteria iscoreboardcriteria) {
++    public synchronized Collection<ScoreboardObjective> getObjectivesForCriteria(IScoreboardCriteria iscoreboardcriteria) {
+         Collection collection = (Collection) this.objectivesByCriteria.get(iscoreboardcriteria);
+ 
+         return collection == null ? Lists.newArrayList() : Lists.newArrayList(collection);
+     }
+ 
+-    public boolean entityHasObjective(String s, ScoreboardObjective scoreboardobjective) {
++    public synchronized boolean entityHasObjective(String s, ScoreboardObjective scoreboardobjective) {
+         Map map = (Map) this.playerScores.get(s);
+ 
+         if (map == null) {
+@@ -63,7 +65,7 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public ScoreboardScore getPlayerScoreForObjective(String s, ScoreboardObjective scoreboardobjective) {
++    public synchronized ScoreboardScore getPlayerScoreForObjective(String s, ScoreboardObjective scoreboardobjective) {
+         if (s.length() > 40) {
+             throw new IllegalArgumentException("The player name '" + s + "' is too long!");
+         } else {
+@@ -73,7 +75,7 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public Collection<ScoreboardScore> getScoresForObjective(ScoreboardObjective scoreboardobjective) {
++    public synchronized Collection<ScoreboardScore> getScoresForObjective(ScoreboardObjective scoreboardobjective) {
+         ArrayList arraylist = Lists.newArrayList();
+ 
+         for (Map map : this.playerScores.values()) {
+@@ -88,15 +90,15 @@ public class Scoreboard {
+         return arraylist;
+     }
+ 
+-    public Collection<ScoreboardObjective> getObjectives() {
+-        return this.objectivesByName.values();
++    public synchronized Collection<ScoreboardObjective> getObjectives() {
++        return Lists.newArrayList(this.objectivesByName.values()); // Athena - a copy, read outside the lock
+     }
+ 
+-    public Collection<String> getPlayers() {
+-        return this.playerScores.keySet();
++    public synchronized Collection<String> getPlayers() {
++        return Lists.newArrayList(this.playerScores.keySet()); // Athena - a copy
+     }
+ 
+-    public void resetPlayerScores(String s, ScoreboardObjective scoreboardobjective) {
++    public synchronized void resetPlayerScores(String s, ScoreboardObjective scoreboardobjective) {
+         if (scoreboardobjective == null) {
+             Map map = (Map) this.playerScores.remove(s);
+ 
+@@ -123,7 +125,7 @@ public class Scoreboard {
+ 
+     }
+ 
+-    public Collection<ScoreboardScore> getScores() {
++    public synchronized Collection<ScoreboardScore> getScores() {
+         Collection<Map<ScoreboardObjective, ScoreboardScore>> collection = this.playerScores.values();
+         ArrayList arraylist = Lists.newArrayList();
+ 
+@@ -134,17 +136,17 @@ public class Scoreboard {
+         return arraylist;
+     }
+ 
+-    public Map<ScoreboardObjective, ScoreboardScore> getPlayerObjectives(String s) {
++    public synchronized Map<ScoreboardObjective, ScoreboardScore> getPlayerObjectives(String s) {
+         Object object = (Map) this.playerScores.get(s);
+ 
+         if (object == null) {
+             object = Maps.newHashMap();
+         }
+ 
+-        return (Map<ScoreboardObjective, ScoreboardScore>) object;
++        return Maps.newHashMap((Map<ScoreboardObjective, ScoreboardScore>) object); // Athena - a copy
+     }
+ 
+-    public void unregisterObjective(ScoreboardObjective scoreboardobjective) {
++    public synchronized void unregisterObjective(ScoreboardObjective scoreboardobjective) {
+         this.objectivesByName.remove(scoreboardobjective.getName());
+ 
+         for (int i = 0; i < 19; ++i) {
+@@ -166,19 +168,19 @@ public class Scoreboard {
+         this.handleObjectiveRemoved(scoreboardobjective);
+     }
+ 
+-    public void setDisplaySlot(int i, ScoreboardObjective scoreboardobjective) {
++    public synchronized void setDisplaySlot(int i, ScoreboardObjective scoreboardobjective) {
+         this.displaySlots[i] = scoreboardobjective;
+     }
+ 
+-    public ScoreboardObjective getObjectiveForSlot(int i) {
++    public synchronized ScoreboardObjective getObjectiveForSlot(int i) {
+         return this.displaySlots[i];
+     }
+ 
+-    public ScoreboardTeam getTeam(String s) {
++    public synchronized ScoreboardTeam getTeam(String s) {
+         return (ScoreboardTeam) this.teamsByName.get(s);
+     }
+ 
+-    public ScoreboardTeam createTeam(String s) {
++    public synchronized ScoreboardTeam createTeam(String s) {
+         if (s.length() > 16) {
+             throw new IllegalArgumentException("The team name '" + s + "' is too long!");
+         } else {
+@@ -195,7 +197,7 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public void removeTeam(ScoreboardTeam scoreboardteam) {
++    public synchronized void removeTeam(ScoreboardTeam scoreboardteam) {
+         this.teamsByName.remove(scoreboardteam.getName());
+ 
+         for (String s : scoreboardteam.getPlayerNameSet()) {
+@@ -205,7 +207,7 @@ public class Scoreboard {
+         this.handleTeamRemoved(scoreboardteam);
+     }
+ 
+-    public boolean addPlayerToTeam(String s, String s1) {
++    public synchronized boolean addPlayerToTeam(String s, String s1) {
+         if (s.length() > 40) {
+             throw new IllegalArgumentException("The player name '" + s + "' is too long!");
+         } else if (!this.teamsByName.containsKey(s1)) {
+@@ -223,7 +225,7 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public boolean removePlayerFromTeam(String s) {
++    public synchronized boolean removePlayerFromTeam(String s) {
+         ScoreboardTeam scoreboardteam = this.getPlayerTeam(s);
+ 
+         if (scoreboardteam != null) {
+@@ -234,7 +236,7 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public void removePlayerFromTeam(String s, ScoreboardTeam scoreboardteam) {
++    public synchronized void removePlayerFromTeam(String s, ScoreboardTeam scoreboardteam) {
+         if (this.getPlayerTeam(s) != scoreboardteam) {
+             throw new IllegalStateException("Player is either on another team or not on any team. Cannot remove from team '" + scoreboardteam.getName() + "'.");
+         } else {
+@@ -243,35 +245,35 @@ public class Scoreboard {
+         }
+     }
+ 
+-    public Collection<String> getTeamNames() {
+-        return this.teamsByName.keySet();
++    public synchronized Collection<String> getTeamNames() {
++        return Lists.newArrayList(this.teamsByName.keySet()); // Athena - a copy
+     }
+ 
+-    public Collection<ScoreboardTeam> getTeams() {
+-        return this.teamsByName.values();
++    public synchronized Collection<ScoreboardTeam> getTeams() {
++        return Lists.newArrayList(this.teamsByName.values()); // Athena - a copy
+     }
+ 
+-    public ScoreboardTeam getPlayerTeam(String s) {
++    public synchronized ScoreboardTeam getPlayerTeam(String s) {
+         return (ScoreboardTeam) this.teamsByPlayer.get(s);
+     }
+ 
+-    public void handleObjectiveAdded(ScoreboardObjective scoreboardobjective) {}
++    public synchronized void handleObjectiveAdded(ScoreboardObjective scoreboardobjective) {}
+ 
+-    public void handleObjectiveChanged(ScoreboardObjective scoreboardobjective) {}
++    public synchronized void handleObjectiveChanged(ScoreboardObjective scoreboardobjective) {}
+ 
+-    public void handleObjectiveRemoved(ScoreboardObjective scoreboardobjective) {}
++    public synchronized void handleObjectiveRemoved(ScoreboardObjective scoreboardobjective) {}
+ 
+-    public void handleScoreChanged(ScoreboardScore scoreboardscore) {}
++    public synchronized void handleScoreChanged(ScoreboardScore scoreboardscore) {}
+ 
+-    public void handlePlayerRemoved(String s) {}
++    public synchronized void handlePlayerRemoved(String s) {}
+ 
+-    public void a(String s, ScoreboardObjective scoreboardobjective) {}
++    public synchronized void a(String s, ScoreboardObjective scoreboardobjective) {}
+ 
+-    public void handleTeamAdded(ScoreboardTeam scoreboardteam) {}
++    public synchronized void handleTeamAdded(ScoreboardTeam scoreboardteam) {}
+ 
+-    public void handleTeamChanged(ScoreboardTeam scoreboardteam) {}
++    public synchronized void handleTeamChanged(ScoreboardTeam scoreboardteam) {}
+ 
+-    public void handleTeamRemoved(ScoreboardTeam scoreboardteam) {}
++    public synchronized void handleTeamRemoved(ScoreboardTeam scoreboardteam) {}
+ 
+     public static String getSlotName(int i) {
+         switch (i) {
+@@ -327,7 +329,7 @@ public class Scoreboard {
+         return Scoreboard.g;
+     }
+ 
+-    public void a(Entity entity) {
++    public synchronized void a(Entity entity) {
+         if (entity != null && !(entity instanceof EntityHuman) && !entity.isAlive()) {
+             String s = entity.getUniqueID().toString();
+ 
+diff --git a/src/main/java/net/minecraft/server/ScoreboardScore.java b/src/main/java/net/minecraft/server/ScoreboardScore.java
+index 8c577b65739c3df3793823fac959021ebe1791af..e358a6ab078e5b42972db007b87c90572ba988e6 100644
+--- a/src/main/java/net/minecraft/server/ScoreboardScore.java
++++ b/src/main/java/net/minecraft/server/ScoreboardScore.java
+@@ -30,19 +30,23 @@ public class ScoreboardScore {
+     }
+ 
+     public void addScore(int i) {
++        synchronized (this.theScoreboard) { // Athena - read and set as one, under the scoreboard's lock
+         if (this.theScoreObjective.getCriteria().isReadOnly()) {
+             throw new IllegalStateException("Cannot modify read-only score");
+         } else {
+             this.setScore(this.getScore() + i);
+         }
++        } // Athena
+     }
+ 
+     public void removeScore(int i) {
++        synchronized (this.theScoreboard) { // Athena
+         if (this.theScoreObjective.getCriteria().isReadOnly()) {
+             throw new IllegalStateException("Cannot modify read-only score");
+         } else {
+             this.setScore(this.getScore() - i);
+         }
++        } // Athena
+     }
+ 
+     public void incrementScore() {
+@@ -58,6 +62,7 @@ public class ScoreboardScore {
+     }
+ 
+     public void setScore(int i) {
++        synchronized (this.theScoreboard) { // Athena - with handleScoreChanged, under the scoreboard's lock
+         int j = this.score;
+ 
+         this.score = i;
+@@ -65,6 +70,7 @@ public class ScoreboardScore {
+             this.forceUpdate = false;
+             this.getScoreScoreboard().handleScoreChanged(this);
+         }
++        } // Athena
+ 
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/ScoreboardServer.java b/src/main/java/net/minecraft/server/ScoreboardServer.java
+index c5d69a5ca3cba6a95de02495ecd73a928570a999..fd61a6350a9ae31900ffd72361acc2e30c7a612e 100644
+--- a/src/main/java/net/minecraft/server/ScoreboardServer.java
++++ b/src/main/java/net/minecraft/server/ScoreboardServer.java
+@@ -19,7 +19,7 @@ public class ScoreboardServer extends Scoreboard {
+         this.scoreboardMCServer = minecraftserver;
+     }
+ 
+-    public void handleScoreChanged(ScoreboardScore scoreboardscore) {
++    public synchronized void handleScoreChanged(ScoreboardScore scoreboardscore) {
+         super.handleScoreChanged(scoreboardscore);
+         if (this.b.contains(scoreboardscore.getObjective())) {
+             this.sendAll(new PacketPlayOutScoreboardScore(scoreboardscore));
+@@ -28,19 +28,19 @@ public class ScoreboardServer extends Scoreboard {
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handlePlayerRemoved(String s) {
++    public synchronized void handlePlayerRemoved(String s) {
+         super.handlePlayerRemoved(s);
+         this.sendAll(new PacketPlayOutScoreboardScore(s));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void a(String s, ScoreboardObjective scoreboardobjective) {
++    public synchronized void a(String s, ScoreboardObjective scoreboardobjective) {
+         super.a(s, scoreboardobjective);
+         this.sendAll(new PacketPlayOutScoreboardScore(s, scoreboardobjective));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void setDisplaySlot(int i, ScoreboardObjective scoreboardobjective) {
++    public synchronized void setDisplaySlot(int i, ScoreboardObjective scoreboardobjective) {
+         ScoreboardObjective scoreboardobjective1 = this.getObjectiveForSlot(i);
+ 
+         super.setDisplaySlot(i, scoreboardobjective);
+@@ -63,7 +63,7 @@ public class ScoreboardServer extends Scoreboard {
+         this.markSaveDataDirty();
+     }
+ 
+-    public boolean addPlayerToTeam(String s, String s1) {
++    public synchronized boolean addPlayerToTeam(String s, String s1) {
+         if (super.addPlayerToTeam(s, s1)) {
+             ScoreboardTeam scoreboardteam = this.getTeam(s1);
+ 
+@@ -75,18 +75,18 @@ public class ScoreboardServer extends Scoreboard {
+         }
+     }
+ 
+-    public void removePlayerFromTeam(String s, ScoreboardTeam scoreboardteam) {
++    public synchronized void removePlayerFromTeam(String s, ScoreboardTeam scoreboardteam) {
+         super.removePlayerFromTeam(s, scoreboardteam);
+         this.sendAll(new PacketPlayOutScoreboardTeam(scoreboardteam, Arrays.asList(new String[] { s}), 4));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleObjectiveAdded(ScoreboardObjective scoreboardobjective) {
++    public synchronized void handleObjectiveAdded(ScoreboardObjective scoreboardobjective) {
+         super.handleObjectiveAdded(scoreboardobjective);
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleObjectiveChanged(ScoreboardObjective scoreboardobjective) {
++    public synchronized void handleObjectiveChanged(ScoreboardObjective scoreboardobjective) {
+         super.handleObjectiveChanged(scoreboardobjective);
+         if (this.b.contains(scoreboardobjective)) {
+             this.sendAll(new PacketPlayOutScoreboardObjective(scoreboardobjective, 2));
+@@ -95,7 +95,7 @@ public class ScoreboardServer extends Scoreboard {
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleObjectiveRemoved(ScoreboardObjective scoreboardobjective) {
++    public synchronized void handleObjectiveRemoved(ScoreboardObjective scoreboardobjective) {
+         super.handleObjectiveRemoved(scoreboardobjective);
+         if (this.b.contains(scoreboardobjective)) {
+             this.sendDisplaySlotRemovalPackets(scoreboardobjective);
+@@ -104,25 +104,25 @@ public class ScoreboardServer extends Scoreboard {
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleTeamAdded(ScoreboardTeam scoreboardteam) {
++    public synchronized void handleTeamAdded(ScoreboardTeam scoreboardteam) {
+         super.handleTeamAdded(scoreboardteam);
+         this.sendAll(new PacketPlayOutScoreboardTeam(scoreboardteam, 0));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleTeamChanged(ScoreboardTeam scoreboardteam) {
++    public synchronized void handleTeamChanged(ScoreboardTeam scoreboardteam) {
+         super.handleTeamChanged(scoreboardteam);
+         this.sendAll(new PacketPlayOutScoreboardTeam(scoreboardteam, 2));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void handleTeamRemoved(ScoreboardTeam scoreboardteam) {
++    public synchronized void handleTeamRemoved(ScoreboardTeam scoreboardteam) {
+         super.handleTeamRemoved(scoreboardteam);
+         this.sendAll(new PacketPlayOutScoreboardTeam(scoreboardteam, 1));
+         this.markSaveDataDirty();
+     }
+ 
+-    public void a(PersistentScoreboard persistentscoreboard) {
++    public synchronized void a(PersistentScoreboard persistentscoreboard) {
+         this.scoreboardSaveData = persistentscoreboard;
+     }
+ 
+@@ -133,7 +133,7 @@ public class ScoreboardServer extends Scoreboard {
+ 
+     }
+ 
+-    public List<Packet> getScoreboardScorePacketsForObjective(ScoreboardObjective scoreboardobjective) {
++    public synchronized List<Packet> getScoreboardScorePacketsForObjective(ScoreboardObjective scoreboardobjective) {
+         ArrayList arraylist = Lists.newArrayList();
+ 
+         arraylist.add(new PacketPlayOutScoreboardObjective(scoreboardobjective, 0));
+@@ -155,7 +155,7 @@ public class ScoreboardServer extends Scoreboard {
+         return arraylist;
+     }
+ 
+-    public void e(ScoreboardObjective scoreboardobjective) {
++    public synchronized void e(ScoreboardObjective scoreboardobjective) {
+         List list = this.getScoreboardScorePacketsForObjective(scoreboardobjective);
+         Iterator iterator = this.scoreboardMCServer.getPlayerList().getPlayerList().iterator();
+ 
+@@ -174,7 +174,7 @@ public class ScoreboardServer extends Scoreboard {
+         this.b.add(scoreboardobjective);
+     }
+ 
+-    public List<Packet> f(ScoreboardObjective scoreboardobjective) {
++    public synchronized List<Packet> f(ScoreboardObjective scoreboardobjective) {
+         ArrayList arraylist = Lists.newArrayList();
+ 
+         arraylist.add(new PacketPlayOutScoreboardObjective(scoreboardobjective, 1));
+@@ -188,7 +188,7 @@ public class ScoreboardServer extends Scoreboard {
+         return arraylist;
+     }
+ 
+-    public void sendDisplaySlotRemovalPackets(ScoreboardObjective scoreboardobjective) {
++    public synchronized void sendDisplaySlotRemovalPackets(ScoreboardObjective scoreboardobjective) {
+         List list = this.f(scoreboardobjective);
+         Iterator iterator = this.scoreboardMCServer.getPlayerList().getPlayerList().iterator();
+ 
+@@ -207,7 +207,7 @@ public class ScoreboardServer extends Scoreboard {
+         this.b.remove(scoreboardobjective);
+     }
+ 
+-    public int h(ScoreboardObjective scoreboardobjective) {
++    public synchronized int h(ScoreboardObjective scoreboardobjective) {
+         int i = 0;
+ 
+         for (int j = 0; j < 19; ++j) {
+diff --git a/src/main/java/net/minecraft/server/ScoreboardTeam.java b/src/main/java/net/minecraft/server/ScoreboardTeam.java
+index 966d496dd1964ee6a1f6833b8a6b6ff09af24922..3b89e80c592a1c8b1fd959ed6c5715b5d6c5a7bc 100644
+--- a/src/main/java/net/minecraft/server/ScoreboardTeam.java
++++ b/src/main/java/net/minecraft/server/ScoreboardTeam.java
+@@ -9,7 +9,7 @@ public class ScoreboardTeam extends ScoreboardTeamBase {
+ 
+     private final Scoreboard theScoreboard;
+     private final String registeredName;
+-    private final Set<String> membershipSet = Sets.newHashSet();
++    private final Set<String> membershipSet = Sets.newConcurrentHashSet(); // Athena - iterated (packets, CraftTeam) while another thread may change it
+     private String teamNameSPT;
+     private String namePrefixSPT = "";
+     private String colorSuffix = "";
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 918d6d105caa2ef6ff3e3950161fa1483529a6dd..e5949bc705e0286e7e602d7aa3967baf7afa0ee0 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1550,7 +1550,8 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+     public boolean isMainThread() {
+         AthenaWorldThread thread = this.athenaThread;
+-        return thread == null ? this.server.isMainThread() : Thread.currentThread() == thread;
++        // while every world thread waits (AthenaWorldThread.runWithWorldsStopped), the server thread may touch any world
++        return thread == null ? this.server.isMainThread() : Thread.currentThread() == thread || AthenaWorldThread.worldsStopped();
+     }
+ 
+     /**
+diff --git a/src/main/java/org/bukkit/craftbukkit/command/VanillaCommandWrapper.java b/src/main/java/org/bukkit/craftbukkit/command/VanillaCommandWrapper.java
+index 410cd26d6ad23faf2640424393482f0192dc0f80..b8a206ca0d2a2884948e2555773ffe5d51f8e257 100644
+--- a/src/main/java/org/bukkit/craftbukkit/command/VanillaCommandWrapper.java
++++ b/src/main/java/org/bukkit/craftbukkit/command/VanillaCommandWrapper.java
+@@ -41,6 +41,26 @@ public final class VanillaCommandWrapper extends VanillaCommand {
+     public boolean execute(CommandSender sender, String commandLabel, String[] args) {
+         if (!testPermission(sender)) return true;
+ 
++        // Athena start - with worlds on their own threads, a vanilla command runs on the server thread
++        // with every world thread stopped: it swaps MinecraftServer.worldServer for the whole server and
++        // may touch any world (/time, /tp, selectors). One typed in a world on its own thread is handed
++        // to the server thread and runs there before its next tick
++        if (net.minecraft.server.AthenaWorldThread.anyRunning() && !net.minecraft.server.AthenaWorldThread.worldsStopped()) {
++            final String[] copy = args.clone();
++            Runnable run = () -> {
++                String stuck = net.minecraft.server.AthenaWorldThread.runWithWorldsStopped(() -> dispatchVanillaCommand(sender, getListener(sender), copy), 5000L);
++                if (stuck != null) {
++                    sender.sendMessage(org.bukkit.ChatColor.RED + "World " + stuck + " is not responding, so /" + commandLabel + " was not run");
++                }
++            };
++            if (MinecraftServer.getServer().isMainThread()) {
++                run.run();
++            } else {
++                MinecraftServer.getServer().processQueue.add(run);
++            }
++            return true;
++        }
++        // Athena end
+         ICommandListener icommandlistener = getListener(sender);
+         dispatchVanillaCommand(sender, icommandlistener, args);
+         return true;
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+index 78ad791f994700bd33725084fc442c700a6aaa78..16e55f45f63589e8f6318c9e3cd576ae150d9d74 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftEntity.java
+@@ -247,11 +247,8 @@ public abstract class CraftEntity implements org.bukkit.entity.Entity {
+ 
+         // Spigot start
+         if (!location.getWorld().equals(getWorld())) {
+-          // Athena start - moving an entity between worlds touches both: only between worlds the same thread ticks
+-          if (!((net.minecraft.server.WorldServer) entity.world).athenaSameTickThread(((CraftWorld) location.getWorld()).getHandle())) {
+-              return false;
+-          }
+-          // Athena end
++          // Athena - between worlds ticked by different threads, teleportTo moves it in two steps: it is
++          // in the new world once that world's thread has taken it, after this returns
+           entity.teleportTo(location, cause.equals(TeleportCause.NETHER_PORTAL));
+           return true;
+         }
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index e6724bb50fed865fc20abe4d9cc2b8a1a05be927..9ac74aae36047152d53a0f18dcee2bcbf656486f 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -76,7 +76,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+     private boolean hasPlayedBefore = false;
+     private final ConversationTracker conversationTracker = new ConversationTracker();
+     private final Set<String> channels = new HashSet<String>();
+-    private final Set<UUID> hiddenPlayers = new HashSet<UUID>();
++    private final Set<UUID> hiddenPlayers = java.util.concurrent.ConcurrentHashMap.newKeySet(); // Athena - read by the tracker on this player's world thread, changed from any thread
+     private int hash = 0;
+     private double health = 20;
+     private boolean scaledHealth = false;
+@@ -1081,12 +1081,16 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+         Validate.notNull(player, "hidden player cannot be null");
+         if (getHandle().playerConnection == null) return;
+         if (equals(player)) return;
+-        if (hiddenPlayers.contains(player.getUniqueId())) return;
+-        hiddenPlayers.add(player.getUniqueId());
++        if (!hiddenPlayers.add(player.getUniqueId())) return; // Athena - one step: another thread may hide or show at once
+ 
+         // PandaSpigot start
+-        EntityPlayer other = ((CraftPlayer) player).getHandle();
+-        this.unregisterPlayer(other);
++        final EntityPlayer other = ((CraftPlayer) player).getHandle();
++        // Athena start - the tracker of this player's world, on its thread (now, if that is this thread);
++        // canSee already says hidden. Shown again before then: nothing to undo
++        net.minecraft.server.WorldServer.athenaRunForEntity(getHandle(), () -> {
++            if (getHandle().playerConnection != null && hiddenPlayers.contains(other.getUniqueID())) this.unregisterPlayer(other);
++        });
++        // Athena end
+     }
+     private void unregisterPlayer(EntityPlayer other) {
+         //remove this player from the hidden player's EntityTrackerEntry
+@@ -1106,12 +1110,15 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+         Validate.notNull(player, "shown player cannot be null");
+         if (getHandle().playerConnection == null) return;
+         if (equals(player)) return;
+-        if (!hiddenPlayers.contains(player.getUniqueId())) return;
+-        hiddenPlayers.remove(player.getUniqueId());
++        if (!hiddenPlayers.remove(player.getUniqueId())) return; // Athena - one step: another thread may hide or show at once
+ 
+         // PandaSpigot start
+-        EntityPlayer other = ((CraftPlayer) player).getHandle();
+-        this.registerPlayer(other);
++        final EntityPlayer other = ((CraftPlayer) player).getHandle();
++        // Athena start - as hidePlayer: on this player's world thread
++        net.minecraft.server.WorldServer.athenaRunForEntity(getHandle(), () -> {
++            if (getHandle().playerConnection != null && !hiddenPlayers.contains(other.getUniqueID())) this.registerPlayer(other);
++        });
++        // Athena end
+     }
+     private void registerPlayer(EntityPlayer other) {
+         EntityTracker tracker = ((WorldServer) entity.world).tracker;
+@@ -1184,8 +1191,8 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+         EntityPlayer self = getHandle();
+         self.setProfile(com.destroystokyo.paper.profile.CraftPlayerProfile.asAuthlibCopy(profile));
+         List<EntityPlayer> players = server.getServer().getPlayerList().players;
+-        for (EntityPlayer player : players) {
+-            player.getBukkitEntity().reregisterPlayer(self);
++        for (final EntityPlayer player : players) {
++            net.minecraft.server.WorldServer.athenaRunForEntity(player, () -> player.getBukkitEntity().reregisterPlayer(self)); // Athena - on the viewer's world thread
+         }
+         refreshPlayer();
+     }
+diff --git a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+index 13863b54fc77d1f925b87748248feecb51ce071a..b713d1ca060e452b0bd846d6e88400ab93530587 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
++++ b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+@@ -33,7 +33,8 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+     /**
+      * Athena - held for the list of scoreboards and for the scores vanilla keeps by criteria (deaths,
+      * kills, health), which a world on its own thread updates for its players while others do for
+-     * theirs. A plugin that changes one scoreboard from several threads must guard it itself.
++     * theirs. Each scoreboard also guards itself (net.minecraft.server.Scoreboard's methods hold
++     * its own lock), so a plugin may change one from several threads; taken in that order, never back.
+      */
+     public static final Object LOCK = new Object();
+     private final Map<CraftPlayer, CraftScoreboard> playerBoards = new java.util.concurrent.ConcurrentHashMap<CraftPlayer, CraftScoreboard>(); // Athena - players in worlds on their own threads join and leave there
+diff --git a/src/test/java/net/minecraft/server/AthenaScoreboardThreadsTest.java b/src/test/java/net/minecraft/server/AthenaScoreboardThreadsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d4f856cbe41a2dd0a89dc51d6a9802b286223177
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaScoreboardThreadsTest.java
+@@ -0,0 +1,60 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertSame;
++
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import java.util.concurrent.atomic.AtomicReference;
++
++import org.junit.Test;
++
++/** One scoreboard changed from several threads at once, as the main one is by worlds on their own threads. */
++public class AthenaScoreboardThreadsTest {
++
++    @Test
++    public void manyThreadsKeepItConsistent() throws InterruptedException {
++        final Scoreboard board = new Scoreboard();
++        final ScoreboardObjective objective = board.registerObjective("o", new ScoreboardBaseCriteria("athena_threads_test"));
++        for (int t = 0; t < 8; t++) board.createTeam("t" + t);
++        final AtomicReference<Throwable> failure = new AtomicReference<Throwable>();
++        List<Thread> threads = new ArrayList<Thread>();
++        for (int n = 0; n < 6; n++) {
++            final Random random = new Random(n);
++            final int me = n;
++            threads.add(new Thread(() -> {
++                try {
++                    for (int i = 0; i < 20000; i++) {
++                        String player = "p" + me + "_" + random.nextInt(40);
++                        switch (random.nextInt(6)) {
++                            case 0: board.addPlayerToTeam(player, "t" + random.nextInt(8)); break;
++                            case 1: board.removePlayerFromTeam(player); break;
++                            case 2: board.getPlayerScoreForObjective(player, objective).addScore(1); break;
++                            case 3: board.resetPlayerScores(player, null); break;
++                            case 4: for (ScoreboardTeam team : board.getTeams()) for (String s : team.getPlayerNameSet()) s.length(); break;
++                            default: for (ScoreboardScore score : board.getScoresForObjective(objective)) score.getScore(); break;
++                        }
++                    }
++                } catch (Throwable throwable) {
++                    failure.compareAndSet(null, throwable);
++                }
++            }));
++        }
++        for (Thread thread : threads) thread.start();
++        for (Thread thread : threads) thread.join();
++        if (failure.get() != null) throw new AssertionError(failure.get());
++
++        // every player's team lists the player, and no team lists a player it does not have
++        int members = 0;
++        for (ScoreboardTeam team : board.getTeams()) {
++            for (String player : team.getPlayerNameSet()) {
++                assertSame(team, board.getPlayerTeam(player));
++                members++;
++            }
++        }
++        int players = 0;
++        for (int n = 0; n < 6; n++) for (int p = 0; p < 40; p++) if (board.getPlayerTeam("p" + n + "_" + p) != null) players++;
++        assertEquals(players, members);
++    }
++}

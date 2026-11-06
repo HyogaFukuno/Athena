@@ -1,0 +1,98 @@
+{
+ "desc": "v1-wt-1m: 24 bots, 1 at once (threaded), 2 rounds, live 240 s, heap 128M, jar 39dfdfbb1d15, configs 97dbbd5, VPS-B",
+ "tag": "v1-wt-1m",
+ "bots": 24,
+ "at_once": 1,
+ "threaded": true,
+ "heap": "128M",
+ "aot": [
+  "[start-small] building the shared AOT cache from record-simbench.aotconf"
+ ],
+ "bots_ok": 24,
+ "bot_matches": {
+  "2": 24
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "rows": 707,
+   "ticks": 14140,
+   "max_gap_ms": 215,
+   "gaps_over_60": 8,
+   "gaps_over_100": 3
+  },
+  "sg-lobby_games-1": {
+   "rows": 328,
+   "ticks": 6560,
+   "max_gap_ms": 71,
+   "gaps_over_60": 5,
+   "gaps_over_100": 0
+  },
+  "sg-lobby_games-2": {
+   "rows": 320,
+   "ticks": 6400,
+   "max_gap_ms": 64,
+   "gaps_over_60": 4,
+   "gaps_over_100": 0
+  }
+ },
+ "match_ticks": 12960,
+ "match_gaps_over_60": 9,
+ "match_gaps_over_100": 0,
+ "match_worst_ms": 71,
+ "fighting_tps_min": 20.0,
+ "anon_peak_mib": 167.21484375,
+ "rss_peak_mib": 246.02734375,
+ "avail_min_mib": 430.32421875,
+ "swap_used_max_mib": 0.0,
+ "full": {
+  "seconds": 565.3469998836517,
+  "server_cores": 0.08495667264509152,
+  "box_cores": 0.13096381517057207,
+  "steal_cores": 0.000795971323970252,
+  "sshd_cores": 0.03636704537961858,
+  "threads": {
+   "Netty io_uring": 0.04749295566355835,
+   "World thread -": 0.030034651291144146,
+   "Server thread": 0.0036791563419069414,
+   "C1 CompilerThre": 0.0011851128601334865,
+   "bStats-Metrics": 0.0011674246084897024,
+   "Log4j2-AsyncApp": 0.0005306475493135012,
+   "GC Thread": 0.0003891415361632342,
+   "Monitor Deflati": 0.00019457076808161708,
+   "Athena world wa": 8.844125821891686e-05,
+   "VM Thread": 5.306475493135013e-05
+  },
+  "anon_median_mib": 159.755859375
+ },
+ "run": {
+  "seconds": 703.6640000343323,
+  "server_cores": 0.08951715591095562,
+  "box_cores": 0.13659928601620983,
+  "steal_cores": 0.0007674117191921901,
+  "sshd_cores": 0.035187248457775225,
+  "threads": {
+   "Netty io_uring": 0.04806271174644418,
+   "World thread -": 0.027598399234652456,
+   "Server thread": 0.005897701175273311,
+   "C1 CompilerThre": 0.00272857500157223,
+   "Chunk I/O Execu": 0.0013358648445197375,
+   "GC Thread": 0.0009379476567904542,
+   "bStats-Metrics": 0.0009379476567904542,
+   "File IO Thread": 0.0006963550785262462,
+   "Log4j2-AsyncApp": 0.0004973964846616045,
+   "Athena chunk pa": 0.0002131699219978305
+  }
+ },
+ "gc": {
+  "count": 55,
+  "full": 2,
+  "max_after_mb": 52,
+  "longest_ms": 149.984,
+  "young_total_ms": 379.0
+ },
+ "log_warnings": 0,
+ "log_warning_samples": [],
+ "stalls_reported": 0,
+ "cant_keep_up": 0
+}

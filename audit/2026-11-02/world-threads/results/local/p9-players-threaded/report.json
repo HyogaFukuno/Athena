@@ -1,0 +1,372 @@
+{
+ "tag": "p9-players-threaded",
+ "bots": 12,
+ "spawned": 12,
+ "alive_at_end": 6,
+ "freezes": [
+  {
+   "world": "wt-0",
+   "thread": "World thread - wt-0",
+   "seconds": 5.006,
+   "ticks_per_s": {
+    "world": 20.4,
+    "wt-0": 0.0,
+    "wt-1": 20.4,
+    "wt-2": 20.4,
+    "wt-3": 20.4
+   }
+  },
+  {
+   "world": "world",
+   "thread": "Server thread",
+   "seconds": 5.001,
+   "ticks_per_s": {
+    "world": 0.0,
+    "wt-0": 20.4,
+    "wt-1": 20.4,
+    "wt-2": 20.4,
+    "wt-3": 20.4
+   }
+  }
+ ],
+ "bots_detail": [
+  {
+   "name": "wt00",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 5.96,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-0",
+   "left": true,
+   "gapped_in": [
+    "wt-0#0"
+   ]
+  },
+  {
+   "name": "wt01",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-1",
+   "left": true,
+   "gapped_in": []
+  },
+  {
+   "name": "wt02",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-2",
+   "left": true,
+   "gapped_in": []
+  },
+  {
+   "name": "wt03",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 3,
+   "corrections": 0,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-3",
+   "left": true,
+   "gapped_in": []
+  },
+  {
+   "name": "wt04",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 5.96,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-0",
+   "left": true,
+   "gapped_in": [
+    "wt-0#0"
+   ]
+  },
+  {
+   "name": "wt05",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-1",
+   "left": true,
+   "gapped_in": []
+  },
+  {
+   "name": "wt06",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-2",
+   "left": false,
+   "gapped_in": []
+  },
+  {
+   "name": "wt07",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 3,
+   "corrections": 0,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-3",
+   "left": false,
+   "gapped_in": []
+  },
+  {
+   "name": "wt08",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 5.96,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-0",
+   "left": false,
+   "gapped_in": [
+    "wt-0#0"
+   ]
+  },
+  {
+   "name": "wt09",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-1",
+   "left": false,
+   "gapped_in": []
+  },
+  {
+   "name": "wt10",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-2",
+   "left": false,
+   "gapped_in": []
+  },
+  {
+   "name": "wt11",
+   "lost": null,
+   "respawns": 2,
+   "teleports": 2,
+   "corrections": 1,
+   "longest_gap_in_freeze_s": 0,
+   "longest_gap_outside_s": 0,
+   "gaps_outside": 0,
+   "world": "wt-3",
+   "left": false,
+   "gapped_in": []
+  }
+ ],
+ "server": {
+  "errors": 0,
+  "warnings": 0,
+  "moved_wrongly": 0,
+  "status": [
+   "[21:04:18 INFO]: [WorldThreadsProbe] wt status wt-3 time 767 players 2 entities 48 chunks 674 thread World thread - wt-3",
+   "[21:04:18 INFO]: [WorldThreadsProbe] wt status wt-1 time 767 players 1 entities 47 chunks 674 thread World thread - wt-1",
+   "[21:04:18 INFO]: [WorldThreadsProbe] wt status wt-2 time 767 players 2 entities 42 chunks 674 thread World thread - wt-2",
+   "[21:04:18 INFO]: [WorldThreadsProbe] wt status wt-0 time 668 players 1 entities 49 chunks 674 thread World thread - wt-0",
+   "[21:04:18 INFO]: [WorldThreadsProbe] wt status world time 768 players 0 entities 0 chunks 256 thread Server thread"
+  ]
+ },
+ "threads": [
+  {
+   "world": "wt-0",
+   "event": "quit",
+   "thread": "World thread - wt-0",
+   "count": "2"
+  },
+  {
+   "world": "world",
+   "event": "teleport-from",
+   "thread": "Server thread",
+   "count": "24"
+  },
+  {
+   "world": "wt-2",
+   "event": "arrived",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-2",
+   "event": "teleport-from",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-1",
+   "event": "quit",
+   "thread": "World thread - wt-1",
+   "count": "2"
+  },
+  {
+   "world": "wt-2",
+   "event": "command",
+   "thread": "World thread - wt-2",
+   "count": "3"
+  },
+  {
+   "world": "wt-3",
+   "event": "move",
+   "thread": "World thread - wt-3",
+   "count": "1378"
+  },
+  {
+   "world": "world",
+   "event": "move",
+   "thread": "Server thread",
+   "count": "209"
+  },
+  {
+   "world": "wt-3",
+   "event": "arrived",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-1",
+   "event": "teleport-from",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-1",
+   "event": "command",
+   "thread": "World thread - wt-1",
+   "count": "3"
+  },
+  {
+   "world": "wt-2",
+   "event": "move",
+   "thread": "Server thread",
+   "count": "542"
+  },
+  {
+   "world": "wt-1",
+   "event": "move",
+   "thread": "World thread - wt-1",
+   "count": "1291"
+  },
+  {
+   "world": "wt-3",
+   "event": "move",
+   "thread": "Server thread",
+   "count": "544"
+  },
+  {
+   "world": "wt-0",
+   "event": "arrived",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-0",
+   "event": "teleport-from",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-2",
+   "event": "move",
+   "thread": "World thread - wt-2",
+   "count": "1378"
+  },
+  {
+   "world": "wt-0",
+   "event": "command",
+   "thread": "World thread - wt-0",
+   "count": "3"
+  },
+  {
+   "world": "wt-3",
+   "event": "quit",
+   "thread": "World thread - wt-3",
+   "count": "1"
+  },
+  {
+   "world": "wt-0",
+   "event": "move",
+   "thread": "Server thread",
+   "count": "536"
+  },
+  {
+   "world": "world",
+   "event": "join",
+   "thread": "Server thread",
+   "count": "12"
+  },
+  {
+   "world": "wt-2",
+   "event": "quit",
+   "thread": "World thread - wt-2",
+   "count": "1"
+  },
+  {
+   "world": "wt-3",
+   "event": "teleport-from",
+   "thread": "Server thread",
+   "count": "3"
+  },
+  {
+   "world": "wt-3",
+   "event": "command",
+   "thread": "World thread - wt-3",
+   "count": "3"
+  },
+  {
+   "world": "wt-1",
+   "event": "move",
+   "thread": "Server thread",
+   "count": "540"
+  },
+  {
+   "world": "wt-0",
+   "event": "move",
+   "thread": "World thread - wt-0",
+   "count": "1301"
+  },
+  {
+   "world": "wt-1",
+   "event": "arrived",
+   "thread": "Server thread",
+   "count": "3"
+  }
+ ]
+}

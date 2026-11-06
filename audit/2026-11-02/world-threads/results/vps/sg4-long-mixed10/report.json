@@ -1,0 +1,459 @@
+{
+ "desc": "sg4-long-mixed10: 240 bots, 10 at once (SurvivalGames rooms, maps Lobby_Games,Mortal_Skies,Par_72_Revamped,Plantations,Shady_Hollow), 15 rounds, live 240 s, heap 320M, GC -XX:+UseShenandoahGC -XX:+ExplicitGCInvokesConcurrent, jar 769706b9ac8e, configs 97dbbd5, VPS-B",
+ "tag": "sg4-long-mixed10",
+ "bots": 240,
+ "at_once": 10,
+ "threaded": false,
+ "heap": "320M",
+ "aot": [
+  "AOT cache in use"
+ ],
+ "bots_ok": 240,
+ "bot_matches": {
+  "15": 240
+ },
+ "errors": [],
+ "worlds": {
+  "lobby": {
+   "rows": 5330,
+   "ticks": 106681,
+   "max_gap_ms": 4025,
+   "gaps_over_60": 753,
+   "gaps_over_100": 153
+  },
+  "sg-2-Par_72_Revamped": {
+   "rows": 1272,
+   "ticks": 25269,
+   "max_gap_ms": 221,
+   "gaps_over_60": 228,
+   "gaps_over_100": 36
+  },
+  "sg-1-Plantations": {
+   "rows": 1054,
+   "ticks": 21024,
+   "max_gap_ms": 454,
+   "gaps_over_60": 179,
+   "gaps_over_100": 31
+  },
+  "sg-3-Mortal_Skies": {
+   "rows": 486,
+   "ticks": 9649,
+   "max_gap_ms": 262,
+   "gaps_over_60": 81,
+   "gaps_over_100": 24
+  },
+  "sg-5-Lobby_Games": {
+   "rows": 1758,
+   "ticks": 34991,
+   "max_gap_ms": 236,
+   "gaps_over_60": 217,
+   "gaps_over_100": 30
+  },
+  "sg-4-Lobby_Games": {
+   "rows": 666,
+   "ticks": 13253,
+   "max_gap_ms": 233,
+   "gaps_over_60": 68,
+   "gaps_over_100": 8
+  },
+  "sg-8-Shady_Hollow": {
+   "rows": 725,
+   "ticks": 14461,
+   "max_gap_ms": 1027,
+   "gaps_over_60": 91,
+   "gaps_over_100": 11
+  },
+  "sg-6-Par_72_Revamped": {
+   "rows": 961,
+   "ticks": 19085,
+   "max_gap_ms": 232,
+   "gaps_over_60": 156,
+   "gaps_over_100": 37
+  },
+  "sg-7-Mortal_Skies": {
+   "rows": 849,
+   "ticks": 16863,
+   "max_gap_ms": 246,
+   "gaps_over_60": 144,
+   "gaps_over_100": 20
+  },
+  "sg-10-Plantations": {
+   "rows": 969,
+   "ticks": 19287,
+   "max_gap_ms": 452,
+   "gaps_over_60": 139,
+   "gaps_over_100": 32
+  },
+  "sg-9-Shady_Hollow": {
+   "rows": 1448,
+   "ticks": 28850,
+   "max_gap_ms": 620,
+   "gaps_over_60": 235,
+   "gaps_over_100": 42
+  },
+  "sg-3-Plantations": {
+   "rows": 1120,
+   "ticks": 22306,
+   "max_gap_ms": 200,
+   "gaps_over_60": 129,
+   "gaps_over_100": 22
+  },
+  "sg-7-Shady_Hollow": {
+   "rows": 1440,
+   "ticks": 28689,
+   "max_gap_ms": 662,
+   "gaps_over_60": 225,
+   "gaps_over_100": 46
+  },
+  "sg-6-Mortal_Skies": {
+   "rows": 584,
+   "ticks": 11614,
+   "max_gap_ms": 129,
+   "gaps_over_60": 93,
+   "gaps_over_100": 8
+  },
+  "sg-2-Mortal_Skies": {
+   "rows": 522,
+   "ticks": 10368,
+   "max_gap_ms": 163,
+   "gaps_over_60": 81,
+   "gaps_over_100": 14
+  },
+  "sg-1-Mortal_Skies": {
+   "rows": 635,
+   "ticks": 12596,
+   "max_gap_ms": 354,
+   "gaps_over_60": 71,
+   "gaps_over_100": 17
+  },
+  "sg-10-Shady_Hollow": {
+   "rows": 2182,
+   "ticks": 43421,
+   "max_gap_ms": 1683,
+   "gaps_over_60": 294,
+   "gaps_over_100": 52
+  },
+  "sg-4-Par_72_Revamped": {
+   "rows": 443,
+   "ticks": 8800,
+   "max_gap_ms": 141,
+   "gaps_over_60": 81,
+   "gaps_over_100": 12
+  },
+  "sg-1-Lobby_Games": {
+   "rows": 1530,
+   "ticks": 30510,
+   "max_gap_ms": 174,
+   "gaps_over_60": 208,
+   "gaps_over_100": 39
+  },
+  "sg-8-Mortal_Skies": {
+   "rows": 745,
+   "ticks": 14793,
+   "max_gap_ms": 162,
+   "gaps_over_60": 119,
+   "gaps_over_100": 15
+  },
+  "sg-9-Plantations": {
+   "rows": 1242,
+   "ticks": 24731,
+   "max_gap_ms": 321,
+   "gaps_over_60": 175,
+   "gaps_over_100": 31
+  },
+  "sg-5-Shady_Hollow": {
+   "rows": 1459,
+   "ticks": 29051,
+   "max_gap_ms": 1588,
+   "gaps_over_60": 246,
+   "gaps_over_100": 42
+  },
+  "sg-2-Plantations": {
+   "rows": 941,
+   "ticks": 18754,
+   "max_gap_ms": 340,
+   "gaps_over_60": 141,
+   "gaps_over_100": 30
+  },
+  "sg-3-Lobby_Games": {
+   "rows": 2394,
+   "ticks": 47727,
+   "max_gap_ms": 352,
+   "gaps_over_60": 281,
+   "gaps_over_100": 49
+  },
+  "sg-4-Shady_Hollow": {
+   "rows": 1464,
+   "ticks": 29163,
+   "max_gap_ms": 1273,
+   "gaps_over_60": 212,
+   "gaps_over_100": 37
+  },
+  "sg-8-Plantations": {
+   "rows": 1335,
+   "ticks": 26626,
+   "max_gap_ms": 692,
+   "gaps_over_60": 201,
+   "gaps_over_100": 44
+  },
+  "sg-7-Plantations": {
+   "rows": 1546,
+   "ticks": 30847,
+   "max_gap_ms": 340,
+   "gaps_over_60": 251,
+   "gaps_over_100": 44
+  },
+  "sg-6-Plantations": {
+   "rows": 734,
+   "ticks": 14644,
+   "max_gap_ms": 316,
+   "gaps_over_60": 113,
+   "gaps_over_100": 34
+  },
+  "sg-10-Par_72_Revamped": {
+   "rows": 400,
+   "ticks": 7948,
+   "max_gap_ms": 336,
+   "gaps_over_60": 51,
+   "gaps_over_100": 9
+  },
+  "sg-5-Plantations": {
+   "rows": 776,
+   "ticks": 15484,
+   "max_gap_ms": 309,
+   "gaps_over_60": 75,
+   "gaps_over_100": 16
+  },
+  "sg-9-Mortal_Skies": {
+   "rows": 433,
+   "ticks": 8615,
+   "max_gap_ms": 308,
+   "gaps_over_60": 65,
+   "gaps_over_100": 12
+  },
+  "sg-8-Lobby_Games": {
+   "rows": 1200,
+   "ticks": 23941,
+   "max_gap_ms": 193,
+   "gaps_over_60": 159,
+   "gaps_over_100": 28
+  },
+  "sg-10-Mortal_Skies": {
+   "rows": 196,
+   "ticks": 3888,
+   "max_gap_ms": 163,
+   "gaps_over_60": 39,
+   "gaps_over_100": 4
+  },
+  "sg-4-Mortal_Skies": {
+   "rows": 724,
+   "ticks": 14387,
+   "max_gap_ms": 170,
+   "gaps_over_60": 140,
+   "gaps_over_100": 25
+  },
+  "sg-1-Par_72_Revamped": {
+   "rows": 332,
+   "ticks": 6571,
+   "max_gap_ms": 141,
+   "gaps_over_60": 49,
+   "gaps_over_100": 4
+  },
+  "sg-9-Lobby_Games": {
+   "rows": 1030,
+   "ticks": 20518,
+   "max_gap_ms": 139,
+   "gaps_over_60": 116,
+   "gaps_over_100": 19
+  },
+  "sg-10-Lobby_Games": {
+   "rows": 1161,
+   "ticks": 23152,
+   "max_gap_ms": 146,
+   "gaps_over_60": 105,
+   "gaps_over_100": 12
+  },
+  "sg-4-Plantations": {
+   "rows": 921,
+   "ticks": 18350,
+   "max_gap_ms": 200,
+   "gaps_over_60": 123,
+   "gaps_over_100": 22
+  },
+  "sg-5-Par_72_Revamped": {
+   "rows": 303,
+   "ticks": 6029,
+   "max_gap_ms": 123,
+   "gaps_over_60": 39,
+   "gaps_over_100": 4
+  },
+  "sg-6-Shady_Hollow": {
+   "rows": 1452,
+   "ticks": 28928,
+   "max_gap_ms": 761,
+   "gaps_over_60": 223,
+   "gaps_over_100": 42
+  },
+  "sg-3-Par_72_Revamped": {
+   "rows": 476,
+   "ticks": 9458,
+   "max_gap_ms": 143,
+   "gaps_over_60": 83,
+   "gaps_over_100": 7
+  },
+  "sg-5-Mortal_Skies": {
+   "rows": 716,
+   "ticks": 14224,
+   "max_gap_ms": 140,
+   "gaps_over_60": 92,
+   "gaps_over_100": 13
+  },
+  "sg-1-Shady_Hollow": {
+   "rows": 731,
+   "ticks": 14532,
+   "max_gap_ms": 1252,
+   "gaps_over_60": 136,
+   "gaps_over_100": 26
+  },
+  "sg-8-Par_72_Revamped": {
+   "rows": 324,
+   "ticks": 6431,
+   "max_gap_ms": 123,
+   "gaps_over_60": 37,
+   "gaps_over_100": 5
+  },
+  "sg-7-Par_72_Revamped": {
+   "rows": 205,
+   "ticks": 4073,
+   "max_gap_ms": 149,
+   "gaps_over_60": 38,
+   "gaps_over_100": 7
+  },
+  "sg-6-Lobby_Games": {
+   "rows": 329,
+   "ticks": 6572,
+   "max_gap_ms": 136,
+   "gaps_over_60": 70,
+   "gaps_over_100": 6
+  },
+  "sg-2-Shady_Hollow": {
+   "rows": 1094,
+   "ticks": 21804,
+   "max_gap_ms": 493,
+   "gaps_over_60": 161,
+   "gaps_over_100": 30
+  },
+  "sg-3-Shady_Hollow": {
+   "rows": 362,
+   "ticks": 7228,
+   "max_gap_ms": 1018,
+   "gaps_over_60": 52,
+   "gaps_over_100": 14
+  },
+  "sg-9-Par_72_Revamped": {
+   "rows": 430,
+   "ticks": 8537,
+   "max_gap_ms": 163,
+   "gaps_over_60": 35,
+   "gaps_over_100": 6
+  },
+  "sg-7-Lobby_Games": {
+   "rows": 337,
+   "ticks": 6730,
+   "max_gap_ms": 126,
+   "gaps_over_60": 15,
+   "gaps_over_100": 3
+  }
+ },
+ "match_ticks": 884772,
+ "match_gaps_over_60": 6362,
+ "match_gaps_over_100": 1121,
+ "match_worst_ms": 1683,
+ "fighting_tps_min": 19.949129680630282,
+ "anon_peak_mib": 409.5546875,
+ "rss_peak_mib": 589.50390625,
+ "avail_min_mib": 151.99609375,
+ "swap_used_max_mib": 279.24609375,
+ "full": {
+  "seconds": 331.08600068092346,
+  "server_cores": 0.6273898611623427,
+  "box_cores": 0.8691095347076074,
+  "steal_cores": 0.0014799780087114782,
+  "sshd_cores": 0.2417498771780953,
+  "threads": {
+   "World thread -": 0.2962674344377731,
+   "Netty io_uring": 0.2723763608685734,
+   "Shenandoah GC T": 0.033223996113931176,
+   "Shenandoah Cont": 0.015917314501856076,
+   "Server thread": 0.004711766721612005,
+   "VM Periodic Tas": 0.0025975124234527956,
+   "Log4j2-AsyncApp": 0.0012081453132338587,
+   "C1 CompilerThre": 0.0006342762894477773,
+   "VM Thread": 0.00024162906264677198,
+   "sgwatch-writer": 0.000181221796985079
+  },
+  "anon_median_mib": 381.21484375
+ },
+ "run": {
+  "seconds": 5330.3109998703,
+  "server_cores": 0.6588564907536265,
+  "box_cores": 0.8666998980195374,
+  "steal_cores": 0.0011913000949014885,
+  "sshd_cores": 0.20523943162540037,
+  "threads": {
+   "Netty io_uring": 0.25389512920220414,
+   "Shenandoah GC T": 0.06668654043050194,
+   "Server thread": 0.02042845154863376,
+   "Chunk I/O Execu": 0.018379790598031496,
+   "Shenandoah Cont": 0.0159390324508396,
+   "Athena chunk pa": 0.006509939101272766,
+   "VM Periodic Tas": 0.002622736271924878,
+   "World thread -": 0.002395732631794041,
+   "Log4j2-AsyncApp": 0.0011988043474678092,
+   "C1 CompilerThre": 0.0008667411714086507
+  }
+ },
+ "gc": {
+  "count": 31068,
+  "full": 0,
+  "max_after_mb": 265,
+  "longest_ms": 595.544,
+  "young_total_ms": 0
+ },
+ "log_warnings": 2405,
+ "log_warning_samples": [
+  "[03:00:01 WARN]: [SurvivalGames] Map Lobby_Games has only 4 deathmatch spawns: add the rest with /sg edit Lobby_Games (spawns are reused until then)",
+  "[03:00:01 WARN]: [SurvivalGames] Map Mortal_Skies has only 4 deathmatch spawns: add the rest with /sg edit Mortal_Skies (spawns are reused until then)",
+  "[03:00:01 WARN]: [SurvivalGames] Map Par_72_Revamped has only 4 deathmatch spawns: add the rest with /sg edit Par_72_Revamped (spawns are reused until then)",
+  "[03:00:01 WARN]: [SurvivalGames] Map Plantations has only 4 deathmatch spawns: add the rest with /sg edit Plantations (spawns are reused until then)",
+  "[03:00:01 WARN]: [SurvivalGames] Map Shady_Hollow has only 4 deathmatch spawns: add the rest with /sg edit Shady_Hollow (spawns are reused until then)",
+  "[03:01:03 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:03 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:05 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 ",
+  "[03:01:07 WARN]: CompletionQueue overflow detected, consider increasing size: 4096 "
+ ],
+ "stalls_reported": 0,
+ "cant_keep_up": 0,
+ "freezes": []
+}

@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 1 Nov 2026 00:20:57 +0900
+Subject: [PATCH] Back up pandaspigot.yml with its own permissions, not the
+ umask's
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+index f42d2a762158f107feaa13462b9f893f216d0a9d..bdcd06174b641c6aaacd233b60bcd2a3009114e0 100644
+--- a/src/main/java/athena/server/AthenaConfig.java
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -131,9 +131,7 @@ public class AthenaConfig {
+         Path destination = file.toPath().toAbsolutePath();
+         // Athena - atomic replacement must retain administrator-selected group/read permissions.
+         // New files keep createTempFile's private default; non-POSIX filesystems need no change.
+-        Set<PosixFilePermission> permissions = Files.exists(destination)
+-                && Files.getFileStore(destination).supportsFileAttributeView(PosixFileAttributeView.class)
+-                ? Files.getPosixFilePermissions(destination) : null;
++        Set<PosixFilePermission> permissions = Files.exists(destination) ? posixPermissions(destination) : null;
+         Path temporary = Files.createTempFile(destination.getParent(), file.getName() + ".", ".tmp");
+         try {
+             loader(temporary.toFile(), header).save(root);
+@@ -144,6 +142,31 @@ public class AthenaConfig {
+         }
+     }
+ 
++    /** The file's POSIX permissions, or null on a filesystem without them. */
++    private static Set<PosixFilePermission> posixPermissions(Path path) throws IOException {
++        return Files.getFileStore(path).supportsFileAttributeView(PosixFileAttributeView.class)
++                ? Files.getPosixFilePermissions(path) : null;
++    }
++
++    // Athena - the backup holds what the file held, the BungeeGuard tokens included, so it gets the
++    // file's own permissions. Files.copy made it with the umask's default instead (rw-r--r-- on most
++    // boxes): a pandaspigot.yml kept at 600 left a copy of the proxy's secret anyone could read.
++    // The content goes into createTempFile's private file, which takes the source's permissions
++    // before it is renamed into place, so the backup is never readable by more than the source.
++    static void backUp(Path source, Path backup) throws IOException {
++        Set<PosixFilePermission> permissions = posixPermissions(source);
++        Path temporary = Files.createTempFile(backup.toAbsolutePath().getParent(), backup.getFileName() + ".", ".tmp");
++        try {
++            try (java.io.OutputStream out = Files.newOutputStream(temporary)) {
++                Files.copy(source, out);
++            }
++            if (permissions != null) Files.setPosixFilePermissions(temporary, permissions);
++            Files.move(temporary, backup, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
++        } finally {
++            Files.deleteIfExists(temporary);
++        }
++    }
++
+     /** Stages removals in memory only. A failed validation or destination save never edits Panda's file. */
+     private static Migration migrate(CommentedConfigurationNode root, boolean fresh, File pandaSpigotFile) throws Exception {
+         if (pandaSpigotFile == null || !pandaSpigotFile.isFile()) {
+@@ -175,13 +198,15 @@ public class AthenaConfig {
+ 
+         void commit(boolean fresh) throws IOException {
+             // Athena - preserve the exact pre-removal file, including proxy secrets, for recovery.
+-            Files.copy(this.source.toPath(), new File(this.source.getPath() + ".bak").toPath(), StandardCopyOption.REPLACE_EXISTING);
++            File backup = new File(this.source.getPath() + ".bak");
++            backUp(this.source.toPath(), backup.toPath());
+             saveAtomically(this.source, this.remaining, PANDA_HEADER);
+             if (fresh) {
+                 LOGGER.info("Moved Athena's settings from {} to athena.yml: {}", this.source.getName(), this.found);
+             } else {
+                 LOGGER.warn("Ignored and removed Athena settings found in {} - they are read from athena.yml: {}", this.source.getName(), this.found);
+             }
++            LOGGER.info("{} keeps {} as it was, BungeeGuard tokens included: keep it as private as the file, or delete it", backup.getName(), this.source.getName()); // Athena
+         }
+     }
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+index 61751b2d9b55feac6e97381853854fc404286b39..9859656576a01825de936e0dcf905064b8c3d72e 100644
+--- a/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
++++ b/src/test/java/net/minecraft/server/AthenaConfigSafetyTest.java
+@@ -83,6 +83,29 @@ public class AthenaConfigSafetyTest {
+         assertEquals(mode, Files.getPosixFilePermissions(source));
+     }
+ 
++    // Athena - the backup holds the BungeeGuard tokens: never readable by more than the source
++    @Test
++    public void backupTakesTheSourcePermissionsNotTheUmask() throws Exception {
++        for (String permissions : new String[] {"rw-------", "rw-r-----"}) {
++            Path dir = Files.createTempDirectory("athena-config-backup-mode");
++            Assume.assumeTrue(Files.getFileStore(dir).supportsFileAttributeView(PosixFileAttributeView.class));
++            Set<PosixFilePermission> mode = PosixFilePermissions.fromString(permissions);
++            Path source = dir.resolve("pandaspigot.yml"), destination = dir.resolve("athena.yml"), backup = dir.resolve("pandaspigot.yml.bak");
++            String old = "bungeeGuardTokens:\n  - audit-dummy-secret\n";
++            Files.writeString(source, old);
++            Files.setPosixFilePermissions(source, mode);
++            // a backup from before, readable by everyone: replaced, not kept with its mode
++            Files.writeString(backup, "stale");
++            Files.setPosixFilePermissions(backup, PosixFilePermissions.fromString("rw-r--r--"));
++            AthenaConfig.init(destination.toFile(), source.toFile());
++            assertEquals(old, Files.readString(backup));
++            assertEquals(mode, Files.getPosixFilePermissions(backup));
++            try (java.util.stream.Stream<Path> files = Files.list(dir)) {
++                assertFalse("temporary file left behind", files.anyMatch(path -> path.getFileName().toString().endsWith(".tmp")));
++            }
++        }
++    }
++
+     @Test
+     public void newConfigurationsKeepPrivateDefaultPermissions() throws Exception {
+         Path dir = Files.createTempDirectory("athena-config-private");

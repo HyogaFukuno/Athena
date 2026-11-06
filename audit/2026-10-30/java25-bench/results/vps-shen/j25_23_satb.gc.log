@@ -1,0 +1,276 @@
+[2026-10-30T19:42:32.195+0900] Min heap equals to max heap, disabling ShenandoahUncommit
+[2026-10-30T19:42:32.199+0900] Heuristics ergonomically sets -XX:+ExplicitGCInvokesConcurrent
+[2026-10-30T19:42:32.199+0900] Heuristics ergonomically sets -XX:+ShenandoahImplicitGCInvokesConcurrent
+[2026-10-30T19:42:32.199+0900] Using Shenandoah
+[2026-10-30T19:42:33.694+0900] Trigger: Learning 1 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:42:33.694+0900] GC(0) Concurrent reset (unload classes) 0.031ms
+[2026-10-30T19:42:33.695+0900] GC(0) Pause Init Mark (unload classes) 0.032ms
+[2026-10-30T19:42:33.703+0900] GC(0) Concurrent marking roots 7.834ms
+[2026-10-30T19:42:33.762+0900] GC(0) Concurrent marking (unload classes) 58.777ms
+[2026-10-30T19:42:33.762+0900] GC(0) Pause Final Mark (unload classes) 0.117ms
+[2026-10-30T19:42:33.764+0900] GC(0) Concurrent thread roots 1.807ms
+[2026-10-30T19:42:33.765+0900] GC(0) Concurrent weak references (unload classes) 0.957ms
+[2026-10-30T19:42:33.767+0900] GC(0) Concurrent weak roots (unload classes) 2.271ms
+[2026-10-30T19:42:33.775+0900] GC(0) Concurrent class unloading 7.143ms
+[2026-10-30T19:42:33.775+0900] GC(0) Concurrent cleanup (unload classes) 38M->36M(144M) 0.021ms
+[2026-10-30T19:42:33.778+0900] GC(0) Concurrent strong roots 3.542ms
+[2026-10-30T19:42:33.803+0900] GC(0) Concurrent evacuation 24.937ms
+[2026-10-30T19:42:33.803+0900] GC(0) Concurrent Init Update Refs (unload classes) 0.060ms
+[2026-10-30T19:42:33.803+0900] GC(0) Pause Init Update Refs 0.004ms
+[2026-10-30T19:42:33.836+0900] GC(0) Concurrent update references 32.694ms
+[2026-10-30T19:42:33.839+0900] GC(0) Concurrent update thread roots 2.480ms
+[2026-10-30T19:42:33.839+0900] GC(0) Pause Final Update Refs 0.043ms
+[2026-10-30T19:42:33.839+0900] GC(0) Concurrent cleanup (unload classes) 43M->17M(144M) 0.016ms
+[2026-10-30T19:42:33.839+0900] GC(0) Concurrent reset after collect (unload classes) 0.356ms
+[2026-10-30T19:42:33.926+0900] Trigger: Learning 2 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:42:33.926+0900] GC(1) Concurrent reset (unload classes) 0.025ms
+[2026-10-30T19:42:33.926+0900] GC(1) Pause Init Mark (unload classes) 0.013ms
+[2026-10-30T19:42:33.929+0900] GC(1) Concurrent marking roots 2.374ms
+[2026-10-30T19:42:33.976+0900] GC(1) Concurrent marking (unload classes) 47.198ms
+[2026-10-30T19:42:33.977+0900] GC(1) Pause Final Mark (unload classes) 0.314ms
+[2026-10-30T19:42:33.978+0900] GC(1) Concurrent thread roots 1.890ms
+[2026-10-30T19:42:33.979+0900] GC(1) Concurrent weak references (unload classes) 0.097ms
+[2026-10-30T19:42:33.982+0900] GC(1) Concurrent weak roots (unload classes) 3.817ms
+[2026-10-30T19:42:33.991+0900] GC(1) Concurrent class unloading 8.577ms
+[2026-10-30T19:42:33.991+0900] GC(1) Concurrent cleanup (unload classes) 41M->26M(144M) 0.085ms
+[2026-10-30T19:42:33.992+0900] GC(1) Concurrent strong roots 0.305ms
+[2026-10-30T19:42:33.997+0900] GC(1) Concurrent evacuation 4.949ms
+[2026-10-30T19:42:33.997+0900] GC(1) Concurrent Init Update Refs (unload classes) 0.069ms
+[2026-10-30T19:42:33.997+0900] GC(1) Pause Init Update Refs 0.003ms
+[2026-10-30T19:42:34.038+0900] GC(1) Concurrent update references 41.025ms
+[2026-10-30T19:42:34.038+0900] GC(1) Concurrent update thread roots 0.411ms
+[2026-10-30T19:42:34.039+0900] GC(1) Pause Final Update Refs 0.065ms
+[2026-10-30T19:42:34.039+0900] GC(1) Concurrent cleanup (unload classes) 31M->22M(144M) 0.016ms
+[2026-10-30T19:42:34.040+0900] GC(1) Concurrent reset after collect (unload classes) 1.739ms
+[2026-10-30T19:42:34.121+0900] Trigger: Learning 3 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:42:34.122+0900] GC(2) Concurrent reset (unload classes) 0.029ms
+[2026-10-30T19:42:34.122+0900] GC(2) Pause Init Mark (unload classes) 0.014ms
+[2026-10-30T19:42:34.123+0900] GC(2) Concurrent marking roots 0.805ms
+[2026-10-30T19:42:34.238+0900] GC(2) Concurrent marking (unload classes) 114.935ms
+[2026-10-30T19:42:34.238+0900] GC(2) Pause Final Mark (unload classes) 0.084ms
+[2026-10-30T19:42:34.242+0900] GC(2) Concurrent weak references (unload classes) 2.551ms
+[2026-10-30T19:42:34.248+0900] GC(2) Concurrent weak roots (unload classes) 6.555ms
+[2026-10-30T19:42:34.258+0900] GC(2) Concurrent class unloading 9.708ms
+[2026-10-30T19:42:34.258+0900] GC(2) Concurrent cleanup (unload classes) 38M->20M(144M) 0.040ms
+[2026-10-30T19:42:34.258+0900] GC(2) Concurrent Final Roots (unload classes) 0.182ms
+[2026-10-30T19:42:34.259+0900] GC(2) Concurrent reset after collect (unload classes) 0.170ms
+[2026-10-30T19:42:34.756+0900] Trigger: Learning 4 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:42:34.756+0900] GC(3) Concurrent reset (unload classes) 0.033ms
+[2026-10-30T19:42:34.757+0900] GC(3) Pause Init Mark (unload classes) 0.027ms
+[2026-10-30T19:42:34.759+0900] GC(3) Concurrent marking roots 2.437ms
+[2026-10-30T19:42:34.796+0900] GC(3) Concurrent marking (unload classes) 37.365ms
+[2026-10-30T19:42:34.797+0900] GC(3) Pause Final Mark (unload classes) 0.078ms
+[2026-10-30T19:42:34.797+0900] GC(3) Concurrent thread roots 0.266ms
+[2026-10-30T19:42:34.797+0900] GC(3) Concurrent weak references (unload classes) 0.081ms
+[2026-10-30T19:42:34.800+0900] GC(3) Concurrent weak roots (unload classes) 3.052ms
+[2026-10-30T19:42:34.806+0900] GC(3) Concurrent class unloading 5.287ms
+[2026-10-30T19:42:34.806+0900] GC(3) Concurrent cleanup (unload classes) 38M->28M(144M) 0.022ms
+[2026-10-30T19:42:34.806+0900] GC(3) Concurrent strong roots 0.154ms
+[2026-10-30T19:42:34.808+0900] GC(3) Concurrent evacuation 1.821ms
+[2026-10-30T19:42:34.808+0900] GC(3) Concurrent Init Update Refs (unload classes) 0.132ms
+[2026-10-30T19:42:34.808+0900] GC(3) Pause Init Update Refs 0.004ms
+[2026-10-30T19:42:34.823+0900] GC(3) Concurrent update references 14.739ms
+[2026-10-30T19:42:34.823+0900] GC(3) Concurrent update thread roots 0.204ms
+[2026-10-30T19:42:34.823+0900] GC(3) Pause Final Update Refs 0.043ms
+[2026-10-30T19:42:34.823+0900] GC(3) Concurrent cleanup (unload classes) 30M->19M(144M) 0.012ms
+[2026-10-30T19:42:34.823+0900] GC(3) Concurrent reset after collect (unload classes) 0.239ms
+[2026-10-30T19:42:34.936+0900] Trigger: Learning 5 of 5. Free (100M) is below initial threshold (100M)
+[2026-10-30T19:42:34.936+0900] GC(4) Concurrent reset (unload classes) 0.027ms
+[2026-10-30T19:42:34.937+0900] GC(4) Pause Init Mark (unload classes) 0.023ms
+[2026-10-30T19:42:34.938+0900] GC(4) Concurrent marking roots 0.379ms
+[2026-10-30T19:42:34.998+0900] GC(4) Concurrent marking (unload classes) 60.654ms
+[2026-10-30T19:42:34.999+0900] GC(4) Pause Final Mark (unload classes) 0.132ms
+[2026-10-30T19:42:34.999+0900] GC(4) Concurrent thread roots 0.249ms
+[2026-10-30T19:42:34.999+0900] GC(4) Concurrent weak references (unload classes) 0.085ms
+[2026-10-30T19:42:35.002+0900] GC(4) Concurrent weak roots (unload classes) 3.133ms
+[2026-10-30T19:42:35.011+0900] GC(4) Concurrent class unloading 9.134ms
+[2026-10-30T19:42:35.011+0900] GC(4) Concurrent cleanup (unload classes) 43M->43M(144M) 0.013ms
+[2026-10-30T19:42:35.011+0900] GC(4) Concurrent strong roots 0.149ms
+[2026-10-30T19:42:35.013+0900] GC(4) Concurrent evacuation 1.049ms
+[2026-10-30T19:42:35.013+0900] GC(4) Concurrent Init Update Refs (unload classes) 0.099ms
+[2026-10-30T19:42:35.013+0900] GC(4) Pause Init Update Refs 0.006ms
+[2026-10-30T19:42:35.049+0900] GC(4) Concurrent update references 35.663ms
+[2026-10-30T19:42:35.049+0900] GC(4) Concurrent update thread roots 0.202ms
+[2026-10-30T19:42:35.049+0900] GC(4) Pause Final Update Refs 0.075ms
+[2026-10-30T19:42:35.049+0900] GC(4) Concurrent cleanup (unload classes) 49M->29M(144M) 0.024ms
+[2026-10-30T19:42:35.049+0900] GC(4) Concurrent reset after collect (unload classes) 0.313ms
+[2026-10-30T19:42:35.346+0900] Trigger: Average GC time (151.94 ms) is above the time for average allocation rate (222 MB/s) to deplete free headroom (34172K) (margin of error = 1.80)
+[2026-10-30T19:42:35.346+0900] GC(5) Concurrent reset (unload classes) 0.030ms
+[2026-10-30T19:42:35.346+0900] GC(5) Pause Init Mark (unload classes) 0.029ms
+[2026-10-30T19:42:35.346+0900] GC(5) Concurrent marking roots 0.403ms
+[2026-10-30T19:42:35.418+0900] GC(5) Concurrent marking (unload classes) 72.102ms
+[2026-10-30T19:42:35.419+0900] GC(5) Pause Final Mark (unload classes) 0.136ms
+[2026-10-30T19:42:35.419+0900] GC(5) Concurrent thread roots 0.450ms
+[2026-10-30T19:42:35.420+0900] GC(5) Concurrent weak references (unload classes) 0.218ms
+[2026-10-30T19:42:35.423+0900] GC(5) Concurrent weak roots (unload classes) 3.340ms
+[2026-10-30T19:42:35.432+0900] GC(5) Concurrent class unloading 8.744ms
+[2026-10-30T19:42:35.432+0900] GC(5) Concurrent cleanup (unload classes) 110M->110M(144M) 0.014ms
+[2026-10-30T19:42:35.433+0900] GC(5) Concurrent strong roots 1.573ms
+[2026-10-30T19:42:35.441+0900] GC(5) Concurrent evacuation 7.298ms
+[2026-10-30T19:42:35.441+0900] GC(5) Concurrent Init Update Refs (unload classes) 0.086ms
+[2026-10-30T19:42:35.441+0900] GC(5) Pause Init Update Refs 0.006ms
+[2026-10-30T19:42:35.473+0900] GC(5) Concurrent update references 32.153ms
+[2026-10-30T19:42:35.473+0900] GC(5) Concurrent update thread roots 0.279ms
+[2026-10-30T19:42:35.474+0900] GC(5) Pause Final Update Refs 0.051ms
+[2026-10-30T19:42:35.474+0900] GC(5) Concurrent cleanup (unload classes) 124M->45M(144M) 0.054ms
+[2026-10-30T19:42:35.476+0900] GC(5) Concurrent reset after collect (unload classes) 1.903ms
+[2026-10-30T19:42:35.606+0900] Trigger: Average GC time (157.81 ms) is above the time for average allocation rate (264 MB/s) to deplete free headroom (42291K) (margin of error = 1.86)
+[2026-10-30T19:42:35.606+0900] GC(6) Concurrent reset (unload classes) 0.031ms
+[2026-10-30T19:42:35.606+0900] GC(6) Pause Init Mark (unload classes) 0.026ms
+[2026-10-30T19:42:35.607+0900] GC(6) Concurrent marking roots 0.330ms
+[2026-10-30T19:42:35.666+0900] GC(6) Concurrent marking (unload classes) 59.518ms
+[2026-10-30T19:42:35.667+0900] GC(6) Pause Final Mark (unload classes) 0.149ms
+[2026-10-30T19:42:35.667+0900] GC(6) Concurrent thread roots 0.202ms
+[2026-10-30T19:42:35.667+0900] GC(6) Concurrent weak references (unload classes) 0.157ms
+[2026-10-30T19:42:35.671+0900] GC(6) Concurrent weak roots (unload classes) 4.191ms
+[2026-10-30T19:42:35.682+0900] GC(6) Concurrent class unloading 10.182ms
+[2026-10-30T19:42:35.682+0900] GC(6) Concurrent cleanup (unload classes) 104M->104M(144M) 0.021ms
+[2026-10-30T19:42:35.682+0900] GC(6) Concurrent strong roots 0.217ms
+[2026-10-30T19:42:35.692+0900] GC(6) Concurrent evacuation 9.913ms
+[2026-10-30T19:42:35.692+0900] GC(6) Concurrent Init Update Refs (unload classes) 0.102ms
+[2026-10-30T19:42:35.692+0900] GC(6) Pause Init Update Refs 0.006ms
+[2026-10-30T19:42:35.729+0900] GC(6) Concurrent update references 36.413ms
+[2026-10-30T19:42:35.730+0900] GC(6) Concurrent update thread roots 1.790ms
+[2026-10-30T19:42:35.731+0900] GC(6) Pause Final Update Refs 0.055ms
+[2026-10-30T19:42:35.731+0900] GC(6) Concurrent cleanup (unload classes) 117M->49M(144M) 0.051ms
+[2026-10-30T19:42:35.733+0900] GC(6) Concurrent reset after collect (unload classes) 2.473ms
+[2026-10-30T19:42:35.868+0900] Trigger: Average GC time (152.02 ms) is above the time for average allocation rate (280 MB/s) to deplete free headroom (43315K) (margin of error = 1.88)
+[2026-10-30T19:42:35.868+0900] GC(7) Concurrent reset (unload classes) 0.037ms
+[2026-10-30T19:42:35.869+0900] GC(7) Pause Init Mark (unload classes) 0.038ms
+[2026-10-30T19:42:35.869+0900] GC(7) Concurrent marking roots 0.412ms
+[2026-10-30T19:42:35.940+0900] GC(7) Concurrent marking (unload classes) 71.410ms
+[2026-10-30T19:42:35.941+0900] GC(7) Pause Final Mark (unload classes) 0.138ms
+[2026-10-30T19:42:35.941+0900] GC(7) Concurrent thread roots 0.543ms
+[2026-10-30T19:42:35.944+0900] GC(7) Concurrent weak references (unload classes) 2.559ms
+[2026-10-30T19:42:35.947+0900] GC(7) Concurrent weak roots (unload classes) 3.158ms
+[2026-10-30T19:42:35.959+0900] GC(7) Concurrent class unloading 11.780ms
+[2026-10-30T19:42:35.959+0900] GC(7) Concurrent cleanup (unload classes) 93M->93M(144M) 0.013ms
+[2026-10-30T19:42:35.962+0900] GC(7) Concurrent strong roots 2.698ms
+[2026-10-30T19:42:35.967+0900] GC(7) Concurrent evacuation 5.618ms
+[2026-10-30T19:42:35.968+0900] GC(7) Concurrent Init Update Refs (unload classes) 0.250ms
+[2026-10-30T19:42:35.968+0900] GC(7) Pause Init Update Refs 0.006ms
+[2026-10-30T19:42:36.007+0900] GC(7) Concurrent update references 39.019ms
+[2026-10-30T19:42:36.011+0900] GC(7) Concurrent update thread roots 4.284ms
+[2026-10-30T19:42:36.011+0900] GC(7) Pause Final Update Refs 0.049ms
+[2026-10-30T19:42:36.012+0900] GC(7) Concurrent cleanup (unload classes) 97M->35M(144M) 0.042ms
+[2026-10-30T19:42:36.012+0900] GC(7) Concurrent reset after collect (unload classes) 0.398ms
+[2026-10-30T19:42:49.751+0900] Trigger: Average GC time (161.80 ms) is above the time for average allocation rate (73971 KB/s) to deplete free headroom (11827K) (margin of error = 1.88)
+[2026-10-30T19:42:49.751+0900] GC(8) Concurrent reset (unload classes) 0.026ms
+[2026-10-30T19:42:49.755+0900] GC(8) Pause Init Mark (unload classes) 0.078ms
+[2026-10-30T19:42:49.759+0900] GC(8) Concurrent marking roots 0.811ms
+[2026-10-30T19:42:49.853+0900] GC(8) Concurrent marking (unload classes) 93.879ms
+[2026-10-30T19:42:49.853+0900] GC(8) Pause Final Mark (unload classes) 0.123ms
+[2026-10-30T19:42:49.853+0900] GC(8) Concurrent thread roots 0.221ms
+[2026-10-30T19:42:49.854+0900] GC(8) Concurrent weak references (unload classes) 0.211ms
+[2026-10-30T19:42:49.866+0900] GC(8) Concurrent weak roots (unload classes) 12.204ms
+[2026-10-30T19:42:49.901+0900] GC(8) Concurrent class unloading 35.123ms
+[2026-10-30T19:42:49.901+0900] GC(8) Concurrent cleanup (unload classes) 125M->94M(144M) 0.030ms
+[2026-10-30T19:42:49.901+0900] GC(8) Concurrent strong roots 0.374ms
+[2026-10-30T19:42:49.918+0900] GC(8) Concurrent evacuation 16.895ms
+[2026-10-30T19:42:49.918+0900] GC(8) Concurrent Init Update Refs (unload classes) 0.083ms
+[2026-10-30T19:42:49.919+0900] GC(8) Pause Init Update Refs 0.005ms
+[2026-10-30T19:42:49.961+0900] GC(8) Concurrent update references 42.554ms
+[2026-10-30T19:42:49.961+0900] GC(8) Concurrent update thread roots 0.223ms
+[2026-10-30T19:42:49.962+0900] GC(8) Pause Final Update Refs 0.046ms
+[2026-10-30T19:42:49.962+0900] GC(8) Concurrent cleanup (unload classes) 101M->37M(144M) 0.042ms
+[2026-10-30T19:42:49.962+0900] GC(8) Concurrent reset after collect (unload classes) 0.321ms
+[2026-10-30T19:43:08.990+0900] Trigger: Average GC time (248.45 ms) is above the time for average allocation rate (61668 KB/s) to deplete free headroom (12339K) (margin of error = 1.89)
+[2026-10-30T19:43:08.991+0900] GC(9) Concurrent reset (unload classes) 0.153ms
+[2026-10-30T19:43:08.993+0900] GC(9) Pause Init Mark (unload classes) 0.077ms
+[2026-10-30T19:43:08.999+0900] GC(9) Concurrent marking roots 1.063ms
+[2026-10-30T19:43:09.197+0900] GC(9) Concurrent marking (unload classes) 197.822ms
+[2026-10-30T19:43:09.200+0900] GC(9) Pause Final Mark (unload classes) 0.221ms
+[2026-10-30T19:43:09.201+0900] GC(9) Concurrent thread roots 0.666ms
+[2026-10-30T19:43:09.205+0900] GC(9) Concurrent weak references (unload classes) 3.628ms
+[2026-10-30T19:43:09.229+0900] GC(9) Concurrent weak roots (unload classes) 24.673ms
+[2026-10-30T19:43:09.254+0900] GC(9) Concurrent class unloading 24.799ms
+[2026-10-30T19:43:09.254+0900] GC(9) Concurrent cleanup (unload classes) 130M->109M(144M) 0.069ms
+[2026-10-30T19:43:09.257+0900] GC(9) Concurrent strong roots 3.047ms
+[2026-10-30T19:43:09.301+0900] GC(9) Concurrent evacuation 43.750ms
+[2026-10-30T19:43:09.309+0900] GC(9) Concurrent Init Update Refs (unload classes) 7.930ms
+[2026-10-30T19:43:09.310+0900] GC(9) Pause Init Update Refs 0.008ms
+[2026-10-30T19:43:09.371+0900] GC(9) Concurrent update references 57.431ms
+[2026-10-30T19:43:09.372+0900] GC(9) Concurrent update thread roots 1.224ms
+[2026-10-30T19:43:09.372+0900] GC(9) Pause Final Update Refs 0.064ms
+[2026-10-30T19:43:09.372+0900] GC(9) Concurrent cleanup (unload classes) 129M->65M(144M) 0.045ms
+[2026-10-30T19:43:09.373+0900] GC(9) Concurrent reset after collect (unload classes) 0.526ms
+[2026-10-30T19:43:09.636+0900] Trigger: Average GC time (485.86 ms) is above the time for average allocation rate (85767 KB/s) to deplete free headroom (41394K) (margin of error = 1.92)
+[2026-10-30T19:43:09.637+0900] GC(10) Concurrent reset (unload classes) 0.030ms
+[2026-10-30T19:43:09.638+0900] GC(10) Pause Init Mark (unload classes) 0.032ms
+[2026-10-30T19:43:09.640+0900] GC(10) Concurrent marking roots 1.322ms
+[2026-10-30T19:43:09.891+0900] GC(10) Concurrent marking (unload classes) 251.228ms
+[2026-10-30T19:43:09.892+0900] GC(10) Pause Final Mark (unload classes) 0.208ms
+[2026-10-30T19:43:09.899+0900] GC(10) Concurrent thread roots 6.124ms
+[2026-10-30T19:43:09.900+0900] GC(10) Concurrent weak references (unload classes) 0.649ms
+[2026-10-30T19:43:09.921+0900] GC(10) Concurrent weak roots (unload classes) 21.215ms
+[2026-10-30T19:43:09.982+0900] GC(10) Concurrent class unloading 61.027ms
+[2026-10-30T19:43:09.982+0900] GC(10) Concurrent cleanup (unload classes) 101M->93M(144M) 0.039ms
+[2026-10-30T19:43:09.984+0900] GC(10) Concurrent strong roots 1.806ms
+[2026-10-30T19:43:10.025+0900] GC(10) Concurrent evacuation 40.269ms
+[2026-10-30T19:43:10.028+0900] GC(10) Concurrent Init Update Refs (unload classes) 3.890ms
+[2026-10-30T19:43:10.029+0900] GC(10) Pause Init Update Refs 0.006ms
+[2026-10-30T19:43:10.142+0900] GC(10) Concurrent update references 111.820ms
+[2026-10-30T19:43:10.147+0900] GC(10) Concurrent update thread roots 5.605ms
+[2026-10-30T19:43:10.148+0900] GC(10) Pause Final Update Refs 0.060ms
+[2026-10-30T19:43:10.149+0900] GC(10) Concurrent cleanup (unload classes) 102M->55M(144M) 0.045ms
+[2026-10-30T19:43:10.149+0900] GC(10) Concurrent reset after collect (unload classes) 0.464ms
+[2026-10-30T19:43:10.456+0900] Trigger: Average GC time (666.62 ms) is above the time for instantaneous allocation rate (111 MB/s) to deplete free headroom (58478K) (spike threshold = 1.80)
+[2026-10-30T19:43:10.456+0900] GC(11) Concurrent reset (unload classes) 0.028ms
+[2026-10-30T19:43:10.456+0900] GC(11) Pause Init Mark (unload classes) 0.027ms
+[2026-10-30T19:43:10.456+0900] GC(11) Concurrent marking roots 0.458ms
+[2026-10-30T19:43:10.529+0900] GC(11) Concurrent marking (unload classes) 72.587ms
+[2026-10-30T19:43:10.529+0900] GC(11) Pause Final Mark (unload classes) 0.131ms
+[2026-10-30T19:43:10.529+0900] GC(11) Concurrent thread roots 0.216ms
+[2026-10-30T19:43:10.530+0900] GC(11) Concurrent weak references (unload classes) 0.081ms
+[2026-10-30T19:43:10.541+0900] GC(11) Concurrent weak roots (unload classes) 11.026ms
+[2026-10-30T19:43:10.552+0900] GC(11) Concurrent class unloading 11.254ms
+[2026-10-30T19:43:10.552+0900] GC(11) Concurrent cleanup (unload classes) 76M->73M(144M) 0.041ms
+[2026-10-30T19:43:10.552+0900] GC(11) Concurrent strong roots 0.247ms
+[2026-10-30T19:43:10.559+0900] GC(11) Concurrent evacuation 6.645ms
+[2026-10-30T19:43:10.560+0900] GC(11) Concurrent Init Update Refs (unload classes) 0.888ms
+[2026-10-30T19:43:10.560+0900] GC(11) Pause Init Update Refs 0.006ms
+[2026-10-30T19:43:10.586+0900] GC(11) Concurrent update references 25.719ms
+[2026-10-30T19:43:10.587+0900] GC(11) Concurrent update thread roots 1.192ms
+[2026-10-30T19:43:10.587+0900] GC(11) Pause Final Update Refs 0.043ms
+[2026-10-30T19:43:10.590+0900] GC(11) Concurrent cleanup (unload classes) 79M->49M(144M) 0.048ms
+[2026-10-30T19:43:10.590+0900] GC(11) Concurrent reset after collect (unload classes) 0.309ms
+[2026-10-30T19:43:12.639+0900] Trigger: Average GC time (581.24 ms) is above the time for average allocation rate (25902 KB/s) to deplete free headroom (14823K) (margin of error = 1.93)
+[2026-10-30T19:43:12.639+0900] GC(12) Concurrent reset (unload classes) 0.046ms
+[2026-10-30T19:43:12.640+0900] GC(12) Pause Init Mark (unload classes) 0.036ms
+[2026-10-30T19:43:12.640+0900] GC(12) Concurrent marking roots 0.538ms
+[2026-10-30T19:43:12.709+0900] GC(12) Concurrent marking (unload classes) 68.994ms
+[2026-10-30T19:43:12.710+0900] GC(12) Pause Final Mark (unload classes) 0.129ms
+[2026-10-30T19:43:12.710+0900] GC(12) Concurrent thread roots 0.217ms
+[2026-10-30T19:43:12.711+0900] GC(12) Concurrent weak references (unload classes) 0.729ms
+[2026-10-30T19:43:12.716+0900] GC(12) Concurrent weak roots (unload classes) 5.274ms
+[2026-10-30T19:43:12.752+0900] GC(12) Concurrent class unloading 35.617ms
+[2026-10-30T19:43:12.752+0900] GC(12) Concurrent cleanup (unload classes) 117M->108M(144M) 0.025ms
+[2026-10-30T19:43:12.752+0900] GC(12) Concurrent strong roots 0.183ms
+[2026-10-30T19:43:12.758+0900] GC(12) Concurrent evacuation 6.122ms
+[2026-10-30T19:43:12.759+0900] GC(12) Concurrent Init Update Refs (unload classes) 0.560ms
+[2026-10-30T19:43:12.759+0900] GC(12) Pause Init Update Refs 0.006ms
+[2026-10-30T19:43:12.789+0900] GC(12) Concurrent update references 30.572ms
+[2026-10-30T19:43:12.791+0900] GC(12) Concurrent update thread roots 1.151ms
+[2026-10-30T19:43:12.791+0900] GC(12) Pause Final Update Refs 0.048ms
+[2026-10-30T19:43:12.791+0900] GC(12) Concurrent cleanup (unload classes) 115M->52M(144M) 0.030ms
+[2026-10-30T19:43:12.791+0900] GC(12) Concurrent reset after collect (unload classes) 0.448ms
+[2026-10-30T19:45:34.234+0900] Trigger: Free (14592K) is below minimum threshold (14745K)
+[2026-10-30T19:45:34.234+0900] GC(13) Concurrent reset (unload classes) 0.314ms
+[2026-10-30T19:45:34.235+0900] GC(13) Pause Init Mark (unload classes) 0.078ms
+[2026-10-30T19:45:34.238+0900] GC(13) Concurrent marking roots 2.711ms
+[2026-10-30T19:45:34.356+0900] GC(13) Concurrent marking (unload classes) 118.030ms
+[2026-10-30T19:45:34.356+0900] GC(13) Pause Final Mark (unload classes) 0.193ms
+[2026-10-30T19:45:34.356+0900] GC(13) Concurrent thread roots 0.319ms
+[2026-10-30T19:45:34.357+0900] GC(13) Concurrent weak references (unload classes) 0.309ms
+[2026-10-30T19:45:34.380+0900] GC(13) Concurrent weak roots (unload classes) 23.141ms
+[2026-10-30T19:45:34.417+0900] GC(13) Concurrent class unloading 36.796ms
+[2026-10-30T19:45:34.417+0900] GC(13) Concurrent cleanup (unload classes) 122M->105M(144M) 0.040ms
+[2026-10-30T19:45:34.417+0900] GC(13) Concurrent strong roots 0.490ms
+[2026-10-30T19:45:34.425+0900] GC(13) Concurrent evacuation 7.918ms
+[2026-10-30T19:45:34.425+0900] GC(13) Concurrent Init Update Refs (unload classes) 0.138ms
+[2026-10-30T19:45:34.426+0900] GC(13) Pause Init Update Refs 0.006ms
+[2026-10-30T19:45:34.454+0900] GC(13) Concurrent update references 27.983ms
+[2026-10-30T19:45:34.454+0900] GC(13) Concurrent update thread roots 0.276ms
+[2026-10-30T19:45:34.454+0900] GC(13) Pause Final Update Refs 0.054ms
+[2026-10-30T19:45:34.454+0900] GC(13) Concurrent cleanup (unload classes) 108M->47M(144M) 0.058ms
+[2026-10-30T19:45:34.455+0900] GC(13) Concurrent reset after collect (unload classes) 0.865ms

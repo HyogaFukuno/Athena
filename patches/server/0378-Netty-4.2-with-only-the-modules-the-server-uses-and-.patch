@@ -1,0 +1,82 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 30 Oct 2026 15:40:45 +0900
+Subject: [PATCH] Netty 4.2 with only the modules the server uses, and io_uring
+ from Netty itself
+
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 550bb20c7aa1f38557c040c7d1b2db570908c1be..ae9854c0566efb444b5aedb475911f77b8ca91d4 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -5,6 +5,7 @@ plugins {
+ 
+ val minecraftVersion = "1_8_R3"
+ val adventureVersion = "4.25.0" // PandaSpigot - Adventure
++val nettyVersion = "4.2.19.Final" // Athena
+ 
+ repositories {
+     maven(url = "https://libraries.minecraft.net")
+@@ -20,10 +21,19 @@ dependencies {
+     // PandaSpigot end
+ 
+     // Minecraft libraries:
+-    implementation("io.netty:netty-all:4.1.132.Final") // PandaSpigot - Update Netty to 4.1.x
+-    // Athena - io_uring transport, used when pandaspigot.yml ioUring is on and the kernel allows it
+-    implementation("io.netty.incubator:netty-incubator-transport-native-io_uring:0.0.26.Final:linux-x86_64")
+-    implementation("io.netty.incubator:netty-incubator-transport-native-io_uring:0.0.26.Final:linux-aarch_64")
++    // PandaSpigot - Update Netty to 4.1.x
++    // Athena start - Netty 4.2, and only the parts the server uses. netty-all 4.2 also carries QUIC
++    // with its native library for five platforms, HTTP/2, DNS, SSL and more: 12 MB more in the
++    // patched jar than 4.1's netty-all, none of it loaded. netty-handler brings the transport, the
++    // codecs, the buffers and unix-common with it.
++    implementation("io.netty:netty-handler:$nettyVersion")
++    implementation("io.netty:netty-transport-native-epoll:$nettyVersion:linux-x86_64")
++    implementation("io.netty:netty-transport-native-epoll:$nettyVersion:linux-aarch_64")
++    // io_uring, used when athena.yml ioUring is on and the kernel allows it. Part of Netty itself
++    // since 4.2; the incubator project it came from is no longer released.
++    implementation("io.netty:netty-transport-native-io_uring:$nettyVersion:linux-x86_64")
++    implementation("io.netty:netty-transport-native-io_uring:$nettyVersion:linux-aarch_64")
++    // Athena end
+     implementation("com.mojang:authlib:1.5.21")
+     // PandaSpigot start - Update log4j
+     implementation("org.apache.logging.log4j:log4j-api:2.25.3")
+diff --git a/src/main/java/net/minecraft/server/ServerConnection.java b/src/main/java/net/minecraft/server/ServerConnection.java
+index abda8d7cea02e79a283f79ba4f6ecc19f56d6c49..207992e50e9ead73b0196b999b71dac5c4260d4d 100644
+--- a/src/main/java/net/minecraft/server/ServerConnection.java
++++ b/src/main/java/net/minecraft/server/ServerConnection.java
+@@ -70,9 +70,9 @@ public class ServerConnection {
+     // batches instead of an epoll_wait and a read or write syscall each. On the VPS, kernel entry
+     // and exit and the per-syscall security hooks were most of Netty's time. Opt in with
+     // athena.yml ioUring; without kernel support it falls back to epoll and says why.
+-    public static final LazyInitVar<io.netty.incubator.channel.uring.IOUringEventLoopGroup> SERVER_IO_URING_EVENTLOOP = new LazyInitVar() {
+-        protected io.netty.incubator.channel.uring.IOUringEventLoopGroup load() {
+-            return new io.netty.incubator.channel.uring.IOUringEventLoopGroup(0, nettyThreads("Netty io_uring Server IO #%d"));
++    public static final LazyInitVar<EventLoopGroup> SERVER_IO_URING_EVENTLOOP = new LazyInitVar() {
++        protected EventLoopGroup load() {
++            return new io.netty.channel.MultiThreadIoEventLoopGroup(0, nettyThreads("Netty io_uring Server IO #%d"), io.netty.channel.uring.IoUringIoHandler.newFactory());
+         }
+ 
+         protected Object init() {
+@@ -85,10 +85,10 @@ public class ServerConnection {
+             return false;
+         }
+         try {
+-            if (io.netty.incubator.channel.uring.IOUring.isAvailable()) {
++            if (io.netty.channel.uring.IoUring.isAvailable()) {
+                 return true;
+             }
+-            ServerConnection.logger.warn("io_uring is not available, using epoll: {}", String.valueOf(io.netty.incubator.channel.uring.IOUring.unavailabilityCause()));
++            ServerConnection.logger.warn("io_uring is not available, using epoll: {}", String.valueOf(io.netty.channel.uring.IoUring.unavailabilityCause()));
+         } catch (Throwable t) {
+             ServerConnection.logger.warn("io_uring is not available, using epoll: {}", t.toString());
+         }
+@@ -138,7 +138,7 @@ public class ServerConnection {
+             LazyInitVar lazyinitvar;
+ 
+             if (!(address instanceof io.netty.channel.unix.DomainSocketAddress) && athenaIoUring()) { // Athena
+-                oclass = io.netty.incubator.channel.uring.IOUringServerSocketChannel.class;
++                oclass = io.netty.channel.uring.IoUringServerSocketChannel.class;
+                 lazyinitvar = ServerConnection.SERVER_IO_URING_EVENTLOOP;
+                 ServerConnection.logger.info("Using io_uring channel type");
+             } else if (Epoll.isAvailable() && this.mcServer.ai()) {

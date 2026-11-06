@@ -1,8 +1,12 @@
 #!/bin/bash
 # runs on the game VPS: athena_sg_when_empty.sh <server> <port> <athena jar> <plugin jar> <tag>
 # waits until the server has had 0 connections for two checks 30 s apart, then backs up and replaces
-# paperclip.jar and plugins/SurvivalGames.jar together, starts it, and restarts it once more after
-# 25 s (if still empty) so that start-small.sh builds the new jar's AOT cache. Gives up after 8 hours.
+# paperclip.jar and plugins/SurvivalGames.jar together and starts it. Gives up after 8 hours.
+# It does not restart the server to make the new jar's AOT cache: a record of a run that only starts
+# and stops leaves out the ~950 classes the first login and the first map load, and those then load
+# from the jar in the first match (115-219 ms ticks; audit/2026-10-31/TICK-SPIKES.md). The cache is
+# made from a run that played a match - a bot match on sgbench3, or this server's own first match,
+# recorded until its next stop - and start-small.sh builds it from the largest record there is.
 S=$1; P=$2; JAR=$3; PLUGIN=$4; TAG=$5; D=/opt/mc/$S
 conns() { ss -tnH state established "( sport = :$P )" | wc -l; }
 waitdone() { for i in $(seq 1 150); do grep -q "Done (" $D/console.out 2>/dev/null && return 0; sleep 2; done; return 1; }
@@ -16,14 +20,10 @@ while [ $(date +%s) -lt $end ]; do
     install -o mc -g mc -m 644 $JAR $D/paperclip.jar
     install -o mc -g mc -m 644 $PLUGIN $D/plugins/SurvivalGames.jar
     systemctl start sg@$S; waitdone || { echo "$S did not start"; exit 1; }
-    sleep 25
-    if [ "$(conns)" -eq 0 ]; then
-      systemctl stop sg@$S   # writes the AOT record of this jar
-      systemctl start sg@$S; waitdone || { echo "$S did not restart"; exit 1; }
-    else
-      echo "$S has players again - AOT cache left for the next restart"
-    fi
     grep -E "start-small" $D/console.out
+    if grep -q "recording this run" $D/console.out; then
+      echo "$S has no AOT cache for this jar yet: it records this run. Play a bot match on sgbench3 (or let a match play here) and restart, and the next start builds the cache"
+    fi
     echo "$(date '+%F %T') $S $(systemctl is-active sg@$S) athena $(sha256sum $D/paperclip.jar | cut -c1-12) plugin $(sha256sum $D/plugins/SurvivalGames.jar | cut -c1-12) errors $(grep -cE 'ERROR|Exception' $D/console.out)"
     grep -hE "SurvivalGames\] Loaded" $D/console.out | head -1
     exit 0

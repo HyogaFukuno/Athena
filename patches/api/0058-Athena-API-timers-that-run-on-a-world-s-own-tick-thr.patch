@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 2 Nov 2026 18:36:52 +0900
+Subject: [PATCH] Athena API: timers that run on a world's own tick thread
+
+Athena.runOnWorldTimer runs a task at the start of a world's tick, after a delay
+and then every period of that world's own ticks, on the thread that ticks it.
+It is what Bukkit's scheduler is to the server thread, for a match whose world
+has a thread of its own: a stall of the server thread or of another world does
+not hold its clock up. WorldTask cancels it; it stops with the world.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index f2a0f393c6d5ced7e34975eaed67c663b2d43d79..232a061759e4ce02d281dd484b5265d52f90128a 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -458,4 +458,18 @@ public final class Athena {
+     public static void runOnWorld(World world, Runnable task) {
+         getServer().runOnWorld(world, task);
+     }
++
++    /**
++     * Runs {@code task} on the thread that ticks {@code world}, at the start of the world's tick:
++     * first after {@code delay} of the world's ticks, then every {@code period} ticks ({@code period}
++     * of 0 or less: once). It counts the world's own ticks, so it keeps time with the world: a stall
++     * of the server thread, or of another world's thread, does not hold it up. It stops when
++     * cancelled or when the world is unloaded. May be called from any thread.
++     *
++     * <p>This is what Bukkit's scheduler is to the server thread: a match that runs in a world on its
++     * own thread keeps its clock (countdowns, phases) here.
++     */
++    public static WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period) {
++        return getServer().runOnWorldTimer(world, task, delay, period);
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index bc12d9bf85b36210b3677ed3032fff6c894d1b6b..53906ac216aefcc9f9ed7b1564195ce3c488e712 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -73,4 +73,6 @@ public interface AthenaServer {
+     boolean isWorldThread(World world);
+ 
+     void runOnWorld(World world, Runnable task);
++
++    WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period);
+ }
+diff --git a/src/main/java/athena/api/WorldTask.java b/src/main/java/athena/api/WorldTask.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea6b8ddf5ee8a9489a25cc467cb726e23fb4c0cc
+--- /dev/null
++++ b/src/main/java/athena/api/WorldTask.java
+@@ -0,0 +1,16 @@
++package athena.api;
++
++import org.bukkit.World;
++
++/** A task {@link Athena#runOnWorldTimer} runs on the thread that ticks a world. */
++public interface WorldTask {
++
++    /** The world whose ticks the task runs at. */
++    World getWorld();
++
++    /** Stops the task; a run already under way finishes. May be called from any thread. */
++    void cancel();
++
++    /** Whether {@link #cancel} was called, or the task ran its one time, or its world was unloaded. */
++    boolean isCancelled();
++}
