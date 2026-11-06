@@ -1,0 +1,380 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 15:24:34 +0900
+Subject: [PATCH] Timings stay off once worlds tick on their own threads
+
+Audit 2026-11-06 F8, and the recheck's probes as regression tests.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 056316c28b83c9213978b7e4c44228e3a49eee6b..e7ca197111126fe51e1ae1a4dfa678469bb2fae6 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -101,6 +101,7 @@ public final class AthenaWorldThread extends Thread {
+             co.aikar.timings.SpigotTimings.stopServer();
+             LOGGER.info("Timings turned off: worlds on their own threads cannot be timed");
+         }
++        co.aikar.timings.Timings.athenaKeepDisabled(); // and neither /timings on nor a plugin turns them back on
+     }
+ 
+     /** Set once the thread has stopped and its leftover tasks went to the server thread. */
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java b/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..aafd94c0643bc624f182341ffa32bb321a95bcaf
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaWorldThreadRecheckTest.java
+@@ -0,0 +1,355 @@
++package net.minecraft.server;
++
++import com.google.common.util.concurrent.ListenableFuture;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.Queue;
++import java.util.Random;
++import java.util.concurrent.ConcurrentLinkedQueue;
++import java.util.concurrent.CopyOnWriteArrayList;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.FutureTask;
++import java.util.concurrent.ThreadPoolExecutor;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicReference;
++import org.bukkit.craftbukkit.CraftServer;
++import org.bukkit.craftbukkit.CraftWorld;
++import org.bukkit.craftbukkit.util.AsynchronousExecutor;
++
++/** The recheck of 2026-11-06 (audit/2026-11-06/world-thread-audit): each finding's probe, turned round to pass once it is fixed. */
++public class AthenaWorldThreadRecheckTest extends org.bukkit.support.AbstractTestingBase {
++    private Object previousServer;
++    private Object previousStarted;
++
++    @org.junit.Before
++    public void remember() throws Exception {
++        this.previousServer = get(null, MinecraftServer.class, "l");
++        this.previousStarted = get(null, AthenaWorldThread.class, "started");
++    }
++
++    @org.junit.After
++    public void restore() throws Exception {
++        set(null, MinecraftServer.class, "l", this.previousServer);
++        set(null, AthenaWorldThread.class, "started", this.previousStarted);
++        set(null, co.aikar.timings.Timings.class, "athenaKeptDisabled", false);
++        org.spigotmc.AsyncCatcher.enabled = true;
++    }
++
++    private static final sun.misc.Unsafe UNSAFE;
++    static {
++        try {
++            Field f = sun.misc.Unsafe.class.getDeclaredField("theUnsafe");
++            f.setAccessible(true);
++            UNSAFE = (sun.misc.Unsafe) f.get(null);
++        } catch (Exception e) { throw new AssertionError(e); }
++    }
++    private static <T> T allocate(Class<T> type) throws Exception { return type.cast(UNSAFE.allocateInstance(type)); }
++    private static void set(Object obj, Class<?> type, String name, Object value) throws Exception {
++        Field f = type.getDeclaredField(name); f.setAccessible(true); f.set(obj, value);
++    }
++    private static Object get(Object obj, Class<?> type, String name) throws Exception {
++        Field f = type.getDeclaredField(name); f.setAccessible(true); return f.get(obj);
++    }
++    private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
++    private static void await(CountDownLatch latch) {
++        try { check(latch.await(5, TimeUnit.SECONDS), "latch timeout"); }
++        catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new AssertionError(e); }
++    }
++    public static final class Server extends DedicatedServer {
++        PlayerList list;
++        private Server() { super(null); }
++        @Override public void athenaTickWorld(WorldServer world) { }
++        @Override public PlayerList getPlayerList() { return list; }
++    }
++    private static Server server() throws Exception {
++        Server s = allocate(Server.class);
++        set(s, MinecraftServer.class, "primaryThread", Thread.currentThread());
++        set(s, MinecraftServer.class, "serverThread", Thread.currentThread());
++        set(s, MinecraftServer.class, "j", new ConcurrentLinkedQueue<FutureTask<?>>());
++        set(null, MinecraftServer.class, "l", s);
++        s.worlds = new CopyOnWriteArrayList<>();
++        s.processQueue = new ConcurrentLinkedQueue<>();
++        return s;
++    }
++    private static WorldServer world(Server s) throws Exception {
++        WorldServer w = allocate(WorldServer.class);
++        set(w, WorldServer.class, "server", s);
++        set(w, World.class, "players", new ArrayList<>());
++        w.worldData = new WorldData(); w.worldData.setWorldName("recheck");
++        s.worlds.add(w);
++        return w;
++    }
++
++    private static void unboundedFinish(int mode) throws Exception {
++        AtomicReference<Object> owner = new AtomicReference<>();
++        AtomicInteger calls = new AtomicInteger();
++        Object target = new Object();
++        AsynchronousExecutor<Integer, Integer, Runnable, RuntimeException> executor = new AsynchronousExecutor<>(
++                new AsynchronousExecutor.CallBackProvider<Integer, Integer, Runnable, RuntimeException>() {
++                    public Integer callStage1(Integer p) { return p; }
++                    public void callStage2(Integer p, Integer result) { calls.incrementAndGet(); }
++                    public void callStage3(Integer p, Integer result, Runnable r) { r.run(); }
++                    public Object athenaOwner(Integer p) { return owner.get(); }
++                    public Thread newThread(Runnable r) { Thread t = new Thread(r); t.setDaemon(true); return t; }
++                }, 1);
++        try {
++            executor.add(1, () -> {});
++            Queue<?> queue = (Queue<?>) get(executor, AsynchronousExecutor.class, "finished");
++            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
++            while (queue.isEmpty() && System.nanoTime() < deadline) Thread.onSpinWait();
++            check(!queue.isEmpty(), "worker did not queue completion");
++            owner.set(target); // real transition: completed on main before startWorldThread
++            if (mode == 0) executor.finishActive();
++            else if (mode == 1) executor.finishActive(0L);
++            else executor.finishActive(TimeUnit.SECONDS.toNanos(1));
++            check(calls.get() == 0, "a completion ran on the server thread after its world moved, mode " + mode);
++            executor.finishActive(target, 0L);
++            check(calls.get() == 1, "routed completion lost");
++        } finally { ((ThreadPoolExecutor) get(executor, AsynchronousExecutor.class, "pool")).shutdownNow(); }
++    }
++
++    private static final class PausedIds extends HashMap<String, Short> {
++        @Override public Short get(Object key) {
++            Short value = super.get(key);
++            try { Thread.sleep(100); } // long enough for the other thread to read the same count, if it may
++            catch (InterruptedException e) { throw new AssertionError(e); }
++            return value;
++        }
++    }
++    @org.junit.Test public void mapIds() throws Exception {
++        PersistentCollection control = new PersistentCollection(null);
++        check(control.getUniqueDataId("map") == 0 && control.getUniqueDataId("map") == 1, "serial IDs");
++        PersistentCollection storage = new PersistentCollection(null);
++        PausedIds ids = new PausedIds(); ids.put("map", (short) 0);
++        set(storage, PersistentCollection.class, "idCounts", ids);
++        AtomicInteger a = new AtomicInteger(-1), b = new AtomicInteger(-2);
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread first = new Thread(() -> { try { a.set(storage.getUniqueDataId("map")); } catch (Throwable t) { failure.set(t); } });
++        Thread second = new Thread(() -> { try { b.set(storage.getUniqueDataId("map")); } catch (Throwable t) { failure.set(t); } });
++        first.start(); second.start(); first.join(); second.join();
++        check(failure.get() == null, "map fixture failed: " + failure.get());
++        check(a.get() != b.get(), "two threads got the same map ID");
++    }
++
++    @org.junit.Test public void forwardedFuture() throws Exception {
++        Server s = server(); WorldServer w = world(s);
++        AtomicReference<ListenableFuture<Object>> future = new AtomicReference<>();
++        CountDownLatch taskRan = new CountDownLatch(1), entered = new CountDownLatch(1), release = new CountDownLatch(1), afterFailure = new CountDownLatch(1);
++        Thread submit = new Thread(() -> future.set(w.postToMainThread(() -> {
++            taskRan.countDown(); throw new IllegalArgumentException("review task failure");
++        })));
++        submit.start(); submit.join();
++        AthenaWorldThread thread = new AthenaWorldThread(w);
++        thread.post(w, () -> { entered.countDown(); await(release); });
++        w.athenaThread = thread; thread.start();
++        try {
++            await(entered);
++            ((Queue<FutureTask<?>>) get(s, MinecraftServer.class, "j")).remove().run();
++            check(!future.get().isDone(), "the future completed before its task ran");
++            thread.post(w, afterFailure::countDown); // after runTasks caught the preceding task's exception
++            release.countDown(); await(taskRan); await(afterFailure);
++            try {
++                future.get().get(1, TimeUnit.SECONDS);
++                throw new AssertionError("the future does not carry the task's failure");
++            } catch (java.util.concurrent.ExecutionException expected) {
++                check(expected.getCause() instanceof IllegalArgumentException, "wrong failure: " + expected.getCause());
++            }
++        } finally {
++            release.countDown(); check(thread.stopAndJoin(2000), "thread did not stop");
++            w.athenaThread = null; thread.handBack();
++        }
++    }
++
++    /** Stop exactly at the first write / decay event, leaving decision logic unchanged. */
++    private static final class Decision extends RuntimeException {
++        final String result;
++        Decision(String result) { super(result, null, false, false); this.result = result; }
++    }
++    public static final class FlowWorld extends WorldServer {
++        boolean sources;
++        CountDownLatch scanned, otherDone;
++        private FlowWorld() { super(null, null, null, 0, null, null, null); }
++        @Override public CraftWorld getWorld() { return null; }
++        @Override public CraftServer getServer() { return null; }
++        @Override public IBlockData getType(BlockPosition p) { return getType(p.getX(), p.getY(), p.getZ()); }
++        @Override public IBlockData getType(int x, int y, int z) {
++            if (y == 1 && scanned != null) { scanned.countDown(); await(otherDone); }
++            if (y < 0) return Blocks.STONE.getBlockData();
++            if (sources && y == 0 && z == 0 && Math.abs(x) == 1) return Blocks.WATER.getBlockData();
++            return Blocks.AIR.getBlockData();
++        }
++        @Override public boolean setTypeAndData(BlockPosition p, IBlockData data, int flags) {
++            throw new Decision(data.getBlock().getMaterial() == Material.WATER ? "water:" + data.get(BlockFluids.LEVEL) : "other");
++        }
++        @Override public boolean setAir(BlockPosition p) { throw new Decision("air"); }
++    }
++    private static FlowWorld flowWorld(boolean sources) throws Exception {
++        FlowWorld w = allocate(FlowWorld.class); w.sources = sources;
++        set(w, World.class, "paperSpigotConfig", allocate(org.github.paperspigot.PaperSpigotWorldConfig.class));
++        return w;
++    }
++    private static String flow(FlowWorld w) {
++        try { Blocks.FLOWING_WATER.updateTick(w, BlockPosition.ZERO, Blocks.FLOWING_WATER.getBlockData().set(BlockFluids.LEVEL, 1), new Random(1)); }
++        catch (Decision d) { return d.result; }
++        throw new AssertionError("no water decision");
++    }
++    @org.junit.Test public void water() throws Exception {
++        String serial = flow(flowWorld(true));
++        FlowWorld a = flowWorld(true), b = flowWorld(false);
++        a.scanned = new CountDownLatch(1); a.otherDone = new CountDownLatch(1);
++        AtomicReference<String> parallel = new AtomicReference<>();
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread first = new Thread(() -> { try { parallel.set(flow(a)); } catch (Throwable t) { failure.set(t); } });
++        first.start(); await(a.scanned);
++        try { flow(b); } finally { a.otherDone.countDown(); }
++        first.join(); check(failure.get() == null, "water fixture failed: " + failure.get());
++        check("water:0".equals(serial) && serial.equals(parallel.get()), "another world's water changed the count: " + parallel.get());
++    }
++
++    public static final class LeafWorld extends WorldServer {
++        boolean log;
++        CountDownLatch scanned, otherDone;
++        private LeafWorld() { super(null, null, null, 0, null, null, null); }
++        @Override public boolean isAreaLoaded(int a, int b, int c, int d, int e, int f, boolean flag) { return true; }
++        @Override public Chunk getChunkIfLoaded(int x, int z) { return null; }
++        @Override public IBlockData getTypeIfLoaded(int x, int y, int z, Chunk chunk) {
++            if (x == 4 && y == 4 && z == 4 && scanned != null) { scanned.countDown(); await(otherDone); }
++            if (x == 0 && y == 0 && z == 0) return Blocks.LEAVES.getBlockData();
++            if (log && x == 1 && y == 0 && z == 0) return Blocks.LOG.getBlockData();
++            return Blocks.AIR.getBlockData();
++        }
++        @Override public CraftWorld getWorld() { throw new Decision("decay"); }
++        @Override public boolean setTypeAndData(BlockPosition p, IBlockData data, int flags) { throw new Decision("keep"); }
++    }
++    private static LeafWorld leafWorld(boolean log) throws Exception { LeafWorld w = allocate(LeafWorld.class); w.log = log; return w; }
++    private static String leaf(LeafWorld w) {
++        try { Blocks.LEAVES.updateTick(w, BlockPosition.ZERO, Blocks.LEAVES.getBlockData().set(BlockLeaves.CHECK_DECAY, true).set(BlockLeaves.DECAYABLE, true), new Random(1)); }
++        catch (Decision d) { return d.result; }
++        throw new AssertionError("no leaf decision");
++    }
++    @org.junit.Test public void leaves() throws Exception {
++        String serial = leaf(leafWorld(false));
++        LeafWorld a = leafWorld(false), b = leafWorld(true);
++        a.scanned = new CountDownLatch(1); a.otherDone = new CountDownLatch(1);
++        AtomicReference<String> parallel = new AtomicReference<>();
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread first = new Thread(() -> { try { parallel.set(leaf(a)); } catch (Throwable t) { failure.set(t); } });
++        first.start(); await(a.scanned);
++        try { check("keep".equals(leaf(b)), "control leaf near log"); } finally { a.otherDone.countDown(); }
++        first.join(); check(failure.get() == null, "leaf fixture failed: " + failure.get());
++        check("decay".equals(serial) && serial.equals(parallel.get()), "another world's log kept the leaf: " + parallel.get());
++    }
++
++    public static final class MesaWorld extends WorldServer {
++        long seed;
++        CountDownLatch ready, otherDone;
++        private MesaWorld() { super(null, null, null, 0, null, null, null); }
++        @Override public long getSeed() { return seed; }
++        @Override public int getSeaLevel() {
++            if (ready != null) { ready.countDown(); await(otherDone); }
++            return 63;
++        }
++    }
++    private static MesaWorld mesaWorld(long seed) throws Exception {
++        MesaWorld w = allocate(MesaWorld.class); w.seed = seed;
++        set(w, World.class, "paperSpigotConfig", allocate(org.github.paperspigot.PaperSpigotWorldConfig.class));
++        return w;
++    }
++    private static ChunkSnapshot mesa(MesaWorld w) {
++        ChunkSnapshot chunk = new ChunkSnapshot();
++        for (int y = 0; y <= 110; ++y) chunk.setBlockState(0, y, 0, Blocks.STONE.getBlockData());
++        BiomeBase.MESA.genTerrainBlocks(w, new Random(123), chunk, 0, 0, 2.0D);
++        return chunk;
++    }
++    @org.junit.Test public void mesaNoise() throws Exception {
++        ChunkSnapshot serial = mesa(mesaWorld(1));
++        MesaWorld a = mesaWorld(1), b = mesaWorld(2);
++        a.ready = new CountDownLatch(1); a.otherDone = new CountDownLatch(1);
++        AtomicReference<ChunkSnapshot> parallel = new AtomicReference<>();
++        AtomicReference<Throwable> failure = new AtomicReference<>();
++        Thread first = new Thread(() -> { try { parallel.set(mesa(a)); } catch (Throwable t) { failure.set(t); } });
++        first.start(); await(a.ready);
++        try { mesa(b); } finally { a.otherDone.countDown(); }
++        first.join(); check(failure.get() == null, "mesa fixture failed: " + failure.get());
++        int differences = 0;
++        for (int y = 0; y < 256; ++y) if (serial.getBlockState(0, y, 0) != parallel.get().getBlockState(0, y, 0)) ++differences;
++        check(differences == 0, "another seed changed the column by " + differences + " blocks");
++    }
++
++    /** Stop at entry to PlayerList.disconnect, before inventory, events and disk IO. */
++    public static final class DisconnectList extends DedicatedPlayerList {
++        CountDownLatch called;
++        AtomicReference<Boolean> owned;
++        private DisconnectList() { super(null); }
++        @Override public net.kyori.adventure.text.Component disconnect(EntityPlayer player) {
++            owned.set(player.getServerForPlayer().isMainThread());
++            called.countDown();
++            return null;
++        }
++    }
++    @org.junit.Test public void movedDisconnect() throws Exception {
++        Server s = server(); WorldServer a = world(s), b = world(s);
++        DisconnectList list = allocate(DisconnectList.class);
++        list.called = new CountDownLatch(1); list.owned = new AtomicReference<>(); s.list = list;
++        EntityPlayer player = allocate(EntityPlayer.class);
++        player.setProfile(new com.mojang.authlib.GameProfile(new java.util.UUID(0, 1), "review-moved"));
++        player.world = a;
++        PlayerConnection connection = allocate(PlayerConnection.class);
++        connection.player = player; player.playerConnection = connection;
++        set(connection, PlayerConnection.class, "minecraftServer", s);
++        NetworkManager network = allocate(NetworkManager.class);
++        set(network, NetworkManager.class, "outboundPacketsQueue", new ConcurrentLinkedQueue<>());
++        network.channel = new io.netty.channel.embedded.EmbeddedChannel();
++        network.setNetHandler(connection);
++        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
++        AthenaWorldThread first = new AthenaWorldThread(a), second = new AthenaWorldThread(b);
++        a.athenaThread = first; b.athenaThread = second;
++        first.post(a, () -> { entered.countDown(); await(release); });
++        first.start(); second.start();
++        try {
++            await(entered);
++            network.channel.close();
++            // Exactly ServerConnection.networkTick's scheduling expression for a closed channel.
++            WorldServer owner = ServerConnection.athenaThreadedWorldOf(network);
++            check(owner == a, "wrong original owner");
++            WorldServer.athenaRunForEntity(network.getPlayer(), network::checkDisconnected);
++            player.world = b; // the ownership change in moveToWorld, before the queued quit runs
++            release.countDown(); await(list.called);
++            check(Boolean.TRUE.equals(list.owned.get()), "the quit ran on a thread that does not own the player");
++            check(connection.athenaQuitDone(), "real onDisconnect did not mark quit");
++        } finally {
++            release.countDown(); check(first.stopAndJoin(2000), "first thread stuck");
++            check(second.stopAndJoin(2000), "second thread stuck");
++            a.athenaThread = null; b.athenaThread = null;
++            first.handBack(); second.handBack(); network.channel.close();
++        }
++    }
++    @org.junit.Test public void timingsRestart() throws Exception {
++        Server s = server(); WorldServer w = world(s);
++        set(null, AthenaWorldThread.class, "started", false);
++        AthenaWorldThread.beforeFirstStart();
++        AthenaWorldThread thread = new AthenaWorldThread(w);
++        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
++        thread.post(w, () -> { entered.countDown(); await(release); });
++        w.athenaThread = thread; thread.start();
++        try {
++            await(entered);
++            co.aikar.timings.Timings.setTimingsEnabled(true); // exactly /timings on
++            java.lang.reflect.Method factory = co.aikar.timings.Timings.class.getDeclaredMethod("ofSafe", String.class);
++            factory.setAccessible(true);
++            Object timing = factory.invoke(null, "review after world start");
++            boolean enabled = (Boolean) get(timing, Class.forName("co.aikar.timings.TimingHandler"), "enabled");
++            check(AthenaWorldThread.anyRunning() && !co.aikar.timings.Timings.isTimingsEnabled() && !enabled, "timings came back on beside a world thread");
++        } finally {
++            co.aikar.timings.Timings.setTimingsEnabled(false);
++            co.aikar.timings.SpigotTimings.stopServer();
++            release.countDown(); check(thread.stopAndJoin(2000), "timings thread stuck");
++            w.athenaThread = null; thread.handBack();
++        }
++    }
++    @org.junit.Test public void unboundedFinishNoBudget() throws Exception { unboundedFinish(0); }
++    @org.junit.Test public void unboundedFinishZeroBudget() throws Exception { unboundedFinish(1); }
++    @org.junit.Test public void budgetedFinish() throws Exception { unboundedFinish(2); }
++}

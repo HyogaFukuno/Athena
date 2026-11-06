@@ -1,0 +1,395 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 15:24:34 +0900
+Subject: [PATCH] Water, leaves and mesa noise keep no working state in the
+ shared block or biome
+
+Audit 2026-11-06 F4, F5, F6: the source count is a local; the leaf scan has a per-thread array of 11 a side instead of a shared one of 32, and waits when its area is not loaded instead of reading the last scan; a mesa column reads the immutable tables of its seed, a few of which are kept. Tables no longer depend on the seed built before them.
+
+diff --git a/src/main/java/net/minecraft/server/BiomeMesa.java b/src/main/java/net/minecraft/server/BiomeMesa.java
+index cc2fd3fde89150a1bf45020a54454c1ec63265d1..9cf6ec2e65cc6c80fb44f038430ffb1d97f4d2a0 100644
+--- a/src/main/java/net/minecraft/server/BiomeMesa.java
++++ b/src/main/java/net/minecraft/server/BiomeMesa.java
+@@ -6,11 +6,6 @@ import java.util.Random;
+ 
+ public class BiomeMesa extends BiomeBase {
+ 
+-    private IBlockData[] aD;
+-    private long aE;
+-    private NoiseGenerator3 aF;
+-    private NoiseGenerator3 aG;
+-    private NoiseGenerator3 aH;
+     private boolean aI;
+     private boolean aJ;
+ 
+@@ -43,32 +38,54 @@ public class BiomeMesa extends BiomeBase {
+         super.decorate(world, random, blockposition);
+     }
+ 
+-    // Athena start - the noise tables below are built lazily into fields of this shared biome
+-    // singleton. With shaping running on several threads, two of them could enter the build at once
+-    // and one would read half-published arrays. The build is once per seed, so a lock costs nothing;
+-    // taking it on every call is also what makes the arrays visible to the reading thread.
+-    private final Object noiseLock = new Object();
+-
+-    private void ensureNoiseTables(long seed) {
+-        synchronized (this.noiseLock) {
+-            if (this.aD == null || this.aE != seed) {
+-                this.a(seed);
+-            }
++    // Athena start - the noise tables of one seed, never changed once built. This biome is shared by
++    // every world and generating threads, so a column takes the tables of its world's seed once and
++    // reads only those. A few seeds are kept: worlds generating side by side do not rebuild each
++    // other's for every column, and a server that makes worlds for ever does not keep them all.
++    private static final class NoiseTables {
++        final long seed;
++        final IBlockData[] aD;
++        final NoiseGenerator3 aF;
++        final NoiseGenerator3 aG;
++        final NoiseGenerator3 aH;
++
++        NoiseTables(long seed, IBlockData[] aD, NoiseGenerator3 aF, NoiseGenerator3 aG, NoiseGenerator3 aH) {
++            this.seed = seed;
++            this.aD = aD;
++            this.aF = aF;
++            this.aG = aG;
++            this.aH = aH;
++        }
++    }
+ 
+-            if (this.aF == null || this.aG == null || this.aE != seed) {
+-                Random random1 = new Random(this.aE);
++    private static final int MAX_NOISE_TABLES = 4;
++    private volatile NoiseTables[] noiseTables = new NoiseTables[0];
+ 
+-                this.aF = new NoiseGenerator3(random1, 4);
+-                this.aG = new NoiseGenerator3(random1, 1);
++    private NoiseTables noiseTables(long seed) {
++        for (NoiseTables tables : this.noiseTables) {
++            if (tables.seed == seed) {
++                return tables;
+             }
+-
+-            this.aE = seed;
++        }
++        synchronized (this) {
++            NoiseTables[] known = this.noiseTables;
++            for (NoiseTables tables : known) {
++                if (tables.seed == seed) {
++                    return tables;
++                }
++            }
++            NoiseTables tables = this.a(seed);
++            NoiseTables[] kept = new NoiseTables[Math.min(known.length + 1, MAX_NOISE_TABLES)];
++            kept[0] = tables;
++            System.arraycopy(known, 0, kept, 1, kept.length - 1);
++            this.noiseTables = kept;
++            return tables;
+         }
+     }
+     // Athena end
+ 
+     public void genTerrainBlocks(World world, Random random, ChunkSnapshot chunksnapshot, int i, int j, double d0) {
+-        this.ensureNoiseTables(world.getSeed()); // Athena - see above
++        final NoiseTables tables = this.noiseTables(world.getSeed()); // Athena - see above
+         double d1 = 0.0D;
+         int k;
+         int l;
+@@ -76,11 +93,11 @@ public class BiomeMesa extends BiomeBase {
+         if (this.aI) {
+             k = (i & -16) + (j & 15);
+             l = (j & -16) + (i & 15);
+-            double d2 = Math.min(Math.abs(d0), this.aF.a((double) k * 0.25D, (double) l * 0.25D));
++            double d2 = Math.min(Math.abs(d0), tables.aF.a((double) k * 0.25D, (double) l * 0.25D));
+ 
+             if (d2 > 0.0D) {
+                 double d3 = 0.001953125D;
+-                double d4 = Math.abs(this.aG.a((double) k * d3, (double) l * d3));
++                double d4 = Math.abs(tables.aG.a((double) k * d3, (double) l * d3));
+ 
+                 d1 = d2 * d2 * 2.5D;
+                 double d5 = Math.ceil(d4 * 50.0D) + 14.0D;
+@@ -145,7 +162,7 @@ public class BiomeMesa extends BiomeBase {
+                                     if (flag) {
+                                         iblockdata3 = Blocks.HARDENED_CLAY.getBlockData();
+                                     } else {
+-                                        iblockdata3 = this.a(i, l1, j);
++                                        iblockdata3 = this.a(tables, i, l1, j);
+                                     }
+                                 } else {
+                                     iblockdata3 = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.ORANGE);
+@@ -167,7 +184,7 @@ public class BiomeMesa extends BiomeBase {
+                         if (flag1) {
+                             chunksnapshot.setBlockState(l, l1, k, Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.ORANGE));
+                         } else {
+-                            iblockdata3 = this.a(i, l1, j);
++                            iblockdata3 = this.a(tables, i, l1, j);
+                             chunksnapshot.setBlockState(l, l1, k, iblockdata3);
+                         }
+                     }
+@@ -177,19 +194,19 @@ public class BiomeMesa extends BiomeBase {
+ 
+     }
+ 
+-    private void a(long i) {
+-        this.aD = new IBlockData[64];
+-        Arrays.fill(this.aD, Blocks.HARDENED_CLAY.getBlockData());
++    private NoiseTables a(long i) { // Athena - builds a seed's tables instead of filling this biome's fields
++        final IBlockData[] aD = new IBlockData[64];
++        Arrays.fill(aD, Blocks.HARDENED_CLAY.getBlockData());
+         Random random = new Random(i);
+ 
+-        this.aH = new NoiseGenerator3(random, 1);
++        final NoiseGenerator3 aH = new NoiseGenerator3(random, 1);
+ 
+         int j;
+ 
+         for (j = 0; j < 64; ++j) {
+             j += random.nextInt(5) + 1;
+             if (j < 64) {
+-                this.aD[j] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.ORANGE);
++                aD[j] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.ORANGE);
+             }
+         }
+ 
+@@ -205,7 +222,7 @@ public class BiomeMesa extends BiomeBase {
+             i1 = random.nextInt(64);
+ 
+             for (j1 = 0; i1 + j1 < 64 && j1 < l; ++j1) {
+-                this.aD[i1 + j1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.YELLOW);
++                aD[i1 + j1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.YELLOW);
+             }
+         }
+ 
+@@ -218,7 +235,7 @@ public class BiomeMesa extends BiomeBase {
+             j1 = random.nextInt(64);
+ 
+             for (k1 = 0; j1 + k1 < 64 && k1 < i1; ++k1) {
+-                this.aD[j1 + k1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.BROWN);
++                aD[j1 + k1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.BROWN);
+             }
+         }
+ 
+@@ -229,7 +246,7 @@ public class BiomeMesa extends BiomeBase {
+             k1 = random.nextInt(64);
+ 
+             for (int l1 = 0; k1 + l1 < 64 && l1 < j1; ++l1) {
+-                this.aD[k1 + l1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.RED);
++                aD[k1 + l1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.RED);
+             }
+         }
+ 
+@@ -242,23 +259,29 @@ public class BiomeMesa extends BiomeBase {
+             j1 += random.nextInt(16) + 4;
+ 
+             for (int i2 = 0; j1 + i2 < 64 && i2 < b0; ++i2) {
+-                this.aD[j1 + i2] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.WHITE);
++                aD[j1 + i2] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.WHITE);
+                 if (j1 + i2 > 1 && random.nextBoolean()) {
+-                    this.aD[j1 + i2 - 1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.SILVER);
++                    aD[j1 + i2 - 1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.SILVER);
+                 }
+ 
+                 if (j1 + i2 < 63 && random.nextBoolean()) {
+-                    this.aD[j1 + i2 + 1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.SILVER);
++                    aD[j1 + i2 + 1] = Blocks.STAINED_HARDENED_CLAY.getBlockData().set(BlockCloth.COLOR, EnumColor.SILVER);
+                 }
+             }
+         }
+ 
++        // Athena - vanilla seeded these from a field that was still 0 when a server built its tables
++        Random random1 = new Random(0L);
++        NoiseGenerator3 aF = new NoiseGenerator3(random1, 4);
++        NoiseGenerator3 aG = new NoiseGenerator3(random1, 1);
++
++        return new NoiseTables(i, aD, aF, aG, aH);
+     }
+ 
+-    private IBlockData a(int i, int j, int k) {
+-        int l = (int) Math.round(this.aH.a((double) i * 1.0D / 512.0D, (double) i * 1.0D / 512.0D) * 2.0D);
++    private IBlockData a(NoiseTables tables, int i, int j, int k) {
++        int l = (int) Math.round(tables.aH.a((double) i * 1.0D / 512.0D, (double) i * 1.0D / 512.0D) * 2.0D);
+ 
+-        return this.aD[(j + l + 64) % 64];
++        return tables.aD[(j + l + 64) % 64];
+     }
+ 
+     protected BiomeBase createMutatedBiome(int i) {
+diff --git a/src/main/java/net/minecraft/server/BlockFlowing.java b/src/main/java/net/minecraft/server/BlockFlowing.java
+index 37d9c95334c0ea2f63725f8a9c90d4530cc47085..d8b8bca98d65d846e0e5012845230b8c173339da 100644
+--- a/src/main/java/net/minecraft/server/BlockFlowing.java
++++ b/src/main/java/net/minecraft/server/BlockFlowing.java
+@@ -13,8 +13,6 @@ import org.bukkit.event.block.BlockFromToEvent;
+ 
+ public class BlockFlowing extends BlockFluids {
+ 
+-    int adjacentSourceBlocks;
+-
+     protected BlockFlowing(Material material) {
+         super(material);
+     }
+@@ -46,7 +44,7 @@ public class BlockFlowing extends BlockFluids {
+         if (i > 0) {
+             int l = -100;
+ 
+-            this.adjacentSourceBlocks = 0;
++            int sources = 0; // Athena - a local: this block is shared by every world
+ 
+             // Athena start - index the shared facings array and scan on coordinates
+             EnumDirection[] facings = EnumDirection.EnumDirectionLimit.HORIZONTAL.facings();
+@@ -54,7 +52,12 @@ public class BlockFlowing extends BlockFluids {
+             for (int f = 0; f < facings.length; ++f) {
+                 EnumDirection enumdirection = facings[f];
+ 
+-                l = this.checkAdjacentBlock(world, posX + enumdirection.getAdjacentX(), posY + enumdirection.getAdjacentY(), posZ + enumdirection.getAdjacentZ(), l);
++                int adjacent = this.getLevel(world, posX + enumdirection.getAdjacentX(), posY + enumdirection.getAdjacentY(), posZ + enumdirection.getAdjacentZ());
++
++                if (adjacent == 0) {
++                    ++sources;
++                }
++                l = this.checkAdjacentLevel(adjacent, l);
+             }
+             // Athena end
+ 
+@@ -73,7 +76,7 @@ public class BlockFlowing extends BlockFluids {
+                 }
+             }
+ 
+-            if (this.adjacentSourceBlocks >= 2 && this.material == Material.WATER) {
++            if (sources >= 2 && this.material == Material.WATER) {
+                 IBlockData iblockdata1 = world.getType(posX, posY - 1, posZ); // Athena
+ 
+                 if (iblockdata1.getBlock().getMaterial().isBuildable()) {
+@@ -268,26 +271,13 @@ public class BlockFlowing extends BlockFluids {
+ 
+         return !(block instanceof BlockDoor) && block != Blocks.STANDING_SIGN && block != Blocks.LADDER && block != Blocks.REEDS ? (block.material == Material.PORTAL ? true : block.material.isSolid()) : true;
+     }
+-
+-    protected int checkAdjacentBlock(World world, int x, int y, int z, int i) {
+-        return this.checkAdjacentLevel(this.getLevel(world, x, y, z), i);
+-    }
+     // Athena end
+ 
+-    protected int checkAdjacentBlock(World world, BlockPosition blockposition, int i) {
+-        return this.checkAdjacentLevel(this.getLevel(world, blockposition), i); // Athena - shared with the coordinate form
+-    }
+-
+-    // Athena - the tally-and-clamp half of checkAdjacentBlock, kept in one place so the position and
+-    // coordinate forms cannot drift apart. Still bumps adjacentSourceBlocks as a side effect.
++    // Athena - the clamp half of the neighbour scan
+     private int checkAdjacentLevel(int j, int i) {
+         if (j < 0) {
+             return i;
+         } else {
+-            if (j == 0) {
+-                ++this.adjacentSourceBlocks;
+-            }
+-
+             if (j >= 8) {
+                 j = 0;
+             }
+diff --git a/src/main/java/net/minecraft/server/BlockLeaves.java b/src/main/java/net/minecraft/server/BlockLeaves.java
+index 8f6199b00aacd5f4d6866c2d4636b1fba60075a1..6bd770bfc44ecf3144e93de05f7f5bab3184078b 100644
+--- a/src/main/java/net/minecraft/server/BlockLeaves.java
++++ b/src/main/java/net/minecraft/server/BlockLeaves.java
+@@ -9,7 +9,9 @@ public abstract class BlockLeaves extends BlockTransparent {
+ 
+     public static final BlockStateBoolean DECAYABLE = BlockStateBoolean.of("decayable");
+     public static final BlockStateBoolean CHECK_DECAY = BlockStateBoolean.of("check_decay");
+-    int[] surroundings;
++    // Athena - per thread: this block is shared by every world. 11 a side, the 9 the scan fills and a
++    // border that stays 0; vanilla's 32 a side kept 128 KiB for the same cells.
++    private static final ThreadLocal<int[]> SURROUNDINGS = ThreadLocal.withInitial(() -> new int[11 * 11 * 11]);
+ 
+     public BlockLeaves() {
+         super(Material.LEAVES, false);
+@@ -52,15 +54,17 @@ public abstract class BlockLeaves extends BlockTransparent {
+                 int j = blockposition.getX();
+                 int k = blockposition.getY();
+                 int l = blockposition.getZ();
+-                byte b1 = 32;
++                byte b1 = 11;
+                 int i1 = b1 * b1;
+                 int j1 = b1 / 2;
++                final int[] surroundings = SURROUNDINGS.get();
+ 
+-                if (this.surroundings == null) {
+-                    this.surroundings = new int[b1 * b1 * b1];
++                // Athena - not yet: what the array holds is another leaf's scan
++                if (!world.isAreaLoaded(j - i, k - i, l - i, j + i, k + i, l + i, true)) { // Athena - scalar; this built two positions per decay check
++                    return;
+                 }
+ 
+-                if (world.isAreaLoaded(j - i, k - i, l - i, j + i, k + i, l + i, true)) { // Athena - scalar; this built two positions per decay check
++                {
+                     int k1;
+                     int l1;
+                     int i2;
+@@ -93,12 +97,12 @@ public abstract class BlockLeaves extends BlockTransparent {
+ 
+                                 if (block != Blocks.LOG && block != Blocks.LOG2) {
+                                     if (block.getMaterial() == Material.LEAVES) {
+-                                        this.surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = -2;
++                                        surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = -2;
+                                     } else {
+-                                        this.surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = -1;
++                                        surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = -1;
+                                     }
+                                 } else {
+-                                    this.surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = 0;
++                                    surroundings[(k1 + j1) * i1 + (l1 + j1) * b1 + i2 + j1] = 0;
+                                 }
+                             }
+                         }
+@@ -108,29 +112,29 @@ public abstract class BlockLeaves extends BlockTransparent {
+                         for (l1 = -b0; l1 <= b0; ++l1) {
+                             for (i2 = -b0; i2 <= b0; ++i2) {
+                                 for (int j2 = -b0; j2 <= b0; ++j2) {
+-                                    if (this.surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1] == k1 - 1) {
+-                                        if (this.surroundings[(l1 + j1 - 1) * i1 + (i2 + j1) * b1 + j2 + j1] == -2) {
+-                                            this.surroundings[(l1 + j1 - 1) * i1 + (i2 + j1) * b1 + j2 + j1] = k1;
++                                    if (surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1] == k1 - 1) {
++                                        if (surroundings[(l1 + j1 - 1) * i1 + (i2 + j1) * b1 + j2 + j1] == -2) {
++                                            surroundings[(l1 + j1 - 1) * i1 + (i2 + j1) * b1 + j2 + j1] = k1;
+                                         }
+ 
+-                                        if (this.surroundings[(l1 + j1 + 1) * i1 + (i2 + j1) * b1 + j2 + j1] == -2) {
+-                                            this.surroundings[(l1 + j1 + 1) * i1 + (i2 + j1) * b1 + j2 + j1] = k1;
++                                        if (surroundings[(l1 + j1 + 1) * i1 + (i2 + j1) * b1 + j2 + j1] == -2) {
++                                            surroundings[(l1 + j1 + 1) * i1 + (i2 + j1) * b1 + j2 + j1] = k1;
+                                         }
+ 
+-                                        if (this.surroundings[(l1 + j1) * i1 + (i2 + j1 - 1) * b1 + j2 + j1] == -2) {
+-                                            this.surroundings[(l1 + j1) * i1 + (i2 + j1 - 1) * b1 + j2 + j1] = k1;
++                                        if (surroundings[(l1 + j1) * i1 + (i2 + j1 - 1) * b1 + j2 + j1] == -2) {
++                                            surroundings[(l1 + j1) * i1 + (i2 + j1 - 1) * b1 + j2 + j1] = k1;
+                                         }
+ 
+-                                        if (this.surroundings[(l1 + j1) * i1 + (i2 + j1 + 1) * b1 + j2 + j1] == -2) {
+-                                            this.surroundings[(l1 + j1) * i1 + (i2 + j1 + 1) * b1 + j2 + j1] = k1;
++                                        if (surroundings[(l1 + j1) * i1 + (i2 + j1 + 1) * b1 + j2 + j1] == -2) {
++                                            surroundings[(l1 + j1) * i1 + (i2 + j1 + 1) * b1 + j2 + j1] = k1;
+                                         }
+ 
+-                                        if (this.surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + (j2 + j1 - 1)] == -2) {
+-                                            this.surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + (j2 + j1 - 1)] = k1;
++                                        if (surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + (j2 + j1 - 1)] == -2) {
++                                            surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + (j2 + j1 - 1)] = k1;
+                                         }
+ 
+-                                        if (this.surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1 + 1] == -2) {
+-                                            this.surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1 + 1] = k1;
++                                        if (surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1 + 1] == -2) {
++                                            surroundings[(l1 + j1) * i1 + (i2 + j1) * b1 + j2 + j1 + 1] = k1;
+                                         }
+                                     }
+                                 }
+@@ -139,7 +143,7 @@ public abstract class BlockLeaves extends BlockTransparent {
+                     }
+                 }
+ 
+-                int k2 = this.surroundings[j1 * i1 + j1 * b1 + j1];
++                int k2 = surroundings[j1 * i1 + j1 * b1 + j1];
+ 
+                 if (k2 >= 0) {
+                     world.setTypeAndData(blockposition, iblockdata.set(BlockLeaves.CHECK_DECAY, Boolean.valueOf(false)), 4);
