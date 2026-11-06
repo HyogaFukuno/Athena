@@ -104,6 +104,7 @@ if a.vps:
             % (a.gc, script, script, script))
     props = "-Dbotwatch.matches=%d -Dsgbots.debug=%s -Dbotwatch.protect=%s" % (a.matches * a.rooms, os.environ.get("SGBOTS_DEBUG", "false"),
                                                                               os.environ.get("BOTWATCH_PROTECT", ""))
+    props += " " + os.environ.get("SGBOTS_JVM", "")   # measuring: JFR, -Dathena.threadStats, GC logs
     start = ("cd %s && : > console.out && ATHENA_CACHE_ROOT=%s HEAP=%s JAVA_TOOL_OPTIONS=%s %s 2>&1 | tee -a console.out"
              % (D, CACHE, a.heap, json.dumps(props), script))
 
