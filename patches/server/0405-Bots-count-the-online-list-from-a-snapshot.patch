@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 23:49:37 +0900
+Subject: [PATCH] Bots: count the online list from a snapshot
+
+
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index b6c167cf16bd79604a19a805eeefcfe586e5cb51..0978eb6203628a978903cb0a5b02271eb6b61562 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -451,8 +451,8 @@ public abstract class PlayerList {
+     /** The players online that are not bots. */
+     int athenaCountWithoutBots() {
+         int count = 0;
+-        for (int i = 0; i < this.players.size(); ++i) {
+-            if (!(this.players.get(i) instanceof AthenaBotPlayer)) ++count;
++        for (EntityPlayer player : this.players) { // a snapshot: other threads leave and move
++            if (!(player instanceof AthenaBotPlayer)) ++count;
+         }
+         return count;
+     }

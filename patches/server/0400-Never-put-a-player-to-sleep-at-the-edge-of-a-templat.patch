@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 03:46:24 +0900
+Subject: [PATCH] Never put a player to sleep at the edge of a template's
+ bounds
+
+Spigot's activation range skips an entity whose neighbouring chunks are not loaded, and a template world never loads the chunks outside its bounds. A player teleported to a deathmatch venue's spawn on that edge was not ticked, so EntityPlayer.onUpdate never sent it its chunks: 64 queued, none sent, the client saw only sky. A player now ticks wherever its own chunk is loaded (bots already did).
+
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index be05cd8b0e633324688da2c9987c15e6a05a443b..a5d693dd05460445f366428e979220f56473b94f 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -370,10 +370,11 @@ public class ActivationRange
+             SpigotTimings.checkIfActiveTimer.stopTiming();
+             return true;
+         }
+-        // Athena start - a bot moves on its world's ticks as a client's player moves on its packets, which
+-        // this never holds up: it ticks wherever its own chunk is loaded, also next to chunks that are not
+-        // (the edge of a template's bounds, which are never loaded)
+-        if ( entity instanceof net.minecraft.server.AthenaBotPlayer )
++        // Athena start - a player is never put to sleep where its own chunk is loaded, also next to chunks
++        // that are not (the edge of a template's bounds, which are never loaded). Its world's tick is what
++        // sends a client its chunks (EntityPlayer.onUpdate) and moves a bot: a player teleported to a
++        // deathmatch venue's spawn on that edge was sent none and saw only sky
++        if ( entity instanceof net.minecraft.server.EntityPlayer )
+         {
+             SpigotTimings.checkIfActiveTimer.stopTiming();
+             return entity.world.getChunkIfLoaded( MathHelper.floor( entity.locX ) >> 4, MathHelper.floor( entity.locZ ) >> 4 ) != null;

@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 13:43:29 +0900
+Subject: [PATCH] Boss bar: a wither again, kept in the fog at the edge of the
+ view
+
+The client draws an ender dragon even when it is invisible, so the dragon of the last change was plainly seen. The wither is back, and kept 85% of the way to the edge of what the player sees (the smaller of the server's view distance and the client's render distance, from its settings), at most 100 blocks, where its armour below half health is lost in the fog rather than 30 blocks ahead.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBossBar.java b/src/main/java/net/minecraft/server/AthenaBossBar.java
+index afaab4133590bd94950d393ac58cfc9deb27fe94..693ecac8d3cd479ebe0a22bcf484ac13bf0bc06f 100644
+--- a/src/main/java/net/minecraft/server/AthenaBossBar.java
++++ b/src/main/java/net/minecraft/server/AthenaBossBar.java
+@@ -3,27 +3,34 @@ package net.minecraft.server;
+ /**
+  * Athena - a boss bar shown to one player (athena.api.Athena.setBossBar). Neither 1.7 nor 1.8 has a
+  * boss bar of its own: the client draws one for a boss it is rendering, with the boss's name and
+- * health. So this tells only this player about an invisible, silent ender dragon that exists nowhere
+- * else (not in the world, not tracked), and keeps it {@value #DISTANCE} blocks ahead of their eyes:
+- * 1.8 renders entities by the chunk sections in view, so a boss behind the player or under the
+- * world would drop the bar. It is too far away to be hit, and 1.7 gets it through the usual
+- * translation (a dragon, with its name).
++ * health. So this tells only this player about an invisible, silent wither that exists nowhere
++ * else (not in the world, not tracked), and keeps it ahead of their eyes: the client draws the bar
++ * only while it renders the boss, so the boss has to stay in view.
+  * <p>
+- * A dragon, not a wither: a wither at half its health or less wears its armour, which the client
+- * draws even on an invisible wither, so a bar below half showed a ghostly shape ahead of the player
+- * whenever they looked around. An invisible dragon draws nothing.
++ * It is kept far away, in the fog at the edge of what the player sees ({@link #distance}): a wither
++ * at half its health or less wears its armour, which the client draws even on an invisible wither,
++ * and at 30 blocks a bar below half showed a ghostly shape whenever the player looked around. (An
++ * ender dragon has no armour but the client draws it even when invisible.) 1.7 gets it through the
++ * usual translation (a wither, with its name).
+  */
+ public final class AthenaBossBar {
+-    /** How far ahead of the player's eyes the dragon is kept. */
+-    private static final double DISTANCE = 30.0D;
++    /**
++     * How far ahead of the player's eyes the wither is kept: 85% of what they see (the smaller of the
++     * server's view distance and the client's render distance), in the fog, and no further than 100
++     * blocks, past which the client does not render a wither at all.
++     */
++    private double distance() {
++        int chunks = Math.max(2, Math.min(this.player.viewDistance, this.player.athenaClientViewDistance));
++        return Math.max(24.0D, Math.min(100.0D, chunks * 16.0D * 0.85D));
++    }
+     /** Boss bar names longer than this are cut (the name tag's limit). */
+     private static final int MAX_TITLE = 64;
+-    /** The dragon is moved once it is this far (1 block, in 1/32 blocks, squared) from where the client has it. */
++    /** The wither is moved once it is this far (1 block, in 1/32 blocks, squared) from where the client has it. */
+     private static final long MOVE_THRESHOLD_SQUARED = 32L * 32L;
+ 
+     private final EntityPlayer player;
+-    private final EntityEnderDragon boss;
+-    /** The world the client was told about the dragon in; null until then. A new world forgets it. */
++    private final EntityWither boss;
++    /** The world the client was told about the wither in; null until then. A new world forgets it. */
+     private World spawnedIn;
+     private int lastX, lastY, lastZ;
+ 
+@@ -34,7 +41,7 @@ public final class AthenaBossBar {
+ 
+     private AthenaBossBar(EntityPlayer player) {
+         this.player = player;
+-        this.boss = new EntityEnderDragon(player.world);
++        this.boss = new EntityWither(player.world);
+         this.boss.setInvisible(true);
+         this.boss.setSilent(true);
+     }
+@@ -62,8 +69,8 @@ public final class AthenaBossBar {
+         int x = MathHelper.floor(at[0] * 32.0D);
+         int y = MathHelper.floor(at[1] * 32.0D);
+         int z = MathHelper.floor(at[2] * 32.0D);
+-        // Moved only once it is a block from where the client has it: 30 blocks ahead that is about
+-        // 2 degrees of looking around, and the dragon stays in view, without a packet every tick
++        // Moved only once it is a block from where the client has it: that is a degree or two of
++        // looking around, and the wither stays in view, without a packet every tick
+         long dx = x - this.lastX, dy = y - this.lastY, dz = z - this.lastZ;
+         if (dx * dx + dy * dy + dz * dz >= MOVE_THRESHOLD_SQUARED) {
+             this.lastX = x;
+@@ -92,13 +99,14 @@ public final class AthenaBossBar {
+         this.spawnedIn = this.player.world;
+     }
+ 
+-    /** {@value #DISTANCE} blocks ahead of the player's eyes, kept inside the world's height. */
++    /** {@link #distance} blocks ahead of the player's eyes, kept inside the world's height. */
+     private double[] target() {
+         Vec3D look = this.player.getLookVec();
+-        double y = this.player.locY + this.player.getHeadHeight() + look.yCoord * DISTANCE;
++        double distance = this.distance();
++        double y = this.player.locY + this.player.getHeadHeight() + look.yCoord * distance;
+         return new double[] {
+-                this.player.locX + look.xCoord * DISTANCE,
++                this.player.locX + look.xCoord * distance,
+                 Math.max(1.0D, Math.min(254.0D, y)),
+-                this.player.locZ + look.zCoord * DISTANCE };
++                this.player.locZ + look.zCoord * distance };
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 2311fc322cbd88c3835901c4632bd725f8acff0a..a6447ff1cd5e48d59f69195d068118f8d9b00082 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -355,7 +355,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+ 
+     public void onUpdate() {
+         this.athenaRecordBox(); // Athena
+-        if (this.athenaBossBar != null) this.athenaBossBar.tick(); // Athena - keep the boss bar's dragon in view
++        if (this.athenaBossBar != null) this.athenaBossBar.tick(); // Athena - keep the boss bar's wither in view
+         // CraftBukkit start
+         if (this.joining) {
+             this.joining = false;
+@@ -1224,8 +1224,12 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         this.chatVisibility = packetplayinsettings.getChatVisibility();
+         this.chatColours = packetplayinsettings.isColorsEnabled();
+         this.getDataWatcher().watch(10, Byte.valueOf((byte) packetplayinsettings.getModelPartFlags()));
++        this.athenaClientViewDistance = packetplayinsettings.athenaViewDistance(); // Athena
+     }
+ 
++    /** Athena - the client's render distance in chunks, from its settings; 8 until it says. */
++    public int athenaClientViewDistance = 8;
++
+     public EntityHuman.EnumChatVisibility getChatFlags() {
+         return this.chatVisibility;
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayInSettings.java b/src/main/java/net/minecraft/server/PacketPlayInSettings.java
+index 27a42d96f1cdc9ba74d911b49ee31c6941544fc8..5073a69a33a2566fdece05500add180e0890effd 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayInSettings.java
++++ b/src/main/java/net/minecraft/server/PacketPlayInSettings.java
+@@ -11,6 +11,11 @@ public class PacketPlayInSettings implements Packet<PacketListenerPlayIn> {
+     private boolean enableColors;
+     private int modelPartFlags;
+ 
++    // Athena - the client's render distance, in chunks (AthenaBossBar keeps its boss inside it)
++    public int athenaViewDistance() {
++        return this.view;
++    }
++
+     public PacketPlayInSettings() {}
+ 
+     @Override

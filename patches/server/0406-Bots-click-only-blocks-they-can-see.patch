@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 00:24:36 +0900
+Subject: [PATCH] Bots click only blocks they can see
+
+A bot's right click checked only the distance, so bots opened chests through walls. It now needs a clear line from its eyes to the block.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBot.java b/src/main/java/net/minecraft/server/AthenaBot.java
+index b3b9e634cc4c60a919b5e5105823e121f7aa7a77..98dfe192a361c2484b291dd842155b07de2cea69 100644
+--- a/src/main/java/net/minecraft/server/AthenaBot.java
++++ b/src/main/java/net/minecraft/server/AthenaBot.java
+@@ -227,19 +227,11 @@ public final class AthenaBot implements Bot {
+     @Override
+     public boolean interact(Block block, BlockFace face) {
+         this.checkThread("click a block");
+-        if (this.player.dead || block == null || face == null) return false;
++        if (this.player.dead || block == null || face == null || !this.canClick(block)) return false;
+         WorldServer world = this.player.getServerForPlayer();
+-        if (((org.bukkit.craftbukkit.CraftWorld) block.getWorld()).getHandle() != world) return false;
+         BlockPosition position = new BlockPosition(block.getX(), block.getY(), block.getZ());
+         EnumDirection direction = CraftBlock.blockFaceToNotch(face);
+         if (direction == null) return false;
+-        double eyeX = this.player.locX;
+-        double eyeY = this.player.locY + (double) this.player.getHeadHeight();
+-        double eyeZ = this.player.locZ;
+-        double dx = eyeX - position.getX();
+-        double dy = eyeY - position.getY();
+-        double dz = eyeZ - position.getZ();
+-        if (dx * dx + dy * dy + dz * dz > INTERACT_REACH_SQUARED) return false;
+         if (position.getY() >= this.player.server.getMaxBuildHeight() || !world.getWorldBorder().contains(position)) return false;
+         this.player.resetIdleTimer();
+         if (!this.player.server.a(world, position, this.player)) {
+@@ -250,6 +242,26 @@ public final class AthenaBot implements Bot {
+         return true;
+     }
+ 
++    @Override
++    public boolean canClick(Block block) {
++        WorldServer world = this.player.getServerForPlayer();
++        if (block == null || ((org.bukkit.craftbukkit.CraftWorld) block.getWorld()).getHandle() != world) return false;
++        double eyeX = this.player.locX;
++        double eyeY = this.player.locY + (double) this.player.getHeadHeight();
++        double eyeZ = this.player.locZ;
++        double dx = eyeX - block.getX();
++        double dy = eyeY - block.getY();
++        double dz = eyeZ - block.getZ();
++        if (dx * dx + dy * dy + dz * dz > INTERACT_REACH_SQUARED) return false;
++        // no other block in the way: a client clicks the first block it looks at (the other half of a
++        // large chest is the same chest)
++        MovingObjectPosition hit = world.rayTrace(new Vec3D(eyeX, eyeY, eyeZ), new Vec3D(block.getX() + 0.5D, block.getY() + 0.5D, block.getZ() + 0.5D), false);
++        if (hit == null || hit.type != MovingObjectPosition.EnumMovingObjectType.BLOCK) return true;
++        BlockPosition at = hit.getBlockPos();
++        return at.getX() == block.getX() && at.getY() == block.getY() && at.getZ() == block.getZ()
++                || org.bukkit.craftbukkit.util.CraftMagicNumbers.getMaterial(world.getType(at).getBlock()) == block.getType();
++    }
++
+     /** PlayerConnection's: an item used up (count 0) leaves the hand empty. */
+     private void clearEmptyHand() {
+         ItemStack itemstack = this.player.inventory.getItemInHand();

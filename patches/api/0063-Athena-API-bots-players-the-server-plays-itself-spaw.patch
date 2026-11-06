@@ -1,0 +1,224 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 5 Nov 2026 01:54:19 +0900
+Subject: [PATCH] Athena API: bots, players the server plays itself (spawnBot)
+
+athena.api.bot.Bot and BotController: a player with no client, logged in with the usual events, moved by the keys and clicks a plugin gives it each tick on its world's thread.
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index a6f956c569e4dc3d8aedcefed190f520bff0938e..4509b404588e85cf7d5f96b2be12ffdec284fc02 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -525,4 +525,39 @@ public final class Athena {
+     public static void requestGarbageCollection() {
+         getServer().requestGarbageCollection();
+     }
++
++    /**
++     * Starts a bot: a player the server plays itself (see {@link athena.api.bot.Bot}). It logs in as a
++     * player does - PlayerLoginEvent (from 127.0.0.1, hostname "bot"), PlayerInitialSpawnEvent and
++     * PlayerSpawnLocationEvent choose where it goes, then PlayerJoinEvent - but with no client.
++     * May be called from any thread; the login runs on the server thread.
++     *
++     * <p>The future completes on the thread that ticks the bot's world, once the bot is in that world
++     * (after the move onto a world's own thread, when the spawn events chose one). It completes
++     * exceptionally if the login is refused (the event's kick message), the name or id is in use, or
++     * the name is not a Minecraft name (1 to 16 of A-Z, a-z, 0-9 and _).
++     *
++     * @param name the bot's name
++     * @param id its UUID; use one no real player has, such as a version 3 UUID made from the name
++     * @param skinValue its skin's "textures" property, as {@link #setDisguise}'s; null for the default skin
++     * @param skinSignature that property's signature, or null
++     */
++    public static CompletableFuture<athena.api.bot.Bot> spawnBot(String name, java.util.UUID id, String skinValue, String skinSignature) {
++        return getServer().spawnBot(name, id, skinValue, skinSignature);
++    }
++
++    /** The bot that {@code player} is, or null if it is a real player. */
++    public static athena.api.bot.Bot getBot(Player player) {
++        return getServer().getBot(player);
++    }
++
++    /** Whether {@code player} is a bot ({@link #spawnBot}). */
++    public static boolean isBot(Player player) {
++        return getServer().getBot(player) != null;
++    }
++
++    /** The bots online now. May be called from any thread. */
++    public static Collection<athena.api.bot.Bot> getBots() {
++        return getServer().getBots();
++    }
+ }
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 792b8c73b1458218f5ed069c948cb39b98072abc..108f00ba3ef027c418945e6445baf9cfcd30d3fe 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -79,4 +79,10 @@ public interface AthenaServer {
+     WorldTask runOnWorldTimer(World world, Runnable task, long delay, long period);
+ 
+     void requestGarbageCollection();
++
++    CompletableFuture<athena.api.bot.Bot> spawnBot(String name, java.util.UUID id, String skinValue, String skinSignature);
++
++    athena.api.bot.Bot getBot(Player player);
++
++    Collection<athena.api.bot.Bot> getBots();
+ }
+diff --git a/src/main/java/athena/api/bot/Bot.java b/src/main/java/athena/api/bot/Bot.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c644c78bec7c2dbfc276f6939d3f03108045908
+--- /dev/null
++++ b/src/main/java/athena/api/bot/Bot.java
+@@ -0,0 +1,132 @@
++package athena.api.bot;
++
++import org.bukkit.Location;
++import org.bukkit.block.Block;
++import org.bukkit.block.BlockFace;
++import org.bukkit.entity.Entity;
++import org.bukkit.entity.Player;
++
++/**
++ * Athena - a player the server plays itself: a {@link Player} with no client and no connection,
++ * started with {@link athena.api.Athena#spawnBot}.
++ * <p>
++ * To plugins a bot is an ordinary player. It logs in and out with the usual events
++ * ({@code PlayerLoginEvent}, {@code PlayerSpawnLocationEvent}, {@code PlayerJoinEvent},
++ * {@code PlayerQuitEvent}), is listed in {@link org.bukkit.Bukkit#getOnlinePlayers()} and the tab list,
++ * shows to everyone as a player with its skin, takes damage and knockback, gets hungry, dies and
++ * respawns. Its inventory, health, game mode and location are the {@link Player}'s.
++ * <p>
++ * What a client would do, a bot does through the inputs here: the keys it holds
++ * ({@link #setMovement}, {@link #setJumping}, {@link #setSneaking}, {@link #setSprinting}), where it
++ * looks ({@link #look}), and its clicks ({@link #attack}, {@link #useItem}, {@link #interact},
++ * {@link #releaseItem}, {@link #selectSlot}). Each click goes through the same events and checks as a
++ * player's packet (PlayerInteractEvent, PlayerAnimationEvent, PrePlayerAttackEntityEvent, the
++ * damage events, PlayerItemHeldEvent, the toggle events). Each tick the server runs the bot's
++ * {@link BotController}, then moves the bot from its held keys with the client's own physics: walking,
++ * sprinting, jumping, swimming, climbing, falling (with fall damage) and knockback.
++ * <p>
++ * A bot is never sent chunks or entities and never saves a player file or statistics. It does not
++ * count toward the server's player limit when a real player logs in. Neither the proxy nor
++ * the server list knows about it.
++ * <p>
++ * Everything here must be called on the thread that ticks the bot's world (as for any player:
++ * the server thread, or the world's own thread), which is where its controller runs.
++ */
++public interface Bot {
++
++    /** The player this bot is. The same object for as long as the bot is online. */
++    Player getPlayer();
++
++    /** Whether the bot is still on the server (it has not been removed or kicked). */
++    boolean isOnline();
++
++    /**
++     * The keys held, as a client's movement keys: {@code forward} 1 is W, -1 is S;
++     * {@code strafe} 1 is A (left), -1 is D (right). Values in between are allowed. They are kept
++     * until changed. Sneaking slows both to 0.3 as on the client.
++     */
++    void setMovement(float forward, float strafe);
++
++    float getForward();
++
++    float getStrafe();
++
++    /** Holds the jump key: the bot jumps whenever it is on the ground, and swims up in water. */
++    void setJumping(boolean jumping);
++
++    boolean isJumping();
++
++    /** Starts or stops sneaking, with PlayerToggleSneakEvent. Returns false if the event was cancelled. */
++    boolean setSneaking(boolean sneaking);
++
++    /**
++     * Starts or stops sprinting, with PlayerToggleSprintEvent. Returns false if the event was
++     * cancelled. As on the client, sprinting stops by itself when the bot stops moving forward,
++     * runs into a wall, or has 3 food bars or fewer.
++     */
++    boolean setSprinting(boolean sprinting);
++
++    /** Turns the bot's head and body. Yaw and pitch in degrees, as {@link Location}'s. */
++    void look(float yaw, float pitch);
++
++    /** Turns the bot's eyes to {@code target}. */
++    void lookAt(Location target);
++
++    /** A left click on nothing: swings the arm (PlayerInteractEvent LEFT_CLICK_AIR, PlayerAnimationEvent). */
++    void swing();
++
++    /**
++     * A left click on {@code target}: swings, then attacks it as a player's hit, if it is within
++     * reach: 3 blocks from the bot's eyes to the nearest point of its box, as a client's reach.
++     * The bot does not have to look at it.
++     *
++     * @return whether the hit was made (in reach, not the bot itself, in the bot's world). A hit
++     *         that the events cancel or that does no damage was still made.
++     */
++    boolean attack(Entity target);
++
++    /**
++     * A right click with the held item on nothing (PlayerInteractEvent RIGHT_CLICK_AIR): eats,
++     * drinks, draws a bow, casts or reels in a rod, throws, blocks with a sword. An item used over
++     * time (food, bow, sword) stays in use until {@link #releaseItem} or until it is done.
++     *
++     * @return false if there is nothing in hand or the event denied it
++     */
++    boolean useItem();
++
++    /**
++     * A right click on {@code face} of {@code block} with the held item, as a player's: opens a chest
++     * or a door, places a block, presses a button. Within 6 blocks of the bot's eyes.
++     *
++     * @return whether the click reached the block (in reach and in the bot's world)
++     */
++    boolean interact(Block block, BlockFace face);
++
++    /** Lets go of the right button: shoots a drawn bow, stops eating or blocking. */
++    void releaseItem();
++
++    /** Whether the held item is in use (eating, drawing a bow, blocking). */
++    boolean isUsingItem();
++
++    /**
++     * Holds the hotbar slot {@code slot} (0 to 8), with PlayerItemHeldEvent.
++     *
++     * @return false if the event was cancelled
++     */
++    boolean selectSlot(int slot);
++
++    /** Sets what the bot does each tick. Null leaves it holding its keys. */
++    void setController(BotController controller);
++
++    BotController getController();
++
++    /**
++     * Respawns a dead bot as a client's respawn button does (PlayerRespawnEvent).
++     *
++     * @return false if it is not dead
++     */
++    boolean respawn();
++
++    /** Takes the bot off the server, as a player who quits (PlayerQuitEvent, no PlayerKickEvent). */
++    void remove();
++}
+diff --git a/src/main/java/athena/api/bot/BotController.java b/src/main/java/athena/api/bot/BotController.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..31272b737ecefc1bdcc04b6d49de780a217e92b4
+--- /dev/null
++++ b/src/main/java/athena/api/bot/BotController.java
+@@ -0,0 +1,14 @@
++package athena.api.bot;
++
++/**
++ * Athena - what a {@link Bot} does: run once a tick, on the thread that ticks the bot's world,
++ * before the bot moves. It sets the bot's keys and makes its clicks; the server then moves it.
++ * <p>
++ * Not run while the bot is dead. An exception it throws is logged and the bot stands still for that
++ * tick; it does not stop the world.
++ */
++@FunctionalInterface
++public interface BotController {
++
++    void tick(Bot bot);
++}

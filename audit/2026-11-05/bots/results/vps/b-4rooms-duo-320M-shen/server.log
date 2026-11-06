@@ -1,0 +1,1581 @@
+[start-small] new jar, JDK or flags (7a32e271d1674f11): patching
+Picked up JAVA_TOOL_OPTIONS: -Dbotwatch.matches=4 -Dsgbots.debug=false
+Patching vanilla jar...
+[start-small] no AOT cache yet (7a32e271d1674f11): recording this run
+Picked up JAVA_TOOL_OPTIONS: -Dbotwatch.matches=4 -Dsgbots.debug=false
+Loading libraries, please wait...
+2026-11-04T17:13:36.366897739Z main WARN Advanced terminal features are not available in this environment
+[02:13:37 INFO]: Starting minecraft server version 1.8.8
+[02:13:37 WARN]: To start the server with more ram, launch it as "java -Xmx1024M -Xms1024M -jar minecraft_server.jar"
+[02:13:37 INFO]: Loading properties
+[02:13:37 INFO]: Default game type: SURVIVAL
+[02:13:37 INFO]: This server is running PandaSpigot version git-PandaSpigot-"f4b7b16" (MC: 1.8.8) (Implementing API version 1.8.8-R0.1-SNAPSHOT) (Git: f4b7b16 on feature/bots)
+[02:13:37 INFO]: Unable to find file banned-players.json, creating it.
+[02:13:37 INFO]: Unable to find file banned-ips.json, creating it.
+[02:13:37 INFO]: Unable to find file ops.json, creating it.
+[02:13:37 INFO]: Unable to find file whitelist.json, creating it.
+[02:13:37 INFO]: Debug logging is disabled
+[02:13:37 INFO]: Spigot Timings: false - Verbose: true - Interval: 5m - Length: 60m
+[02:13:37 INFO]: Server Ping Player Sample Count: 12
+[02:13:37 INFO]: Using 1 threads for Netty based IO
+[02:13:37 INFO]: Data value allowed items: 
+[02:13:37 INFO]: Generating keypair
+[02:13:37 INFO]: Starting Minecraft server on 127.0.0.1:25692
+WARNING: A restricted method in java.lang.System has been called
+WARNING: java.lang.System::loadLibrary has been called by io.netty.util.internal.NativeLibraryUtil in an unnamed module (file:/opt/mc/simbench-cache/7a32e271d1674f11/patched_1.8.8.jar)
+WARNING: Use --enable-native-access=ALL-UNNAMED to avoid a warning for callers in this module
+WARNING: Restricted methods will be blocked in a future release unless native access is enabled
+
+[02:13:37 INFO]: Using io_uring channel type
+[02:13:38 INFO]: Set PluginClassLoader as parallel capable
+[02:13:38 INFO]: [BotWatch] Loading BotWatch v1
+[02:13:38 INFO]: [SurvivalGames] Loading SurvivalGames v1.0-SNAPSHOT
+[02:13:38 WARN]: **** SERVER IS RUNNING IN OFFLINE/INSECURE MODE!
+[02:13:38 WARN]: The server will make no attempt to authenticate usernames. Beware.
+[02:13:38 WARN]: While this makes the game possible to play without internet access, it also opens up the ability for hackers to connect with any username they choose.
+[02:13:38 WARN]: To change this, set "online-mode" to "true" in the server.properties file.
+[02:13:38 INFO]: **** Beginning UUID conversion, this may take A LONG time ****
+[02:13:38 INFO]: Preparing level "lobby"
+[02:13:38 INFO]: -------- World Settings For [lobby] --------
+[02:13:38 INFO]: Item Despawn Rate: 6000
+[02:13:38 INFO]: Item Merge Radius: 2.5
+[02:13:38 INFO]: Arrow Despawn Rate: 1200
+[02:13:38 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:13:38 INFO]: View Distance: 8
+[02:13:38 INFO]: Zombie Aggressive Towards Villager: true
+[02:13:38 INFO]: Anti X-Ray: false
+[02:13:38 INFO]: 	Engine Mode: 1
+[02:13:38 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:13:38 INFO]: 	Replace Blocks: [1, 5]
+[02:13:38 INFO]: Chunks to Grow per Tick: 650
+[02:13:38 INFO]: Clear tick list: false
+[02:13:38 INFO]: Experience Merge Radius: 3.0
+[02:13:38 INFO]: Mob Spawn Range: 4
+[02:13:38 INFO]: Nerfing mobs spawned from spawners: false
+[02:13:38 INFO]: Cactus Growth Modifier: 100%
+[02:13:38 INFO]: Cane Growth Modifier: 100%
+[02:13:38 INFO]: Melon Growth Modifier: 100%
+[02:13:38 INFO]: Mushroom Growth Modifier: 100%
+[02:13:38 INFO]: Pumpkin Growth Modifier: 100%
+[02:13:38 INFO]: Sapling Growth Modifier: 100%
+[02:13:38 INFO]: Wheat Growth Modifier: 100%
+[02:13:38 INFO]: NetherWart Growth Modifier: 100%
+[02:13:38 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:13:38 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:13:38 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:13:38 INFO]: Random Lighting Updates: false
+[02:13:38 INFO]: Structure Info Saving: true
+[02:13:38 INFO]: Sending up to 10 chunks per packet
+[02:13:38 INFO]: Max Entity Collisions: 8
+[02:13:38 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:13:38 INFO]: Max TNT Explosions: 100
+[02:13:38 INFO]: -------- World Settings For [lobby] --------
+[02:13:38 INFO]: Water over lava flow speed: 5
+[02:13:38 INFO]: Fix TNT cannons: false
+[02:13:38 INFO]: Allow undead horse types to be leashed: false
+[02:13:38 INFO]: Keep spawn chunk loaded: true
+[02:13:38 INFO]: World async lighting: false
+[02:13:38 INFO]: WorldServer TickNextTick cap set at 10000
+[02:13:38 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:13:38 INFO]: Remove invalid mob spawner tile entities: true
+[02:13:38 INFO]: Player blocking damage multiplier set to 0.5
+[02:13:38 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:13:38 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:13:38 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:13:38 INFO]: Preparing start region for level 0 (Seed: 0)
+[02:13:38 INFO]: [Athena] lobby: chunk shaping is on the server thread (config=true, generator=NormalChunkGenerator, pluginGenerator=false, biomeSource=WorldChunkManagerHell)
+[02:13:39 INFO]: Preparing spawn area: 53%
+[02:13:39 INFO]: [BotWatch] Enabling BotWatch v1
+[02:13:39 INFO]: [SurvivalGames] Enabling SurvivalGames v1.0-SNAPSHOT
+[02:13:39 WARN]: [SurvivalGames] Map Lobby_Games has only 4 deathmatch spawns: add the rest with /sg edit Lobby_Games (spawns are reused until then)
+[02:13:39 WARN]: [SurvivalGames] Map Mortal_Skies has only 4 deathmatch spawns: add the rest with /sg edit Mortal_Skies (spawns are reused until then)
+[02:13:39 WARN]: [SurvivalGames] Map Par_72_Revamped has only 4 deathmatch spawns: add the rest with /sg edit Par_72_Revamped (spawns are reused until then)
+[02:13:39 WARN]: [SurvivalGames] Map Plantations has only 4 deathmatch spawns: add the rest with /sg edit Plantations (spawns are reused until then)
+[02:13:39 WARN]: [SurvivalGames] Map Shady_Hollow has only 4 deathmatch spawns: add the rest with /sg edit Shady_Hollow (spawns are reused until then)
+[02:13:39 INFO]: [SurvivalGames] Loaded 5 map(s) from /opt/mc/maps: Lobby_Games, Mortal_Skies, Par_72_Revamped, Plantations, Shady_Hollow
+[02:13:39 INFO]: [SurvivalGames] Loaded 1 deathmatch arena(s): Deathmatch_Arena
+[02:13:39 INFO]: [SurvivalGames] Stats are not saved (database.enabled is false in config.yml)
+[02:13:40 INFO]: [SurvivalGames] Bots fill rooms up to 24 players
+[02:13:40 INFO]: Server permissions file permissions.yml is empty, ignoring it
+[02:13:40 INFO]: Done (1.972s)! For help, type "help" or "?"
+[02:13:40 INFO]: Timings Reset
+[02:13:44 INFO]: [BotWatch] BOTWATCH t=5s bots=0 hits=0 chests=0 eats=0 shots=0 walked=0 maxTick=39.8ms joins=0 quits=0
+[02:13:46 INFO]: [SurvivalGames] GhostFox (bot) joined room 1
+[02:13:46 INFO]: GhostFox[localhost/127.0.0.1:0] logged in with entity id 0 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] FrostShark (bot) joined room 1
+[02:13:46 INFO]: FrostShark[localhost/127.0.0.1:0] logged in with entity id 1 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] TinySlayer_835 (bot) joined room 1
+[02:13:46 INFO]: TinySlayer_835[localhost/127.0.0.1:0] logged in with entity id 2 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] lazylynx4 (bot) joined room 1
+[02:13:46 INFO]: lazylynx4[localhost/127.0.0.1:0] logged in with entity id 3 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] pixelgolem6 (bot) joined room 2
+[02:13:46 INFO]: pixelgolem6[localhost/127.0.0.1:0] logged in with entity id 4 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] RapidBlade (bot) joined room 2
+[02:13:46 INFO]: RapidBlade[localhost/127.0.0.1:0] logged in with entity id 5 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] novatiger6 (bot) joined room 2
+[02:13:46 INFO]: novatiger6[localhost/127.0.0.1:0] logged in with entity id 6 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] silentfalcon9 (bot) joined room 2
+[02:13:46 INFO]: silentfalcon9[localhost/127.0.0.1:0] logged in with entity id 7 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] swiftdragon6 (bot) joined room 3
+[02:13:46 INFO]: swiftdragon6[localhost/127.0.0.1:0] logged in with entity id 8 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] toxicfox1 (bot) joined room 3
+[02:13:46 INFO]: toxicfox1[localhost/127.0.0.1:0] logged in with entity id 9 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] RedMiner71 (bot) joined room 3
+[02:13:46 INFO]: RedMiner71[localhost/127.0.0.1:0] logged in with entity id 10 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] NightViper57 (bot) joined room 3
+[02:13:46 INFO]: NightViper57[localhost/127.0.0.1:0] logged in with entity id 11 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] LazyWizard (bot) joined room 4
+[02:13:46 INFO]: LazyWizard[localhost/127.0.0.1:0] logged in with entity id 12 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] BraveGamer33 (bot) joined room 4
+[02:13:46 INFO]: BraveGamer33[localhost/127.0.0.1:0] logged in with entity id 13 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] EnderPanda_107 (bot) joined room 4
+[02:13:46 INFO]: EnderPanda_107[localhost/127.0.0.1:0] logged in with entity id 14 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] SlyWizard_323 (bot) joined room 4
+[02:13:46 INFO]: SlyWizard_323[localhost/127.0.0.1:0] logged in with entity id 15 at ([lobby]262.5, 84.0, 39.5)
+[02:13:46 INFO]: [SurvivalGames] mightybear2 (bot) joined room 1
+[02:13:47 INFO]: mightybear2[localhost/127.0.0.1:0] logged in with entity id 16 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] FrostBolt_133 (bot) joined room 1
+[02:13:47 INFO]: FrostBolt_133[localhost/127.0.0.1:0] logged in with entity id 17 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] toxicninja1 (bot) joined room 1
+[02:13:47 INFO]: toxicninja1[localhost/127.0.0.1:0] logged in with entity id 18 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] epicninja7 (bot) joined room 1
+[02:13:47 INFO]: epicninja7[localhost/127.0.0.1:0] logged in with entity id 19 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] NeonRider63 (bot) joined room 2
+[02:13:47 INFO]: NeonRider63[localhost/127.0.0.1:0] logged in with entity id 20 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] bluehunter7 (bot) joined room 2
+[02:13:47 INFO]: bluehunter7[localhost/127.0.0.1:0] logged in with entity id 21 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] SilentCat29 (bot) joined room 2
+[02:13:47 INFO]: SilentCat29[localhost/127.0.0.1:0] logged in with entity id 22 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] DarkKnight_267 (bot) joined room 2
+[02:13:47 INFO]: DarkKnight_267[localhost/127.0.0.1:0] logged in with entity id 23 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] DarkMiner_383 (bot) joined room 3
+[02:13:47 INFO]: DarkMiner_383[localhost/127.0.0.1:0] logged in with entity id 24 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] SwiftArcher_48 (bot) joined room 3
+[02:13:47 INFO]: SwiftArcher_48[localhost/127.0.0.1:0] logged in with entity id 25 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] TinyOwl_908 (bot) joined room 3
+[02:13:47 INFO]: TinyOwl_908[localhost/127.0.0.1:0] logged in with entity id 26 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] ShadowRaven_274 (bot) joined room 3
+[02:13:47 INFO]: ShadowRaven_274[localhost/127.0.0.1:0] logged in with entity id 27 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] FrostMiner72 (bot) joined room 4
+[02:13:47 INFO]: FrostMiner72[localhost/127.0.0.1:0] logged in with entity id 28 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] GhostBlade44 (bot) joined room 4
+[02:13:47 INFO]: GhostBlade44[localhost/127.0.0.1:0] logged in with entity id 29 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] MightyArcher_849 (bot) joined room 4
+[02:13:47 INFO]: MightyArcher_849[localhost/127.0.0.1:0] logged in with entity id 30 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] SlyKnight_812 (bot) joined room 4
+[02:13:47 INFO]: SlyKnight_812[localhost/127.0.0.1:0] logged in with entity id 31 at ([lobby]262.5, 84.0, 39.5)
+[02:13:47 INFO]: [SurvivalGames] PixelFox62 (bot) joined room 1
+[02:13:47 INFO]: PixelFox62[localhost/127.0.0.1:0] logged in with entity id 32 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] nightfox9 (bot) joined room 1
+[02:13:48 INFO]: nightfox9[localhost/127.0.0.1:0] logged in with entity id 33 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] MightyHawk (bot) joined room 1
+[02:13:48 INFO]: MightyHawk[localhost/127.0.0.1:0] logged in with entity id 34 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] GhostWolf (bot) joined room 1
+[02:13:48 INFO]: GhostWolf[localhost/127.0.0.1:0] logged in with entity id 35 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] SilentRaven_901 (bot) joined room 2
+[02:13:48 INFO]: SilentRaven_901[localhost/127.0.0.1:0] logged in with entity id 36 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] nightwolf1 (bot) joined room 2
+[02:13:48 INFO]: nightwolf1[localhost/127.0.0.1:0] logged in with entity id 37 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] silentminer8 (bot) joined room 2
+[02:13:48 INFO]: silentminer8[localhost/127.0.0.1:0] logged in with entity id 38 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] RedViper63 (bot) joined room 2
+[02:13:48 INFO]: RedViper63[localhost/127.0.0.1:0] logged in with entity id 39 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] frostgolem1 (bot) joined room 3
+[02:13:48 INFO]: frostgolem1[localhost/127.0.0.1:0] logged in with entity id 40 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] BraveWizard (bot) joined room 3
+[02:13:48 INFO]: BraveWizard[localhost/127.0.0.1:0] logged in with entity id 41 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] CrazyNinja (bot) joined room 3
+[02:13:48 INFO]: CrazyNinja[localhost/127.0.0.1:0] logged in with entity id 42 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] pixelwolf5 (bot) joined room 3
+[02:13:48 INFO]: pixelwolf5[localhost/127.0.0.1:0] logged in with entity id 43 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] NightOwl74 (bot) joined room 4
+[02:13:48 INFO]: NightOwl74[localhost/127.0.0.1:0] logged in with entity id 44 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] darkpanda3 (bot) joined room 4
+[02:13:48 INFO]: darkpanda3[localhost/127.0.0.1:0] logged in with entity id 45 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] redwizard5 (bot) joined room 4
+[02:13:48 INFO]: redwizard5[localhost/127.0.0.1:0] logged in with entity id 46 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] GoldenHunter_633 (bot) joined room 4
+[02:13:48 INFO]: GoldenHunter_633[localhost/127.0.0.1:0] logged in with entity id 47 at ([lobby]262.5, 84.0, 39.5)
+[02:13:48 INFO]: [SurvivalGames] SilentBear_479 (bot) joined room 1
+[02:13:48 INFO]: SilentBear_479[localhost/127.0.0.1:0] logged in with entity id 48 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] GhostHawk_184 (bot) joined room 1
+[02:13:49 INFO]: GhostHawk_184[localhost/127.0.0.1:0] logged in with entity id 49 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] epicdragon0 (bot) joined room 1
+[02:13:49 INFO]: epicdragon0[localhost/127.0.0.1:0] logged in with entity id 50 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] ToxicSpark_322 (bot) joined room 1
+[02:13:49 INFO]: ToxicSpark_322[localhost/127.0.0.1:0] logged in with entity id 51 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] TinyBolt_453 (bot) joined room 2
+[02:13:49 INFO]: TinyBolt_453[localhost/127.0.0.1:0] logged in with entity id 52 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] frostowl2 (bot) joined room 2
+[02:13:49 INFO]: frostowl2[localhost/127.0.0.1:0] logged in with entity id 53 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] silentfalcon5 (bot) joined room 2
+[02:13:49 INFO]: silentfalcon5[localhost/127.0.0.1:0] logged in with entity id 54 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] LuckyArcher71 (bot) joined room 2
+[02:13:49 INFO]: LuckyArcher71[localhost/127.0.0.1:0] logged in with entity id 55 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] SlyBear27 (bot) joined room 3
+[02:13:49 INFO]: SlyBear27[localhost/127.0.0.1:0] logged in with entity id 56 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] RapidStorm_277 (bot) joined room 3
+[02:13:49 INFO]: RapidStorm_277[localhost/127.0.0.1:0] logged in with entity id 57 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] stormshark2 (bot) joined room 3
+[02:13:49 INFO]: stormshark2[localhost/127.0.0.1:0] logged in with entity id 58 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] StormNinja_159 (bot) joined room 3
+[02:13:49 INFO]: StormNinja_159[localhost/127.0.0.1:0] logged in with entity id 59 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] ShadowMiner_164 (bot) joined room 4
+[02:13:49 INFO]: ShadowMiner_164[localhost/127.0.0.1:0] logged in with entity id 60 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] crazyraven1 (bot) joined room 4
+[02:13:49 INFO]: crazyraven1[localhost/127.0.0.1:0] logged in with entity id 61 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] ShadowTiger_644 (bot) joined room 4
+[02:13:49 INFO]: ShadowTiger_644[localhost/127.0.0.1:0] logged in with entity id 62 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [SurvivalGames] BraveWolf (bot) joined room 4
+[02:13:49 INFO]: BraveWolf[localhost/127.0.0.1:0] logged in with entity id 63 at ([lobby]262.5, 84.0, 39.5)
+[02:13:49 INFO]: [BotWatch] BOTWATCH t=10s bots=64 hits=0 chests=0 eats=0 shots=0 walked=32 maxTick=280.8ms joins=64 quits=0
+[02:13:49 INFO]: [SurvivalGames] NeonSlayer23 (bot) joined room 1
+[02:13:50 INFO]: NeonSlayer23[localhost/127.0.0.1:0] logged in with entity id 64 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] TinySlayer_814 (bot) joined room 1
+[02:13:50 INFO]: TinySlayer_814[localhost/127.0.0.1:0] logged in with entity id 65 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] SwiftWizard78 (bot) joined room 1
+[02:13:50 INFO]: SwiftWizard78[localhost/127.0.0.1:0] logged in with entity id 66 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] EnderLynx (bot) joined room 1
+[02:13:50 INFO]: EnderLynx[localhost/127.0.0.1:0] logged in with entity id 67 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] lazyowl3 (bot) joined room 2
+[02:13:50 INFO]: lazyowl3[localhost/127.0.0.1:0] logged in with entity id 68 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] CrazyHunter (bot) joined room 2
+[02:13:50 INFO]: CrazyHunter[localhost/127.0.0.1:0] logged in with entity id 69 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] ironspark8 (bot) joined room 2
+[02:13:50 INFO]: ironspark8[localhost/127.0.0.1:0] logged in with entity id 70 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] nightviper8 (bot) joined room 2
+[02:13:50 INFO]: nightviper8[localhost/127.0.0.1:0] logged in with entity id 71 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] ShadowGamer (bot) joined room 3
+[02:13:50 INFO]: ShadowGamer[localhost/127.0.0.1:0] logged in with entity id 72 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] TinyMiner_895 (bot) joined room 3
+[02:13:50 INFO]: TinyMiner_895[localhost/127.0.0.1:0] logged in with entity id 73 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] nighthunter7 (bot) joined room 3
+[02:13:50 INFO]: nighthunter7[localhost/127.0.0.1:0] logged in with entity id 74 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] rapidarcher2 (bot) joined room 3
+[02:13:50 INFO]: rapidarcher2[localhost/127.0.0.1:0] logged in with entity id 75 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] ShadowShark_365 (bot) joined room 4
+[02:13:50 INFO]: ShadowShark_365[localhost/127.0.0.1:0] logged in with entity id 76 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] LazyBolt (bot) joined room 4
+[02:13:50 INFO]: LazyBolt[localhost/127.0.0.1:0] logged in with entity id 77 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] LuckyFalcon_10 (bot) joined room 4
+[02:13:50 INFO]: LuckyFalcon_10[localhost/127.0.0.1:0] logged in with entity id 78 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] ToxicHunter_819 (bot) joined room 4
+[02:13:50 INFO]: ToxicHunter_819[localhost/127.0.0.1:0] logged in with entity id 79 at ([lobby]262.5, 84.0, 39.5)
+[02:13:50 INFO]: [SurvivalGames] SwiftGolem_430 (bot) joined room 1
+[02:13:50 INFO]: SwiftGolem_430[localhost/127.0.0.1:0] logged in with entity id 80 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] NightMiner_79 (bot) joined room 1
+[02:13:51 INFO]: NightMiner_79[localhost/127.0.0.1:0] logged in with entity id 81 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] novaraven8 (bot) joined room 1
+[02:13:51 INFO]: novaraven8[localhost/127.0.0.1:0] logged in with entity id 82 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] StormRider21 (bot) joined room 1
+[02:13:51 INFO]: StormRider21[localhost/127.0.0.1:0] logged in with entity id 83 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] LazyFox (bot) joined room 2
+[02:13:51 INFO]: LazyFox[localhost/127.0.0.1:0] logged in with entity id 84 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] DarkLynx47 (bot) joined room 2
+[02:13:51 INFO]: DarkLynx47[localhost/127.0.0.1:0] logged in with entity id 85 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] redwizard6 (bot) joined room 2
+[02:13:51 INFO]: redwizard6[localhost/127.0.0.1:0] logged in with entity id 86 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] BraveWizard_707 (bot) joined room 2
+[02:13:51 INFO]: BraveWizard_707[localhost/127.0.0.1:0] logged in with entity id 87 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] ToxicArcher (bot) joined room 3
+[02:13:51 INFO]: ToxicArcher[localhost/127.0.0.1:0] logged in with entity id 88 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] EpicCat_925 (bot) joined room 3
+[02:13:51 INFO]: EpicCat_925[localhost/127.0.0.1:0] logged in with entity id 89 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] pixelspark6 (bot) joined room 3
+[02:13:51 INFO]: pixelspark6[localhost/127.0.0.1:0] logged in with entity id 90 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] CrazyMiner98 (bot) joined room 3
+[02:13:51 INFO]: CrazyMiner98[localhost/127.0.0.1:0] logged in with entity id 91 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] SwiftGamer75 (bot) joined room 4
+[02:13:51 INFO]: SwiftGamer75[localhost/127.0.0.1:0] logged in with entity id 92 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] toxicshark9 (bot) joined room 4
+[02:13:51 INFO]: toxicshark9[localhost/127.0.0.1:0] logged in with entity id 93 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] braveraven0 (bot) joined room 4
+[02:13:51 INFO]: braveraven0[localhost/127.0.0.1:0] logged in with entity id 94 at ([lobby]262.5, 84.0, 39.5)
+[02:13:51 INFO]: [SurvivalGames] SilentSlayer53 (bot) joined room 4
+[02:13:51 INFO]: SilentSlayer53[localhost/127.0.0.1:0] logged in with entity id 95 at ([lobby]262.5, 84.0, 39.5)
+[02:13:54 INFO]: [BotWatch] BOTWATCH t=15s bots=96 hits=0 chests=0 eats=0 shots=0 walked=16 maxTick=44.5ms joins=96 quits=0
+[02:13:59 INFO]: [BotWatch] BOTWATCH t=20s bots=96 hits=0 chests=0 eats=0 shots=0 walked=0 maxTick=7.7ms joins=96 quits=0
+[02:14:01 INFO]: -------- World Settings For [sg-1-Par_72_Revamped] --------
+[02:14:01 INFO]: Item Despawn Rate: 6000
+[02:14:01 INFO]: Item Merge Radius: 2.5
+[02:14:01 INFO]: Arrow Despawn Rate: 1200
+[02:14:01 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:01 INFO]: View Distance: 8
+[02:14:01 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:01 INFO]: Anti X-Ray: false
+[02:14:01 INFO]: 	Engine Mode: 1
+[02:14:01 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:01 INFO]: 	Replace Blocks: [1, 5]
+[02:14:01 INFO]: Chunks to Grow per Tick: 650
+[02:14:01 INFO]: Clear tick list: false
+[02:14:01 INFO]: Experience Merge Radius: 3.0
+[02:14:01 INFO]: Mob Spawn Range: 4
+[02:14:01 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:01 INFO]: Cactus Growth Modifier: 100%
+[02:14:01 INFO]: Cane Growth Modifier: 100%
+[02:14:01 INFO]: Melon Growth Modifier: 100%
+[02:14:01 INFO]: Mushroom Growth Modifier: 100%
+[02:14:01 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:01 INFO]: Sapling Growth Modifier: 100%
+[02:14:01 INFO]: Wheat Growth Modifier: 100%
+[02:14:01 INFO]: NetherWart Growth Modifier: 100%
+[02:14:01 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:01 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:01 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:01 INFO]: Random Lighting Updates: false
+[02:14:01 INFO]: Structure Info Saving: true
+[02:14:01 INFO]: Sending up to 10 chunks per packet
+[02:14:01 INFO]: Max Entity Collisions: 8
+[02:14:01 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:01 INFO]: Max TNT Explosions: 100
+[02:14:01 INFO]: -------- World Settings For [sg-1-Par_72_Revamped] --------
+[02:14:01 INFO]: Water over lava flow speed: 5
+[02:14:01 INFO]: Fix TNT cannons: false
+[02:14:01 INFO]: Allow undead horse types to be leashed: false
+[02:14:01 INFO]: Keep spawn chunk loaded: true
+[02:14:01 INFO]: World async lighting: false
+[02:14:01 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:01 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:01 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:01 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:01 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:01 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:01 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:01 INFO]: -------- World Settings For [sg-2-Plantations] --------
+[02:14:01 INFO]: Item Despawn Rate: 6000
+[02:14:01 INFO]: Item Merge Radius: 2.5
+[02:14:01 INFO]: Arrow Despawn Rate: 1200
+[02:14:01 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:01 INFO]: View Distance: 8
+[02:14:01 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:01 INFO]: Anti X-Ray: false
+[02:14:01 INFO]: 	Engine Mode: 1
+[02:14:01 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:01 INFO]: 	Replace Blocks: [1, 5]
+[02:14:01 INFO]: Chunks to Grow per Tick: 650
+[02:14:01 INFO]: Clear tick list: false
+[02:14:01 INFO]: Experience Merge Radius: 3.0
+[02:14:01 INFO]: Mob Spawn Range: 4
+[02:14:01 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:01 INFO]: Cactus Growth Modifier: 100%
+[02:14:01 INFO]: Cane Growth Modifier: 100%
+[02:14:01 INFO]: Melon Growth Modifier: 100%
+[02:14:01 INFO]: Mushroom Growth Modifier: 100%
+[02:14:01 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:01 INFO]: Sapling Growth Modifier: 100%
+[02:14:01 INFO]: Wheat Growth Modifier: 100%
+[02:14:01 INFO]: NetherWart Growth Modifier: 100%
+[02:14:01 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:01 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:01 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:01 INFO]: Random Lighting Updates: false
+[02:14:01 INFO]: Structure Info Saving: true
+[02:14:01 INFO]: Sending up to 10 chunks per packet
+[02:14:01 INFO]: Max Entity Collisions: 8
+[02:14:01 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:01 INFO]: Max TNT Explosions: 100
+[02:14:01 INFO]: -------- World Settings For [sg-2-Plantations] --------
+[02:14:01 INFO]: Water over lava flow speed: 5
+[02:14:01 INFO]: Fix TNT cannons: false
+[02:14:01 INFO]: Allow undead horse types to be leashed: false
+[02:14:01 INFO]: Keep spawn chunk loaded: true
+[02:14:01 INFO]: World async lighting: false
+[02:14:01 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:01 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:01 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:01 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:01 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:01 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:01 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:01 INFO]: -------- World Settings For [sg-3-Shady_Hollow] --------
+[02:14:01 INFO]: Item Despawn Rate: 6000
+[02:14:01 INFO]: Item Merge Radius: 2.5
+[02:14:01 INFO]: Arrow Despawn Rate: 1200
+[02:14:01 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:01 INFO]: View Distance: 8
+[02:14:01 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:01 INFO]: Anti X-Ray: false
+[02:14:01 INFO]: 	Engine Mode: 1
+[02:14:01 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:01 INFO]: 	Replace Blocks: [1, 5]
+[02:14:01 INFO]: Chunks to Grow per Tick: 650
+[02:14:01 INFO]: Clear tick list: false
+[02:14:01 INFO]: Experience Merge Radius: 3.0
+[02:14:01 INFO]: Mob Spawn Range: 4
+[02:14:01 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:01 INFO]: Cactus Growth Modifier: 100%
+[02:14:01 INFO]: Cane Growth Modifier: 100%
+[02:14:01 INFO]: Melon Growth Modifier: 100%
+[02:14:01 INFO]: Mushroom Growth Modifier: 100%
+[02:14:01 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:01 INFO]: Sapling Growth Modifier: 100%
+[02:14:01 INFO]: Wheat Growth Modifier: 100%
+[02:14:01 INFO]: NetherWart Growth Modifier: 100%
+[02:14:01 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:01 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:01 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:01 INFO]: Random Lighting Updates: false
+[02:14:01 INFO]: Structure Info Saving: true
+[02:14:01 INFO]: Sending up to 10 chunks per packet
+[02:14:01 INFO]: Max Entity Collisions: 8
+[02:14:01 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:01 INFO]: Max TNT Explosions: 100
+[02:14:01 INFO]: -------- World Settings For [sg-3-Shady_Hollow] --------
+[02:14:01 INFO]: Water over lava flow speed: 5
+[02:14:01 INFO]: Fix TNT cannons: false
+[02:14:01 INFO]: Allow undead horse types to be leashed: false
+[02:14:01 INFO]: Keep spawn chunk loaded: true
+[02:14:01 INFO]: World async lighting: false
+[02:14:01 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:01 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:01 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:01 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:01 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:01 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:01 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:01 INFO]: -------- World Settings For [sg-4-Par_72_Revamped] --------
+[02:14:01 INFO]: Item Despawn Rate: 6000
+[02:14:01 INFO]: Item Merge Radius: 2.5
+[02:14:01 INFO]: Arrow Despawn Rate: 1200
+[02:14:01 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:01 INFO]: View Distance: 8
+[02:14:01 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:01 INFO]: Anti X-Ray: false
+[02:14:01 INFO]: 	Engine Mode: 1
+[02:14:01 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:01 INFO]: 	Replace Blocks: [1, 5]
+[02:14:01 INFO]: Chunks to Grow per Tick: 650
+[02:14:01 INFO]: Clear tick list: false
+[02:14:01 INFO]: Experience Merge Radius: 3.0
+[02:14:01 INFO]: Mob Spawn Range: 4
+[02:14:01 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:01 INFO]: Cactus Growth Modifier: 100%
+[02:14:01 INFO]: Cane Growth Modifier: 100%
+[02:14:01 INFO]: Melon Growth Modifier: 100%
+[02:14:01 INFO]: Mushroom Growth Modifier: 100%
+[02:14:01 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:01 INFO]: Sapling Growth Modifier: 100%
+[02:14:01 INFO]: Wheat Growth Modifier: 100%
+[02:14:01 INFO]: NetherWart Growth Modifier: 100%
+[02:14:01 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:01 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:01 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:01 INFO]: Random Lighting Updates: false
+[02:14:01 INFO]: Structure Info Saving: true
+[02:14:01 INFO]: Sending up to 10 chunks per packet
+[02:14:01 INFO]: Max Entity Collisions: 8
+[02:14:01 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:01 INFO]: Max TNT Explosions: 100
+[02:14:01 INFO]: -------- World Settings For [sg-4-Par_72_Revamped] --------
+[02:14:01 INFO]: Water over lava flow speed: 5
+[02:14:01 INFO]: Fix TNT cannons: false
+[02:14:01 INFO]: Allow undead horse types to be leashed: false
+[02:14:01 INFO]: Keep spawn chunk loaded: true
+[02:14:01 INFO]: World async lighting: false
+[02:14:01 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:01 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:01 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:01 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:01 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:01 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:01 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:01 INFO]: [SurvivalGames] Preloaded the spawns of sg-1-Par_72_Revamped: 30 chunks in 485 ms
+[02:14:02 INFO]: [SurvivalGames] Preloaded the spawns of sg-2-Plantations: 255 chunks in 971 ms
+[02:14:02 INFO]: [SurvivalGames] Preloaded the spawns of sg-3-Shady_Hollow: 36 chunks in 1066 ms
+[02:14:02 INFO]: [SurvivalGames] Preloaded the spawns of sg-4-Par_72_Revamped: 30 chunks in 1198 ms
+[02:14:05 INFO]: [BotWatch] BOTWATCH t=25s bots=96 sg-1-Par_72_Revamped alive=24 sg-2-Plantations alive=24 sg-3-Shady_Hollow alive=24 sg-4-Par_72_Revamped alive=24 hits=0 chests=0 eats=0 shots=0 walked=4 maxTick=387.4ms joins=96 quits=0
+[02:14:06 INFO]: [SurvivalGames] Preloaded sg-2-Plantations: 809 chunks in 4042 ms (5011 ms after the map opened)
+[02:14:06 INFO]: [SurvivalGames] Preloaded sg-1-Par_72_Revamped: 1397 chunks in 5085 ms (5561 ms after the map opened)
+[02:14:07 INFO]: [SurvivalGames] Preloaded sg-4-Par_72_Revamped: 1391 chunks in 4665 ms (5860 ms after the map opened)
+[02:14:09 INFO]: [SurvivalGames] Preloaded sg-3-Shady_Hollow: 1355 chunks in 6851 ms (7911 ms after the map opened)
+[02:14:09 INFO]: [BotWatch] BOTWATCH t=30s bots=96 sg-1-Par_72_Revamped alive=24 sg-2-Plantations alive=24 sg-3-Shady_Hollow alive=24 sg-4-Par_72_Revamped alive=24 hits=0 chests=0 eats=0 shots=0 walked=0 maxTick=29.8ms joins=96 quits=0
+[02:14:12 INFO]: -------- World Settings For [sg-1-dm-Deathmatch_Arena-0] --------
+[02:14:12 INFO]: Item Despawn Rate: 6000
+[02:14:12 INFO]: Item Merge Radius: 2.5
+[02:14:12 INFO]: Arrow Despawn Rate: 1200
+[02:14:12 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:12 INFO]: View Distance: 8
+[02:14:12 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:12 INFO]: Anti X-Ray: false
+[02:14:12 INFO]: 	Engine Mode: 1
+[02:14:12 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:12 INFO]: 	Replace Blocks: [1, 5]
+[02:14:12 INFO]: Chunks to Grow per Tick: 650
+[02:14:12 INFO]: Clear tick list: false
+[02:14:12 INFO]: Experience Merge Radius: 3.0
+[02:14:12 INFO]: Mob Spawn Range: 4
+[02:14:12 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:12 INFO]: Cactus Growth Modifier: 100%
+[02:14:12 INFO]: Cane Growth Modifier: 100%
+[02:14:12 INFO]: Melon Growth Modifier: 100%
+[02:14:12 INFO]: Mushroom Growth Modifier: 100%
+[02:14:12 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:12 INFO]: Sapling Growth Modifier: 100%
+[02:14:12 INFO]: Wheat Growth Modifier: 100%
+[02:14:12 INFO]: NetherWart Growth Modifier: 100%
+[02:14:12 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:12 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:12 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:12 INFO]: Random Lighting Updates: false
+[02:14:12 INFO]: Structure Info Saving: true
+[02:14:12 INFO]: Sending up to 10 chunks per packet
+[02:14:12 INFO]: Max Entity Collisions: 8
+[02:14:12 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:12 INFO]: Max TNT Explosions: 100
+[02:14:12 INFO]: -------- World Settings For [sg-1-dm-Deathmatch_Arena-0] --------
+[02:14:12 INFO]: Water over lava flow speed: 5
+[02:14:12 INFO]: Fix TNT cannons: false
+[02:14:12 INFO]: Allow undead horse types to be leashed: false
+[02:14:12 INFO]: Keep spawn chunk loaded: true
+[02:14:12 INFO]: World async lighting: false
+[02:14:12 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:12 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:12 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:12 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:12 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:12 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:12 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:12 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-1-dm-Deathmatch_Arena-0: 60 chunks in 729 ms
+[02:14:13 INFO]: -------- World Settings For [sg-2-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Item Despawn Rate: 6000
+[02:14:13 INFO]: Item Merge Radius: 2.5
+[02:14:13 INFO]: Arrow Despawn Rate: 1200
+[02:14:13 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:13 INFO]: View Distance: 8
+[02:14:13 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:13 INFO]: Anti X-Ray: false
+[02:14:13 INFO]: 	Engine Mode: 1
+[02:14:13 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:13 INFO]: 	Replace Blocks: [1, 5]
+[02:14:13 INFO]: Chunks to Grow per Tick: 650
+[02:14:13 INFO]: Clear tick list: false
+[02:14:13 INFO]: Experience Merge Radius: 3.0
+[02:14:13 INFO]: Mob Spawn Range: 4
+[02:14:13 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:13 INFO]: Cactus Growth Modifier: 100%
+[02:14:13 INFO]: Cane Growth Modifier: 100%
+[02:14:13 INFO]: Melon Growth Modifier: 100%
+[02:14:13 INFO]: Mushroom Growth Modifier: 100%
+[02:14:13 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:13 INFO]: Sapling Growth Modifier: 100%
+[02:14:13 INFO]: Wheat Growth Modifier: 100%
+[02:14:13 INFO]: NetherWart Growth Modifier: 100%
+[02:14:13 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:13 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:13 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:13 INFO]: Random Lighting Updates: false
+[02:14:13 INFO]: Structure Info Saving: true
+[02:14:13 INFO]: Sending up to 10 chunks per packet
+[02:14:13 INFO]: Max Entity Collisions: 8
+[02:14:13 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:13 INFO]: Max TNT Explosions: 100
+[02:14:13 INFO]: -------- World Settings For [sg-2-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Water over lava flow speed: 5
+[02:14:13 INFO]: Fix TNT cannons: false
+[02:14:13 INFO]: Allow undead horse types to be leashed: false
+[02:14:13 INFO]: Keep spawn chunk loaded: true
+[02:14:13 INFO]: World async lighting: false
+[02:14:13 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:13 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:13 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:13 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:13 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:13 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:13 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:13 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Item Despawn Rate: 6000
+[02:14:13 INFO]: Item Merge Radius: 2.5
+[02:14:13 INFO]: Arrow Despawn Rate: 1200
+[02:14:13 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:13 INFO]: View Distance: 8
+[02:14:13 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:13 INFO]: Anti X-Ray: false
+[02:14:13 INFO]: 	Engine Mode: 1
+[02:14:13 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:13 INFO]: 	Replace Blocks: [1, 5]
+[02:14:13 INFO]: Chunks to Grow per Tick: 650
+[02:14:13 INFO]: Clear tick list: false
+[02:14:13 INFO]: Experience Merge Radius: 3.0
+[02:14:13 INFO]: Mob Spawn Range: 4
+[02:14:13 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:13 INFO]: Cactus Growth Modifier: 100%
+[02:14:13 INFO]: Cane Growth Modifier: 100%
+[02:14:13 INFO]: Melon Growth Modifier: 100%
+[02:14:13 INFO]: Mushroom Growth Modifier: 100%
+[02:14:13 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:13 INFO]: Sapling Growth Modifier: 100%
+[02:14:13 INFO]: Wheat Growth Modifier: 100%
+[02:14:13 INFO]: NetherWart Growth Modifier: 100%
+[02:14:13 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:13 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:13 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:13 INFO]: Random Lighting Updates: false
+[02:14:13 INFO]: Structure Info Saving: true
+[02:14:13 INFO]: Sending up to 10 chunks per packet
+[02:14:13 INFO]: Max Entity Collisions: 8
+[02:14:13 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:13 INFO]: Max TNT Explosions: 100
+[02:14:13 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Water over lava flow speed: 5
+[02:14:13 INFO]: Fix TNT cannons: false
+[02:14:13 INFO]: Allow undead horse types to be leashed: false
+[02:14:13 INFO]: Keep spawn chunk loaded: true
+[02:14:13 INFO]: World async lighting: false
+[02:14:13 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:13 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:13 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:13 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:13 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:13 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:13 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:13 INFO]: -------- World Settings For [sg-4-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Item Despawn Rate: 6000
+[02:14:13 INFO]: Item Merge Radius: 2.5
+[02:14:13 INFO]: Arrow Despawn Rate: 1200
+[02:14:13 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:14:13 INFO]: View Distance: 8
+[02:14:13 INFO]: Zombie Aggressive Towards Villager: true
+[02:14:13 INFO]: Anti X-Ray: false
+[02:14:13 INFO]: 	Engine Mode: 1
+[02:14:13 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:14:13 INFO]: 	Replace Blocks: [1, 5]
+[02:14:13 INFO]: Chunks to Grow per Tick: 650
+[02:14:13 INFO]: Clear tick list: false
+[02:14:13 INFO]: Experience Merge Radius: 3.0
+[02:14:13 INFO]: Mob Spawn Range: 4
+[02:14:13 INFO]: Nerfing mobs spawned from spawners: false
+[02:14:13 INFO]: Cactus Growth Modifier: 100%
+[02:14:13 INFO]: Cane Growth Modifier: 100%
+[02:14:13 INFO]: Melon Growth Modifier: 100%
+[02:14:13 INFO]: Mushroom Growth Modifier: 100%
+[02:14:13 INFO]: Pumpkin Growth Modifier: 100%
+[02:14:13 INFO]: Sapling Growth Modifier: 100%
+[02:14:13 INFO]: Wheat Growth Modifier: 100%
+[02:14:13 INFO]: NetherWart Growth Modifier: 100%
+[02:14:13 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:14:13 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:14:13 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:14:13 INFO]: Random Lighting Updates: false
+[02:14:13 INFO]: Structure Info Saving: true
+[02:14:13 INFO]: Sending up to 10 chunks per packet
+[02:14:13 INFO]: Max Entity Collisions: 8
+[02:14:13 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:14:13 INFO]: Max TNT Explosions: 100
+[02:14:13 INFO]: -------- World Settings For [sg-4-dm-Deathmatch_Arena-0] --------
+[02:14:13 INFO]: Water over lava flow speed: 5
+[02:14:13 INFO]: Fix TNT cannons: false
+[02:14:13 INFO]: Allow undead horse types to be leashed: false
+[02:14:13 INFO]: Keep spawn chunk loaded: true
+[02:14:13 INFO]: World async lighting: false
+[02:14:13 INFO]: WorldServer TickNextTick cap set at 10000
+[02:14:13 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:14:13 INFO]: Remove invalid mob spawner tile entities: true
+[02:14:13 INFO]: Player blocking damage multiplier set to 0.5
+[02:14:13 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:14:13 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:14:13 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:14:13 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-2-dm-Deathmatch_Arena-0: 60 chunks in 743 ms
+[02:14:13 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-3-dm-Deathmatch_Arena-0: 60 chunks in 749 ms
+[02:14:13 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-4-dm-Deathmatch_Arena-0: 60 chunks in 708 ms
+[02:14:14 INFO]: [BotWatch] BOTWATCH t=35s bots=96 sg-1-Par_72_Revamped alive=24 sg-2-Plantations alive=24 sg-3-Shady_Hollow alive=24 sg-4-Par_72_Revamped alive=24 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=12 chests=19 eats=0 shots=0 walked=867 maxTick=127.8ms joins=96 quits=0
+[02:14:20 INFO]: [BotWatch] BOTWATCH t=40s bots=96 sg-1-Par_72_Revamped alive=24 sg-2-Plantations alive=24 sg-3-Shady_Hollow alive=24 sg-4-Par_72_Revamped alive=24 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=142 chests=77 eats=0 shots=0 walked=1173 maxTick=4.1ms joins=96 quits=0
+[02:14:24 INFO]: NeonRider63 lost connection: Bot removed
+[02:14:24 INFO]: [BotWatch] BOTWATCH t=45s bots=95 sg-1-Par_72_Revamped alive=24 sg-2-Plantations alive=23 sg-3-Shady_Hollow alive=24 sg-4-Par_72_Revamped alive=24 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=162 chests=75 eats=0 shots=0 walked=1837 maxTick=5.7ms joins=96 quits=1
+[02:14:27 INFO]: TinyMiner_895 lost connection: Bot removed
+[02:14:28 INFO]: lazylynx4 lost connection: Bot removed
+[02:14:29 INFO]: [BotWatch] BOTWATCH t=50s bots=93 sg-1-Par_72_Revamped alive=23 sg-2-Plantations alive=23 sg-3-Shady_Hollow alive=21 sg-4-Par_72_Revamped alive=23 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=197 chests=47 eats=0 shots=0 walked=1233 maxTick=10.9ms joins=96 quits=3
+[02:14:30 INFO]: DarkMiner_383 lost connection: Bot removed
+[02:14:30 INFO]: RapidStorm_277 lost connection: Bot removed
+[02:14:30 INFO]: MightyArcher_849 lost connection: Bot removed
+[02:14:32 INFO]: rapidarcher2 lost connection: Bot removed
+[02:14:32 INFO]: FrostShark lost connection: Bot removed
+[02:14:32 INFO]: TinySlayer_814 lost connection: Bot removed
+[02:14:33 INFO]: MightyHawk lost connection: Bot removed
+[02:14:34 INFO]: NightViper57 lost connection: Bot removed
+[02:14:34 INFO]: SlyKnight_812 lost connection: Bot removed
+[02:14:34 INFO]: toxicshark9 lost connection: Bot removed
+[02:14:34 INFO]: [BotWatch] BOTWATCH t=55s bots=83 sg-1-Par_72_Revamped alive=20 sg-2-Plantations alive=23 sg-3-Shady_Hollow alive=18 sg-4-Par_72_Revamped alive=21 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=197 chests=12 eats=0 shots=0 walked=1584 maxTick=2.7ms joins=96 quits=13
+[02:14:35 INFO]: TinyOwl_908 lost connection: Bot removed
+[02:14:36 INFO]: SlyBear27 lost connection: Bot removed
+[02:14:36 INFO]: ToxicArcher lost connection: Bot removed
+[02:14:36 INFO]: GoldenHunter_633 lost connection: Bot removed
+[02:14:36 INFO]: ToxicHunter_819 lost connection: Bot removed
+[02:14:37 INFO]: BraveWizard lost connection: Bot removed
+[02:14:39 INFO]: StormNinja_159 lost connection: Bot removed
+[02:14:39 INFO]: [BotWatch] BOTWATCH t=60s bots=76 sg-1-Par_72_Revamped alive=19 sg-2-Plantations alive=22 sg-3-Shady_Hollow alive=14 sg-4-Par_72_Revamped alive=18 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=139 chests=10 eats=0 shots=0 walked=989 maxTick=4.3ms joins=96 quits=20
+[02:14:40 INFO]: pixelgolem6 lost connection: Bot removed
+[02:14:40 INFO]: NightMiner_79 lost connection: Bot removed
+[02:14:40 INFO]: GhostBlade44 lost connection: Bot removed
+[02:14:41 INFO]: LuckyArcher71 lost connection: Bot removed
+[02:14:42 INFO]: RedViper63 lost connection: Bot removed
+[02:14:43 INFO]: epicdragon0 lost connection: Bot removed
+[02:14:44 INFO]: RedMiner71 lost connection: Bot removed
+[02:14:44 INFO]: [BotWatch] BOTWATCH t=65s bots=69 sg-1-Par_72_Revamped alive=18 sg-2-Plantations alive=20 sg-3-Shady_Hollow alive=12 sg-4-Par_72_Revamped alive=18 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=118 chests=6 eats=0 shots=0 walked=1426 maxTick=3.0ms joins=96 quits=27
+[02:14:45 INFO]: pixelwolf5 lost connection: Bot removed
+[02:14:47 INFO]: ironspark8 lost connection: Bot removed
+[02:14:47 INFO]: GhostHawk_184 lost connection: Bot removed
+[02:14:48 INFO]: ShadowRaven_274 lost connection: Bot removed
+[02:14:48 INFO]: LazyWizard lost connection: Bot removed
+[02:14:49 INFO]: SlyWizard_323 lost connection: Bot removed
+[02:14:49 INFO]: crazyraven1 lost connection: Bot removed
+[02:14:49 INFO]: [BotWatch] BOTWATCH t=70s bots=62 sg-1-Par_72_Revamped alive=16 sg-2-Plantations alive=19 sg-3-Shady_Hollow alive=11 sg-4-Par_72_Revamped alive=14 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=92 chests=10 eats=0 shots=0 walked=857 maxTick=5.4ms joins=96 quits=34
+[02:14:50 INFO]: StormRider21 lost connection: Bot removed
+[02:14:50 INFO]: darkpanda3 lost connection: Bot removed
+[02:14:54 INFO]: silentfalcon9 lost connection: Bot removed
+[02:14:54 INFO]: SilentSlayer53 lost connection: Bot removed
+[02:14:54 INFO]: [BotWatch] BOTWATCH t=75s bots=58 sg-1-Par_72_Revamped alive=16 sg-2-Plantations alive=18 sg-3-Shady_Hollow alive=10 sg-4-Par_72_Revamped alive=13 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=87 chests=9 eats=0 shots=0 walked=1183 maxTick=10.9ms joins=96 quits=38
+[02:14:55 INFO]: EpicCat_925 lost connection: Bot removed
+[02:14:56 INFO]: TinyBolt_453 lost connection: Bot removed
+[02:14:58 INFO]: CrazyNinja lost connection: Bot removed
+[02:14:59 INFO]: toxicninja1 lost connection: Bot removed
+[02:14:59 INFO]: [BotWatch] BOTWATCH t=80s bots=54 sg-1-Par_72_Revamped alive=13 sg-2-Plantations alive=16 sg-3-Shady_Hollow alive=9 sg-4-Par_72_Revamped alive=12 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=60 chests=7 eats=4 shots=0 walked=706 maxTick=2.3ms joins=96 quits=42
+[02:15:00 INFO]: silentminer8 lost connection: Bot removed
+[02:15:00 INFO]: GhostWolf lost connection: Bot removed
+[02:15:00 INFO]: novaraven8 lost connection: Bot removed
+[02:15:00 INFO]: NightOwl74 lost connection: Bot removed
+[02:15:01 INFO]: toxicfox1 lost connection: Bot removed
+[02:15:04 INFO]: SwiftArcher_48 lost connection: Bot removed
+[02:15:04 INFO]: [BotWatch] BOTWATCH t=85s bots=48 sg-1-Par_72_Revamped alive=13 sg-2-Plantations alive=16 sg-3-Shady_Hollow alive=7 sg-4-Par_72_Revamped alive=12 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=29 chests=87 eats=3 shots=0 walked=977 maxTick=1.8ms joins=96 quits=48
+[02:15:07 INFO]: nightfox9 lost connection: Bot removed
+[02:15:08 INFO]: SwiftWizard78 lost connection: Bot removed
+[02:15:09 INFO]: [BotWatch] BOTWATCH t=90s bots=46 sg-1-Par_72_Revamped alive=11 sg-2-Plantations alive=16 sg-3-Shady_Hollow alive=7 sg-4-Par_72_Revamped alive=12 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=18 chests=206 eats=2 shots=0 walked=686 maxTick=1.1ms joins=96 quits=50
+[02:15:11 INFO]: LazyFox lost connection: Bot removed
+[02:15:12 INFO]: DarkKnight_267 lost connection: Bot removed
+[02:15:12 INFO]: braveraven0 lost connection: Bot removed
+[02:15:14 INFO]: [BotWatch] BOTWATCH t=95s bots=43 sg-1-Par_72_Revamped alive=10 sg-2-Plantations alive=14 sg-3-Shady_Hollow alive=7 sg-4-Par_72_Revamped alive=11 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=15 chests=206 eats=2 shots=0 walked=883 maxTick=0.8ms joins=96 quits=53
+[02:15:15 INFO]: mightybear2 lost connection: Bot removed
+[02:15:19 INFO]: [BotWatch] BOTWATCH t=100s bots=42 sg-1-Par_72_Revamped alive=10 sg-2-Plantations alive=14 sg-3-Shady_Hollow alive=7 sg-4-Par_72_Revamped alive=11 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=17 chests=212 eats=4 shots=1 walked=522 maxTick=1.5ms joins=96 quits=54
+[02:15:24 INFO]: [BotWatch] BOTWATCH t=105s bots=42 sg-1-Par_72_Revamped alive=10 sg-2-Plantations alive=14 sg-3-Shady_Hollow alive=7 sg-4-Par_72_Revamped alive=11 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=27 chests=306 eats=1 shots=0 walked=717 maxTick=2.7ms joins=96 quits=54
+[02:15:28 INFO]: lazyowl3 lost connection: Bot removed
+[02:15:29 INFO]: stormshark2 lost connection: Bot removed
+[02:15:29 INFO]: [BotWatch] BOTWATCH t=110s bots=40 sg-1-Par_72_Revamped alive=9 sg-2-Plantations alive=13 sg-3-Shady_Hollow alive=6 sg-4-Par_72_Revamped alive=11 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=14 chests=309 eats=4 shots=0 walked=480 maxTick=2.3ms joins=96 quits=56
+[02:15:30 INFO]: epicninja7 lost connection: Bot removed
+[02:15:32 INFO]: FrostMiner72 lost connection: Bot removed
+[02:15:34 INFO]: [BotWatch] BOTWATCH t=115s bots=38 sg-1-Par_72_Revamped alive=8 sg-2-Plantations alive=13 sg-3-Shady_Hollow alive=6 sg-4-Par_72_Revamped alive=10 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=12 chests=303 eats=2 shots=0 walked=605 maxTick=1.1ms joins=96 quits=58
+[02:15:35 INFO]: GhostFox lost connection: Bot removed
+[02:15:38 INFO]: DarkLynx47 lost connection: Bot removed
+[02:15:39 INFO]: RapidBlade lost connection: Bot removed
+[02:15:39 INFO]: [BotWatch] BOTWATCH t=120s bots=35 sg-1-Par_72_Revamped alive=8 sg-2-Plantations alive=11 sg-3-Shady_Hollow alive=6 sg-4-Par_72_Revamped alive=10 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=14 chests=305 eats=1 shots=0 walked=381 maxTick=1.1ms joins=96 quits=61
+[02:15:44 INFO]: [BotWatch] BOTWATCH t=125s bots=35 sg-1-Par_72_Revamped alive=8 sg-2-Plantations alive=11 sg-3-Shady_Hollow alive=6 sg-4-Par_72_Revamped alive=10 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=9 chests=302 eats=1 shots=0 walked=643 maxTick=1.3ms joins=96 quits=61
+[02:15:47 INFO]: ShadowTiger_644 lost connection: Bot removed
+[02:15:48 INFO]: redwizard6 lost connection: Bot removed
+[02:15:48 INFO]: EnderPanda_107 lost connection: Bot removed
+[02:15:49 INFO]: pixelspark6 lost connection: Bot removed
+[02:15:49 INFO]: EnderLynx lost connection: Bot removed
+[02:15:49 INFO]: [BotWatch] BOTWATCH t=130s bots=30 sg-1-Par_72_Revamped alive=7 sg-2-Plantations alive=10 sg-3-Shady_Hollow alive=5 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=301 eats=3 shots=0 walked=371 maxTick=21.3ms joins=96 quits=66
+[02:15:52 INFO]: SilentBear_479 lost connection: Bot removed
+[02:15:54 INFO]: frostgolem1 lost connection: Bot removed
+[02:15:54 INFO]: [BotWatch] BOTWATCH t=135s bots=28 sg-1-Par_72_Revamped alive=6 sg-2-Plantations alive=10 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=10 chests=300 eats=0 shots=0 walked=465 maxTick=1.6ms joins=96 quits=68
+[02:15:59 INFO]: [BotWatch] BOTWATCH t=140s bots=28 sg-1-Par_72_Revamped alive=6 sg-2-Plantations alive=10 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=16 chests=300 eats=1 shots=0 walked=265 maxTick=1.7ms joins=96 quits=68
+[02:16:03 INFO]: nightviper8 lost connection: Bot removed
+[02:16:04 INFO]: [BotWatch] BOTWATCH t=145s bots=27 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=9 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=11 chests=300 eats=0 shots=0 walked=400 maxTick=0.7ms joins=96 quits=69
+[02:16:05 INFO]: FrostBolt_133 lost connection: Bot removed
+[02:16:09 INFO]: [BotWatch] BOTWATCH t=150s bots=26 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=9 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=300 eats=5 shots=1 walked=239 maxTick=1.2ms joins=96 quits=70
+[02:16:12 INFO]: novatiger6 lost connection: Bot removed
+[02:16:14 INFO]: [BotWatch] BOTWATCH t=155s bots=25 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=8 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=8 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=12 chests=300 eats=0 shots=0 walked=329 maxTick=1.4ms joins=96 quits=71
+[02:16:17 INFO]: ShadowMiner_164 lost connection: Bot removed
+[02:16:17 INFO]: SwiftGamer75 lost connection: Bot removed
+[02:16:19 INFO]: [BotWatch] BOTWATCH t=160s bots=23 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=8 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=303 eats=1 shots=0 walked=195 maxTick=0.7ms joins=96 quits=73
+[02:16:24 INFO]: [BotWatch] BOTWATCH t=165s bots=23 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=7 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=300 eats=0 shots=0 walked=312 maxTick=3.0ms joins=96 quits=73
+[02:16:25 INFO]: CrazyHunter lost connection: Bot removed
+[02:16:29 INFO]: [BotWatch] BOTWATCH t=170s bots=22 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=7 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=0 shots=0 walked=241 maxTick=0.7ms joins=96 quits=74
+[02:16:34 INFO]: [BotWatch] BOTWATCH t=175s bots=22 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=7 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=302 eats=0 shots=0 walked=359 maxTick=4.3ms joins=96 quits=74
+[02:16:36 INFO]: nightwolf1 lost connection: Bot removed
+[02:16:39 INFO]: [BotWatch] BOTWATCH t=180s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=6 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=0 shots=0 walked=259 maxTick=1.0ms joins=96 quits=75
+[02:16:44 INFO]: [BotWatch] BOTWATCH t=185s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=6 sg-3-Shady_Hollow alive=4 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=3 shots=0 walked=333 maxTick=3.4ms joins=96 quits=75
+[02:16:48 INFO]: bluehunter7 lost connection: Bot removed
+[02:16:49 INFO]: CrazyMiner98 lost connection: Bot removed
+[02:16:49 INFO]: [BotWatch] BOTWATCH t=190s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=300 eats=1 shots=0 walked=194 maxTick=0.8ms joins=96 quits=77
+[02:16:54 INFO]: [BotWatch] BOTWATCH t=195s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=294 maxTick=0.6ms joins=96 quits=77
+[02:16:59 INFO]: [BotWatch] BOTWATCH t=200s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=300 eats=1 shots=0 walked=198 maxTick=2.3ms joins=96 quits=77
+[02:17:04 INFO]: [BotWatch] BOTWATCH t=205s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=301 eats=0 shots=0 walked=284 maxTick=1.0ms joins=96 quits=77
+[02:17:09 INFO]: [BotWatch] BOTWATCH t=210s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=300 eats=2 shots=0 walked=181 maxTick=2.2ms joins=96 quits=77
+[02:17:14 INFO]: [BotWatch] BOTWATCH t=215s bots=19 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=3 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=6 chests=300 eats=0 shots=0 walked=254 maxTick=0.6ms joins=96 quits=77
+[02:17:17 INFO]: swiftdragon6 lost connection: Bot removed
+[02:17:17 INFO]: [SurvivalGames] [Combat] Shady_Hollow, 24 players: melee 100% of 646.7 damage (sword 286.6/64 hits, axe 168.1/46 hits, fist 147.7/149 hits, other_melee 44.3/68 hits, bow 0.0/0 hits, rod 0.0/0 hits, thrown 0.0/0 hits); fights that stopped: 58 (resumed 28, caught 0, third_party 19, died 0, escaped 11), someone fled in 10 (resumed 6, caught 0, third_party 1, died 0, escaped 3), gap median 6.449s, max 27.95s
+[02:17:19 INFO]: [BotWatch] BOTWATCH t=220s bots=18 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=2 sg-4-Par_72_Revamped alive=6 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=300 eats=0 shots=0 walked=162 maxTick=1.0ms joins=96 quits=78
+[02:17:24 INFO]: [BotWatch] BOTWATCH t=225s bots=18 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-3-Shady_Hollow alive=2 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=6 chests=300 eats=0 shots=0 walked=172 maxTick=0.9ms joins=96 quits=78
+[02:17:25 INFO]: LuckyFalcon_10 lost connection: Bot removed
+[02:17:28 INFO]: [BotWatch] BOTWATCH match over sg-3-dm-Deathmatch_Arena-0 last alive: 
+[02:17:28 INFO]: [BotWatch] BOTWATCH match over sg-3-Shady_Hollow last alive: nighthunter7(9) ShadowGamer(20)
+[02:17:29 INFO]: [BotWatch] BOTWATCH t=230s bots=17 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=300 eats=0 shots=0 walked=101 maxTick=18.6ms joins=96 quits=79
+[02:17:33 INFO]: [SurvivalGames] EpicShark96 (bot) joined room 3
+[02:17:34 INFO]: EpicShark96[localhost/127.0.0.1:0] logged in with entity id 1389 at ([lobby]262.5, 84.0, 39.5)
+[02:17:34 INFO]: [SurvivalGames] WildBlade (bot) joined room 3
+[02:17:34 INFO]: WildBlade[localhost/127.0.0.1:0] logged in with entity id 1390 at ([lobby]262.5, 84.0, 39.5)
+[02:17:34 INFO]: [SurvivalGames] ToxicTiger80 (bot) joined room 3
+[02:17:34 INFO]: ToxicTiger80[localhost/127.0.0.1:0] logged in with entity id 1391 at ([lobby]262.5, 84.0, 39.5)
+[02:17:34 INFO]: [SurvivalGames] SwiftFalcon22 (bot) joined room 3
+[02:17:34 INFO]: SwiftFalcon22[localhost/127.0.0.1:0] logged in with entity id 1392 at ([lobby]262.5, 84.0, 39.5)
+[02:17:34 INFO]: [SurvivalGames] NeonGolem (bot) joined room 3
+[02:17:34 INFO]: NeonGolem[localhost/127.0.0.1:0] logged in with entity id 1393 at ([lobby]262.5, 84.0, 39.5)
+[02:17:34 INFO]: [SurvivalGames] SlyBear (bot) joined room 3
+[02:17:34 INFO]: SlyBear[localhost/127.0.0.1:0] logged in with entity id 1394 at ([lobby]262.5, 84.0, 39.5)
+[02:17:35 INFO]: [SurvivalGames] TinyViper_116 (bot) joined room 3
+[02:17:35 INFO]: TinyViper_116[localhost/127.0.0.1:0] logged in with entity id 1395 at ([lobby]262.5, 84.0, 39.5)
+[02:17:35 INFO]: [SurvivalGames] novawizard5 (bot) joined room 3
+[02:17:35 INFO]: novawizard5[localhost/127.0.0.1:0] logged in with entity id 1396 at ([lobby]262.5, 84.0, 39.5)
+[02:17:35 INFO]: [BotWatch] BOTWATCH t=235s bots=25 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=300 eats=1 shots=1 walked=123 maxTick=13.6ms joins=104 quits=79
+[02:17:35 INFO]: [SurvivalGames] LuckyMiner (bot) joined room 3
+[02:17:35 INFO]: LuckyMiner[localhost/127.0.0.1:0] logged in with entity id 1398 at ([lobby]262.5, 84.0, 39.5)
+[02:17:36 INFO]: [SurvivalGames] NovaMiner (bot) joined room 3
+[02:17:36 INFO]: NovaMiner[localhost/127.0.0.1:0] logged in with entity id 1399 at ([lobby]262.5, 84.0, 39.5)
+[02:17:36 INFO]: [SurvivalGames] EpicLynx (bot) joined room 3
+[02:17:36 INFO]: EpicLynx[localhost/127.0.0.1:0] logged in with entity id 1400 at ([lobby]262.5, 84.0, 39.5)
+[02:17:36 INFO]: [SurvivalGames] tinyarcher4 (bot) joined room 3
+[02:17:36 INFO]: tinyarcher4[localhost/127.0.0.1:0] logged in with entity id 1401 at ([lobby]262.5, 84.0, 39.5)
+[02:17:36 INFO]: [SurvivalGames] SilentGolem_659 (bot) joined room 3
+[02:17:36 INFO]: SilentGolem_659[localhost/127.0.0.1:0] logged in with entity id 1402 at ([lobby]262.5, 84.0, 39.5)
+[02:17:36 INFO]: [SurvivalGames] SlyHunter5 (bot) joined room 3
+[02:17:36 INFO]: SlyHunter5[localhost/127.0.0.1:0] logged in with entity id 1403 at ([lobby]262.5, 84.0, 39.5)
+[02:17:37 INFO]: [SurvivalGames] IronSlayer74 (bot) joined room 3
+[02:17:37 INFO]: IronSlayer74[localhost/127.0.0.1:0] logged in with entity id 1404 at ([lobby]262.5, 84.0, 39.5)
+[02:17:37 INFO]: [SurvivalGames] BraveGolem20 (bot) joined room 3
+[02:17:37 INFO]: BraveGolem20[localhost/127.0.0.1:0] logged in with entity id 1405 at ([lobby]262.5, 84.0, 39.5)
+[02:17:37 INFO]: [SurvivalGames] swiftslayer5 (bot) joined room 3
+[02:17:37 INFO]: swiftslayer5[localhost/127.0.0.1:0] logged in with entity id 1406 at ([lobby]262.5, 84.0, 39.5)
+[02:17:38 INFO]: [SurvivalGames] GhostSpark_154 (bot) joined room 3
+[02:17:38 INFO]: GhostSpark_154[localhost/127.0.0.1:0] logged in with entity id 1407 at ([lobby]262.5, 84.0, 39.5)
+[02:17:38 INFO]: [SurvivalGames] SilentOwl_529 (bot) joined room 3
+[02:17:38 INFO]: SilentOwl_529[localhost/127.0.0.1:0] logged in with entity id 1408 at ([lobby]262.5, 84.0, 39.5)
+[02:17:38 INFO]: [SurvivalGames] CosmicLynx (bot) joined room 3
+[02:17:38 INFO]: CosmicLynx[localhost/127.0.0.1:0] logged in with entity id 1409 at ([lobby]262.5, 84.0, 39.5)
+[02:17:38 INFO]: [SurvivalGames] EpicSpark (bot) joined room 3
+[02:17:39 INFO]: EpicSpark[localhost/127.0.0.1:0] logged in with entity id 1410 at ([lobby]262.5, 84.0, 39.5)
+[02:17:39 INFO]: [SurvivalGames] WildMiner49 (bot) joined room 3
+[02:17:39 INFO]: WildMiner49[localhost/127.0.0.1:0] logged in with entity id 1411 at ([lobby]262.5, 84.0, 39.5)
+[02:17:39 INFO]: [BotWatch] BOTWATCH t=240s bots=39 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=300 eats=0 shots=0 walked=179 maxTick=13.5ms joins=118 quits=79
+[02:17:44 INFO]: [BotWatch] BOTWATCH t=245s bots=39 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=5 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=0 shots=0 walked=125 maxTick=2.1ms joins=118 quits=79
+[02:17:48 INFO]: frostowl2 lost connection: Bot removed
+[02:17:49 INFO]: -------- World Settings For [sg-3-Plantations] --------
+[02:17:49 INFO]: Item Despawn Rate: 6000
+[02:17:49 INFO]: Item Merge Radius: 2.5
+[02:17:49 INFO]: Arrow Despawn Rate: 1200
+[02:17:49 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:17:49 INFO]: View Distance: 8
+[02:17:49 INFO]: Zombie Aggressive Towards Villager: true
+[02:17:49 INFO]: Anti X-Ray: false
+[02:17:49 INFO]: 	Engine Mode: 1
+[02:17:49 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:17:49 INFO]: 	Replace Blocks: [1, 5]
+[02:17:49 INFO]: Chunks to Grow per Tick: 650
+[02:17:49 INFO]: Clear tick list: false
+[02:17:49 INFO]: Experience Merge Radius: 3.0
+[02:17:49 INFO]: Mob Spawn Range: 4
+[02:17:49 INFO]: Nerfing mobs spawned from spawners: false
+[02:17:49 INFO]: Cactus Growth Modifier: 100%
+[02:17:49 INFO]: Cane Growth Modifier: 100%
+[02:17:49 INFO]: Melon Growth Modifier: 100%
+[02:17:49 INFO]: Mushroom Growth Modifier: 100%
+[02:17:49 INFO]: Pumpkin Growth Modifier: 100%
+[02:17:49 INFO]: Sapling Growth Modifier: 100%
+[02:17:49 INFO]: Wheat Growth Modifier: 100%
+[02:17:49 INFO]: NetherWart Growth Modifier: 100%
+[02:17:49 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:17:49 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:17:49 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:17:49 INFO]: Random Lighting Updates: false
+[02:17:49 INFO]: Structure Info Saving: true
+[02:17:49 INFO]: Sending up to 10 chunks per packet
+[02:17:49 INFO]: Max Entity Collisions: 8
+[02:17:49 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:17:49 INFO]: Max TNT Explosions: 100
+[02:17:49 INFO]: -------- World Settings For [sg-3-Plantations] --------
+[02:17:49 INFO]: Water over lava flow speed: 5
+[02:17:49 INFO]: Fix TNT cannons: false
+[02:17:49 INFO]: Allow undead horse types to be leashed: false
+[02:17:49 INFO]: Keep spawn chunk loaded: true
+[02:17:49 INFO]: World async lighting: false
+[02:17:49 INFO]: WorldServer TickNextTick cap set at 10000
+[02:17:49 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:17:49 INFO]: Remove invalid mob spawner tile entities: true
+[02:17:49 INFO]: Player blocking damage multiplier set to 0.5
+[02:17:49 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:17:49 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:17:49 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:17:49 INFO]: [SurvivalGames] Preloaded the spawns of sg-3-Plantations: 255 chunks in 336 ms
+[02:17:49 INFO]: [BotWatch] BOTWATCH t=250s bots=38 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=20 hits=0 chests=300 eats=0 shots=0 walked=168 maxTick=35.2ms joins=118 quits=80
+[02:17:50 INFO]: [SurvivalGames] Preloaded sg-3-Plantations: 813 chunks in 1502 ms (1837 ms after the map opened)
+[02:17:54 INFO]: [BotWatch] BOTWATCH t=255s bots=38 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=24 hits=3 chests=300 eats=0 shots=0 walked=101 maxTick=29.2ms joins=118 quits=80
+[02:17:59 INFO]: [BotWatch] BOTWATCH t=260s bots=38 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=5 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=24 hits=0 chests=301 eats=0 shots=0 walked=168 maxTick=1.0ms joins=118 quits=80
+[02:18:00 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:18:00 INFO]: Item Despawn Rate: 6000
+[02:18:00 INFO]: Item Merge Radius: 2.5
+[02:18:00 INFO]: Arrow Despawn Rate: 1200
+[02:18:00 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:18:00 INFO]: View Distance: 8
+[02:18:00 INFO]: Zombie Aggressive Towards Villager: true
+[02:18:00 INFO]: Anti X-Ray: false
+[02:18:00 INFO]: 	Engine Mode: 1
+[02:18:00 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:18:00 INFO]: 	Replace Blocks: [1, 5]
+[02:18:00 INFO]: Chunks to Grow per Tick: 650
+[02:18:00 INFO]: Clear tick list: false
+[02:18:00 INFO]: Experience Merge Radius: 3.0
+[02:18:00 INFO]: Mob Spawn Range: 4
+[02:18:00 INFO]: Nerfing mobs spawned from spawners: false
+[02:18:00 INFO]: Cactus Growth Modifier: 100%
+[02:18:00 INFO]: Cane Growth Modifier: 100%
+[02:18:00 INFO]: Melon Growth Modifier: 100%
+[02:18:00 INFO]: Mushroom Growth Modifier: 100%
+[02:18:00 INFO]: Pumpkin Growth Modifier: 100%
+[02:18:00 INFO]: Sapling Growth Modifier: 100%
+[02:18:00 INFO]: Wheat Growth Modifier: 100%
+[02:18:00 INFO]: NetherWart Growth Modifier: 100%
+[02:18:00 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:18:00 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:18:00 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:18:00 INFO]: Random Lighting Updates: false
+[02:18:00 INFO]: Structure Info Saving: true
+[02:18:00 INFO]: Sending up to 10 chunks per packet
+[02:18:00 INFO]: Max Entity Collisions: 8
+[02:18:00 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:18:00 INFO]: Max TNT Explosions: 100
+[02:18:00 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:18:00 INFO]: Water over lava flow speed: 5
+[02:18:00 INFO]: Fix TNT cannons: false
+[02:18:00 INFO]: Allow undead horse types to be leashed: false
+[02:18:00 INFO]: Keep spawn chunk loaded: true
+[02:18:00 INFO]: World async lighting: false
+[02:18:00 INFO]: WorldServer TickNextTick cap set at 10000
+[02:18:00 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:18:00 INFO]: Remove invalid mob spawner tile entities: true
+[02:18:00 INFO]: Player blocking damage multiplier set to 0.5
+[02:18:00 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:18:00 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:18:00 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:18:00 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-3-dm-Deathmatch_Arena-0: 60 chunks in 738 ms
+[02:18:02 INFO]: ShadowShark_365 lost connection: Bot removed
+[02:18:04 INFO]: [BotWatch] BOTWATCH t=265s bots=37 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=4 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=24 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=41 chests=335 eats=0 shots=1 walked=455 maxTick=22.7ms joins=118 quits=81
+[02:18:06 INFO]: SlyHunter5 lost connection: Bot removed
+[02:18:09 INFO]: [BotWatch] BOTWATCH t=270s bots=36 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=4 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=22 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=55 chests=319 eats=1 shots=0 walked=635 maxTick=2.5ms joins=118 quits=82
+[02:18:10 INFO]: TinyViper_116 lost connection: Bot removed
+[02:18:11 INFO]: LuckyMiner lost connection: Bot removed
+[02:18:12 INFO]: EpicShark96 lost connection: Bot removed
+[02:18:14 INFO]: EpicSpark lost connection: Bot removed
+[02:18:14 INFO]: [BotWatch] BOTWATCH t=275s bots=32 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=4 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=18 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=48 chests=311 eats=0 shots=0 walked=378 maxTick=3.2ms joins=118 quits=86
+[02:18:15 INFO]: SlyBear lost connection: Bot removed
+[02:18:17 INFO]: GhostSpark_154 lost connection: Bot removed
+[02:18:19 INFO]: [BotWatch] BOTWATCH t=280s bots=30 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=4 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=17 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=33 chests=303 eats=0 shots=0 walked=520 maxTick=1.7ms joins=118 quits=88
+[02:18:22 INFO]: SilentGolem_659 lost connection: Bot removed
+[02:18:23 INFO]: NeonGolem lost connection: Bot removed
+[02:18:24 INFO]: [BotWatch] BOTWATCH t=285s bots=28 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=4 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=12 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=17 chests=302 eats=0 shots=0 walked=347 maxTick=2.6ms joins=118 quits=90
+[02:18:25 INFO]: BraveGolem20 lost connection: Bot removed
+[02:18:25 INFO]: swiftslayer5 lost connection: Bot removed
+[02:18:25 INFO]: NovaMiner lost connection: Bot removed
+[02:18:27 INFO]: CosmicLynx lost connection: Bot removed
+[02:18:29 INFO]: BraveGamer33 lost connection: Bot removed
+[02:18:29 INFO]: [BotWatch] BOTWATCH t=290s bots=23 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=11 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=303 eats=0 shots=0 walked=402 maxTick=2.7ms joins=118 quits=95
+[02:18:34 INFO]: [BotWatch] BOTWATCH t=295s bots=23 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=300 eats=0 shots=0 walked=262 maxTick=0.6ms joins=118 quits=95
+[02:18:35 INFO]: EpicLynx lost connection: Bot removed
+[02:18:39 INFO]: [BotWatch] BOTWATCH t=300s bots=22 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=301 eats=1 shots=0 walked=378 maxTick=0.7ms joins=118 quits=96
+[02:18:42 INFO]: SilentCat29 lost connection: Bot removed
+[02:18:44 INFO]: [BotWatch] BOTWATCH t=305s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=303 eats=1 shots=0 walked=182 maxTick=11.0ms joins=118 quits=97
+[02:18:49 INFO]: [BotWatch] BOTWATCH t=310s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=301 eats=0 shots=0 walked=311 maxTick=1.5ms joins=118 quits=97
+[02:18:54 INFO]: [BotWatch] BOTWATCH t=315s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=304 eats=0 shots=0 walked=200 maxTick=0.8ms joins=118 quits=97
+[02:18:59 INFO]: [BotWatch] BOTWATCH t=320s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=303 eats=1 shots=0 walked=282 maxTick=1.3ms joins=118 quits=97
+[02:19:04 INFO]: [BotWatch] BOTWATCH t=325s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=1 shots=0 walked=212 maxTick=0.7ms joins=118 quits=97
+[02:19:09 INFO]: [BotWatch] BOTWATCH t=330s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=302 eats=0 shots=0 walked=343 maxTick=1.3ms joins=118 quits=97
+[02:19:14 INFO]: [BotWatch] BOTWATCH t=335s bots=21 sg-1-Par_72_Revamped alive=5 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=3 chests=301 eats=0 shots=0 walked=247 maxTick=0.5ms joins=118 quits=97
+[02:19:16 INFO]: SwiftGolem_430 lost connection: Bot removed
+[02:19:19 INFO]: [BotWatch] BOTWATCH t=340s bots=20 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=10 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=9 chests=300 eats=0 shots=0 walked=316 maxTick=2.4ms joins=118 quits=98
+[02:19:21 INFO]: SilentOwl_529 lost connection: Bot removed
+[02:19:24 INFO]: [BotWatch] BOTWATCH t=345s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=300 eats=1 shots=0 walked=188 maxTick=1.3ms joins=118 quits=99
+[02:19:29 INFO]: [BotWatch] BOTWATCH t=350s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=284 maxTick=0.8ms joins=118 quits=99
+[02:19:34 INFO]: [BotWatch] BOTWATCH t=355s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=1 shots=0 walked=210 maxTick=2.1ms joins=118 quits=99
+[02:19:39 INFO]: [BotWatch] BOTWATCH t=360s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=3 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=1 shots=0 walked=303 maxTick=0.8ms joins=118 quits=99
+[02:19:44 INFO]: [BotWatch] BOTWATCH t=365s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=3 chests=301 eats=0 shots=0 walked=176 maxTick=0.9ms joins=118 quits=99
+[02:19:49 INFO]: [BotWatch] BOTWATCH t=370s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=3 chests=301 eats=0 shots=0 walked=254 maxTick=1.7ms joins=118 quits=99
+[02:19:54 INFO]: [BotWatch] BOTWATCH t=375s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=1 shots=0 walked=192 maxTick=0.8ms joins=118 quits=99
+[02:19:55 INFO]: [SurvivalGames] Opened the gates of sg-2-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:19:59 INFO]: [BotWatch] BOTWATCH t=380s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=339 maxTick=1.4ms joins=118 quits=99
+[02:20:04 INFO]: [BotWatch] BOTWATCH t=385s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=301 eats=0 shots=0 walked=219 maxTick=0.5ms joins=118 quits=99
+[02:20:09 INFO]: [BotWatch] BOTWATCH t=390s bots=19 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=9 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=10 chests=301 eats=0 shots=0 walked=329 maxTick=0.9ms joins=118 quits=99
+[02:20:13 INFO]: WildBlade lost connection: Bot removed
+[02:20:14 INFO]: [BotWatch] BOTWATCH t=395s bots=18 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=8 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=300 eats=0 shots=0 walked=215 maxTick=1.8ms joins=118 quits=100
+[02:20:17 INFO]: BraveWizard_707 lost connection: Bot removed
+[02:20:17 INFO]: [SurvivalGames] [Combat] Plantations, 24 players: melee 100% of 840.3 damage (sword 303.8/86 hits, axe 148.1/57 hits, fist 365.6/469 hits, other_melee 22.7/30 hits, bow 0.0/0 hits, rod 0.0/0 hits, thrown 0.0/0 hits); fights that stopped: 103 (resumed 62, caught 0, third_party 18, died 0, escaped 23), someone fled in 23 (resumed 11, caught 0, third_party 3, died 0, escaped 9), gap median 6.9s, max 27.48s
+[02:20:19 INFO]: novawizard5 lost connection: Bot removed
+[02:20:19 INFO]: [BotWatch] BOTWATCH t=400s bots=16 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=7 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=300 eats=0 shots=0 walked=198 maxTick=0.8ms joins=118 quits=102
+[02:20:24 INFO]: [BotWatch] BOTWATCH t=405s bots=16 sg-1-Par_72_Revamped alive=4 sg-2-Plantations alive=0 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-2-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=7 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=300 eats=0 shots=0 walked=104 maxTick=1.3ms joins=118 quits=102
+[02:20:28 INFO]: [BotWatch] BOTWATCH match over sg-2-dm-Deathmatch_Arena-0 last alive: SilentRaven_901(15) silentfalcon5(16)
+[02:20:28 INFO]: [BotWatch] BOTWATCH match over sg-2-Plantations last alive: 
+[02:20:29 INFO]: [BotWatch] BOTWATCH t=410s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=7 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=301 eats=0 shots=0 walked=221 maxTick=4.4ms joins=118 quits=102
+[02:20:33 INFO]: [SurvivalGames] PixelNinja (bot) joined room 2
+[02:20:34 INFO]: PixelNinja[localhost/127.0.0.1:0] logged in with entity id 2050 at ([lobby]262.5, 84.0, 39.5)
+[02:20:34 INFO]: [SurvivalGames] crazypanda4 (bot) joined room 2
+[02:20:34 INFO]: crazypanda4[localhost/127.0.0.1:0] logged in with entity id 2051 at ([lobby]262.5, 84.0, 39.5)
+[02:20:34 INFO]: [SurvivalGames] EpicWolf_155 (bot) joined room 2
+[02:20:34 INFO]: EpicWolf_155[localhost/127.0.0.1:0] logged in with entity id 2052 at ([lobby]262.5, 84.0, 39.5)
+[02:20:34 INFO]: [SurvivalGames] CrazyHunter (bot) joined room 2
+[02:20:34 INFO]: CrazyHunter[localhost/127.0.0.1:0] logged in with entity id 2053 at ([lobby]262.5, 84.0, 39.5)
+[02:20:34 INFO]: [BotWatch] BOTWATCH t=415s bots=20 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=7 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=300 eats=0 shots=0 walked=158 maxTick=17.8ms joins=122 quits=102
+[02:20:34 INFO]: [SurvivalGames] LuckyShark13 (bot) joined room 2
+[02:20:34 INFO]: LuckyShark13[localhost/127.0.0.1:0] logged in with entity id 2054 at ([lobby]262.5, 84.0, 39.5)
+[02:20:35 INFO]: [SurvivalGames] DarkHawk (bot) joined room 2
+[02:20:35 INFO]: DarkHawk[localhost/127.0.0.1:0] logged in with entity id 2055 at ([lobby]262.5, 84.0, 39.5)
+[02:20:35 INFO]: [SurvivalGames] BlueNinja (bot) joined room 2
+[02:20:35 INFO]: BlueNinja[localhost/127.0.0.1:0] logged in with entity id 2056 at ([lobby]262.5, 84.0, 39.5)
+[02:20:35 INFO]: [SurvivalGames] ShadowRaven (bot) joined room 2
+[02:20:35 INFO]: ShadowRaven[localhost/127.0.0.1:0] logged in with entity id 2057 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: [SurvivalGames] RedViper65 (bot) joined room 2
+[02:20:36 INFO]: RedViper65[localhost/127.0.0.1:0] logged in with entity id 2092 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: [SurvivalGames] SwiftFox_501 (bot) joined room 2
+[02:20:36 INFO]: SwiftFox_501[localhost/127.0.0.1:0] logged in with entity id 2093 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: [SurvivalGames] SlyCat (bot) joined room 2
+[02:20:36 INFO]: SlyCat[localhost/127.0.0.1:0] logged in with entity id 2094 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: [SurvivalGames] cosmicstorm8 (bot) joined room 2
+[02:20:36 INFO]: cosmicstorm8[localhost/127.0.0.1:0] logged in with entity id 2095 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: IronSlayer74 lost connection: Bot removed
+[02:20:36 INFO]: [SurvivalGames] redviper6 (bot) joined room 2
+[02:20:36 INFO]: redviper6[localhost/127.0.0.1:0] logged in with entity id 2096 at ([lobby]262.5, 84.0, 39.5)
+[02:20:36 INFO]: [SurvivalGames] wildtiger7 (bot) joined room 2
+[02:20:36 INFO]: wildtiger7[localhost/127.0.0.1:0] logged in with entity id 2097 at ([lobby]262.5, 84.0, 39.5)
+[02:20:37 INFO]: [SurvivalGames] PixelWolf_710 (bot) joined room 2
+[02:20:37 INFO]: PixelWolf_710[localhost/127.0.0.1:0] logged in with entity id 2098 at ([lobby]262.5, 84.0, 39.5)
+[02:20:37 INFO]: [SurvivalGames] FrostGamer_313 (bot) joined room 2
+[02:20:37 INFO]: FrostGamer_313[localhost/127.0.0.1:0] logged in with entity id 2099 at ([lobby]262.5, 84.0, 39.5)
+[02:20:37 INFO]: [SurvivalGames] slyhawk1 (bot) joined room 2
+[02:20:37 INFO]: slyhawk1[localhost/127.0.0.1:0] logged in with entity id 2100 at ([lobby]262.5, 84.0, 39.5)
+[02:20:38 INFO]: [SurvivalGames] TinySpark_391 (bot) joined room 2
+[02:20:38 INFO]: TinySpark_391[localhost/127.0.0.1:0] logged in with entity id 2101 at ([lobby]262.5, 84.0, 39.5)
+[02:20:38 INFO]: [SurvivalGames] CosmicFalcon_450 (bot) joined room 2
+[02:20:38 INFO]: CosmicFalcon_450[localhost/127.0.0.1:0] logged in with entity id 2102 at ([lobby]262.5, 84.0, 39.5)
+[02:20:38 INFO]: [SurvivalGames] WildLynx (bot) joined room 2
+[02:20:38 INFO]: WildLynx[localhost/127.0.0.1:0] logged in with entity id 2103 at ([lobby]262.5, 84.0, 39.5)
+[02:20:38 INFO]: [SurvivalGames] frostgamer8 (bot) joined room 2
+[02:20:38 INFO]: frostgamer8[localhost/127.0.0.1:0] logged in with entity id 2121 at ([lobby]262.5, 84.0, 39.5)
+[02:20:39 INFO]: [SurvivalGames] TinyGolem_865 (bot) joined room 2
+[02:20:39 INFO]: TinyGolem_865[localhost/127.0.0.1:0] logged in with entity id 2122 at ([lobby]262.5, 84.0, 39.5)
+[02:20:39 INFO]: SwiftFalcon22 lost connection: Bot removed
+[02:20:39 INFO]: [BotWatch] BOTWATCH t=420s bots=36 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=5 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=300 eats=1 shots=0 walked=116 maxTick=20.1ms joins=140 quits=104
+[02:20:44 INFO]: [BotWatch] BOTWATCH t=425s bots=36 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=5 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=135 maxTick=2.9ms joins=140 quits=104
+[02:20:49 INFO]: -------- World Settings For [sg-2-Shady_Hollow] --------
+[02:20:49 INFO]: Item Despawn Rate: 6000
+[02:20:49 INFO]: Item Merge Radius: 2.5
+[02:20:49 INFO]: Arrow Despawn Rate: 1200
+[02:20:49 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:20:49 INFO]: View Distance: 8
+[02:20:49 INFO]: Zombie Aggressive Towards Villager: true
+[02:20:49 INFO]: Anti X-Ray: false
+[02:20:49 INFO]: 	Engine Mode: 1
+[02:20:49 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:20:49 INFO]: 	Replace Blocks: [1, 5]
+[02:20:49 INFO]: Chunks to Grow per Tick: 650
+[02:20:49 INFO]: Clear tick list: false
+[02:20:49 INFO]: Experience Merge Radius: 3.0
+[02:20:49 INFO]: Mob Spawn Range: 4
+[02:20:49 INFO]: Nerfing mobs spawned from spawners: false
+[02:20:49 INFO]: Cactus Growth Modifier: 100%
+[02:20:49 INFO]: Cane Growth Modifier: 100%
+[02:20:49 INFO]: Melon Growth Modifier: 100%
+[02:20:49 INFO]: Mushroom Growth Modifier: 100%
+[02:20:49 INFO]: Pumpkin Growth Modifier: 100%
+[02:20:49 INFO]: Sapling Growth Modifier: 100%
+[02:20:49 INFO]: Wheat Growth Modifier: 100%
+[02:20:49 INFO]: NetherWart Growth Modifier: 100%
+[02:20:49 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:20:49 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:20:49 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:20:49 INFO]: Random Lighting Updates: false
+[02:20:49 INFO]: Structure Info Saving: true
+[02:20:49 INFO]: Sending up to 10 chunks per packet
+[02:20:49 INFO]: Max Entity Collisions: 8
+[02:20:49 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:20:49 INFO]: Max TNT Explosions: 100
+[02:20:49 INFO]: -------- World Settings For [sg-2-Shady_Hollow] --------
+[02:20:49 INFO]: Water over lava flow speed: 5
+[02:20:49 INFO]: Fix TNT cannons: false
+[02:20:49 INFO]: Allow undead horse types to be leashed: false
+[02:20:49 INFO]: Keep spawn chunk loaded: true
+[02:20:49 INFO]: World async lighting: false
+[02:20:49 INFO]: WorldServer TickNextTick cap set at 10000
+[02:20:49 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:20:49 INFO]: Remove invalid mob spawner tile entities: true
+[02:20:49 INFO]: Player blocking damage multiplier set to 0.5
+[02:20:49 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:20:49 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:20:49 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:20:49 INFO]: [SurvivalGames] Preloaded the spawns of sg-2-Shady_Hollow: 36 chunks in 133 ms
+[02:20:49 INFO]: [BotWatch] BOTWATCH t=430s bots=36 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=5 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=24 hits=0 chests=300 eats=2 shots=0 walked=75 maxTick=21.6ms joins=140 quits=104
+[02:20:52 INFO]: nighthunter7 lost connection: Bot removed
+[02:20:52 INFO]: [SurvivalGames] Preloaded sg-2-Shady_Hollow: 1400 chunks in 3205 ms (3338 ms after the map opened)
+[02:20:54 INFO]: [BotWatch] BOTWATCH t=435s bots=35 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=4 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=24 hits=1 chests=300 eats=0 shots=0 walked=122 maxTick=14.0ms joins=140 quits=105
+[02:20:59 INFO]: [BotWatch] BOTWATCH t=440s bots=35 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=4 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=24 hits=0 chests=300 eats=0 shots=0 walked=77 maxTick=2.4ms joins=140 quits=105
+[02:21:00 INFO]: -------- World Settings For [sg-2-dm-Deathmatch_Arena-0] --------
+[02:21:00 INFO]: Item Despawn Rate: 6000
+[02:21:00 INFO]: Item Merge Radius: 2.5
+[02:21:00 INFO]: Arrow Despawn Rate: 1200
+[02:21:00 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:21:00 INFO]: View Distance: 8
+[02:21:00 INFO]: Zombie Aggressive Towards Villager: true
+[02:21:00 INFO]: Anti X-Ray: false
+[02:21:00 INFO]: 	Engine Mode: 1
+[02:21:00 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:21:00 INFO]: 	Replace Blocks: [1, 5]
+[02:21:00 INFO]: Chunks to Grow per Tick: 650
+[02:21:00 INFO]: Clear tick list: false
+[02:21:00 INFO]: Experience Merge Radius: 3.0
+[02:21:00 INFO]: Mob Spawn Range: 4
+[02:21:00 INFO]: Nerfing mobs spawned from spawners: false
+[02:21:00 INFO]: Cactus Growth Modifier: 100%
+[02:21:00 INFO]: Cane Growth Modifier: 100%
+[02:21:00 INFO]: Melon Growth Modifier: 100%
+[02:21:00 INFO]: Mushroom Growth Modifier: 100%
+[02:21:00 INFO]: Pumpkin Growth Modifier: 100%
+[02:21:00 INFO]: Sapling Growth Modifier: 100%
+[02:21:00 INFO]: Wheat Growth Modifier: 100%
+[02:21:00 INFO]: NetherWart Growth Modifier: 100%
+[02:21:00 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:21:00 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:21:00 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:21:00 INFO]: Random Lighting Updates: false
+[02:21:00 INFO]: Structure Info Saving: true
+[02:21:00 INFO]: Sending up to 10 chunks per packet
+[02:21:00 INFO]: Max Entity Collisions: 8
+[02:21:00 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:21:00 INFO]: Max TNT Explosions: 100
+[02:21:00 INFO]: -------- World Settings For [sg-2-dm-Deathmatch_Arena-0] --------
+[02:21:00 INFO]: Water over lava flow speed: 5
+[02:21:00 INFO]: Fix TNT cannons: false
+[02:21:00 INFO]: Allow undead horse types to be leashed: false
+[02:21:00 INFO]: Keep spawn chunk loaded: true
+[02:21:00 INFO]: World async lighting: false
+[02:21:00 INFO]: WorldServer TickNextTick cap set at 10000
+[02:21:00 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:21:00 INFO]: Remove invalid mob spawner tile entities: true
+[02:21:00 INFO]: Player blocking damage multiplier set to 0.5
+[02:21:00 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:21:00 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:21:00 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:21:00 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-2-dm-Deathmatch_Arena-0: 60 chunks in 742 ms
+[02:21:04 INFO]: [BotWatch] BOTWATCH t=445s bots=35 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=4 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=24 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=25 chests=317 eats=0 shots=0 walked=562 maxTick=18.1ms joins=140 quits=105
+[02:21:06 INFO]: frostgamer8 lost connection: Bot removed
+[02:21:09 INFO]: cosmicstorm8 lost connection: Bot removed
+[02:21:09 INFO]: [BotWatch] BOTWATCH t=450s bots=33 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=4 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=22 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=25 chests=330 eats=0 shots=0 walked=366 maxTick=0.7ms joins=140 quits=107
+[02:21:12 INFO]: TinyGolem_865 lost connection: Bot removed
+[02:21:13 INFO]: CosmicFalcon_450 lost connection: Bot removed
+[02:21:14 INFO]: DarkHawk lost connection: Bot removed
+[02:21:14 INFO]: [BotWatch] BOTWATCH t=455s bots=30 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=19 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=25 chests=317 eats=0 shots=0 walked=456 maxTick=1.8ms joins=140 quits=110
+[02:21:15 INFO]: ToxicTiger80 lost connection: Bot removed
+[02:21:17 INFO]: PixelWolf_710 lost connection: Bot removed
+[02:21:17 INFO]: SilentRaven_901 lost connection: Bot removed
+[02:21:18 INFO]: crazypanda4 lost connection: Bot removed
+[02:21:19 INFO]: wildtiger7 lost connection: Bot removed
+[02:21:19 INFO]: [BotWatch] BOTWATCH t=460s bots=25 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=14 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=42 chests=302 eats=1 shots=0 walked=276 maxTick=1.7ms joins=140 quits=115
+[02:21:20 INFO]: FrostGamer_313 lost connection: Bot removed
+[02:21:21 INFO]: SwiftFox_501 lost connection: Bot removed
+[02:21:22 INFO]: LuckyShark13 lost connection: Bot removed
+[02:21:24 INFO]: WildLynx lost connection: Bot removed
+[02:21:24 INFO]: [BotWatch] BOTWATCH t=465s bots=21 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=11 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=8 chests=301 eats=0 shots=0 walked=332 maxTick=1.0ms joins=140 quits=119
+[02:21:27 INFO]: BlueNinja lost connection: Bot removed
+[02:21:29 INFO]: PixelNinja lost connection: Bot removed
+[02:21:29 INFO]: [BotWatch] BOTWATCH t=470s bots=19 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=301 eats=0 shots=0 walked=207 maxTick=1.2ms joins=140 quits=121
+[02:21:30 INFO]: slyhawk1 lost connection: Bot removed
+[02:21:34 INFO]: [BotWatch] BOTWATCH t=475s bots=18 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=262 maxTick=1.4ms joins=140 quits=122
+[02:21:39 INFO]: [BotWatch] BOTWATCH t=480s bots=18 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=305 eats=0 shots=0 walked=154 maxTick=1.9ms joins=140 quits=122
+[02:21:44 INFO]: [BotWatch] BOTWATCH t=485s bots=18 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=303 eats=0 shots=0 walked=254 maxTick=0.8ms joins=140 quits=122
+[02:21:49 INFO]: [BotWatch] BOTWATCH t=490s bots=18 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=303 eats=1 shots=0 walked=179 maxTick=1.6ms joins=140 quits=122
+[02:21:54 INFO]: [BotWatch] BOTWATCH t=495s bots=18 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=8 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=301 eats=0 shots=0 walked=245 maxTick=0.9ms joins=140 quits=122
+[02:21:56 INFO]: silentfalcon5 lost connection: Bot removed
+[02:21:59 INFO]: [BotWatch] BOTWATCH t=500s bots=17 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=300 eats=0 shots=0 walked=157 maxTick=2.2ms joins=140 quits=123
+[02:22:04 INFO]: [BotWatch] BOTWATCH t=505s bots=17 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=3 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=301 eats=1 shots=0 walked=227 maxTick=2.1ms joins=140 quits=123
+[02:22:09 INFO]: WildMiner49 lost connection: Bot removed
+[02:22:09 INFO]: [BotWatch] BOTWATCH t=510s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=300 eats=0 shots=0 walked=148 maxTick=0.6ms joins=140 quits=124
+[02:22:14 INFO]: [BotWatch] BOTWATCH t=515s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=1 shots=0 walked=208 maxTick=1.0ms joins=140 quits=124
+[02:22:19 INFO]: [BotWatch] BOTWATCH t=520s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=300 eats=0 shots=1 walked=126 maxTick=2.4ms joins=140 quits=124
+[02:22:24 INFO]: [BotWatch] BOTWATCH t=525s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=4 chests=301 eats=0 shots=0 walked=219 maxTick=11.1ms joins=140 quits=124
+[02:22:29 INFO]: [BotWatch] BOTWATCH t=530s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=132 maxTick=1.5ms joins=140 quits=124
+[02:22:34 INFO]: [BotWatch] BOTWATCH t=535s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=179 maxTick=0.5ms joins=140 quits=124
+[02:22:39 INFO]: [BotWatch] BOTWATCH t=540s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=1 walked=135 maxTick=1.6ms joins=140 quits=124
+[02:22:44 INFO]: [BotWatch] BOTWATCH t=545s bots=16 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=7 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=229 maxTick=0.7ms joins=140 quits=124
+[02:22:48 INFO]: EpicWolf_155 lost connection: Bot removed
+[02:22:49 INFO]: [BotWatch] BOTWATCH t=550s bots=15 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=6 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=1 walked=130 maxTick=1.7ms joins=140 quits=125
+[02:22:54 INFO]: [BotWatch] BOTWATCH t=555s bots=15 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=6 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=189 maxTick=2.3ms joins=140 quits=125
+[02:22:59 INFO]: [BotWatch] BOTWATCH t=560s bots=15 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=6 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=140 maxTick=2.5ms joins=140 quits=125
+[02:23:04 INFO]: [BotWatch] BOTWATCH t=565s bots=15 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=2 sg-3-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=6 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=0 shots=0 walked=182 maxTick=2.4ms joins=140 quits=125
+[02:23:09 INFO]: [BotWatch] BOTWATCH t=570s bots=15 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=6 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=6 chests=300 eats=0 shots=0 walked=100 maxTick=0.7ms joins=140 quits=125
+[02:23:13 INFO]: SlyCat lost connection: Bot removed
+[02:23:14 INFO]: [BotWatch] BOTWATCH t=575s bots=14 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=5 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=2 chests=300 eats=1 shots=0 walked=149 maxTick=1.1ms joins=140 quits=126
+[02:23:19 INFO]: [BotWatch] BOTWATCH t=580s bots=14 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=5 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=1 shots=0 walked=110 maxTick=1.5ms joins=140 quits=126
+[02:23:22 INFO]: [SurvivalGames] Opened the gates of sg-3-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:23:24 INFO]: [BotWatch] BOTWATCH t=585s bots=14 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=5 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=302 eats=0 shots=0 walked=203 maxTick=0.7ms joins=140 quits=126
+[02:23:28 INFO]: ShadowRaven lost connection: Bot removed
+[02:23:29 INFO]: [BotWatch] BOTWATCH t=590s bots=13 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=4 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=6 chests=300 eats=1 shots=0 walked=135 maxTick=0.8ms joins=140 quits=127
+[02:23:34 INFO]: [BotWatch] BOTWATCH t=595s bots=13 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=4 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=7 chests=302 eats=0 shots=0 walked=168 maxTick=0.6ms joins=140 quits=127
+[02:23:39 INFO]: [BotWatch] BOTWATCH t=600s bots=13 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=1 sg-2-Shady_Hollow alive=4 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=5 chests=301 eats=1 shots=0 walked=106 maxTick=0.7ms joins=140 quits=127
+[02:23:40 INFO]: tinyarcher4 lost connection: Bot removed
+[02:23:40 INFO]: [SurvivalGames] [Combat] Plantations, 24 players: melee 100% of 712.6 damage (sword 549.8/131 hits, axe 22.7/8 hits, fist 137.1/168 hits, other_melee 3.0/5 hits, bow 0.0/0 hits, rod 0.0/0 hits, thrown 0.0/0 hits); fights that stopped: 57 (resumed 21, caught 0, third_party 25, died 0, escaped 11), someone fled in 14 (resumed 6, caught 0, third_party 2, died 0, escaped 6), gap median 7.399s, max 26.5s
+[02:23:42 INFO]: CrazyHunter lost connection: Bot removed
+[02:23:44 INFO]: [BotWatch] BOTWATCH t=605s bots=11 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=1 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=2 shots=0 walked=141 maxTick=2.7ms joins=140 quits=129
+[02:23:49 INFO]: [BotWatch] BOTWATCH t=610s bots=11 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-3-Plantations alive=0 sg-3-dm-Deathmatch_Arena-0 alive=1 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=301 eats=0 shots=0 walked=78 maxTick=0.8ms joins=140 quits=129
+[02:23:51 INFO]: [BotWatch] BOTWATCH match over sg-3-dm-Deathmatch_Arena-0 last alive: ShadowGamer(20)
+[02:23:51 INFO]: [BotWatch] BOTWATCH match over sg-3-Plantations last alive: 
+[02:23:54 INFO]: [BotWatch] BOTWATCH t=615s bots=11 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=98 maxTick=2.8ms joins=140 quits=129
+[02:23:56 INFO]: [SurvivalGames] ShadowSlayer_664 (bot) joined room 3
+[02:23:57 INFO]: ShadowSlayer_664[localhost/127.0.0.1:0] logged in with entity id 2529 at ([lobby]262.5, 84.0, 39.5)
+[02:23:57 INFO]: [SurvivalGames] toxicbear5 (bot) joined room 3
+[02:23:57 INFO]: toxicbear5[localhost/127.0.0.1:0] logged in with entity id 2530 at ([lobby]262.5, 84.0, 39.5)
+[02:23:57 INFO]: [SurvivalGames] DarkBear_5 (bot) joined room 3
+[02:23:57 INFO]: DarkBear_5[localhost/127.0.0.1:0] logged in with entity id 2531 at ([lobby]262.5, 84.0, 39.5)
+[02:23:57 INFO]: [SurvivalGames] nightgolem1 (bot) joined room 3
+[02:23:57 INFO]: nightgolem1[localhost/127.0.0.1:0] logged in with entity id 2532 at ([lobby]262.5, 84.0, 39.5)
+[02:23:57 INFO]: [SurvivalGames] BlueStorm_483 (bot) joined room 3
+[02:23:57 INFO]: BlueStorm_483[localhost/127.0.0.1:0] logged in with entity id 2533 at ([lobby]262.5, 84.0, 39.5)
+[02:23:57 INFO]: [SurvivalGames] EnderHunter82 (bot) joined room 3
+[02:23:57 INFO]: EnderHunter82[localhost/127.0.0.1:0] logged in with entity id 2534 at ([lobby]262.5, 84.0, 39.5)
+[02:23:58 INFO]: [SurvivalGames] BlueWizard_862 (bot) joined room 3
+[02:23:58 INFO]: BlueWizard_862[localhost/127.0.0.1:0] logged in with entity id 2535 at ([lobby]262.5, 84.0, 39.5)
+[02:23:58 INFO]: [SurvivalGames] FrostWolf47 (bot) joined room 3
+[02:23:58 INFO]: FrostWolf47[localhost/127.0.0.1:0] logged in with entity id 2536 at ([lobby]262.5, 84.0, 39.5)
+[02:23:58 INFO]: [SurvivalGames] BraveFalcon31 (bot) joined room 3
+[02:23:58 INFO]: BraveFalcon31[localhost/127.0.0.1:0] logged in with entity id 2537 at ([lobby]262.5, 84.0, 39.5)
+[02:23:59 INFO]: [SurvivalGames] wildninja3 (bot) joined room 3
+[02:23:59 INFO]: wildninja3[localhost/127.0.0.1:0] logged in with entity id 2538 at ([lobby]262.5, 84.0, 39.5)
+[02:23:59 INFO]: [SurvivalGames] NovaTiger36 (bot) joined room 3
+[02:23:59 INFO]: NovaTiger36[localhost/127.0.0.1:0] logged in with entity id 2539 at ([lobby]262.5, 84.0, 39.5)
+[02:23:59 INFO]: [SurvivalGames] TinyGolem (bot) joined room 3
+[02:23:59 INFO]: TinyGolem[localhost/127.0.0.1:0] logged in with entity id 2540 at ([lobby]262.5, 84.0, 39.5)
+[02:23:59 INFO]: [SurvivalGames] SlyLynx (bot) joined room 3
+[02:23:59 INFO]: SlyLynx[localhost/127.0.0.1:0] logged in with entity id 2541 at ([lobby]262.5, 84.0, 39.5)
+[02:24:00 INFO]: [SurvivalGames] cosmicdragon4 (bot) joined room 3
+[02:24:00 INFO]: cosmicdragon4[localhost/127.0.0.1:0] logged in with entity id 2542 at ([lobby]262.5, 84.0, 39.5)
+[02:24:00 INFO]: [SurvivalGames] wildspark1 (bot) joined room 3
+[02:24:00 INFO]: wildspark1[localhost/127.0.0.1:0] logged in with entity id 2543 at ([lobby]262.5, 84.0, 39.5)
+[02:24:00 INFO]: [SurvivalGames] RedPanda97 (bot) joined room 3
+[02:24:00 INFO]: RedPanda97[localhost/127.0.0.1:0] logged in with entity id 2544 at ([lobby]262.5, 84.0, 39.5)
+[02:24:00 INFO]: [BotWatch] BOTWATCH t=620s bots=27 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=73 maxTick=10.4ms joins=156 quits=129
+[02:24:00 INFO]: [SurvivalGames] IronViper (bot) joined room 3
+[02:24:00 INFO]: IronViper[localhost/127.0.0.1:0] logged in with entity id 2545 at ([lobby]262.5, 84.0, 39.5)
+[02:24:01 INFO]: [SurvivalGames] FrostWizard (bot) joined room 3
+[02:24:01 INFO]: FrostWizard[localhost/127.0.0.1:0] logged in with entity id 2546 at ([lobby]262.5, 84.0, 39.5)
+[02:24:01 INFO]: [SurvivalGames] darkgolem0 (bot) joined room 3
+[02:24:01 INFO]: darkgolem0[localhost/127.0.0.1:0] logged in with entity id 2547 at ([lobby]262.5, 84.0, 39.5)
+[02:24:01 INFO]: [SurvivalGames] StormSlayer_489 (bot) joined room 3
+[02:24:01 INFO]: StormSlayer_489[localhost/127.0.0.1:0] logged in with entity id 2548 at ([lobby]262.5, 84.0, 39.5)
+[02:24:01 INFO]: [SurvivalGames] TinyTiger (bot) joined room 3
+[02:24:01 INFO]: TinyTiger[localhost/127.0.0.1:0] logged in with entity id 2549 at ([lobby]262.5, 84.0, 39.5)
+[02:24:02 INFO]: [SurvivalGames] FrostCat64 (bot) joined room 3
+[02:24:02 INFO]: FrostCat64[localhost/127.0.0.1:0] logged in with entity id 2550 at ([lobby]262.5, 84.0, 39.5)
+[02:24:02 INFO]: [SurvivalGames] pixelshark5 (bot) joined room 3
+[02:24:02 INFO]: pixelshark5[localhost/127.0.0.1:0] logged in with entity id 2551 at ([lobby]262.5, 84.0, 39.5)
+[02:24:04 INFO]: [BotWatch] BOTWATCH t=625s bots=34 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=89 maxTick=12.4ms joins=163 quits=129
+[02:24:09 INFO]: [BotWatch] BOTWATCH t=630s bots=34 sg-1-Par_72_Revamped alive=4 sg-4-Par_72_Revamped alive=3 sg-1-dm-Deathmatch_Arena-0 alive=0 sg-4-dm-Deathmatch_Arena-0 alive=0 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 hits=0 chests=300 eats=0 shots=0 walked=58 maxTick=7.7ms joins=163 quits=129
+[02:24:12 INFO]: -------- World Settings For [sg-3-Mortal_Skies] --------
+[02:24:12 INFO]: Item Despawn Rate: 6000
+[02:24:12 INFO]: Item Merge Radius: 2.5
+[02:24:12 INFO]: Arrow Despawn Rate: 1200
+[02:24:12 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:24:12 INFO]: View Distance: 8
+[02:24:12 INFO]: Zombie Aggressive Towards Villager: true
+[02:24:12 INFO]: Anti X-Ray: false
+[02:24:12 INFO]: 	Engine Mode: 1
+[02:24:12 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:24:12 INFO]: 	Replace Blocks: [1, 5]
+[02:24:12 INFO]: Chunks to Grow per Tick: 650
+[02:24:12 INFO]: Clear tick list: false
+[02:24:12 INFO]: Experience Merge Radius: 3.0
+[02:24:12 INFO]: Mob Spawn Range: 4
+[02:24:12 INFO]: Nerfing mobs spawned from spawners: false
+[02:24:12 INFO]: Cactus Growth Modifier: 100%
+[02:24:12 INFO]: Cane Growth Modifier: 100%
+[02:24:12 INFO]: Melon Growth Modifier: 100%
+[02:24:12 INFO]: Mushroom Growth Modifier: 100%
+[02:24:12 INFO]: Pumpkin Growth Modifier: 100%
+[02:24:12 INFO]: Sapling Growth Modifier: 100%
+[02:24:12 INFO]: Wheat Growth Modifier: 100%
+[02:24:12 INFO]: NetherWart Growth Modifier: 100%
+[02:24:12 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:24:12 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:24:12 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:24:12 INFO]: Random Lighting Updates: false
+[02:24:12 INFO]: Structure Info Saving: true
+[02:24:12 INFO]: Sending up to 10 chunks per packet
+[02:24:12 INFO]: Max Entity Collisions: 8
+[02:24:12 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:24:12 INFO]: Max TNT Explosions: 100
+[02:24:12 INFO]: -------- World Settings For [sg-3-Mortal_Skies] --------
+[02:24:12 INFO]: Water over lava flow speed: 5
+[02:24:12 INFO]: Fix TNT cannons: false
+[02:24:12 INFO]: Allow undead horse types to be leashed: false
+[02:24:12 INFO]: Keep spawn chunk loaded: true
+[02:24:12 INFO]: World async lighting: false
+[02:24:12 INFO]: WorldServer TickNextTick cap set at 10000
+[02:24:12 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:24:12 INFO]: Remove invalid mob spawner tile entities: true
+[02:24:12 INFO]: Player blocking damage multiplier set to 0.5
+[02:24:12 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:24:12 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:24:12 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:24:12 INFO]: [SurvivalGames] Preloaded the spawns of sg-3-Mortal_Skies: 16 chunks in 106 ms
+[02:24:14 INFO]: [SurvivalGames] Preloaded sg-3-Mortal_Skies: 569 chunks in 1953 ms (2058 ms after the map opened)
+[02:24:14 INFO]: [BotWatch] BOTWATCH t=635s bots=34 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=24 hits=0 chests=226 eats=0 shots=0 walked=85 maxTick=57.2ms joins=163 quits=129
+[02:24:19 INFO]: [BotWatch] BOTWATCH t=640s bots=34 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=24 hits=0 chests=0 eats=0 shots=0 walked=34 maxTick=0.6ms joins=163 quits=129
+[02:24:23 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:24:23 INFO]: Item Despawn Rate: 6000
+[02:24:23 INFO]: Item Merge Radius: 2.5
+[02:24:23 INFO]: Arrow Despawn Rate: 1200
+[02:24:23 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:24:23 INFO]: View Distance: 8
+[02:24:23 INFO]: Zombie Aggressive Towards Villager: true
+[02:24:23 INFO]: Anti X-Ray: false
+[02:24:23 INFO]: 	Engine Mode: 1
+[02:24:23 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:24:23 INFO]: 	Replace Blocks: [1, 5]
+[02:24:23 INFO]: Chunks to Grow per Tick: 650
+[02:24:23 INFO]: Clear tick list: false
+[02:24:23 INFO]: Experience Merge Radius: 3.0
+[02:24:23 INFO]: Mob Spawn Range: 4
+[02:24:23 INFO]: Nerfing mobs spawned from spawners: false
+[02:24:23 INFO]: Cactus Growth Modifier: 100%
+[02:24:23 INFO]: Cane Growth Modifier: 100%
+[02:24:23 INFO]: Melon Growth Modifier: 100%
+[02:24:23 INFO]: Mushroom Growth Modifier: 100%
+[02:24:23 INFO]: Pumpkin Growth Modifier: 100%
+[02:24:23 INFO]: Sapling Growth Modifier: 100%
+[02:24:23 INFO]: Wheat Growth Modifier: 100%
+[02:24:23 INFO]: NetherWart Growth Modifier: 100%
+[02:24:23 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:24:23 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:24:23 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:24:23 INFO]: Random Lighting Updates: false
+[02:24:23 INFO]: Structure Info Saving: true
+[02:24:23 INFO]: Sending up to 10 chunks per packet
+[02:24:23 INFO]: Max Entity Collisions: 8
+[02:24:23 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:24:23 INFO]: Max TNT Explosions: 100
+[02:24:23 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-0] --------
+[02:24:23 INFO]: Water over lava flow speed: 5
+[02:24:23 INFO]: Fix TNT cannons: false
+[02:24:23 INFO]: Allow undead horse types to be leashed: false
+[02:24:23 INFO]: Keep spawn chunk loaded: true
+[02:24:23 INFO]: World async lighting: false
+[02:24:23 INFO]: WorldServer TickNextTick cap set at 10000
+[02:24:23 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:24:23 INFO]: Remove invalid mob spawner tile entities: true
+[02:24:23 INFO]: Player blocking damage multiplier set to 0.5
+[02:24:23 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:24:23 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:24:23 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:24:23 INFO]: [SurvivalGames] Preloaded deathmatch arena sg-3-dm-Deathmatch_Arena-0: 60 chunks in 738 ms
+[02:24:24 INFO]: [BotWatch] BOTWATCH t=645s bots=34 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=3 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=24 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=12 chests=7 eats=0 shots=0 walked=230 maxTick=20.0ms joins=163 quits=129
+[02:24:26 INFO]: [SurvivalGames] Opened the gates of sg-1-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:24:27 INFO]: RedViper65 lost connection: Bot removed
+[02:24:27 INFO]: [SurvivalGames] Opened the gates of sg-4-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:24:29 INFO]: [BotWatch] BOTWATCH t=650s bots=33 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=24 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=24 chests=9 eats=1 shots=0 walked=434 maxTick=0.9ms joins=163 quits=130
+[02:24:32 INFO]: toxicbear5 lost connection: Bot removed
+[02:24:32 INFO]: ShadowSlayer_664 lost connection: Bot removed
+[02:24:32 INFO]: ShadowGamer lost connection: Bot removed
+[02:24:34 INFO]: [BotWatch] BOTWATCH t=655s bots=30 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=21 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=26 chests=14 eats=0 shots=0 walked=554 maxTick=1.1ms joins=163 quits=133
+[02:24:36 INFO]: TinyGolem lost connection: Bot removed
+[02:24:38 INFO]: TinySlayer_835 lost connection: Bot removed
+[02:24:38 INFO]: redwizard5 lost connection: Bot removed
+[02:24:38 INFO]: [SurvivalGames] Closed the gates of sg-1-dm-Deathmatch_Arena-0 (18 of 18 blocks back)
+[02:24:38 INFO]: [SurvivalGames] Closed the gates of sg-4-dm-Deathmatch_Arena-0 (18 of 18 blocks back)
+[02:24:39 INFO]: RedPanda97 lost connection: Bot removed
+[02:24:39 INFO]: [BotWatch] BOTWATCH t=660s bots=26 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=19 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=30 chests=4 eats=0 shots=0 walked=306 maxTick=1.4ms joins=163 quits=137
+[02:24:41 INFO]: SlyLynx lost connection: Bot removed
+[02:24:43 INFO]: wildspark1 lost connection: Bot removed
+[02:24:44 INFO]: [BotWatch] BOTWATCH t=665s bots=24 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=16 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=41 chests=1 eats=0 shots=0 walked=348 maxTick=0.8ms joins=163 quits=139
+[02:24:45 INFO]: TinyTiger lost connection: Bot removed
+[02:24:45 INFO]: [SurvivalGames] Opened the gates of sg-1-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:24:45 INFO]: [SurvivalGames] Opened the gates of sg-4-dm-Deathmatch_Arena-0 (0 blocks left)
+[02:24:49 INFO]: BraveFalcon31 lost connection: Bot removed
+[02:24:49 INFO]: NovaTiger36 lost connection: Bot removed
+[02:24:49 INFO]: [BotWatch] BOTWATCH t=670s bots=21 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=12 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=29 chests=2 eats=0 shots=0 walked=302 maxTick=0.5ms joins=163 quits=142
+[02:24:50 INFO]: BlueStorm_483 lost connection: Bot removed
+[02:24:50 INFO]: StormSlayer_489 lost connection: Bot removed
+[02:24:54 INFO]: DarkBear_5 lost connection: Bot removed
+[02:24:54 INFO]: [BotWatch] BOTWATCH t=675s bots=18 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=3 sg-4-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=11 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=35 chests=0 eats=0 shots=1 walked=346 maxTick=0.8ms joins=163 quits=145
+[02:24:56 INFO]: wildninja3 lost connection: Bot removed
+[02:24:58 INFO]: EnderHunter82 lost connection: Bot removed
+[02:24:58 INFO]: FrostWolf47 lost connection: Bot removed
+[02:24:58 INFO]: BraveWolf lost connection: Bot removed
+[02:24:58 INFO]: [SurvivalGames] [Combat] Par_72_Revamped, 24 players: melee 100% of 745.2 damage (sword 488.6/115 hits, axe 25.5/8 hits, fist 175.9/202 hits, other_melee 53.2/50 hits, bow 2.0/1 hits, rod 0.0/0 hits, thrown 0.0/0 hits); fights that stopped: 43 (resumed 30, caught 0, third_party 7, died 1, escaped 5), someone fled in 8 (resumed 2, caught 0, third_party 2, died 0, escaped 4), gap median 6.453s, max 28.751s
+[02:24:59 INFO]: [BotWatch] BOTWATCH t=680s bots=14 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=1 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=8 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=25 chests=1 eats=0 shots=0 walked=188 maxTick=0.7ms joins=163 quits=149
+[02:25:00 INFO]: PixelFox62 lost connection: Bot removed
+[02:25:00 INFO]: [SurvivalGames] [Combat] Par_72_Revamped, 24 players: melee 100% of 741.3 damage (sword 563.2/125 hits, axe 43.2/12 hits, fist 130.7/139 hits, other_melee 0.8/1 hits, bow 3.4/1 hits, rod 0.0/0 hits, thrown 0.0/0 hits); fights that stopped: 45 (resumed 18, caught 1, third_party 15, died 0, escaped 11), someone fled in 12 (resumed 2, caught 1, third_party 7, died 0, escaped 2), gap median 6.351s, max 27.001s
+[02:25:04 INFO]: [BotWatch] BOTWATCH t=685s bots=13 sg-1-Par_72_Revamped alive=0 sg-4-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-4-dm-Deathmatch_Arena-0 alive=1 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=8 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=11 chests=2 eats=0 shots=0 walked=159 maxTick=0.7ms joins=163 quits=150
+[02:25:07 INFO]: BlueWizard_862 lost connection: Bot removed
+[02:25:09 INFO]: [BotWatch] BOTWATCH match over sg-4-dm-Deathmatch_Arena-0 last alive: LazyBolt(11)
+[02:25:09 INFO]: [BotWatch] BOTWATCH match over sg-4-Par_72_Revamped last alive: 
+[02:25:09 INFO]: [BotWatch] BOTWATCH t=690s bots=12 sg-1-Par_72_Revamped alive=0 sg-1-dm-Deathmatch_Arena-0 alive=2 sg-2-Shady_Hollow alive=2 sg-2-dm-Deathmatch_Arena-0 alive=0 sg-3-Mortal_Skies alive=7 sg-3-dm-Deathmatch_Arena-0 alive=0 hits=1 chests=0 eats=0 shots=0 walked=72 maxTick=7.5ms joins=163 quits=151
+[02:25:11 INFO]: [BotWatch] BOTWATCH DONE
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-1-dm-Deathmatch_Arena-0 last alive: ToxicSpark_322(16) NeonSlayer23(14)
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-1-Par_72_Revamped last alive: 
+[02:25:11 INFO]: Stopping server
+[02:25:11 INFO]: [SurvivalGames] Disabling SurvivalGames v1.0-SNAPSHOT
+[02:25:11 INFO]: -------- World Settings For [sg-1-Lobby_Games] --------
+[02:25:11 INFO]: Item Despawn Rate: 6000
+[02:25:11 INFO]: Item Merge Radius: 2.5
+[02:25:11 INFO]: Arrow Despawn Rate: 1200
+[02:25:11 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:25:11 INFO]: View Distance: 8
+[02:25:11 INFO]: Zombie Aggressive Towards Villager: true
+[02:25:11 INFO]: Anti X-Ray: false
+[02:25:11 INFO]: 	Engine Mode: 1
+[02:25:11 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:25:11 INFO]: 	Replace Blocks: [1, 5]
+[02:25:11 INFO]: Chunks to Grow per Tick: 650
+[02:25:11 INFO]: Clear tick list: false
+[02:25:11 INFO]: Experience Merge Radius: 3.0
+[02:25:11 INFO]: Mob Spawn Range: 4
+[02:25:11 INFO]: Nerfing mobs spawned from spawners: false
+[02:25:11 INFO]: Cactus Growth Modifier: 100%
+[02:25:11 INFO]: Cane Growth Modifier: 100%
+[02:25:11 INFO]: Melon Growth Modifier: 100%
+[02:25:11 INFO]: Mushroom Growth Modifier: 100%
+[02:25:11 INFO]: Pumpkin Growth Modifier: 100%
+[02:25:11 INFO]: Sapling Growth Modifier: 100%
+[02:25:11 INFO]: Wheat Growth Modifier: 100%
+[02:25:11 INFO]: NetherWart Growth Modifier: 100%
+[02:25:11 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:25:11 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:25:11 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:25:11 INFO]: Random Lighting Updates: false
+[02:25:11 INFO]: Structure Info Saving: true
+[02:25:11 INFO]: Sending up to 10 chunks per packet
+[02:25:11 INFO]: Max Entity Collisions: 8
+[02:25:11 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:25:11 INFO]: Max TNT Explosions: 100
+[02:25:11 INFO]: -------- World Settings For [sg-1-Lobby_Games] --------
+[02:25:11 INFO]: Water over lava flow speed: 5
+[02:25:11 INFO]: Fix TNT cannons: false
+[02:25:11 INFO]: Allow undead horse types to be leashed: false
+[02:25:11 INFO]: Keep spawn chunk loaded: true
+[02:25:11 INFO]: World async lighting: false
+[02:25:11 INFO]: WorldServer TickNextTick cap set at 10000
+[02:25:11 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:25:11 INFO]: Remove invalid mob spawner tile entities: true
+[02:25:11 INFO]: Player blocking damage multiplier set to 0.5
+[02:25:11 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:25:11 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:25:11 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:25:11 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-1] --------
+[02:25:11 INFO]: Item Despawn Rate: 6000
+[02:25:11 INFO]: Item Merge Radius: 2.5
+[02:25:11 INFO]: Arrow Despawn Rate: 1200
+[02:25:11 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:25:11 INFO]: View Distance: 8
+[02:25:11 INFO]: Zombie Aggressive Towards Villager: true
+[02:25:11 INFO]: Anti X-Ray: false
+[02:25:11 INFO]: 	Engine Mode: 1
+[02:25:11 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:25:11 INFO]: 	Replace Blocks: [1, 5]
+[02:25:11 INFO]: Chunks to Grow per Tick: 650
+[02:25:11 INFO]: Clear tick list: false
+[02:25:11 INFO]: Experience Merge Radius: 3.0
+[02:25:11 INFO]: Mob Spawn Range: 4
+[02:25:11 INFO]: Nerfing mobs spawned from spawners: false
+[02:25:11 INFO]: Cactus Growth Modifier: 100%
+[02:25:11 INFO]: Cane Growth Modifier: 100%
+[02:25:11 INFO]: Melon Growth Modifier: 100%
+[02:25:11 INFO]: Mushroom Growth Modifier: 100%
+[02:25:11 INFO]: Pumpkin Growth Modifier: 100%
+[02:25:11 INFO]: Sapling Growth Modifier: 100%
+[02:25:11 INFO]: Wheat Growth Modifier: 100%
+[02:25:11 INFO]: NetherWart Growth Modifier: 100%
+[02:25:11 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:25:11 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:25:11 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:25:11 INFO]: Random Lighting Updates: false
+[02:25:11 INFO]: Structure Info Saving: true
+[02:25:11 INFO]: Sending up to 10 chunks per packet
+[02:25:11 INFO]: Max Entity Collisions: 8
+[02:25:11 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:25:11 INFO]: Max TNT Explosions: 100
+[02:25:11 INFO]: -------- World Settings For [sg-3-dm-Deathmatch_Arena-1] --------
+[02:25:11 INFO]: Water over lava flow speed: 5
+[02:25:11 INFO]: Fix TNT cannons: false
+[02:25:11 INFO]: Allow undead horse types to be leashed: false
+[02:25:11 INFO]: Keep spawn chunk loaded: true
+[02:25:11 INFO]: World async lighting: false
+[02:25:11 INFO]: WorldServer TickNextTick cap set at 10000
+[02:25:11 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:25:11 INFO]: Remove invalid mob spawner tile entities: true
+[02:25:11 INFO]: Player blocking damage multiplier set to 0.5
+[02:25:11 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:25:11 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:25:11 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:25:11 INFO]: -------- World Settings For [sg-4-Shady_Hollow] --------
+[02:25:11 INFO]: Item Despawn Rate: 6000
+[02:25:11 INFO]: Item Merge Radius: 2.5
+[02:25:11 INFO]: Arrow Despawn Rate: 1200
+[02:25:11 INFO]: Allow Zombie Pigmen to spawn from portal blocks: true
+[02:25:11 INFO]: View Distance: 8
+[02:25:11 INFO]: Zombie Aggressive Towards Villager: true
+[02:25:11 INFO]: Anti X-Ray: false
+[02:25:11 INFO]: 	Engine Mode: 1
+[02:25:11 INFO]: 	Hidden Blocks: [14, 15, 16, 21, 48, 49, 54, 56, 73, 74, 82, 129, 130]
+[02:25:11 INFO]: 	Replace Blocks: [1, 5]
+[02:25:11 INFO]: Chunks to Grow per Tick: 650
+[02:25:11 INFO]: Clear tick list: false
+[02:25:11 INFO]: Experience Merge Radius: 3.0
+[02:25:11 INFO]: Mob Spawn Range: 4
+[02:25:11 INFO]: Nerfing mobs spawned from spawners: false
+[02:25:11 INFO]: Cactus Growth Modifier: 100%
+[02:25:11 INFO]: Cane Growth Modifier: 100%
+[02:25:11 INFO]: Melon Growth Modifier: 100%
+[02:25:11 INFO]: Mushroom Growth Modifier: 100%
+[02:25:11 INFO]: Pumpkin Growth Modifier: 100%
+[02:25:11 INFO]: Sapling Growth Modifier: 100%
+[02:25:11 INFO]: Wheat Growth Modifier: 100%
+[02:25:11 INFO]: NetherWart Growth Modifier: 100%
+[02:25:11 INFO]: Entity Activation Range: An 32 / Mo 32 / Mi 16
+[02:25:11 INFO]: Entity Tracking Range: Pl 48 / An 48 / Mo 48 / Mi 32 / Other 64
+[02:25:11 INFO]: Hopper Transfer: 8 Hopper Check: 8 Hopper Amount: 1
+[02:25:11 INFO]: Random Lighting Updates: false
+[02:25:11 INFO]: Structure Info Saving: true
+[02:25:11 INFO]: Sending up to 10 chunks per packet
+[02:25:11 INFO]: Max Entity Collisions: 8
+[02:25:11 INFO]: Custom Map Seeds:  Village: 10387312 Feature: 14357617
+[02:25:11 INFO]: Max TNT Explosions: 100
+[02:25:11 INFO]: -------- World Settings For [sg-4-Shady_Hollow] --------
+[02:25:11 INFO]: Water over lava flow speed: 5
+[02:25:11 INFO]: Fix TNT cannons: false
+[02:25:11 INFO]: Allow undead horse types to be leashed: false
+[02:25:11 INFO]: Keep spawn chunk loaded: true
+[02:25:11 INFO]: World async lighting: false
+[02:25:11 INFO]: WorldServer TickNextTick cap set at 10000
+[02:25:11 INFO]: WorldServer TickNextTickList cap always processes redstone: false
+[02:25:11 INFO]: Remove invalid mob spawner tile entities: true
+[02:25:11 INFO]: Player blocking damage multiplier set to 0.5
+[02:25:11 INFO]: Squids will spawn between Y: 45.0 and Y: 63.0
+[02:25:11 INFO]: Max height for cactus growth 3. Max height for reed growth 3
+[02:25:11 INFO]: Living Entity Despawn Ranges:  Soft: 32 Hard: 128
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-1-Lobby_Games last alive: ?
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-2-dm-Deathmatch_Arena-0 last alive: 
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-2-Shady_Hollow last alive: redviper6(11) TinySpark_391(20)
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-3-dm-Deathmatch_Arena-1 last alive: ?
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-3-dm-Deathmatch_Arena-0 last alive: 
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-3-Mortal_Skies last alive: darkgolem0(19) nightgolem1(20) IronViper(3) FrostCat64(16) FrostWizard(14) cosmicdragon4(20) pixelshark5(16)
+[02:25:11 INFO]: [BotWatch] BOTWATCH match over sg-4-Shady_Hollow last alive: ?
+[02:25:11 INFO]: [BotWatch] Disabling BotWatch v1
+[02:25:11 INFO]: Saving players
+[02:25:11 INFO]: LazyBolt lost connection: Server closed
+[02:25:11 INFO]: LazyBolt left the game
+[02:25:11 INFO]: ToxicSpark_322 lost connection: Server closed
+[02:25:11 INFO]: ToxicSpark_322 left the game
+[02:25:11 INFO]: NeonSlayer23 lost connection: Server closed
+[02:25:11 INFO]: NeonSlayer23 left the game
+[02:25:11 INFO]: redviper6 lost connection: Server closed
+[02:25:11 INFO]: redviper6 left the game
+[02:25:11 INFO]: TinySpark_391 lost connection: Server closed
+[02:25:11 INFO]: TinySpark_391 left the game
+[02:25:11 INFO]: darkgolem0 lost connection: Server closed
+[02:25:11 INFO]: darkgolem0 left the game
+[02:25:11 INFO]: nightgolem1 lost connection: Server closed
+[02:25:11 INFO]: nightgolem1 left the game
+[02:25:11 INFO]: IronViper lost connection: Server closed
+[02:25:11 INFO]: IronViper left the game
+[02:25:11 INFO]: FrostCat64 lost connection: Server closed
+[02:25:11 INFO]: FrostCat64 left the game
+[02:25:11 INFO]: FrostWizard lost connection: Server closed
+[02:25:11 INFO]: FrostWizard left the game
+[02:25:11 INFO]: cosmicdragon4 lost connection: Server closed
+[02:25:11 INFO]: cosmicdragon4 left the game
+[02:25:11 INFO]: pixelshark5 lost connection: Server closed
+[02:25:11 INFO]: pixelshark5 left the game
+[02:25:11 INFO]: Saving worlds
+[02:25:11 INFO]: Saving chunks for level 'lobby'/Overworld
+ AOTConfiguration recorded: /opt/mc/simbench-cache/7a32e271d1674f11/record-simbench.aotconf
