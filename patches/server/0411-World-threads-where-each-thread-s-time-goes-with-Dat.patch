@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Fri, 6 Nov 2026 16:51:25 +0900
+Subject: [PATCH] World threads: where each thread's time goes, with
+ -Dathena.threadStats
+
+One CSV line per thread every 100 ticks: phases, CPU against wall time, lateness and tick lengths. Off unless asked for.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaThreadStats.java b/src/main/java/net/minecraft/server/AthenaThreadStats.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4fe8014161d71c51517703e220dc5acbc304ab8e
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaThreadStats.java
+@@ -0,0 +1,94 @@
++package net.minecraft.server;
++
++import java.io.FileWriter;
++import java.io.IOException;
++import java.io.PrintWriter;
++import java.lang.management.ManagementFactory;
++import java.lang.management.ThreadMXBean;
++import java.util.Arrays;
++
++/**
++ * Athena - where a world thread's time goes, for measuring: with -Dathena.threadStats=&lt;file&gt;, each
++ * thread adds up its own phases and writes one CSV line every {@value #WINDOW_TICKS} ticks. Nothing is
++ * shared during a tick. busy is the tick's wall time and cpu the thread's CPU time, so busy - cpu is
++ * what the thread waited for: a lock, the disk or a free core. late is how long after its time a tick
++ * began. The buckets count ticks by their length, to read a distribution of all ticks and not only
++ * the largest of each window.
++ */
++final class AthenaThreadStats {
++    static final String FILE = System.getProperty("athena.threadStats");
++    static final boolean ENABLED = FILE != null;
++
++    static final int TASKS = 0, CHUNK_IO = 1, CHUNK_GEN = 2, PRELOAD = 3, WORLDS = 4, CONNECTIONS = 5;
++    private static final String[] PHASES = {"tasks", "io", "gen", "preload", "worlds", "conn"};
++    private static final int WINDOW_TICKS = 100;
++    /** Upper bounds of the tick length buckets, in ms; the last bucket is everything longer. */
++    private static final long[] BUCKETS = {5, 10, 20, 50, 100, 250, 500, 1000};
++
++    private static final ThreadMXBean THREADS = ManagementFactory.getThreadMXBean();
++    private static PrintWriter out;
++
++    private final long[] sum = new long[PHASES.length];
++    private final long[] max = new long[PHASES.length];
++    private final int[] buckets = new int[BUCKETS.length + 1];
++    private long busy, maxBusy, late, maxLate, ticks;
++    private long tickStart, last;
++    private long cpuAtWindow = -1;
++
++    void begin(long lateNanos) {
++        if (this.cpuAtWindow < 0) this.cpuAtWindow = THREADS.getCurrentThreadCpuTime();
++        this.tickStart = this.last = System.nanoTime();
++        this.late += lateNanos;
++        this.maxLate = Math.max(this.maxLate, lateNanos);
++    }
++
++    void mark(int phase) {
++        long now = System.nanoTime();
++        long spent = now - this.last;
++        this.last = now;
++        this.sum[phase] += spent;
++        this.max[phase] = Math.max(this.max[phase], spent);
++    }
++
++    void end(String worlds, int worldCount, int tasksQueued) {
++        long spent = System.nanoTime() - this.tickStart;
++        this.busy += spent;
++        this.maxBusy = Math.max(this.maxBusy, spent);
++        long ms = spent / 1_000_000L;
++        int bucket = 0;
++        while (bucket < BUCKETS.length && ms >= BUCKETS[bucket]) ++bucket;
++        ++this.buckets[bucket];
++        if (++this.ticks < WINDOW_TICKS) return;
++
++        long cpu = THREADS.getCurrentThreadCpuTime();
++        StringBuilder line = new StringBuilder();
++        line.append(System.currentTimeMillis()).append(',').append(worlds.replace(',', ' ')).append(',').append(worldCount).append(',').append(tasksQueued)
++                .append(',').append(this.ticks).append(',').append(this.busy / 1000L).append(',').append((cpu - this.cpuAtWindow) / 1000L)
++                .append(',').append(this.maxBusy / 1000L).append(',').append(this.late / 1000L).append(',').append(this.maxLate / 1000L);
++        for (int i = 0; i < PHASES.length; ++i) line.append(',').append(this.sum[i] / 1000L).append(',').append(this.max[i] / 1000L);
++        for (int count : this.buckets) line.append(',').append(count);
++        write(line.toString());
++
++        this.cpuAtWindow = cpu;
++        Arrays.fill(this.sum, 0L);
++        Arrays.fill(this.max, 0L);
++        Arrays.fill(this.buckets, 0);
++        this.busy = this.maxBusy = this.late = this.maxLate = this.ticks = 0L;
++    }
++
++    private static synchronized void write(String line) {
++        if (out == null) {
++            try {
++                out = new PrintWriter(new FileWriter(FILE));
++            } catch (IOException e) {
++                throw new IllegalStateException(e);
++            }
++            StringBuilder header = new StringBuilder("millis,worlds,world_count,tasks_queued,ticks,busy_us,cpu_us,max_busy_us,late_us,max_late_us");
++            for (String phase : PHASES) header.append(',').append(phase).append("_us,").append(phase).append("_max_us");
++            for (long bound : BUCKETS) header.append(",under_").append(bound).append("ms");
++            out.println(header.append(",longer"));
++        }
++        out.println(line);
++        out.flush();
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index e7ca197111126fe51e1ae1a4dfa678469bb2fae6..97915b9d1ab19b0db36d92625546780aa8bca382 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -53,6 +53,9 @@ public final class AthenaWorldThread extends Thread {
+     volatile boolean stallReported;
+     private volatile long lastStallMillis;
+ 
++    /** Where this thread's time goes, with -Dathena.threadStats=<file>; see AthenaThreadStats. */
++    private final AthenaThreadStats stats = AthenaThreadStats.ENABLED ? new AthenaThreadStats() : null;
++
+     /** For tests only (set by reflection): the name of a world whose next tick throws. */
+     static volatile String crashForTest;
+ 
+@@ -373,9 +376,13 @@ public final class AthenaWorldThread extends Thread {
+                 if (now - next > MAX_CATCH_UP * TICK_NANOS) {
+                     next = now;
+                 }
++                final long late = now - next;
+                 next += TICK_NANOS;
+ 
++                final AthenaThreadStats stats = this.stats;
++                if (stats != null) stats.begin(late);
+                 this.runTasks();
++                if (stats != null) stats.mark(AthenaThreadStats.TASKS);
+                 List<WorldServer> worlds = this.worlds;
+                 String crash = crashForTest;
+                 if (crash != null) {
+@@ -393,21 +400,27 @@ public final class AthenaWorldThread extends Thread {
+                 try {
+                     for (WorldServer world : worlds) {
+                         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick(world);
++                        if (stats != null) stats.mark(AthenaThreadStats.CHUNK_IO);
+                         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(world);
++                        if (stats != null) stats.mark(AthenaThreadStats.CHUNK_GEN);
+                     }
+                     this.preloader.tick();
++                    if (stats != null) stats.mark(AthenaThreadStats.PRELOAD);
+                     for (WorldServer world : worlds) {
+                         world.sendWorldTimeUpdate(false);
+                         server.athenaTickWorld(world);
+                     }
++                    if (stats != null) stats.mark(AthenaThreadStats.WORLDS);
+                     for (WorldServer world : worlds) {
+                         this.tickConnections(world);
+                     }
++                    if (stats != null) stats.mark(AthenaThreadStats.CONNECTIONS);
+                 } finally {
+                     NetworkManager.athenaEndBatch();
+                 }
+                 ++this.ticks;
+                 this.lastTickEnd = System.nanoTime();
++                if (stats != null) stats.end(this.worldNames(), this.worlds.size(), this.tasks.size());
+             }
+             this.runTasks();
+             // a stop that gave up waiting (stopAndJoin) left the worlds with this thread: hand them back now
