@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 01:55:39 +0900
+Subject: [PATCH] Athena.readSectionTypeIds: a section's block type ids and a
+ version that moves with every change
+
+For a bot's path search, which keeps its own table of a world's blocks: checking a section costs one
+chunk lookup while it is unchanged, not 4096 block reads. The version is a serial number given to each
+section when it is made, with its modCount; an empty section is 0 and a chunk not loaded -1.
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index b29d2a4083f9d2851c7aa77874aba69465692ee3..9fe6c44573b68ffbb2d70f39088310fb0e0fba8c 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -391,6 +391,32 @@ public final class AthenaServerImpl implements AthenaServer {
+         AthenaGcRequests.get().request();
+     }
+ 
++    @Override
++    public long readSectionTypeIds(World world, int chunkX, int sectionY, int chunkZ, long knownVersion, char[] typeIds) {
++        Validate.notNull(world, "World may not be null");
++        Validate.isTrue(sectionY >= 0 && sectionY < 16, "Section y must be 0 to 15");
++        Validate.isTrue(typeIds != null && typeIds.length >= 4096, "Ids must hold 4096 entries");
++        net.minecraft.server.WorldServer handle = ((CraftWorld) world).getHandle();
++        org.spigotmc.AsyncCatcher.catchOp("Athena section read", handle); // Athena - the thread that ticks the world
++
++        net.minecraft.server.Chunk chunk = handle.chunkProviderServer.getChunkIfLoaded(chunkX, chunkZ);
++        if (chunk == null) {
++            return -1;
++        }
++        net.minecraft.server.ChunkSection section = chunk.getSections()[sectionY];
++        if (section == null) {
++            if (knownVersion != 0) {
++                java.util.Arrays.fill(typeIds, 0, 4096, (char) 0);
++            }
++            return 0;
++        }
++        long version = section.athenaVersion();
++        if (version != knownVersion) {
++            section.athenaTypeIdsInto(typeIds);
++        }
++        return version;
++    }
++
+     // Athena start - bots
+     @Override
+     public CompletableFuture<athena.api.bot.Bot> spawnBot(String name, java.util.UUID id, String skinValue, String skinSignature) {
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index addbc7af2b7080fccd87c97f49d2f3f6c80d4b47..4388421d8231564bc551b963d0959ab0dd25a154 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -44,6 +44,11 @@ public class ChunkSection {
+     // a player stale blocks. Bumped even when a light write stores the value already there; a
+     // spurious rebuild is only a cost.
+     int modCount;
++    // Athena - with modCount, what athena.api.Athena#readSectionTypeIds calls a section's version: a
++    // section made anew (a chunk loaded again) takes a number no section before it had, so a version
++    // read from an earlier section is never mistaken for this one's. Never 0 (an empty section's).
++    private static final java.util.concurrent.atomic.AtomicInteger ATHENA_SERIALS = new java.util.concurrent.atomic.AtomicInteger();
++    private final int athenaSerial = ATHENA_SERIALS.incrementAndGet() | 1 << 30;
+     // Athena end
+     private char[] blockIds;
+     private NibbleArray emittedLight;
+@@ -570,6 +575,24 @@ public class ChunkSection {
+         packed[index >> 1] = (byte) (packed[index >> 1] & ~(15 << shift) | p << shift);
+     }
+ 
++    // Athena start - athena.api.Athena#readSectionTypeIds
++    public long athenaVersion() {
++        return (long) this.athenaSerial << 32 | (this.modCount & 0xFFFFFFFFL);
++    }
++
++    /** Each block's type id: the state id is the type id << 4 | data (Block's registration). */
++    public void athenaTypeIdsInto(char[] typeIds) {
++        char[] ids = this.blockIds;
++
++        if (ids == null) {
++            ids = this.unpackInto(ID_SCRATCH.get());
++        }
++        for (int i = 0; i < 4096; ++i) {
++            typeIds[i] = (char) (ids[i] >> 4);
++        }
++    }
++    // Athena end
++
+     private char[] unpackedIds() {
+         return this.unpackInto(new char[4096]);
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java b/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..dde1016f3043d16ba31beaac271c8c1673d0e5e6
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java
+@@ -0,0 +1,75 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotEquals;
++
++import java.util.Random;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - athena.api.Athena#readSectionTypeIds hands a bot's path search a section's block type ids
++ * and a version, and the search keeps its own copy until the version moves. A version that stood
++ * still over a change would leave bots walking into a block placed in front of them, so every write
++ * must move it, and a section made anew must never share a version with the one before it.
++ */
++public class AthenaSectionTypeIdsTest extends AbstractTestingBase {
++
++    private static final IBlockData[] PALETTE = new IBlockData[] {
++        Blocks.AIR.getBlockData(),
++        Blocks.STONE.getBlockData(),
++        Blocks.WATER.getBlockData(),
++        Blocks.OAK_STAIRS.getBlockData(),
++        Blocks.LADDER.getBlockData(),
++        Blocks.WOOL.fromLegacyData(14),
++    };
++
++    private static void assertTypeIds(ChunkSection section) {
++        char[] ids = new char[4096];
++        section.athenaTypeIdsInto(ids);
++        for (int y = 0; y < 16; ++y) {
++            for (int z = 0; z < 16; ++z) {
++                for (int x = 0; x < 16; ++x) {
++                    assertEquals(x + "," + y + "," + z, Block.getId(section.getType(x, y, z).getBlock()), ids[y << 8 | z << 4 | x]);
++                }
++            }
++        }
++    }
++
++    @Test
++    public void everyWriteMovesTheVersionAndTheIdsFollow() {
++        ChunkSection section = new ChunkSection(4, true);
++        Random random = new Random(11);
++        long version = section.athenaVersion();
++        for (int i = 0; i < 300; ++i) {
++            section.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16), PALETTE[random.nextInt(PALETTE.length)]);
++            long next = section.athenaVersion();
++            assertNotEquals(version, next);
++            version = next;
++        }
++        assertTypeIds(section);
++    }
++
++    @Test
++    public void aSectionMadeAnewHasAVersionOfItsOwn() {
++        ChunkSection first = new ChunkSection(4, true);
++        ChunkSection second = new ChunkSection(4, true);
++        assertNotEquals(first.athenaVersion(), second.athenaVersion());
++        assertNotEquals(0L, first.athenaVersion());
++    }
++
++    @Test
++    public void packedIdsReadTheSame() {
++        char[] ids = new char[4096];
++        // a section holds a state id: the type id << 4 | data
++        ids[5] = (char) (Block.getId(Blocks.STONE) << 4);
++        ids[300] = (char) (Block.getId(Blocks.WOOL) << 4 | 3);
++        ChunkSection section = new ChunkSection(2, true);
++        section.setDataSharingUniform(ids);
++        assertTypeIds(section);
++        char[] read = new char[4096];
++        section.athenaTypeIdsInto(read);
++        assertEquals(Block.getId(Blocks.WOOL), read[300]);
++        assertEquals(Block.getId(Blocks.STONE), read[5]);
++    }
++}
