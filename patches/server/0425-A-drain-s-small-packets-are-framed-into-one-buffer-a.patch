@@ -1,0 +1,511 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 12:19:16 +0900
+Subject: [PATCH] A drain's small packets are framed into one buffer and
+ written once
+
+Each packet went down the pipeline by itself: a pooled buffer in the encoder,
+a second in the compressor with the first copied into it, two handler calls
+and an entry of its own in the channel's outbound buffer, around the thirty
+bytes of an entity move. The packets of one drain are now written frame after
+frame into one buffer - the bytes the compressor would have produced for each -
+which goes on from the prepender's place in the pipeline. Only in the play
+protocol with the server's own encoder, compressor and prepender and nothing
+else that sees outgoing packets; a packet at or over the compression
+threshold, a chunk, and a packet with a finish listener go the old way, in
+order. With C1 a drain of small packets takes 363 ns a packet instead of
+1,134 ns on an embedded channel. -Dathena.disableDirectFrames=true turns it off.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index b7a7d5877e18485e08326388da645e364a7cbe60..360310f5f553c436ef89805a81f649c3193e6836 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -519,6 +519,7 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     private void athenaDrainHandOff() {
+         boolean flush = false;
+ 
++        try {
+         for (;;) {
+             Object entry;
+ 
+@@ -530,20 +531,30 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+                     // when that packet is written; see athenaWriteInLoop.
+                     flush = true;
+                 } else if (entry instanceof Packet) {
++                    if (this.athenaFrame((Packet) entry)) { // Athena - into this drain's one buffer; see athenaFrame
++                        continue;
++                    }
++                    this.athenaWriteFrames(); // in order: what is framed goes first
+                     this.athenaWriteInLoop((Packet) entry, null, false, null, null);
++                    this.athenaFraming = 0; // it may have changed the pipeline
+                 } else if (entry instanceof AthenaPendingWrite) {
+                     AthenaPendingWrite write = (AthenaPendingWrite) entry;
+ 
++                    this.athenaWriteFrames();
+                     this.athenaWriteInLoop(write.packet, write.listeners, false, write.protocol, write.channelProtocol);
++                    this.athenaFraming = 0;
+                 } else {
++                    this.athenaWriteFrames();
+                     if (flush) {
+                         flush = false;
+                         this.channel.flush();
+                     }
+                     ((Runnable) entry).run(); // a close
++                    this.athenaFraming = 0;
+                 }
+             }
+ 
++            this.athenaWriteFrames();
+             if (flush) {
+                 flush = false;
+                 this.channel.flush();
+@@ -554,6 +565,168 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+                 break;
+             }
+         }
++        } finally {
++            this.athenaWriteFrames(); // nothing framed is left behind, whatever was thrown
++            this.athenaFraming = 0;
++        }
++    }
++
++    // Athena start - a drain's small packets are framed into one buffer and written once.
++    //
++    // Each packet went down the pipeline by itself: the encoder took a pooled buffer and wrote
++    // the packet into it, the compressor took a second, copied the first into it behind the frame
++    // and data lengths and gave the first back, and the result became an entry of its own in the
++    // channel's outbound buffer, to be gathered again for the socket write. For a 30-byte entity
++    // move that is two buffers, two copies, two handler calls and an outbound entry around thirty
++    // bytes, and a match sends some twenty thousand such packets a second. Here the packets of one
++    // drain are written, frame after frame, straight into one buffer - exactly the bytes the
++    // compressor (or, without compression, the prepender with a three-byte length) would have
++    // produced for each - and that buffer goes on from the prepender's place in the pipeline, as
++    // the compressor's frames do.
++    //
++    // Only where it is certain to be the same thing: the play protocol, the server's own encoder,
++    // compressor and prepender next to each other with nothing between them or after this handler
++    // that sees outgoing messages (a plugin's packet handler, the 1.7 translator), and no channel
++    // initialize listener. A packet at or over the compression threshold, a chunk, and a packet
++    // with a finish listener go the old way, in order. -Dathena.disableDirectFrames=true turns it off.
++    private static final boolean ATHENA_DIRECT_FRAMES = !Boolean.getBoolean("athena.disableDirectFrames");
++    /** Frames written into a drain's buffer; for tests and measurements, so a plain count that several event loops may put out by a few. */
++    static long athenaFramed;
++    private static final int ATHENA_FRAMES_WRITE_AT = 16384;
++
++    // all of these belong to the event loop
++    private int athenaFraming; // 0: not looked at yet in this drain, 1: frame, 2: do not
++    private ChannelHandlerContext athenaFramesFrom;
++    private int athenaFramesThreshold;
++    private io.netty.buffer.ByteBuf athenaFrames;
++    private PacketDataSerializer athenaFramesSerializer;
++
++    private boolean athenaCanFrame() {
++        if (!ATHENA_DIRECT_FRAMES || this.protocol != EnumProtocol.PLAY || this.channel == null || !this.channel.isOpen() || !athenaVoidWrites()) {
++            return false;
++        }
++
++        io.netty.channel.ChannelPipeline pipeline = this.channel.pipeline();
++        java.util.List<String> names = pipeline.names();
++        int at = names.indexOf("prepender");
++
++        if (at < 0 || pipeline.get("prepender") != PacketPrepender.INSTANCE) {
++            return false;
++        }
++
++        int threshold = -1;
++
++        ++at;
++        if (at < names.size() && names.get(at).equals("compress")) {
++            io.netty.channel.ChannelHandler compressor = pipeline.get("compress");
++
++            if (compressor == null || compressor.getClass() != PacketCompressor.class) {
++                return false;
++            }
++            threshold = ((PacketCompressor) compressor).getThreshold();
++            if (threshold < 0) {
++                return false;
++            }
++            ++at;
++        }
++        if (at + 1 >= names.size() || !names.get(at).equals("encoder") || !names.get(at + 1).equals("packet_handler")) {
++            return false;
++        }
++
++        io.netty.channel.ChannelHandler encoder = pipeline.get("encoder");
++
++        if (encoder == null || encoder.getClass() != PacketEncoder.class || pipeline.get("packet_handler") != this) {
++            return false;
++        }
++        // behind this handler a write passes nothing that looks at outgoing messages
++        for (int i = at + 2; i < names.size(); ++i) {
++            if (pipeline.get(names.get(i)) instanceof io.netty.channel.ChannelOutboundHandler) {
++                return false;
++            }
++        }
++
++        ChannelHandlerContext from = pipeline.context("prepender");
++
++        if (from == null) {
++            return false;
++        }
++        this.athenaFramesFrom = from;
++        this.athenaFramesThreshold = threshold;
++        return true;
++    }
++
++    /** Writes {@code packet}'s frame into this drain's buffer; false if it has to go down the pipeline. */
++    private boolean athenaFrame(Packet packet) {
++        if (this.athenaFraming == 0) {
++            this.athenaFraming = this.athenaCanFrame() ? 1 : 2;
++        }
++        if (this.athenaFraming != 1 || packet.hasFinishListener() || packet instanceof PacketPlayOutMapChunk || packet instanceof PacketPlayOutMapChunkBulk) {
++            return false;
++        }
++
++        Integer id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, packet);
++
++        if (id == null) {
++            return false; // the encoder says what is wrong with it
++        }
++
++        io.netty.buffer.ByteBuf out = this.athenaFrames;
++
++        if (out == null) {
++            out = this.athenaFrames = this.channel.alloc().ioBuffer(1024);
++            this.athenaFramesSerializer = new PacketDataSerializer(out);
++        }
++
++        final int start = out.writerIndex();
++        final int threshold = this.athenaFramesThreshold;
++
++        out.writeMedium(0); // the frame length, known once the packet is written: three bytes, as PacketCompressor writes it
++        if (threshold >= 0) {
++            out.writeByte(0); // the data length of a packet sent uncompressed
++        }
++
++        final int bodyAt = out.writerIndex();
++
++        try {
++            this.athenaFramesSerializer.writeVarIntToBuffer(id);
++            packet.writePacketData(this.athenaFramesSerializer);
++        } catch (Throwable throwable) {
++            // as PacketEncoder: none of a packet that failed part way, and say which it was
++            out.writerIndex(start);
++            NetworkManager.logger.error("Dropped a {} that failed to write", packet.getClass().getSimpleName(), throwable);
++            return true;
++        }
++
++        final int frame = out.writerIndex() - start - 3;
++
++        if ((threshold >= 0 && out.writerIndex() - bodyAt >= threshold) || frame >= 1 << 21) {
++            out.writerIndex(start); // to be compressed: the pipeline's
++            return false;
++        }
++        out.setByte(start, frame & 0x7F | 0x80);
++        out.setByte(start + 1, frame >>> 7 & 0x7F | 0x80);
++        out.setByte(start + 2, frame >>> 14);
++        ++athenaFramed;
++        if (out.readableBytes() >= ATHENA_FRAMES_WRITE_AT) {
++            this.athenaWriteFrames();
++        }
++        return true;
++    }
++
++    /** Hands the frames written so far on to the socket side of the pipeline. */
++    private void athenaWriteFrames() {
++        io.netty.buffer.ByteBuf out = this.athenaFrames;
++
++        if (out == null) {
++            return;
++        }
++        this.athenaFrames = null;
++        this.athenaFramesSerializer = null;
++        if (out.isReadable()) {
++            this.athenaFramesFrom.write(out, this.channel.voidPromise());
++        } else {
++            out.release();
++        }
+     }
+     // Athena end
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaDirectFramesTest.java b/src/test/java/net/minecraft/server/AthenaDirectFramesTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..be726c90ba3cd745e8a0ae78b2d1a0bddfecd0de
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDirectFramesTest.java
+@@ -0,0 +1,273 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.ChannelOutboundHandlerAdapter;
++import io.netty.channel.ChannelPromise;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.lang.reflect.Method;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Queue;
++import org.junit.BeforeClass;
++import org.junit.Test;
++
++/**
++ * Athena - the small packets of one drain are framed into one buffer (NetworkManager.athenaFrame).
++ * What reaches the socket must be what the pipeline would have put there packet by packet: the same
++ * frames in the same order, around the packets that still go down the pipeline.
++ */
++public class AthenaDirectFramesTest {
++
++    @BeforeClass
++    public static void bootstrap() throws Exception {
++        DispenserRegistry.register();
++        Field config = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredField("config");
++        config.setAccessible(true);
++        if (config.get(null) == null) {
++            Constructor<com.hpfxd.pandaspigot.config.PandaSpigotConfig> make = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredConstructor();
++            make.setAccessible(true);
++            config.set(null, make.newInstance());
++        }
++    }
++
++    private static NetworkManager connected(EmbeddedChannel channel, int threshold) {
++        NetworkManager manager = new NetworkManager(EnumProtocolDirection.CLIENTBOUND);
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        manager.protocol = EnumProtocol.PLAY;
++        channel.pipeline().addLast("prepender", PacketPrepender.INSTANCE);
++        if (threshold >= 0) {
++            channel.pipeline().addLast("compress", new PacketCompressor(threshold));
++        }
++        channel.pipeline().addLast("encoder", new PacketEncoder(EnumProtocolDirection.CLIENTBOUND))
++                .addLast("packet_handler", manager);
++        channel.pipeline().fireChannelActive();
++        manager.setConnectionState(EnumProtocol.PLAY); // channelActive starts a connection in the handshake
++        return manager;
++    }
++
++    /** A team packet that writes most of itself and then throws on a null player name. */
++    @SuppressWarnings("unchecked")
++    private static PacketPlayOutScoreboardTeam failing() throws Exception {
++        PacketPlayOutScoreboardTeam team = new PacketPlayOutScoreboardTeam();
++        Field players = null;
++
++        for (Field field : PacketPlayOutScoreboardTeam.class.getDeclaredFields()) {
++            if (java.util.Collection.class.isAssignableFrom(field.getType())) {
++                players = field;
++            }
++        }
++        players.setAccessible(true);
++        ((java.util.Collection<String>) players.get(team)).add(null);
++        return team;
++    }
++
++    private static List<Packet> packets() throws Exception {
++        List<Packet> packets = new ArrayList<Packet>();
++        StringBuilder longText = new StringBuilder();
++
++        for (int i = 0; i < 80; ++i) {
++            longText.append("a long line of chat ").append(i).append(' ');
++        }
++        for (int i = 0; i < 40; ++i) {
++            packets.add(new PacketPlayOutKeepAlive(i));
++            packets.add(new PacketPlayOutEntityVelocity(i, 0.1D * i, -0.2D, 0.3D));
++            packets.add(new PacketPlayOutEntity.PacketPlayOutRelEntityMove(i, (byte) 1, (byte) -2, (byte) 3, true));
++            if (i % 10 == 3) {
++                packets.add(new PacketPlayOutChat(new ChatComponentText(longText.toString()))); // over the threshold
++            }
++            if (i % 10 == 7) {
++                packets.add(new PacketPlayOutChat(new ChatComponentText("short " + i)));
++            }
++            if (i == 20) {
++                packets.add(failing());
++            }
++        }
++        return packets;
++    }
++
++    private static byte[] wire(EmbeddedChannel channel) {
++        channel.flushOutbound();
++        ByteBuf all = Unpooled.buffer();
++        Object out;
++
++        while ((out = channel.readOutbound()) != null) {
++            all.writeBytes((ByteBuf) out);
++            ((ByteBuf) out).release();
++        }
++        byte[] bytes = new byte[all.readableBytes()];
++
++        all.readBytes(bytes);
++        all.release();
++        return bytes;
++    }
++
++    /** The frames of a stream: each one's bytes after its length. */
++    private static List<byte[]> frames(byte[] wire) {
++        PacketDataSerializer in = new PacketDataSerializer(Unpooled.wrappedBuffer(wire));
++        List<byte[]> frames = new ArrayList<byte[]>();
++
++        while (in.isReadable()) {
++            byte[] frame = new byte[in.readVarIntFromBuffer()];
++
++            in.readBytes(frame);
++            frames.add(frame);
++        }
++        return frames;
++    }
++
++    @SuppressWarnings("unchecked")
++    private static byte[] drained(EmbeddedChannel channel, NetworkManager manager, List<Packet> packets) throws Exception {
++        Field queue = NetworkManager.class.getDeclaredField("athenaHandOff");
++        Method drain = NetworkManager.class.getDeclaredMethod("athenaDrainHandOff");
++
++        queue.setAccessible(true);
++        drain.setAccessible(true);
++        ((Queue<Object>) queue.get(manager)).addAll(packets);
++        drain.invoke(manager);
++        return wire(channel);
++    }
++
++    private static byte[] oneByOne(EmbeddedChannel channel, NetworkManager manager, List<Packet> packets) {
++        for (Packet packet : packets) {
++            manager.handle(packet); // on the channel's own loop: straight down the pipeline
++        }
++        return wire(channel);
++    }
++
++    @Test
++    public void aDrainPutsTheSameFramesOnTheWire() throws Exception {
++        for (int threshold : new int[] { 256, 64, -1 }) {
++            EmbeddedChannel plain = new EmbeddedChannel();
++            EmbeddedChannel framed = new EmbeddedChannel();
++            long before = NetworkManager.athenaFramed;
++            byte[] expected = oneByOne(plain, connected(plain, threshold), packets());
++
++            assertEquals("the pipeline frames nothing here", before, NetworkManager.athenaFramed);
++
++            byte[] actual = drained(framed, connected(framed, threshold), packets());
++
++            assertTrue("the drain framed its small packets", NetworkManager.athenaFramed - before > 100);
++            if (threshold >= 0) {
++                assertArrayEquals("with compression on, byte for byte (threshold " + threshold + ")", expected, actual);
++            }
++
++            List<byte[]> want = frames(expected);
++            List<byte[]> got = frames(actual);
++
++            assertEquals(want.size(), got.size());
++            for (int i = 0; i < want.size(); ++i) {
++                assertArrayEquals("frame " + i + " (threshold " + threshold + ")", want.get(i), got.get(i));
++            }
++            plain.finishAndReleaseAll();
++            framed.finishAndReleaseAll();
++        }
++    }
++
++    @Test
++    public void aHandlerThatSeesPacketsKeepsSeeingThem() throws Exception {
++        EmbeddedChannel channel = new EmbeddedChannel();
++        NetworkManager manager = connected(channel, 256);
++        final int[] seen = new int[1];
++
++        // a plugin's handler between the server's own and the socket side of the encoder
++        channel.pipeline().addAfter("packet_handler", "plugin", new ChannelOutboundHandlerAdapter() {
++            @Override
++            public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
++                if (msg instanceof Packet) {
++                    ++seen[0];
++                }
++                super.write(ctx, msg, promise);
++            }
++        });
++
++        long before = NetworkManager.athenaFramed;
++        List<Packet> packets = packets();
++        byte[] wire = drained(channel, manager, packets);
++
++        assertEquals("nothing went round the plugin's handler", before, NetworkManager.athenaFramed);
++        assertEquals(packets.size(), seen[0]);
++        assertEquals(packets.size() - 1, frames(wire).size()); // all but the one that fails to write
++        channel.finishAndReleaseAll();
++    }
++
++    @Test
++    public void anotherProtocolIsLeftToThePipeline() throws Exception {
++        EmbeddedChannel channel = new EmbeddedChannel();
++        NetworkManager manager = connected(channel, 256);
++
++        manager.protocol = EnumProtocol.LOGIN;
++
++        long before = NetworkManager.athenaFramed;
++        List<Packet> packets = new ArrayList<Packet>();
++
++        packets.add(new PacketPlayOutKeepAlive(1));
++        assertEquals(1, frames(drained(channel, manager, packets)).size());
++        assertEquals(before, NetworkManager.athenaFramed);
++        channel.finishAndReleaseAll();
++    }
++
++    /**
++     * Not a test: times a drain of small packets framed directly against the same drain down the
++     * pipeline. Runs only with ATHENA_TIMING_FRAMES set; for C1, as the small servers run:
++     * ATHENA_TIMING_FRAMES=1 JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1 ./gradlew :pandaspigot-server:test --tests '*AthenaDirectFramesTest'
++     */
++    @Test
++    @SuppressWarnings("unchecked")
++    public void time() throws Exception {
++        org.junit.Assume.assumeTrue(System.getenv("ATHENA_TIMING_FRAMES") != null);
++
++        Field queue = NetworkManager.class.getDeclaredField("athenaHandOff");
++        Method drain = NetworkManager.class.getDeclaredMethod("athenaDrainHandOff");
++
++        queue.setAccessible(true);
++        drain.setAccessible(true);
++
++        List<Packet> batch = new ArrayList<Packet>();
++
++        for (int i = 0; i < 100; ++i) {
++            batch.add(new PacketPlayOutEntity.PacketPlayOutRelEntityMove(i, (byte) 1, (byte) -2, (byte) 3, true));
++            batch.add(new PacketPlayOutEntityVelocity(i, 0.1D, -0.2D, 0.3D));
++            batch.add(new PacketPlayOutEntityHeadRotation());
++            batch.add(new PacketPlayOutEntity.PacketPlayOutRelEntityMoveLook(i, (byte) 1, (byte) -2, (byte) 3, (byte) 4, (byte) 5, true));
++        }
++        for (int round = 0; round < 6; ++round) {
++            for (boolean framed : new boolean[] { false, true }) {
++                EmbeddedChannel channel = new EmbeddedChannel();
++                NetworkManager manager = connected(channel, 256);
++                Queue<Object> handOff = (Queue<Object>) queue.get(manager);
++
++                if (!framed) {
++                    manager.protocol = EnumProtocol.HANDSHAKING; // only the framing reads it: the pipeline's way
++                }
++
++                long started = System.nanoTime();
++                long bytes = 0L;
++                int drains = 5000;
++
++                for (int i = 0; i < drains; ++i) {
++                    handOff.addAll(batch);
++                    drain.invoke(manager);
++                    channel.flushOutbound();
++                    Object out;
++
++                    while ((out = channel.readOutbound()) != null) {
++                        bytes += ((ByteBuf) out).readableBytes();
++                        ((ByteBuf) out).release();
++                    }
++                }
++                System.out.printf("round %d: %s %.0f ns a packet (%d bytes)%n", round, framed ? "framed  " : "pipeline",
++                        (System.nanoTime() - started) / (double) (drains * batch.size()), bytes);
++                channel.finishAndReleaseAll();
++            }
++        }
++    }
++}

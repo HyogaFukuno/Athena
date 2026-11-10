@@ -1,0 +1,55 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 17:17:18 +0900
+Subject: [PATCH] An empty world with chunks waiting to unload is ticked every
+ tick
+
+The unload queue is worked off by the world's tick, so many chunks a tick. A
+world everyone had just left went on to every twentieth tick after ten
+seconds with its chunks still queued, and unloaded them twenty times slower: a
+live run with network bots showed the lobby's chunks still being saved a
+minute after the players had gone on to the match.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 165c1fffdf58d0468e4acd4c6c58008150be1533..cf3fb1f2f332bc005e277eb94707f0c457bbe1a9 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1532,6 +1532,11 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             ++this.athenaEmptyTicks;
+             return false;
+         }
++        // chunks waiting to be unloaded are unloaded by the tick, so many a tick: a world everyone has
++        // just left lets go of its chunks as fast as it always did
++        if (this.chunkProviderServer != null && !this.chunkProviderServer.unloadQueue.isEmpty()) {
++            return false;
++        }
+         if (++this.athenaEmptyTicks >= ATHENA_EMPTY_GRACE + interval) {
+             this.athenaEmptyTicks = ATHENA_EMPTY_GRACE;
+             return false; // the one in every interval that is ticked
+diff --git a/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java b/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java
+index 35233d7a8b951cc0f7c5d2108f7fb4b7a079633e..d2d4f47136b6901e28e2c8bedf53d26aba4cfca8 100644
+--- a/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java
++++ b/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java
+@@ -94,4 +94,20 @@ public class AthenaIdleWorldTest extends AbstractTestingBase {
+         assertEquals(time + 10L, world.worldData.getTime());
+         assertEquals(day, world.worldData.getDayTime());
+     }
++
++    @Test
++    public void chunksWaitingToUnloadKeepTheTicksFull() throws Exception {
++        WorldServer world = world(20, new ArrayList<EntityHuman>());
++
++        for (int tick = 0; tick < WorldServer.ATHENA_EMPTY_GRACE; ++tick) {
++            world.athenaIdleTick();
++        }
++        assertTrue(world.athenaIdleTick());
++        world.chunkProviderServer.unloadQueue.add(3, 4);
++        for (int tick = 0; tick < 50; ++tick) {
++            assertFalse("the unload queue is worked off a tick at a time", world.athenaIdleTick());
++        }
++        world.chunkProviderServer.unloadQueue.remove(3, 4);
++        assertTrue(world.athenaIdleTick());
++    }
+ }

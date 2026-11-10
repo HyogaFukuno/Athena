@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:41:25 +0900
+Subject: [PATCH] Equipment is compared in full when it may have changed, and a
+ bot keeps no slots or statistics in step
+
+Each of an entity's five equipment slots was compared with a copy of what it
+held the tick before, tag and all, every tick: 1% of a match. A slot holding
+the very stack and tag object it held, of the same item, count and damage, is
+compared in full every twentieth time; anything put into the slot or any new
+tag is compared at once. A bot, which has no client, no longer compares its 45
+inventory slots every tick (3% of a room of bots) nor keeps statistics; the
+objectives that count a statistic still count a bot's.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBotPlayer.java b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+index a9d83bf5f3f9dd5e03a9bd1e5112f45126ef44a7..85967a463d0230d98a88a2bf02197e4754efe1b3 100644
+--- a/src/main/java/net/minecraft/server/AthenaBotPlayer.java
++++ b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+@@ -146,6 +146,30 @@ public final class AthenaBotPlayer extends EntityPlayer {
+         this.athenaResetMoveEvent();
+     }
+ 
++    // A bot keeps no statistics: nobody opens its statistics screen, and nothing is saved for it. The
++    // objectives that count a statistic still do, as for a player.
++    @Override
++    public void addStat(Statistic statistic, int i) {
++        if (statistic != null) {
++            java.util.Collection<ScoreboardObjective> objectives = this.getScoreboard().getObjectivesForCriteria(statistic.getCriteria());
++
++            if (!objectives.isEmpty()) {
++                for (ScoreboardObjective objective : objectives) {
++                    this.getScoreboard().getPlayerScoreForObjective(this.getName(), objective).addScore(i);
++                }
++            }
++        }
++    }
++
++    @Override
++    public void a(Statistic statistic) {
++        if (statistic != null) {
++            for (ScoreboardObjective objective : this.getScoreboard().getObjectivesForCriteria(statistic.getCriteria())) {
++                this.getScoreboard().getPlayerScoreForObjective(this.getName(), objective).setScore(0);
++            }
++        }
++    }
++
+     /** Whether the client would let it sprint: 3 food bars or more (or able to fly), and not using an item. */
+     boolean canSprint() {
+         return (this.getFoodData().getFoodLevel() > 6 || this.abilities.canFly) && !this.isUsingItem() && !this.hasEffect(MobEffectList.BLINDNESS);
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 5bbc42755503bd9ad0a10cb35130d2b7a84f96e9..acf3e72b7517dab9b93e79a90c4d1b8a3a6d378c 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -41,6 +41,10 @@ public abstract class EntityLiving extends Entity {
+     public CombatTracker combatTracker = new CombatTracker(this);
+     public final Int2ObjectMap<MobEffect> effects = new Int2ObjectOpenHashMap<MobEffect>(); // Athena - boxing真の削除: fastutilのint専用Mapでキーのボックス化を排除
+     private final ItemStack[] previousEquipment = new ItemStack[5];
++    // Athena - the stacks, and their tags, the equipment was last compared as; see onUpdate
++    private ItemStack[] athenaEquipmentSeen;
++    private NBTTagCompound[] athenaEquipmentTagSeen;
++    private int athenaEquipmentChecks;
+     public boolean isSwingInProgress;
+     public int swingProgressInt;
+     public int arrowHitTimer;
+@@ -1487,10 +1491,39 @@ public abstract class EntityLiving extends Entity {
+                 }
+             }
+ 
++            // Athena start - what an entity wears is compared in full when it may have changed.
++            //
++            // Each of the five slots was compared with a copy of what it held the tick before, tag
++            // and all: for an enchanted sword and four pieces of enchanted armour, five compound
++            // tags walked entry by entry, every tick of every player - 1% of a match. A slot that
++            // holds the very stack it held, with the very tag object, of the same item, count and
++            // damage, can differ from the copy only where something wrote inside that tag; that is
++            // looked for every twentieth time. Anything put into the slot, and any tag given to a
++            // stack (setItemMeta makes a new one), is another object and is compared at once.
++            boolean athenaFull = this.athenaEquipmentChecks++ % 20 == 0;
++
+             for (int j = 0; j < 5; ++j) {
+                 ItemStack itemstack = this.previousEquipment[j];
+                 ItemStack itemstack1 = this.getEquipment(j);
+ 
++                if (itemstack1 == null) {
++                    if (itemstack == null) {
++                        continue;
++                    }
++                } else if (!athenaFull && this.athenaEquipmentSeen != null && itemstack1 == this.athenaEquipmentSeen[j]
++                        && itemstack1.getTag() == this.athenaEquipmentTagSeen[j] && ItemStack.fastMatches(itemstack1, itemstack)) {
++                    continue;
++                }
++                if (itemstack1 != null || this.athenaEquipmentSeen != null) {
++                    if (this.athenaEquipmentSeen == null) {
++                        this.athenaEquipmentSeen = new ItemStack[5];
++                        this.athenaEquipmentTagSeen = new NBTTagCompound[5];
++                    }
++                    this.athenaEquipmentSeen[j] = itemstack1;
++                    this.athenaEquipmentTagSeen[j] = itemstack1 == null ? null : itemstack1.getTag();
++                }
++                // Athena end
++
+                 if (!ItemStack.matches(itemstack1, itemstack)) {
+                     ((WorldServer) this.world).getTracker().sendToAllTrackingEntity((Entity) this, (Packet) (new PacketPlayOutEntityEquipment(this.getId(), j, itemstack1)));
+                     if (itemstack != null) {
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 0605e33e8fa5793e9d98e816406fe47e74d2f453..942bbba424d75b4adf8129e903c1601949160c8d 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -369,6 +369,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         
+         // PaperSpigot start - Configurable container update tick rate
+         if (--containerUpdateDelay <= 0) {
++            if (!(this instanceof AthenaBotPlayer)) // Athena - a bot has no client to send its slots to: 45 of them compared every tick, 3% of a room of bots
+             this.activeContainer.detectAndSendChanges();
+             containerUpdateDelay = world.paperSpigotConfig.containerUpdateTickRate;
+         }
+@@ -524,7 +525,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+                 this.playerConnection.sendPacket(new PacketPlayOutExperience(this.exp, this.expTotal, this.expLevel));
+             }
+ 
+-            if (this.ticksLived % 20 * 5 == 0 && !this.getStatisticManager().hasAchievement(AchievementList.exploreAllBiomes)) {
++            if (this.ticksLived % 20 * 5 == 0 && !(this instanceof AthenaBotPlayer) && !this.getStatisticManager().hasAchievement(AchievementList.exploreAllBiomes)) { // Athena - a bot keeps no statistics
+                 this.updateBiomesExplored();
+             }
+ 

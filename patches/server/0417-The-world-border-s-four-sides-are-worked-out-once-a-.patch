@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:37:18 +0900
+Subject: [PATCH] The world border's four sides are worked out once a tick
+
+Every side asked for was the centre and the size again, and the size of a
+moving border is the clock and a division each time; a box tested against the
+border asks for all four, for every block collision scan and every tile entity
+every tick. Within one tick of its world the border is where the first
+question of that tick found it.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/WorldBorder.java b/src/main/java/net/minecraft/server/WorldBorder.java
+index 475b50640f9f37aa5eb22a26cef2c09aaa57f922..1537e57466a64bf5e6631d310097ba7ff7421ab5 100644
+--- a/src/main/java/net/minecraft/server/WorldBorder.java
++++ b/src/main/java/net/minecraft/server/WorldBorder.java
+@@ -77,7 +77,46 @@ public class WorldBorder {
+         return this.endDiameter < this.startDiameter ? EnumWorldBorderState.SHRINKING : (this.endDiameter > this.startDiameter ? EnumWorldBorderState.GROWING : EnumWorldBorderState.STATIONARY);
+     }
+ 
++    // Athena start - the four sides, worked out once a tick of the border's world.
++    //
++    // Every side asked for was the centre and the size again, and the size of a border that is
++    // moving - a deathmatch closing in - is the clock and a division each time. A box tested
++    // against the border asks for all four: every block collision scan does, and every tile entity
++    // every tick. Together about 1% of a match's CPU. Within one tick of its world the border is
++    // now where the first question of that tick found it; a border with no world answers as before.
++    private boolean athenaSidesKnown;
++    private int athenaSidesTick;
++    private double athenaMinX;
++    private double athenaMaxX;
++    private double athenaMinZ;
++    private double athenaMaxZ;
++
++    private boolean athenaSides() {
++        WorldServer world = this.world;
++
++        if (world == null) {
++            return false;
++        }
++
++        int tick = world.athenaCurrentTick;
++
++        if (!this.athenaSidesKnown || tick != this.athenaSidesTick) {
++            double half = this.getSize() / 2.0D; // may end a transition (setSize), which forgets the sides: set below
++            double limit = (double) this.worldSize;
++
++            this.athenaMinX = Math.max(this.centerX - half, -limit);
++            this.athenaMaxX = Math.min(this.centerX + half, limit);
++            this.athenaMinZ = Math.max(this.centerZ - half, -limit);
++            this.athenaMaxZ = Math.min(this.centerZ + half, limit);
++            this.athenaSidesTick = tick;
++            this.athenaSidesKnown = true;
++        }
++        return true;
++    }
++    // Athena end
++
+     public double minX() {
++        if (this.athenaSides()) return this.athenaMinX; // Athena
+         double d0 = this.getCenterX() - this.getSize() / 2.0D;
+ 
+         if (d0 < (double) (-this.worldSize)) {
+@@ -88,6 +127,7 @@ public class WorldBorder {
+     }
+ 
+     public double minZ() {
++        if (this.athenaSides()) return this.athenaMinZ; // Athena
+         double d0 = this.getCenterZ() - this.getSize() / 2.0D;
+ 
+         if (d0 < (double) (-this.worldSize)) {
+@@ -98,6 +138,7 @@ public class WorldBorder {
+     }
+ 
+     public double maxX() {
++        if (this.athenaSides()) return this.athenaMaxX; // Athena
+         double d0 = this.getCenterX() + this.getSize() / 2.0D;
+ 
+         if (d0 > (double) this.worldSize) {
+@@ -108,6 +149,7 @@ public class WorldBorder {
+     }
+ 
+     public double maxZ() {
++        if (this.athenaSides()) return this.athenaMaxZ; // Athena
+         double d0 = this.getCenterZ() + this.getSize() / 2.0D;
+ 
+         if (d0 > (double) this.worldSize) {
+@@ -128,6 +170,7 @@ public class WorldBorder {
+     public void setCenter(double d0, double d1) {
+         this.centerX = d0;
+         this.centerZ = d1;
++        this.athenaSidesKnown = false; // Athena
+         Iterator iterator = this.getListeners().iterator();
+ 
+         while (iterator.hasNext()) {
+@@ -163,6 +206,7 @@ public class WorldBorder {
+     public void setSize(double d0) {
+         this.startDiameter = d0;
+         this.endDiameter = d0;
++        this.athenaSidesKnown = false; // Athena
+         this.endTime = System.currentTimeMillis();
+         this.startTime = this.endTime;
+         Iterator iterator = this.getListeners().iterator();
+@@ -178,6 +222,7 @@ public class WorldBorder {
+     public void transitionSizeBetween(double d0, double d1, long i) {
+         this.startDiameter = d0;
+         this.endDiameter = d1;
++        this.athenaSidesKnown = false; // Athena
+         this.startTime = System.currentTimeMillis();
+         this.endTime = this.startTime + i;
+         Iterator iterator = this.getListeners().iterator();
+@@ -201,6 +246,7 @@ public class WorldBorder {
+ 
+     public void setSize(int i) {
+         this.worldSize = i;
++        this.athenaSidesKnown = false; // Athena
+     }
+ 
+     public int l() {
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java b/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9914088490bced9fcfabc840947383a956e34ebf
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java
+@@ -0,0 +1,73 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/**
++ * Athena - WorldBorder keeps its four sides for one tick of its world. They must be the sides the
++ * border had: after every change of its centre, size or limit at once, and for a moving border
++ * from the next tick on.
++ */
++public class AthenaWorldBorderSidesTest {
++
++    private static void assertSides(WorldBorder border, double minX, double maxX, double minZ, double maxZ) {
++        assertEquals(minX, border.minX(), 0.0D);
++        assertEquals(maxX, border.maxX(), 0.0D);
++        assertEquals(minZ, border.minZ(), 0.0D);
++        assertEquals(maxZ, border.maxZ(), 0.0D);
++    }
++
++    @Test
++    public void sidesFollowEveryChangeAtOnce() throws Exception {
++        for (boolean withWorld : new boolean[] { false, true }) {
++            WorldBorder border = new WorldBorder();
++
++            if (withWorld) {
++                border.world = AthenaAuditFixtures.world();
++            }
++            assertSides(border, -2.9999984E7D, 2.9999984E7D, -2.9999984E7D, 2.9999984E7D);
++            border.setSize(100.0D);
++            assertSides(border, -50.0D, 50.0D, -50.0D, 50.0D);
++            border.setCenter(10.0D, -20.0D);
++            assertSides(border, -40.0D, 60.0D, -70.0D, 30.0D);
++            border.setSize(40); // the world's limit
++            assertSides(border, -40.0D, 40.0D, -40.0D, 30.0D);
++            border.setSize(29999984);
++            border.setSize(10.0D);
++            assertSides(border, 5.0D, 15.0D, -25.0D, -15.0D);
++            assertTrue(border.contains(new BlockPosition(10, 0, -20)));
++            assertTrue(!border.contains(new BlockPosition(16, 0, -20)));
++        }
++    }
++
++    @Test
++    public void aMovingBorderIsReadOnceATick() throws Exception {
++        WorldBorder border = new WorldBorder();
++        WorldServer world = AthenaAuditFixtures.world();
++
++        border.world = world;
++        border.transitionSizeBetween(1000.0D, 10.0D, 400L);
++
++        double first = border.maxX();
++
++        assertTrue(first <= 500.0D && first > 5.0D);
++        Thread.sleep(60L);
++        assertEquals("the same tick: the same sides", first, border.maxX(), 0.0D);
++        assertEquals(-first, border.minX(), 0.0D);
++
++        ++world.athenaCurrentTick;
++        double second = border.maxX();
++
++        assertTrue("the next tick: the border has moved on", second < first);
++        assertEquals(-second, border.minZ(), 0.0D);
++
++        Thread.sleep(450L);
++        ++world.athenaCurrentTick;
++        assertSides(border, -5.0D, 5.0D, -5.0D, 5.0D); // arrived
++        assertEquals(EnumWorldBorderState.STATIONARY, border.getState());
++        ++world.athenaCurrentTick;
++        assertSides(border, -5.0D, 5.0D, -5.0D, 5.0D);
++    }
++}

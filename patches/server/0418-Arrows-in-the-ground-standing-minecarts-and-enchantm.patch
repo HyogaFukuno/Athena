@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:37:18 +0900
+Subject: [PATCH] Arrows in the ground, standing minecarts and enchantment
+ tables do less each tick
+
+An arrow already in the ground shaped its block, made the block's box and a
+vector and turned the block's state into legacy data every tick, to learn that
+it is in the ground: it compares the state it stuck in. Minecarts and boats
+make VehicleUpdateEvent, VehicleMoveEvent and their two Locations for listeners
+only. An enchantment table is no longer ticked: its tick turns the book towards
+the nearest player, which only a client draws.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityArrow.java b/src/main/java/net/minecraft/server/EntityArrow.java
+index 11e1b749c39e4efaad5a771b0aa97aa41949e386..6e55564067bd8ac2f69554c40aa2394deba8735d 100644
+--- a/src/main/java/net/minecraft/server/EntityArrow.java
++++ b/src/main/java/net/minecraft/server/EntityArrow.java
+@@ -15,6 +15,7 @@ public class EntityArrow extends Entity implements IProjectile {
+     private int yTile = -1;
+     private int zTile = -1;
+     private Block inTile;
++    private IBlockData athenaInState; // Athena - the state the arrow was last found stuck in; see onUpdate
+     private int inData;
+     public boolean inGround = false; // Spigot - private -> public
+     public int fromPlayer;
+@@ -136,11 +137,31 @@ public class EntityArrow extends Entity implements IProjectile {
+             this.lastPitch = this.pitch = (float) (MathHelper.atan2(this.motY, (double) f) * 180.0D / 3.1415927410125732D);
+         }
+ 
+-        BlockPosition blockposition = new BlockPosition(this.xTile, this.yTile, this.zTile);
+-        IBlockData iblockdata = this.world.getType(blockposition);
++        // Athena start - an arrow already in the ground only asks whether its block is still there.
++        //
++        // The test below finds out whether a flying arrow has come to rest inside a block, and all it
++        // can do is set inGround. An arrow that is in the ground - where a match's arrows spend a
++        // minute each - still shaped the block, made its box and a vector, every tick; and then
++        // turned the block's state back into its legacy data to compare with what it stuck in. The
++        // same state object is the same block and data.
++        IBlockData iblockdata = this.world.getType(this.xTile, this.yTile, this.zTile);
+         Block block = iblockdata.getBlock();
+ 
+-        if (block.getMaterial() != Material.AIR) {
++        if (this.inGround && iblockdata == this.athenaInState) {
++            if (this.shake > 0) {
++                --this.shake;
++            }
++            ++this.ticksInGround;
++            if (this.ticksInGround >= world.spigotConfig.arrowDespawnRate) { // Spigot - First int after shooter
++                this.die();
++            }
++            return;
++        }
++        // Athena end
++
++        if (!this.inGround && block.getMaterial() != Material.AIR) { // Athena - only an arrow in flight
++            BlockPosition blockposition = new BlockPosition(this.xTile, this.yTile, this.zTile);
++
+             block.updateShape(this.world, blockposition);
+             AxisAlignedBB axisalignedbb = block.getCollisionBoundingBox(this.world, blockposition, iblockdata);
+ 
+@@ -157,12 +178,14 @@ public class EntityArrow extends Entity implements IProjectile {
+             int i = block.toLegacyData(iblockdata);
+ 
+             if (block == this.inTile && i == this.inData) {
++                this.athenaInState = iblockdata; // Athena
+                 ++this.ticksInGround;
+                 if (this.ticksInGround >= world.spigotConfig.arrowDespawnRate) { // Spigot - First int after shooter
+                     this.die();
+                 }
+             } else {
+                 this.inGround = false;
++                this.athenaInState = null; // Athena
+                 this.motX *= (double) (this.random.nextFloat() * 0.2F);
+                 this.motY *= (double) (this.random.nextFloat() * 0.2F);
+                 this.motZ *= (double) (this.random.nextFloat() * 0.2F);
+@@ -316,6 +339,7 @@ public class EntityArrow extends Entity implements IProjectile {
+ 
+                     this.inTile = iblockdata1.getBlock();
+                     this.inData = this.inTile.toLegacyData(iblockdata1);
++                    this.athenaInState = null; // Athena - what it sticks in now is compared in full first
+                     this.motX = (double) ((float) (movingobjectposition.pos.xCoord - this.locX));
+                     this.motY = (double) ((float) (movingobjectposition.pos.yCoord - this.locY));
+                     this.motZ = (double) ((float) (movingobjectposition.pos.zCoord - this.locZ));
+diff --git a/src/main/java/net/minecraft/server/EntityBoat.java b/src/main/java/net/minecraft/server/EntityBoat.java
+index 85e801ea61a209f17a8c7477b9de1c4d1a23493f..38dc66ef70e2fce602ad85cf6baf701e5707f6e3 100644
+--- a/src/main/java/net/minecraft/server/EntityBoat.java
++++ b/src/main/java/net/minecraft/server/EntityBoat.java
+@@ -387,18 +387,27 @@ public class EntityBoat extends Entity {
+ 
+             // CraftBukkit start
+             org.bukkit.Server server = this.world.getServer();
+-            org.bukkit.World bworld = this.world.getWorld();
++            // Athena start - the events and their two Locations are made for listeners only: a map's
++            // minecarts and boats, standing where they are, made all of them every tick for nobody
++            final double toX = this.locX, toY = this.locY, toZ = this.locZ; // where it is before a listener of the first event moves it
++            final float toYaw = this.yaw, toPitch = this.pitch;
+ 
+-            Location from = new Location(bworld, prevX, prevY, prevZ, prevYaw, prevPitch);
+-            Location to = new Location(bworld, this.locX, this.locY, this.locZ, this.yaw, this.pitch);
+-            Vehicle vehicle = (Vehicle) this.getBukkitEntity();
++            if (org.bukkit.event.vehicle.VehicleUpdateEvent.getHandlerList().getRegisteredListeners().length != 0) {
++                server.getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleUpdateEvent((Vehicle) this.getBukkitEntity()));
++            }
+ 
+-            server.getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleUpdateEvent(vehicle));
++            // what Location.equals compares, on the values themselves
++            if (VehicleMoveEvent.getHandlerList().getRegisteredListeners().length != 0
++                    && (Double.doubleToLongBits(prevX) != Double.doubleToLongBits(toX) || Double.doubleToLongBits(prevY) != Double.doubleToLongBits(toY)
++                    || Double.doubleToLongBits(prevZ) != Double.doubleToLongBits(toZ) || Float.floatToIntBits(prevYaw) != Float.floatToIntBits(toYaw)
++                    || Float.floatToIntBits(prevPitch) != Float.floatToIntBits(toPitch))) {
++                org.bukkit.World bworld = this.world.getWorld();
++                Location from = new Location(bworld, prevX, prevY, prevZ, prevYaw, prevPitch);
++                Location to = new Location(bworld, toX, toY, toZ, toYaw, toPitch);
+ 
+-            if (!from.equals(to)) {
+-                VehicleMoveEvent event = new VehicleMoveEvent(vehicle, from, to);
+-                server.getPluginManager().callEvent(event);
++                server.getPluginManager().callEvent(new VehicleMoveEvent((Vehicle) this.getBukkitEntity(), from, to));
+             }
++            // Athena end
+             // CraftBukkit end
+             if (!this.world.isClientSide) {
+                 List list = this.world.getEntities(this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D));
+diff --git a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+index 6b1c6d11dad167365dc4d0d463c6e33f234d50fd..743acbdfc89a52f61c727d2fc0c5067cfc942ae1 100644
+--- a/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
++++ b/src/main/java/net/minecraft/server/EntityMinecartAbstract.java
+@@ -321,16 +321,27 @@ public abstract class EntityMinecartAbstract extends Entity implements INamableT
+             this.setYawPitch(this.yaw, this.pitch);
+ 
+             // CraftBukkit start
+-            org.bukkit.World bworld = this.world.getWorld();
+-            Location from = new Location(bworld, prevX, prevY, prevZ, prevYaw, prevPitch);
+-            Location to = new Location(bworld, this.locX, this.locY, this.locZ, this.yaw, this.pitch);
+-            Vehicle vehicle = (Vehicle) this.getBukkitEntity();
++            // Athena start - the events and their two Locations are made for listeners only: a map's
++            // minecarts and boats, standing where they are, made all of them every tick for nobody
++            final double toX = this.locX, toY = this.locY, toZ = this.locZ; // where it is before a listener of the first event moves it
++            final float toYaw = this.yaw, toPitch = this.pitch;
+ 
+-            this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleUpdateEvent(vehicle));
++            if (org.bukkit.event.vehicle.VehicleUpdateEvent.getHandlerList().getRegisteredListeners().length != 0) {
++                this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleUpdateEvent((Vehicle) this.getBukkitEntity()));
++            }
++
++            // what Location.equals compares, on the values themselves
++            if (org.bukkit.event.vehicle.VehicleMoveEvent.getHandlerList().getRegisteredListeners().length != 0
++                    && (Double.doubleToLongBits(prevX) != Double.doubleToLongBits(toX) || Double.doubleToLongBits(prevY) != Double.doubleToLongBits(toY)
++                    || Double.doubleToLongBits(prevZ) != Double.doubleToLongBits(toZ) || Float.floatToIntBits(prevYaw) != Float.floatToIntBits(toYaw)
++                    || Float.floatToIntBits(prevPitch) != Float.floatToIntBits(toPitch))) {
++                org.bukkit.World bworld = this.world.getWorld();
++                Location from = new Location(bworld, prevX, prevY, prevZ, prevYaw, prevPitch);
++                Location to = new Location(bworld, toX, toY, toZ, toYaw, toPitch);
+ 
+-            if (!from.equals(to)) {
+-                this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleMoveEvent(vehicle, from, to));
++                this.world.getServer().getPluginManager().callEvent(new org.bukkit.event.vehicle.VehicleMoveEvent((Vehicle) this.getBukkitEntity(), from, to));
+             }
++            // Athena end
+             // CraftBukkit end
+ 
+             Iterator iterator = this.world.getEntities(this, Math.min(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.min(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.min(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D), Math.max(this.boundingBoxMinX - 0.20000000298023224D, this.boundingBoxMaxX + 0.20000000298023224D), Math.max(this.boundingBoxMinY - 0.0D, this.boundingBoxMaxY + 0.0D), Math.max(this.boundingBoxMinZ - 0.20000000298023224D, this.boundingBoxMaxZ + 0.20000000298023224D)).iterator();
+diff --git a/src/main/java/net/minecraft/server/TileEntityEnchantTable.java b/src/main/java/net/minecraft/server/TileEntityEnchantTable.java
+index c130ee2273d8cf57a69cbc7cd54af0d2a18816fa..ee2491d93af2bde081fa48f0b34c6b68f52068ee 100644
+--- a/src/main/java/net/minecraft/server/TileEntityEnchantTable.java
++++ b/src/main/java/net/minecraft/server/TileEntityEnchantTable.java
+@@ -3,7 +3,10 @@ package net.minecraft.server;
+ import java.util.Random;
+ 
+ 
+-public class TileEntityEnchantTable extends TileEntity implements IUpdatePlayerListBox, ITileEntityContainer {
++// Athena - not ticked (no IUpdatePlayerListBox): c() below turns the book towards the nearest player and
++// flips its pages, which only a client draws. The server looked for that player around every
++// enchantment table every tick and kept the angles for nobody.
++public class TileEntityEnchantTable extends TileEntity implements ITileEntityContainer {
+ 
+     public int tickCount;
+     public float pageFlip;
+@@ -38,8 +41,7 @@ public class TileEntityEnchantTable extends TileEntity implements IUpdatePlayerL
+ 
+     }
+ 
+-    @Override
+-    public void c() {
++    public void c() { // Athena - no longer called: see the class comment
+         this.bookSpreadPrev = this.bookSpread;
+         this.bookRotationPrev = this.bookRotation;
+         EntityHuman entityhuman = this.world.findNearbyPlayer((double) ((float) this.position.getX() + 0.5F), (double) ((float) this.position.getY() + 0.5F), (double) ((float) this.position.getZ() + 0.5F), 3.0D);

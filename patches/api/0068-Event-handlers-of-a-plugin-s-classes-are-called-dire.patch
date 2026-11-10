@@ -1,0 +1,210 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:26:20 +0900
+Subject: [PATCH] Event handlers of a plugin's classes are called directly too
+
+The executors of api 0051 went through LambdaMetafactory with a lookup
+teleported into the listener class. A plugin's classes are in their loader's
+own unnamed module, the lookup has no module access there, and the
+metafactory refused every one ("Invalid caller"): in production every
+handler was still called through Method.invoke. Each handler now gets a hidden
+class in the API's own module whose execute is invokeExact on the handler's
+method handle, a constant of that class. With C1 an empty handler's call goes
+from 74 ns to 5 ns. Static handlers are taken as well.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+index 36db84437012ee5feb5c48c0c6db2a4f802829fc..9b4edbc7c66e746b9f21a3d40853142f11c37907 100644
+--- a/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
++++ b/src/main/java/org/bukkit/plugin/java/JavaPluginLoader.java
+@@ -332,26 +332,60 @@ public final class JavaPluginLoader implements PluginLoader {
+     //
+     // Every handler was called through Method.invoke. Since Java 18 that is a method handle held in
+     // a field, which the JIT cannot treat as a constant, so the handler never inlined into the
+-    // dispatch however hot the event. LambdaMetafactory defines a small class, in the listener
+-    // class's own nest, whose execute is an ordinary call to the handler - private handlers
+-    // included. A handler it cannot take (static, or on a class a lookup cannot reach, such as a
+-    // hidden one) keeps the reflective path; so does a listener class whose loader cannot see
+-    // EventExecutor. Exceptions from the handler reach the caller wrapped in EventException, as
+-    // before, with the handler's exception as the cause.
++    // dispatch however hot the event, and every call made an Object[] for its one argument. With
++    // C1 only, as the small servers run, such a call of an empty handler measured 74 ns.
++    //
++    // Each handler gets a hidden class of its own instead, whose execute is
++    // "the handle".invokeExact(listener, event) with the handle as a constant of that class (its
++    // class data, loaded with ldc): to the JIT a call it can see through, 5 ns with C1. The class
++    // is defined here, in the API's own module, and the handle is unreflected from the Method the
++    // loader has already made accessible - so private handlers, static ones and, above all, handlers
++    // of classes in another class loader are all taken.
++    //
++    // The first version of this went through LambdaMetafactory with a lookup teleported into the
++    // listener class. A plugin's classes are in their loader's own unnamed module, such a lookup has
++    // no module access there, and the metafactory refused every one of them ("Invalid caller"): in
++    // production every handler of every plugin was still on Method.invoke, 3% of a server's CPU,
++    // while the test, with its listeners in the API's own loader, passed. Only a handler the handle
++    // cannot be made for keeps the reflective path. Exceptions from the handler reach the caller
++    // wrapped in EventException, as before, with the handler's exception as the cause.
++    private static final byte[] ATHENA_EXECUTOR_CLASS = athenaExecutorClass();
++
++    private static byte[] athenaExecutorClass() {
++        final java.lang.constant.ClassDesc listener = java.lang.constant.ClassDesc.of(Listener.class.getName());
++        final java.lang.constant.ClassDesc event = java.lang.constant.ClassDesc.of(Event.class.getName());
++        final java.lang.constant.MethodTypeDesc execute = java.lang.constant.MethodTypeDesc.of(java.lang.constant.ConstantDescs.CD_void, listener, event);
++        final java.lang.constant.DynamicConstantDesc<java.lang.invoke.MethodHandle> handle = java.lang.constant.DynamicConstantDesc.ofNamed(
++                java.lang.constant.ConstantDescs.BSM_CLASS_DATA, java.lang.constant.ConstantDescs.DEFAULT_NAME, java.lang.constant.ConstantDescs.CD_MethodHandle);
++
++        return java.lang.classfile.ClassFile.of().build(java.lang.constant.ClassDesc.of(JavaPluginLoader.class.getName() + "$AthenaHandler"), clazz -> clazz
++                .withFlags(java.lang.classfile.ClassFile.ACC_FINAL | java.lang.classfile.ClassFile.ACC_SYNTHETIC)
++                .withInterfaceSymbols(java.lang.constant.ClassDesc.of(EventExecutor.class.getName()))
++                .withMethodBody(java.lang.constant.ConstantDescs.INIT_NAME, java.lang.constant.ConstantDescs.MTD_void, 0, code -> code
++                        .aload(0)
++                        .invokespecial(java.lang.constant.ConstantDescs.CD_Object, java.lang.constant.ConstantDescs.INIT_NAME, java.lang.constant.ConstantDescs.MTD_void)
++                        .return_())
++                .withMethodBody("execute", execute, java.lang.classfile.ClassFile.ACC_PUBLIC, code -> code
++                        .ldc(handle)
++                        .aload(1)
++                        .aload(2)
++                        .invokevirtual(java.lang.constant.ConstantDescs.CD_MethodHandle, "invokeExact", execute)
++                        .return_()));
++    }
++
+     private static EventExecutor athenaDirectExecutor(Method method) {
+-        if (java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
+-            return null;
+-        }
+         try {
+-            Class<?> owner = method.getDeclaringClass();
+-            java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.privateLookupIn(owner, java.lang.invoke.MethodHandles.lookup());
+-            java.lang.invoke.MethodHandle handler = lookup.unreflect(method);
+-            java.lang.invoke.MethodType erased = java.lang.invoke.MethodType.methodType(void.class, Listener.class, Event.class);
+-            java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(lookup, "execute",
+-                    java.lang.invoke.MethodType.methodType(EventExecutor.class), erased, handler,
+-                    java.lang.invoke.MethodType.methodType(void.class, owner, method.getParameterTypes()[0]));
+-
+-            return (EventExecutor) site.getTarget().invoke();
++            java.lang.invoke.MethodHandles.Lookup lookup = java.lang.invoke.MethodHandles.lookup();
++            java.lang.invoke.MethodHandle handler = lookup.unreflect(method); // accessible already: no access check
++
++            if (java.lang.reflect.Modifier.isStatic(method.getModifiers())) {
++                handler = java.lang.invoke.MethodHandles.dropArguments(handler, 0, Listener.class);
++            }
++            handler = handler.asType(java.lang.invoke.MethodType.methodType(void.class, Listener.class, Event.class));
++
++            java.lang.invoke.MethodHandles.Lookup hidden = lookup.defineHiddenClassWithClassData(ATHENA_EXECUTOR_CLASS, handler, true);
++
++            return (EventExecutor) hidden.findConstructor(hidden.lookupClass(), java.lang.invoke.MethodType.methodType(void.class)).invoke();
+         } catch (Throwable t) {
+             return null;
+         }
+diff --git a/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java b/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java
+index 00d77152d766b636d7749d3751aee5cd3c845674..9bfc65b27e3ff4088f12f6c8737470ceb49ae233 100644
+--- a/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java
++++ b/src/test/java/org/bukkit/plugin/java/AthenaEventExecutorTest.java
+@@ -15,6 +15,7 @@ import org.bukkit.event.EventHandler;
+ import org.bukkit.event.HandlerList;
+ import org.bukkit.event.Listener;
+ import org.bukkit.event.TestEvent;
++import org.bukkit.plugin.EventExecutor;
+ import org.bukkit.plugin.RegisteredListener;
+ import org.bukkit.plugin.TestPlugin;
+ import org.junit.Test;
+@@ -149,4 +150,98 @@ public class AthenaEventExecutorTest {
+         assertFalse("the generated path holds no Method", reflective);
+         assertTrue(executor.getClass().getDeclaredFields().length > 0);
+     }
++
++    /** A plugin's listener: loaded by its own class loader, so in another unnamed module than the API. */
++    public static class Foreign implements Listener {
++        public static int publics;
++        public static int privates;
++
++        @EventHandler
++        public void onPublic(TestEvent event) {
++            ++publics;
++        }
++
++        @EventHandler
++        private void onPrivate(TestEvent event) {
++            ++privates;
++        }
++    }
++
++    /** Defines {@code name} itself from this loader's class file, as PluginClassLoader defines a plugin's classes. */
++    private static final class PluginLikeLoader extends ClassLoader {
++        private final String name;
++
++        PluginLikeLoader(String name) {
++            super(AthenaEventExecutorTest.class.getClassLoader());
++            this.name = name;
++        }
++
++        @Override
++        protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
++            if (!name.equals(this.name)) {
++                return super.loadClass(name, resolve);
++            }
++            synchronized (this.getClassLoadingLock(name)) {
++                Class<?> loaded = this.findLoadedClass(name);
++
++                if (loaded == null) {
++                    try (java.io.InputStream in = this.getParent().getResourceAsStream(name.replace('.', '/') + ".class")) {
++                        byte[] bytes = in.readAllBytes();
++
++                        loaded = this.defineClass(name, bytes, 0, bytes.length);
++                    } catch (java.io.IOException e) {
++                        throw new ClassNotFoundException(name, e);
++                    }
++                }
++                return loaded;
++            }
++        }
++    }
++
++    private static boolean reflective(RegisteredListener listener) throws Exception {
++        java.lang.reflect.Field field = RegisteredListener.class.getDeclaredField("executor");
++
++        field.setAccessible(true);
++        Object timed = field.get(listener);
++        java.lang.reflect.Field inner = timed.getClass().getDeclaredField("executor");
++
++        inner.setAccessible(true);
++        Object executor = inner.get(timed);
++
++        for (java.lang.reflect.Field f : executor.getClass().getDeclaredFields()) {
++            if (f.getType() == java.lang.reflect.Method.class) {
++                return true;
++            }
++        }
++        return false;
++    }
++
++    @Test
++    public void aPluginsHandlersDoNotGoThroughReflection() throws Exception {
++        // every plugin's listener is in another class loader than the API: the first version of the
++        // direct executors was refused there by LambdaMetafactory ("Invalid caller") and all of them
++        // fell back to Method.invoke, while the test above, in one loader, passed
++        Class<?> type = new PluginLikeLoader(Foreign.class.getName()).loadClass(Foreign.class.getName());
++
++        assertTrue(type != Foreign.class);
++        assertTrue(type.getModule() != EventExecutor.class.getModule());
++
++        Listener listener = (Listener) type.getConstructor().newInstance();
++        Map<Class<? extends Event>, Set<RegisteredListener>> listeners = register(listener);
++
++        assertEquals(2, listeners.get(TestEvent.class).size());
++        for (RegisteredListener registered : listeners.get(TestEvent.class)) {
++            assertFalse("a handler of a class in another loader goes through Method.invoke", reflective(registered));
++        }
++        call(listeners, TestEvent.class, new TestEvent(false));
++        assertEquals(1, type.getField("publics").getInt(null));
++        assertEquals(1, type.getField("privates").getInt(null));
++    }
++
++    @Test
++    public void staticHandlersDoNotGoThroughReflection() throws Exception {
++        for (RegisteredListener registered : register(new Handlers()).get(TestEvent.class)) {
++            assertFalse(reflective(registered));
++        }
++    }
+ }

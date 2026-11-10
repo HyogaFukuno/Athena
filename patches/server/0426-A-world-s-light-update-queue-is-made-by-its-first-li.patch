@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 12:22:01 +0900
+Subject: [PATCH] A world's light update queue is made by its first light
+ update
+
+128 KB for every world, and a world nothing is built or broken in - a
+deathmatch arena waiting, a lobby - never has one. AthenaGuard reads the block
+under a player by coordinates, and an empty unload queue costs no clock read.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index 60b762479cfda9e24f46fdc7387579542dbc2e73..e6c7667b7c45fc0d6162eedf9b107d24b6a1a104 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -747,14 +747,14 @@ public final class AthenaGuard {
+     }
+ 
+     private static double slipperiness(World world, double x, double y, double z) {
+-        Block block = world.getType(new BlockPosition(MathHelper.floor(x), MathHelper.floor(y) - 1, MathHelper.floor(z))).getBlock();
++        Block block = world.getType(MathHelper.floor(x), MathHelper.floor(y) - 1, MathHelper.floor(z)).getBlock(); // Athena - no position made
+ 
+         return block.frictionFactor;
+     }
+ 
+     /** A slime block under the feet sends a falling player back up as fast as it came down. */
+     private double slimeBounce(World world, double x, double y, double z) {
+-        Block block = world.getType(new BlockPosition(MathHelper.floor(x), MathHelper.floor(y - 0.2D), MathHelper.floor(z))).getBlock();
++        Block block = world.getType(MathHelper.floor(x), MathHelper.floor(y - 0.2D), MathHelper.floor(z)).getBlock(); // Athena - no position made
+ 
+         return block == Blocks.SLIME ? Math.max(-this.lastDy, 0.0D) + GRAVITY : 0.0D;
+     }
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index d61a88aa33aec6ad4e94fc1a31b127c912893148..e28de77d9805449466400e7b8e60f3d1d6d40727 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -830,7 +830,7 @@ public class ChunkProviderServer implements IChunkProvider {
+         if (!this.world.savingDisabled) {
+             // CraftBukkit start
+             Server server = this.world.getServer();
+-            long athenaStart = System.nanoTime(); // Athena - see athenaUnloadBudgetNanos
++            long athenaStart = this.unloadQueue.isEmpty() ? 0L : System.nanoTime(); // Athena - see athenaUnloadBudgetNanos; no clock read for an empty queue, which is nearly every tick
+             for (int i = 0; i < 100 && !this.unloadQueue.isEmpty(); ++i) {
+                 // Athena - within the per-tick budget; what is left stays queued for the next ticks
+                 if (i > 0 && athenaUnloadBudgetNanos > 0L && System.nanoTime() - athenaStart >= athenaUnloadBudgetNanos) {
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index bffa6b305c0b96417ddc12c356f2badd87a5b98a..e0f1cb59cf5daaf968db3cbd1ba917445941c233 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -248,7 +248,7 @@ public abstract class World implements IBlockAccess {
+         this.ambientTickCountdown = this.random.nextInt(12000);
+         this.allowMonsters = true;
+         this.allowAnimals = true;
+-        this.lightUpdateBlockList = new int['\u8000'];
++        // Athena - made by the first light update (see c): 128 KB for every world, and a world nothing is built or broken in - a deathmatch arena waiting, a lobby - never has one
+         this.dataManager = idatamanager;
+         this.methodProfiler = methodprofiler;
+         this.worldData = worlddata;
+@@ -3441,6 +3441,9 @@ public abstract class World implements IBlockAccess {
+             int i = 0;
+             int j = 0;
+ 
++            if (this.lightUpdateBlockList == null) { // Athena - see where it was made for every world
++                this.lightUpdateBlockList = new int['\u8000'];
++            }
+             this.methodProfiler.startSection("getBrightness");
+             // Athena - take the coordinates first so the two seed reads can use the scalar forms.
+             // The rest of this method was already scalar; these two were the last callers of the
