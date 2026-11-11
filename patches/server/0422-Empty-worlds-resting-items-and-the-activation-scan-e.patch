@@ -1,0 +1,319 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:41:25 +0900
+Subject: [PATCH] Empty worlds, resting items and the activation scan every few
+ ticks
+
+athena.yml, per world: emptyWorldTickInterval (20) ticks a world that has had
+no player for ten seconds every that many ticks, its clock and its timers
+going on every tick; restingItemMoveInterval (4) moves a dropped item lying
+still on the ground every that many ticks, as vanilla has since 1.13;
+entityActivationCheckInterval (4) looks for the entities near players every
+that many ticks, what it finds staying active until the next look. 1 is as
+before for each.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaWorldConfig.java b/src/main/java/athena/server/AthenaWorldConfig.java
+index 948ce043711a594d2a4e1fcb488bdc6ef7e924ba..573972df264e8d5b6edbf37e0e3f9699dc4a715b 100644
+--- a/src/main/java/athena/server/AthenaWorldConfig.java
++++ b/src/main/java/athena/server/AthenaWorldConfig.java
+@@ -79,4 +79,33 @@ public class AthenaWorldConfig {
+             "switch their circuits on one tick when the time changes.\n" +
+             "Default: true")
+     public boolean staggerDaylightDetectors = true;
++
++    @Comment("Every how many ticks the entities near players are looked through to decide which are\n" +
++            "active (Spigot's entity activation range). Vanilla Spigot does it every tick, for every\n" +
++            "chunk near every player. With an interval, an entity found in range stays active until\n" +
++            "the next look, so one that leaves the range sleeps, and one that comes into it wakes,\n" +
++            "up to that many ticks later; asleep it is still ticked once a second, as before.\n" +
++            "1 is every tick.\n" +
++            "Default: 4")
++    public int entityActivationCheckInterval = 4;
++
++    @Comment("Every how many ticks a dropped item that lies still on the ground is moved. 1.8 runs\n" +
++            "the whole movement and collision of every item every tick, though one at rest ends up\n" +
++            "where it was; since 1.13 vanilla moves such an item every fourth tick, which is what 4\n" +
++            "gives here. An item that is falling, sliding or carried by water is moved every tick as\n" +
++            "before. One whose block is taken away starts falling up to that many ticks later.\n" +
++            "1 is every tick.\n" +
++            "Default: 4")
++    public int restingItemMoveInterval = 4;
++
++    @Comment("Every how many ticks a world with no player in it is ticked, once it has been empty for\n" +
++            "ten seconds. Its blocks, entities and tile entities then stand still in between - seen\n" +
++            "by nobody - while its time of day goes on as always, and so do Athena's world timers,\n" +
++            "the scheduler, chunk loading and everything plugins do. The first tick with a player in\n" +
++            "the world is a normal one again. A match's deathmatch arena waits empty for most of\n" +
++            "the match, with every hopper, furnace and minecart in it ticked twenty times a second.\n" +
++            "Set this to 1 for a world whose machines must run with nobody there.\n" +
++            "1 ticks an empty world like any other.\n" +
++            "Default: 20")
++    public int emptyWorldTickInterval = 20;
+ }
+diff --git a/src/main/java/net/minecraft/server/EntityItem.java b/src/main/java/net/minecraft/server/EntityItem.java
+index e0c87f8ea2b6ca3d15d92853aa5a72c8ca9fa938..5805f4b7a46f47458ee78089256e027e124d1289 100644
+--- a/src/main/java/net/minecraft/server/EntityItem.java
++++ b/src/main/java/net/minecraft/server/EntityItem.java
+@@ -72,6 +72,16 @@ public class EntityItem extends Entity {
+             this.lastZ = this.locZ;
+             this.motY -= 0.03999999910593033D;
+             this.noclip = this.pushOutOfBlocks(this.locX, (this.boundingBoxMinY + this.boundingBoxMaxY) / 2.0D, this.locZ);
++            // Athena start - an item at rest on the ground is moved every few ticks, as vanilla has
++            // done since 1.13 (athena.yml restingItemMoveInterval). Its move ends where it began; it
++            // was a collision query for every item lying about, every tick.
++            int restInterval = this.world.athenaConfig == null ? 1 : this.world.athenaConfig.restingItemMoveInterval;
++
++            if (restInterval > 1 && this.onGround && !this.noclip && this.motX * this.motX + this.motZ * this.motZ <= 1.0E-5D
++                    && (this.ticksLived + this.getId()) % restInterval != 0) {
++                this.motY = 0.0D; // what the move would leave of the tick's gravity
++            } else
++            // Athena end
+             this.move(this.motX, this.motY, this.motZ);
+             boolean flag = (int) this.lastX != (int) this.locX || (int) this.lastY != (int) this.locY || (int) this.lastZ != (int) this.locZ;
+ 
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 8b6160ebbe674545bc42049b730bdd3d2dc0dad5..61c01ca3821420473ce3cab185ccf54634c4fb99 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -1014,6 +1014,10 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     public void athenaTickWorld(WorldServer worldserver) {
+         worldserver.athenaInTick = true;
+         try {
++            if (worldserver.athenaIdleTick()) { // Athena - an empty world: its timers and its clock only
++                worldserver.athenaRunTimers();
++                return;
++            }
+             this.athenaTickWorld0(worldserver);
+         } finally {
+             worldserver.athenaInTick = false;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 7a6ff34612ffa6cc11b55597c43a06b8e623882d..bffa6b305c0b96417ddc12c356f2badd87a5b98a 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -185,6 +185,10 @@ public abstract class World implements IBlockAccess {
+ 
+     public com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig pandaSpigotConfig; // PandaSpigot
+     public athena.server.AthenaWorldConfig athenaConfig; // Athena - athena.yml
++    // Athena - org.spigotmc.ActivationRange: the tick of this world's next look for entities near
++    // players, and the tick those it finds are active until
++    public int athenaActivationDue = Integer.MIN_VALUE;
++    public int athenaActiveUntil;
+     // Athena start - while a chunk decorates off the server thread, that thread's world calls are
+     // answered from a sandbox instead of the live world. The check is a field load and a compare
+     // against the current thread, which is false for the server thread on every call.
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index a14db3b3a93df411b0ecf751ba1650d92da60503..165c1fffdf58d0468e4acd4c6c58008150be1533 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -1511,6 +1511,39 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         this.athenaNewTimers.add(timer);
+     }
+ 
++    // Athena start - a world nobody is in is ticked every few ticks (athena.yml emptyWorldTickInterval).
++    /** For how many ticks a world must have been empty before its ticks thin out: ten seconds. */
++    static final int ATHENA_EMPTY_GRACE = 200;
++    private int athenaEmptyTicks;
++
++    /**
++     * Whether this tick is one an empty world leaves out; its time has then been moved on. A world
++     * that has just been loaded, or just left, is ticked in full for ten seconds first: what a map
++     * does as it settles - lamps switching, water running - is done before anyone arrives.
++     */
++    boolean athenaIdleTick() {
++        int interval = this.athenaConfig == null ? 1 : this.athenaConfig.emptyWorldTickInterval;
++
++        if (interval <= 1 || !this.players.isEmpty()) {
++            this.athenaEmptyTicks = 0;
++            return false;
++        }
++        if (this.athenaEmptyTicks < ATHENA_EMPTY_GRACE) {
++            ++this.athenaEmptyTicks;
++            return false;
++        }
++        if (++this.athenaEmptyTicks >= ATHENA_EMPTY_GRACE + interval) {
++            this.athenaEmptyTicks = ATHENA_EMPTY_GRACE;
++            return false; // the one in every interval that is ticked
++        }
++        this.worldData.setTime(this.worldData.getTime() + 1L);
++        if (this.getGameRules().getBoolean("doDaylightCycle")) {
++            this.worldData.setDayTime(this.worldData.getDayTime() + 1L);
++        }
++        return true;
++    }
++    // Athena end
++
+     /** At the start of each tick, on the tick thread: the timers that are due. */
+     void athenaRunTimers() {
+         athena.server.AthenaWorldTimer added;
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index a5d693dd05460445f366428e979220f56473b94f..705a821fd76a8f05333919d86ecd8f19c2d93d37 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -109,6 +109,20 @@ public class ActivationRange
+      */
+     public static void activateEntities(World world)
+     {
++        // Athena start - not every tick: what is found in range stays active until the next look
++        // (athena.yml entityActivationCheckInterval)
++        final int interval = world.athenaConfig == null ? 1 : Math.max( 1, world.athenaConfig.entityActivationCheckInterval );
++        if ( interval > 1 && world.athenaCurrentTick < world.athenaActivationDue && world.athenaActivationDue - world.athenaCurrentTick <= interval )
++        {
++            for ( Entity player : (List<Entity>) (List) world.players )
++            {
++                player.activatedTick = world.athenaCurrentTick;
++            }
++            return;
++        }
++        world.athenaActivationDue = world.athenaCurrentTick + interval;
++        world.athenaActiveUntil = world.athenaCurrentTick + interval - 1;
++        // Athena end
+         SpigotTimings.entityActivationCheckTimer.startTiming();
+         final int miscActivationRange = world.spigotConfig.miscActivationRange;
+         final int animalActivationRange = world.spigotConfig.animalActivationRange;
+@@ -216,7 +230,7 @@ public class ActivationRange
+                 {
+                     if ( entity.defaultActivationState )
+                     {
+-                        entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
++                        entity.activatedTick = entity.world.athenaActiveUntil; // Athena - this world's tick, until the next look
+                         continue;
+                     }
+                     switch ( entity.activationType )
+@@ -224,20 +238,20 @@ public class ActivationRange
+                         case 1:
+                             if ( AxisAlignedBBHelper.intersects( b.monsterBBMinX, b.monsterBBMinY, b.monsterBBMinZ, b.monsterBBMaxX, b.monsterBBMaxY, b.monsterBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
++                                entity.activatedTick = entity.world.athenaActiveUntil; // Athena - this world's tick, until the next look
+                             }
+                             break;
+                         case 2:
+                             if ( AxisAlignedBBHelper.intersects( b.animalBBMinX, b.animalBBMinY, b.animalBBMinZ, b.animalBBMaxX, b.animalBBMaxY, b.animalBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
++                                entity.activatedTick = entity.world.athenaActiveUntil; // Athena - this world's tick, until the next look
+                             }
+                             break;
+                         case 3:
+                         default:
+                             if ( AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) ) // Athena
+                             {
+-                                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
++                                entity.activatedTick = entity.world.athenaActiveUntil; // Athena - this world's tick, until the next look
+                             }
+                     }
+                 }
+@@ -290,7 +304,7 @@ public class ActivationRange
+             if ( entity.world.athenaCurrentTick > entity.activatedTick && !entity.defaultActivationState // Athena - this world's tick
+                     && AxisAlignedBBHelper.intersects( b.miscBBMinX, b.miscBBMinY, b.miscBBMinZ, b.miscBBMaxX, b.miscBBMaxY, b.miscBBMaxZ, entity.boundingBoxMinX, entity.boundingBoxMinY, entity.boundingBoxMinZ, entity.boundingBoxMaxX, entity.boundingBoxMaxY, entity.boundingBoxMaxZ ) )
+             {
+-                entity.activatedTick = entity.world.athenaCurrentTick; // Athena - this world's tick
++                entity.activatedTick = entity.world.athenaActiveUntil; // Athena - this world's tick, until the next look
+             }
+         }
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java b/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..35233d7a8b951cc0f7c5d2108f7fb4b7a079633e
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaIdleWorldTest.java
+@@ -0,0 +1,97 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a world with no player in it is ticked every few ticks once it has been empty for ten
++ * seconds (athena.yml emptyWorldTickInterval); its time goes on every tick all the same.
++ */
++public class AthenaIdleWorldTest extends AbstractTestingBase {
++
++    private static WorldServer world(int interval, List<EntityHuman> players) throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++
++        world.worldData = new WorldData();
++        world.athenaConfig = new athena.server.AthenaWorldConfig();
++        world.athenaConfig.emptyWorldTickInterval = interval;
++        AthenaAuditFixtures.set(world, World.class, "players", players);
++        return world;
++    }
++
++    @Test
++    public void anEmptyWorldIsTickedInFullForTenSecondsThenEveryInterval() throws Exception {
++        WorldServer world = world(20, new ArrayList<EntityHuman>());
++        long time = world.worldData.getTime();
++        long day = world.worldData.getDayTime();
++
++        for (int tick = 0; tick < WorldServer.ATHENA_EMPTY_GRACE; ++tick) {
++            assertFalse("tick " + tick + " of the first ten seconds is a full one", world.athenaIdleTick());
++        }
++        assertEquals("a full tick's time is moved on by the tick itself", time, world.worldData.getTime());
++
++        int full = 0;
++
++        for (int tick = 0; tick < 400; ++tick) {
++            if (!world.athenaIdleTick()) {
++                ++full;
++                assertEquals("every twentieth", 19, tick % 20);
++            }
++        }
++        assertEquals(20, full);
++        assertEquals("the left-out ticks moved the time on", time + 380L, world.worldData.getTime());
++        assertEquals(day + 380L, world.worldData.getDayTime());
++    }
++
++    @Test
++    public void aPlayerMakesEveryTickAFullOneAgain() throws Exception {
++        List<EntityHuman> players = new ArrayList<EntityHuman>();
++        WorldServer world = world(20, players);
++
++        for (int tick = 0; tick < WorldServer.ATHENA_EMPTY_GRACE + 5; ++tick) {
++            world.athenaIdleTick();
++        }
++        assertTrue(world.athenaIdleTick());
++
++        players.add(AthenaAuditFixtures.allocate(EntityPlayer.class));
++        for (int tick = 0; tick < 50; ++tick) {
++            assertFalse(world.athenaIdleTick());
++        }
++        players.clear();
++        for (int tick = 0; tick < WorldServer.ATHENA_EMPTY_GRACE; ++tick) {
++            assertFalse("empty again: ten seconds in full first", world.athenaIdleTick());
++        }
++        assertTrue(world.athenaIdleTick());
++    }
++
++    @Test
++    public void anIntervalOfOneLeavesNothingOut() throws Exception {
++        WorldServer world = world(1, new ArrayList<EntityHuman>());
++
++        for (int tick = 0; tick < 1000; ++tick) {
++            assertFalse(world.athenaIdleTick());
++        }
++    }
++
++    @Test
++    public void theDaylightRuleHoldsTheDayStill() throws Exception {
++        WorldServer world = world(20, new ArrayList<EntityHuman>());
++
++        world.getGameRules().set("doDaylightCycle", "false");
++
++        long time = world.worldData.getTime();
++        long day = world.worldData.getDayTime();
++
++        for (int tick = 0; tick < WorldServer.ATHENA_EMPTY_GRACE + 10; ++tick) {
++            world.athenaIdleTick();
++        }
++        assertEquals(time + 10L, world.worldData.getTime());
++        assertEquals(day, world.worldData.getDayTime());
++    }
++}

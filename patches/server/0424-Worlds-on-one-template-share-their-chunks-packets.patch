@@ -1,0 +1,494 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 12:14:23 +0900
+Subject: [PATCH] Worlds on one template share their chunks' packets
+
+Every world made from a template built the same chunk packets: a match's arena
+was extracted (17% of what a server of eight rooms allocated, 2% of its CPU on
+the tick threads) and deflated again for every match, and each world kept 8 to
+11 MB of frames of its own. A chunk whose sections are all still as the
+template's store filled them takes the packet another world on that template
+made for it, while one is in use; the first block or light written in a world
+gives that world's chunk a packet of its own again.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index 7fb713e372bdb93a716138ff8585d4ccb27216eb..d16534a382537da167b4778c264dd5b2d99669dc 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -84,10 +84,49 @@ final class AthenaChunkPacketCache {
+     /** CRC32 of the uncompressed chunk data, for the index audit. */
+     final long dataChecksum;
+ 
+-    // Written in this order and read in the reverse: frame is set before map is cleared, so a
+-    // reader that finds map gone always finds frame set.
+-    private volatile PacketPlayOutMapChunk.ChunkMap map;
+-    private volatile byte[] frame;
++    // Athena start - the packet itself, apart from the chunk it was made for.
++    //
++    // Every world made from one template builds the same packets: a match's arena was extracted
++    // (17% of everything a server of eight rooms allocated, and 2% of its CPU on the tick threads)
++    // and deflated again for every match, and each world kept its own 8 to 11 MB of frames. A chunk
++    // whose sections are all still what the template's store put into them takes the packet another
++    // world on that template made for the same chunk, if one is still in use (AthenaSectionStore.
++    // sharedPacket); the key above stays the chunk's own, so the first block or light written in
++    // one world gives that world's chunk a packet of its own and leaves the others theirs.
++    static final class Payload {
++        /** Which sections the chunk held, and its biomes: what a chunk must match besides its sections. */
++        final int presentMask;
++        final byte[] biomes;
++        final long dataChecksum;
++        // Written in this order and read in the reverse: frame is set before map is cleared, so a
++        // reader that finds map gone always finds frame set.
++        volatile PacketPlayOutMapChunk.ChunkMap map;
++        volatile byte[] frame;
++        volatile byte[] legacy17;
++
++        Payload(int presentMask, byte[] biomes, PacketPlayOutMapChunk.ChunkMap map, long dataChecksum) {
++            this.presentMask = presentMask;
++            this.biomes = biomes;
++            this.map = map;
++            this.dataChecksum = dataChecksum;
++        }
++    }
++
++    private final Payload payload;
++    /** Packets taken from another world on the same template, and packets extracted; for tests and measurements. */
++    static final java.util.concurrent.atomic.AtomicLong SHARED = new java.util.concurrent.atomic.AtomicLong();
++    static final java.util.concurrent.atomic.AtomicLong BUILT = new java.util.concurrent.atomic.AtomicLong();
++
++    /** Whether this cache's packet is another world's too; for tests. */
++    boolean sharesPacketWith(AthenaChunkPacketCache other) {
++        return this.payload == other.payload;
++    }
++
++    /** Whether the frame is made already: nothing is left to compress ahead. */
++    boolean hasFrame() {
++        return this.payload.frame != null;
++    }
++    // Athena end
+ 
+     AthenaChunkPacketCache(Chunk chunk) {
+         this.chunkX = chunk.locX;
+@@ -96,18 +135,60 @@ final class AthenaChunkPacketCache {
+         // key first, then the data: a write racing the extraction leaves a key that is already
+         // stale, never data newer than its key
+         ChunkSection[] chunkSections = chunk.getSections();
++        // Athena - and whether every section is still what one template store put into it
++        AthenaSectionStore store = null;
++        boolean untouched = true;
++        int present = 0;
+ 
+         for (int i = 0; i < 16; ++i) {
+             ChunkSection section = chunkSections[i];
+ 
+             this.sections[i] = section;
+             this.modCounts[i] = section == null ? 0 : section.modCount;
++            if (section != null) {
++                present |= 1 << i;
++                if (section.athenaStore == null || section.modCount != section.athenaStoreModCount || (store != null && store != section.athenaStore)) {
++                    untouched = false;
++                } else {
++                    store = section.athenaStore;
++                }
++            }
++        }
++
++        boolean sky = !chunk.world.worldProvider.getHasNoSky();
++        int slot = untouched && store != null ? store.packetSlot(this.chunkX, this.chunkZ, sky) : -1;
++
++        if (slot >= 0) {
++            Payload shared = store.sharedPacket(slot);
++
++            if (shared != null && shared.presentMask == present && Arrays.equals(shared.biomes, chunk.getBiomeIndex())) {
++                this.biomes = shared.biomes;
++                this.payload = shared;
++                this.dataChecksum = shared.dataChecksum;
++                SHARED.incrementAndGet();
++                return;
++            }
+         }
+ 
+-        this.biomes = chunk.getBiomeIndex().clone();
+-        this.map = PacketPlayOutMapChunk.getExtractedData(chunk, true, !chunk.world.worldProvider.getHasNoSky(), FULL_MASK);
++        byte[] biomes = chunk.getBiomeIndex().clone();
++        PacketPlayOutMapChunk.ChunkMap map = PacketPlayOutMapChunk.getExtractedData(chunk, true, sky, FULL_MASK);
+         // only the audit reads it, and a CRC of ~60 KB on every rebuild is not free
+-        this.dataChecksum = AthenaIndexAudit.enabled() ? checksum(this.map.data) : 0L;
++        Payload built = new Payload(present, biomes, map, AthenaIndexAudit.enabled() ? checksum(map.data) : 0L);
++
++        BUILT.incrementAndGet();
++        if (slot >= 0 && this.matchesSections(chunk)) {
++            // for the other worlds on this template; if one of them got there first, and with the
++            // same chunk, theirs
++            Payload first = store.sharePacket(slot, built);
++
++            if (first != built && first.presentMask == present && Arrays.equals(first.biomes, biomes)) {
++                built = first;
++                biomes = first.biomes;
++            }
++        }
++        this.biomes = biomes;
++        this.payload = built;
++        this.dataChecksum = built.dataChecksum;
+     }
+ 
+     /** For tests: a cache over given chunk data, with no chunk behind it (it never matches one). */
+@@ -115,12 +196,11 @@ final class AthenaChunkPacketCache {
+         this.chunkX = chunkX;
+         this.chunkZ = chunkZ;
+         this.biomes = new byte[0];
+-        this.map = map;
+         this.dataChecksum = checksum(map.data);
++        this.payload = new Payload(0, this.biomes, map, this.dataChecksum);
+     }
+ 
+-    /** Whether this was built from exactly the chunk's current contents. */
+-    boolean matches(Chunk chunk) {
++    private boolean matchesSections(Chunk chunk) {
+         ChunkSection[] chunkSections = chunk.getSections();
+ 
+         for (int i = 0; i < 16; ++i) {
+@@ -130,13 +210,17 @@ final class AthenaChunkPacketCache {
+                 return false;
+             }
+         }
++        return true;
++    }
+ 
+-        return Arrays.equals(this.biomes, chunk.getBiomeIndex());
++    /** Whether this was built from exactly the chunk's current contents. */
++    boolean matches(Chunk chunk) {
++        return this.matchesSections(chunk) && Arrays.equals(this.biomes, chunk.getBiomeIndex());
+     }
+ 
+     /** The uncompressed data while it is still held, for a packet that may have to fall back to it. */
+     PacketPlayOutMapChunk.ChunkMap map() {
+-        return this.map;
++        return this.payload.map;
+     }
+ 
+     /**
+@@ -146,7 +230,7 @@ final class AthenaChunkPacketCache {
+      * data is kept for it.
+      */
+     byte[] frame(int packetId, int threshold) {
+-        byte[] result = this.frame;
++        byte[] result = this.payload.frame;
+ 
+         if (result != null) {
+             return result;
+@@ -155,22 +239,22 @@ final class AthenaChunkPacketCache {
+         // together are sent the same chunks at the same moment, and with several Netty threads each
+         // of them deflated every one of those chunks - ~1 ms each - only for all but one result to
+         // be thrown away. legacy17Packet guards its packet the same way.
+-        synchronized (this) {
++        synchronized (this.payload) {
+             return this.compressFrame(packetId, threshold);
+         }
+     }
+ 
+     private byte[] compressFrame(int packetId, int threshold) {
+-        byte[] result = this.frame;
++        byte[] result = this.payload.frame;
+ 
+         if (result != null) {
+             return result;
+         }
+ 
+-        PacketPlayOutMapChunk.ChunkMap data = this.map;
++        PacketPlayOutMapChunk.ChunkMap data = this.payload.map;
+ 
+         if (data == null) {
+-            return this.frame; // frame is set before map is cleared
++            return this.payload.frame; // frame is set before map is cleared
+         }
+ 
+         // Athena - serialize only the header and feed the existing immutable payload separately.
+@@ -221,8 +305,8 @@ final class AthenaChunkPacketCache {
+             } finally {
+                 out.release();
+             }
+-            this.frame = result;
+-            this.map = null;
++            this.payload.frame = result;
++            this.payload.map = null;
+             return result;
+         } finally {
+             header.release();
+@@ -230,8 +314,6 @@ final class AthenaChunkPacketCache {
+     }
+ 
+     // Athena start - 1.7.10 clients (AthenaLegacy17)
+-    private volatile byte[] legacy17;
+-
+     /**
+      * The whole 1.7 packet - id and body - for this chunk, built the first time a 1.7 client needs
+      * it. Its chunk data is deflated inside the packet, so it too is built once and sent as it is.
+@@ -252,21 +334,21 @@ final class AthenaChunkPacketCache {
+     byte[] legacy17(int packetId, int threshold) {
+         byte[] result = this.legacy17Packet(packetId);
+ 
+-        if (this.map != null && threshold >= 0) {
++        if (this.payload.map != null && threshold >= 0) {
+             this.frame(packetId, threshold);
+         }
+         return result;
+     }
+ 
+     private byte[] legacy17Packet(int packetId) {
+-        byte[] result = this.legacy17;
++        byte[] result = this.payload.legacy17;
+ 
+         if (result != null) {
+             return result;
+         }
+-        synchronized (this) {
+-            if (this.legacy17 == null) {
+-                PacketPlayOutMapChunk.ChunkMap data = this.map;
++        synchronized (this.payload) {
++            if (this.payload.legacy17 == null) {
++                PacketPlayOutMapChunk.ChunkMap data = this.payload.map;
+                 byte[] data18;
+                 int mask;
+ 
+@@ -275,7 +357,7 @@ final class AthenaChunkPacketCache {
+                     mask = data.dataSize & 0xFFFF;
+                 } else {
+                     // frame is set before map is cleared: map gone means frame is there
+-                    PacketDataSerializer body = new PacketDataSerializer(Unpooled.wrappedBuffer(inflateFrame(this.frame)));
++                    PacketDataSerializer body = new PacketDataSerializer(Unpooled.wrappedBuffer(inflateFrame(this.payload.frame)));
+ 
+                     body.readVarIntFromBuffer();    // packet id
+                     body.skipBytes(4 + 4 + 1);      // x, z, full chunk
+@@ -283,9 +365,9 @@ final class AthenaChunkPacketCache {
+                     data18 = new byte[body.readVarIntFromBuffer()];
+                     body.readBytes(data18);
+                 }
+-                this.legacy17 = AthenaLegacy17Encoder.fullChunk(packetId, this.chunkX, this.chunkZ, mask, data18);
++                this.payload.legacy17 = AthenaLegacy17Encoder.fullChunk(packetId, this.chunkX, this.chunkZ, mask, data18);
+             }
+-            return this.legacy17;
++            return this.payload.legacy17;
+         }
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index b04cb33a445d52fc7ae6698172ee90febc3ede07..bc6853611f48cea2ae7878704507c52572b37f35 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -435,9 +435,64 @@ final class AthenaSectionStore {
+         if (kind(ids) != KIND_UNIFORM) { // a uniform section counts itself without a block read
+             this.applyCounts(index * 16 + sectionY, section);
+         }
++        section.athenaStore = this; // Athena - as this store holds it, until modCount moves
++        section.athenaStoreModCount = section.modCount;
+         return true;
+     }
+ 
++    // Athena start - the chunk packets of this template's worlds; see AthenaChunkPacketCache.Payload.
++    //
++    // Held weakly: a packet lives as long as a chunk of some world uses it, so the worlds that are on
++    // this template at the same time share one copy, and a store kept between matches (RECENT)
++    // keeps none. By chunk index * 2, + 1 for a world with sky light.
++    private volatile java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<AthenaChunkPacketCache.Payload>> packets;
++
++    /** Where this chunk's packet is kept, or -1 if the store does not hold the chunk. */
++    int packetSlot(int chunkX, int chunkZ, boolean sky) {
++        int index = Arrays.binarySearch(this.keys, key(chunkX, chunkZ));
++
++        return index < 0 ? -1 : index * 2 + (sky ? 1 : 0);
++    }
++
++    /** The packet a world on this template made for the chunk and still uses, or null. */
++    AthenaChunkPacketCache.Payload sharedPacket(int slot) {
++        java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<AthenaChunkPacketCache.Payload>> packets = this.packets;
++        WeakReference<AthenaChunkPacketCache.Payload> reference = packets == null ? null : packets.get(slot);
++
++        return reference == null ? null : reference.get();
++    }
++
++    /** Offers {@code built} to the other worlds; answers the packet that is shared now - another world's, if it got there first. */
++    AthenaChunkPacketCache.Payload sharePacket(int slot, AthenaChunkPacketCache.Payload built) {
++        java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<AthenaChunkPacketCache.Payload>> packets = this.packets;
++
++        if (packets == null) {
++            synchronized (this) {
++                packets = this.packets;
++                if (packets == null) {
++                    this.packets = packets = new java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<AthenaChunkPacketCache.Payload>>(this.keys.length * 2);
++                }
++            }
++        }
++        WeakReference<AthenaChunkPacketCache.Payload> mine = null;
++
++        for (;;) {
++            WeakReference<AthenaChunkPacketCache.Payload> reference = packets.get(slot);
++            AthenaChunkPacketCache.Payload shared = reference == null ? null : reference.get();
++
++            if (shared != null) {
++                return shared;
++            }
++            if (mine == null) {
++                mine = new WeakReference<AthenaChunkPacketCache.Payload>(built);
++            }
++            if (packets.compareAndSet(slot, reference, mine)) {
++                return built;
++            }
++        }
++    }
++    // Athena end
++
+     private void applyCounts(int slot, ChunkSection section) {
+         java.util.concurrent.atomic.AtomicReferenceArray<ChunkSection.AthenaCounts> counts = this.counts;
+ 
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 51902674772964950219d85f430d65a2563404f2..3672cea559a0701985629e7ebfe9b86522b0185f 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -219,7 +219,7 @@ public class Chunk {
+         PacketPlayOutMapChunk packet = this.athenaFullChunkPacket();
+         Integer id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, packet);
+ 
+-        if (id != null) {
++        if (id != null && !packet.athenaCache.hasFrame()) { // Athena - another world on this template may have compressed it already
+             AthenaChunkPacketCache.compressAhead(packet.athenaCache, id, threshold);
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 749c2cb0d5aa8d63939105dfd70b58eb4e3fec99..3d9bb91636910131ea18439b8d4efd439585bc08 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -48,6 +48,11 @@ public class ChunkSection {
+     // a player stale blocks. Bumped even when a light write stores the value already there; a
+     // spurious rebuild is only a cost.
+     int modCount;
++    // Athena - the template store that filled this section, and modCount as the store left it: while
++    // it is still that, the section holds exactly what the store holds for it, and so does the
++    // section of every other world on that template (AthenaChunkPacketCache shares their packets)
++    AthenaSectionStore athenaStore;
++    int athenaStoreModCount;
+     // Athena - with modCount, what athena.api.Athena#readSectionTypeIds calls a section's version: a
+     // section made anew (a chunk loaded again) takes a number no section before it had, so a version
+     // read from an earlier section is never mistaken for this one's. Never 0 (an empty section's).
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 8fd913b7b496c68e078b3dde23e3f67eac60bfbf..5fcacd27781d77ff0ea98d9b8d80681ea942806a 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -513,4 +513,115 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         assertTrue(slim > 0);
+         assertNull("no chunk there", store.chunk(5, 5));
+     }
++
++    // ---- chunk packets shared between the worlds on one template (AthenaChunkPacketCache.Payload) ----
++
++    private static WorldServer skyWorld() throws Exception {
++        WorldServer world = AthenaAuditFixtures.world();
++
++        world.worldProvider = new WorldProviderNormal();
++        return world;
++    }
++
++    /** A chunk as the template loader fills it: every section from the store. */
++    private static Chunk fromStore(AthenaSectionStore store, NBTTagCompound level, WorldServer world, int x, int z) {
++        Chunk chunk = new Chunk(world, x, z);
++        ChunkSection[] sections = new ChunkSection[16];
++        NBTTagList list = level.getList("Sections", 10);
++
++        for (int k = 0; k < list.size(); ++k) {
++            int y = list.get(k).getByte("Y");
++            ChunkSection section = new ChunkSection(y << 4, true);
++
++            assertTrue(store.apply(x, z, y, section, true));
++            sections[y] = section;
++        }
++        chunk.setStorageArrays(sections);
++        return chunk;
++    }
++
++    @Test
++    public void worldsOnOneTemplateShareAChunksPacketUntilOneWritesToIt() throws Exception {
++        File dir = template(7L);
++        AthenaSectionStore store = built(dir);
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++        NBTTagCompound level = region.read(0, 0).getCompound("Level");
++
++        region.close();
++
++        Chunk a = fromStore(store, level, skyWorld(), -32, 0);
++        Chunk b = fromStore(store, level, skyWorld(), -32, 0);
++        Chunk c = fromStore(store, level, skyWorld(), -32, 0);
++        long built = AthenaChunkPacketCache.BUILT.get();
++        long shared = AthenaChunkPacketCache.SHARED.get();
++
++        AthenaChunkPacketCache forA = new AthenaChunkPacketCache(a);
++        byte[] dataOfA = forA.map().data;
++        AthenaChunkPacketCache forB = new AthenaChunkPacketCache(b);
++
++        assertEquals("the first world extracts the chunk", built + 1, AthenaChunkPacketCache.BUILT.get());
++        assertEquals("the second takes the first's packet", shared + 1, AthenaChunkPacketCache.SHARED.get());
++        assertTrue(forA.sharesPacketWith(forB));
++        assertTrue(forA.matches(a));
++        assertTrue(forB.matches(b));
++        assertFalse("each cache is keyed on its own chunk", forB.matches(a));
++        assertArrayEquals("and it is the packet that world would have made",
++                PacketPlayOutMapChunk.getExtractedData(b, true, true, AthenaChunkPacketCache.FULL_MASK).data, dataOfA);
++
++        int id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, new PacketPlayOutMapChunk());
++        byte[] frame = forA.frame(id, 256);
++
++        assertNotNull(frame);
++        assertSame("compressed once for both", frame, forB.frame(id, 256));
++        assertTrue(forB.hasFrame());
++
++        // a block written in one world: that world's chunk gets a packet of its own
++        int y = level.getList("Sections", 10).get(0).getByte("Y");
++        IBlockData before = b.getSections()[y].getType(1, 2, 3);
++
++        b.getSections()[y].setType(1, 2, 3, before == Blocks.DIAMOND_BLOCK.getBlockData() ? Blocks.GOLD_BLOCK.getBlockData() : Blocks.DIAMOND_BLOCK.getBlockData());
++        assertFalse(forB.matches(b));
++        assertTrue("the other world's packet is as it was", forA.matches(a));
++
++        AthenaChunkPacketCache again = new AthenaChunkPacketCache(b);
++
++        assertFalse(again.sharesPacketWith(forA));
++        assertTrue(again.matches(b));
++        assertArrayEquals(PacketPlayOutMapChunk.getExtractedData(b, true, true, AthenaChunkPacketCache.FULL_MASK).data, again.map().data);
++        assertFalse("the written block is in it", java.util.Arrays.equals(dataOfA, again.map().data));
++        assertSame("what the template's worlds share is still the untouched chunk", frame, new AthenaChunkPacketCache(c).frame(id, 256));
++
++        // light written in a world, and a biome
++        Chunk lit = fromStore(store, level, skyWorld(), -32, 0);
++
++        lit.getSections()[y].setExtBlocklightValue(1, 2, 3, lit.getSections()[y].getExtBlocklightValue(1, 2, 3) == 7 ? 8 : 7);
++        assertFalse(new AthenaChunkPacketCache(lit).sharesPacketWith(forA));
++
++        Chunk biome = fromStore(store, level, skyWorld(), -32, 0);
++
++        biome.getBiomeIndex()[5] = 9;
++        AthenaChunkPacketCache forBiome = new AthenaChunkPacketCache(biome);
++
++        assertFalse(forBiome.sharesPacketWith(forA));
++        assertTrue(forBiome.matches(biome));
++
++        // a section the template does not hold in that chunk
++        Chunk grown = fromStore(store, level, skyWorld(), -32, 0);
++        ChunkSection[] sections = grown.getSections();
++
++        for (int i = 0; i < 16; ++i) {
++            if (sections[i] == null) {
++                sections[i] = new ChunkSection(i << 4, true);
++                assertFalse(new AthenaChunkPacketCache(grown).sharesPacketWith(forA));
++                break;
++            }
++        }
++
++        // a world without sky light has packets of its own
++        WorldServer nether = AthenaAuditFixtures.world();
++
++        nether.worldProvider = new WorldProviderHell();
++        assertTrue(store.packetSlot(-32, 0, true) != store.packetSlot(-32, 0, false));
++        assertEquals(-1, store.packetSlot(5, 5, true));
++    }
+ }

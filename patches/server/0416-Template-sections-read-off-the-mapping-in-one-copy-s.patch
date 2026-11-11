@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:31:07 +0900
+Subject: [PATCH] Template sections: read off the mapping in one copy, stores
+ kept between matches, ticking bitmaps shared
+
+A mapped section's ids were read from the mapping one at a time to count,
+check and unpack them: a call through the segment's var handle each, which
+costs C1 several times an array read. They are copied off in one call first,
+and a packed section is counted from how often each palette entry occurs. A
+template's 22,543 mapped sections count in 212 ms instead of 473 ms with C1
+(9.4 and 21 us a section).
+
+The stores of the last eight templates opened stay between their matches, so
+a map whose last match ended is not mapped, checked and counted again for its
+next one. Sections filled from a store share its ticking bitmap until a block
+is written, instead of 512 bytes each per world.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index 290250db0c58167f7c79af6f99d2e039fb001ae3..b04cb33a445d52fc7ae6698172ee90febc3ede07 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -138,12 +138,14 @@ final class AthenaSectionStore {
+         AthenaSectionStore store = reference != null ? reference.get() : null;
+ 
+         if (store != null && store.fingerprint() == fingerprint) {
++            keep(store);
+             return store;
+         }
+ 
+         store = file.isFile() ? map(file, fingerprint) : null;
+         if (store != null) {
+             OPEN.put(path, new WeakReference<AthenaSectionStore>(store));
++            keep(store);
+             return store;
+         }
+ 
+@@ -165,6 +167,38 @@ final class AthenaSectionStore {
+         return null;
+     }
+ 
++    // Athena start - the stores of the last few templates opened stay, between their matches too.
++    //
++    // A store was held by its worlds alone. When a map's last match ended and a GC ran - one does
++    // in every lobby - the store went, and the next match on that map mapped the file again,
++    // checked every packed section again and counted every section's blocks again: 22,543 sections
++    // for one arena, a quarter of a second of the chunk IO threads on a fast machine, at the moment
++    // the match starts. What a kept store holds on the heap is its keys and the counts; its
++    // mapping is address space, whose pages the kernel takes back as it likes.
++    private static final int KEPT = 8;
++    private static final java.util.ArrayDeque<AthenaSectionStore> RECENT = new java.util.ArrayDeque<AthenaSectionStore>();
++
++    private static void keep(AthenaSectionStore store) {
++        synchronized (RECENT) {
++            if (RECENT.peekFirst() == store) {
++                return;
++            }
++            RECENT.remove(store);
++            RECENT.addFirst(store);
++            while (RECENT.size() > KEPT) {
++                RECENT.removeLast();
++            }
++        }
++    }
++
++    /** A store that turned out unusable is not kept for the next world. */
++    void forget() {
++        synchronized (RECENT) {
++            RECENT.remove(this);
++        }
++    }
++    // Athena end
++
+     /** Waits for any store being built; for tests. */
+     static void awaitBuilds() throws InterruptedException {
+         while (!BUILDING.isEmpty()) {
+@@ -311,8 +345,12 @@ final class AthenaSectionStore {
+         }
+         int bit = 1 << sectionY;
+         if ((validated.get(chunk) & bit) != 0) return true;
++        // Athena - off the mapping in one copy, then checked on the heap: see ChunkSection.recalcBlockCounts
++        byte[] bytes = ChunkSection.MAPPED_SCRATCH.get();
++
++        MemorySegment.copy(this.mapping, ValueLayout.JAVA_BYTE, offset + 32L, bytes, 0, 2048);
+         for (int i = 0; i < 2048; ++i) {
+-            int packed = this.mapping.get(ValueLayout.JAVA_BYTE, offset + 32L + i) & 255;
++            int packed = bytes[i] & 255;
+             if ((packed & 15) >= paletteSize || (packed >>> 4) >= paletteSize) return false;
+         }
+         // Several IO threads may validate different sections of the same chunk concurrently.
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index 9d7f74505e8c5bbb2c6677149fa5cd97f7669204..28a807376f2bb171e7592cd21ef168540efd8344 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -121,6 +121,7 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+                 if (this.store.hasSlim(i, j)) throw new IOException("Invalid compressed chunk metadata");
+             } catch (IOException | RuntimeException invalid) {
+                 this.storeInvalid = true;
++                this.store.forget(); // Athena - nor kept for the next world
+                 org.apache.logging.log4j.LogManager.getLogger().warn("Ignoring invalid template section store for " + this.directory, invalid);
+             } finally {
+                 this.readingStore.remove();
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 4388421d8231564bc551b963d0959ab0dd25a154..749c2cb0d5aa8d63939105dfd70b58eb4e3fec99 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -34,6 +34,10 @@ public class ChunkSection {
+     // write of a block id goes through setType or is followed by recalcBlockCounts, the same two
+     // points that keep tickingBlockCount. Allocated with the first ticking block; null until then.
+     long[] tickingBits;
++    // Athena - set while tickingBits is the template store's own array (athenaSetCounts): every world
++    // on a template had its copy of each ticking section's 512 bytes, about 1.5 MB a match, though
++    // only a section a block is changed in ever differs. A write takes a copy first.
++    private boolean tickingBitsShared;
+     // Athena - the chunk whose tickingSectionMask has this section's bit cleared, if any. Set by
+     // Chunk.clearTickingSection when the tick finds this section idle, so that the first ticking
+     // block to arrive here can set the bit again. See Chunk.tickingSectionMask.
+@@ -176,13 +180,22 @@ public class ChunkSection {
+         if (block1.isTicking()) {
+             if (this.tickingBits == null) {
+                 this.tickingBits = new long[64];
++            } else if (this.tickingBitsShared && (this.tickingBits[index >>> 6] & 1L << index) == 0L) {
++                this.tickingBits = this.tickingBits.clone();
++                this.tickingBitsShared = false;
+             }
+ 
+-            this.tickingBits[index >>> 6] |= 1L << index;
++            if (!this.tickingBitsShared) { // a shared array already has the bit
++                this.tickingBits[index >>> 6] |= 1L << index;
++            }
+             if (this.tickingMaskOwner != null) {
+                 this.tickingMaskOwner.setTickingSection(this.yPos >> 4);
+             }
+-        } else if (this.tickingBits != null) {
++        } else if (this.tickingBits != null && (this.tickingBits[index >>> 6] & 1L << index) != 0L) {
++            if (this.tickingBitsShared) {
++                this.tickingBits = this.tickingBits.clone();
++                this.tickingBitsShared = false;
++            }
+             this.tickingBits[index >>> 6] &= ~(1L << index);
+         }
+         // Athena end
+@@ -339,7 +352,7 @@ public class ChunkSection {
+                 nonEmpty = 4096;
+                 if ((f & FLAG_TICKING) != 0) {
+                     ticking = 4096;
+-                    bits = this.tickingBits != null ? this.tickingBits : new long[64];
++                    bits = this.tickingBits != null && !this.tickingBitsShared ? this.tickingBits : new long[64];
+                     java.util.Arrays.fill(bits, -1L);
+                 }
+                 if ((f & FLAG_WATER) != 0) {
+@@ -360,22 +373,85 @@ public class ChunkSection {
+         java.lang.foreign.MemorySegment mapped = this.mappedIds;
+         char[] palette = this.palette;
+ 
+-        // the ids read in place, whatever form they are in: unpacking them into an array first, and
+-        // a branch-free loop over a histogram of the flags, both measured slower than this
+-        for (int index = 0; index < 4096 && !this.idsShared; ++index) { // Athena - a uniform section is counted above
+-            int id;
+-
+-            if (ids != null) {
+-                id = ids[index];
+-            } else if (packed != null) {
+-                id = palette[packed[index >> 1] >> ((index & 1) << 2) & 15];
+-            } else if (this.mappedRaw) {
+-                id = mapped.get(AthenaSectionStore.CHAR_LE, this.mappedAt + ((long) index << 1));
++        // Athena - mapped ids are taken off the mapping in one copy first: read there one at a time,
++        // each of the 4096 was a call through the segment's var handle, which costs C1 - all the
++        // small servers compile with - several times an array read. A template's 22,543 mapped
++        // sections counted in 473 ms that way and in 268 ms so (21 and 11.9 us a section).
++        if (ids == null && packed == null && mapped != null && !this.idsShared) {
++            if (this.mappedRaw) {
++                ids = this.mappedUnpackInto(ID_SCRATCH.get());
+             } else {
+-                id = palette[mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (index >> 1)) >> ((index & 1) << 2) & 15];
++                packed = MAPPED_SCRATCH.get();
++                java.lang.foreign.MemorySegment.copy(mapped, java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt, packed, 0, 2048);
++            }
++        }
++
++        // Athena - a packed section is counted from its palette: how often each of its at most 16
++        // entries occurs, then each entry's flags that many times. The pass below it looked two
++        // tables up and tested five flags for every block; this adds to a counter per block and
++        // looks at flags sixteen times. Which positions tick is found in a second pass, only for a
++        // section that holds a ticking block at all.
++        if (ids == null && packed != null && !this.idsShared) {
++            int[] seen = new int[16];
++
++            for (int i = 0; i < 2048; ++i) {
++                int b = packed[i];
++
++                ++seen[b & 15];
++                ++seen[b >> 4 & 15];
++            }
++
++            int tickingEntries = 0;
++
++            for (int p = 0; p < 16; ++p) {
++                int n = seen[p];
++
++                if (n == 0) {
++                    continue;
++                }
++
++                int f = flags[palette[p]];
++
++                if (f == 0) {
++                    continue;
++                }
++                nonEmpty += n;
++                if ((f & FLAG_TICKING) != 0) {
++                    ticking += n;
++                    tickingEntries |= 1 << p;
++                }
++                if ((f & FLAG_WATER) != 0) {
++                    water += n;
++                } else if ((f & FLAG_LAVA) != 0) {
++                    lava += n;
++                } else if ((f & FLAG_FIRE) != 0) {
++                    fire += n;
++                }
++                if ((f & FLAG_COLLISION) != 0) {
++                    collision += n;
++                }
+             }
++            if (tickingEntries != 0) {
++                bits = this.tickingBits != null && !this.tickingBitsShared ? this.tickingBits : new long[64];
++                java.util.Arrays.fill(bits, 0L);
++                for (int i = 0; i < 2048; ++i) {
++                    int b = packed[i];
++
++                    if ((tickingEntries >> (b & 15) & 1) != 0) {
++                        bits[i >>> 5] |= 1L << (i << 1);
++                    }
++                    if ((tickingEntries >> (b >> 4 & 15) & 1) != 0) {
++                        bits[i >>> 5] |= 1L << (i << 1 | 1);
++                    }
++                }
++            }
++            packed = null; // counted: skip the loop below
++            mapped = null;
++        }
+ 
+-            int f = flags[id];
++        // the ids read in place, a block at a time, when they are an array of ids
++        for (int index = 0; ids != null && index < 4096; ++index) { // Athena - a uniform or packed section is counted above
++            int f = flags[ids[index]];
+ 
+             if (f == 0) {
+                 continue;
+@@ -384,7 +460,7 @@ public class ChunkSection {
+             if ((f & FLAG_TICKING) != 0) {
+                 ++ticking;
+                 if (bits == null) {
+-                    bits = this.tickingBits != null ? this.tickingBits : new long[64];
++                    bits = this.tickingBits != null && !this.tickingBitsShared ? this.tickingBits : new long[64];
+                     java.util.Arrays.fill(bits, 0L);
+                 }
+                 bits[index >>> 6] |= 1L << index;
+@@ -402,9 +478,15 @@ public class ChunkSection {
+         }
+ 
+         if (bits == null && this.tickingBits != null) {
+-            java.util.Arrays.fill(this.tickingBits, 0L); // nothing ticks now: as the old count left it
++            if (this.tickingBitsShared) {
++                this.tickingBits = null; // Athena - the store's array stays as it is
++                this.tickingBitsShared = false;
++            } else {
++                java.util.Arrays.fill(this.tickingBits, 0L); // nothing ticks now: as the old count left it
++            }
+         } else if (bits != null) {
+             this.tickingBits = bits;
++            this.tickingBitsShared = false;
+         }
+         this.nonEmptyBlockCount = nonEmpty;
+         this.tickingBlockCount = ticking;
+@@ -425,6 +507,10 @@ public class ChunkSection {
+         this.lavaCount = 0; // Athena
+         this.fireCount = 0; // Athena
+         this.collisionHandlerCount = 0; // Athena
++        if (this.tickingBitsShared) {
++            this.tickingBits = null; // Athena - the store's array stays as it is
++            this.tickingBitsShared = false;
++        }
+         if (this.tickingBits != null) {
+             java.util.Arrays.fill(this.tickingBits, 0L); // Athena - rebuilt below
+         }
+@@ -792,9 +878,15 @@ public class ChunkSection {
+         this.fireCount = counts.fire;
+         this.collisionHandlerCount = counts.collision;
+         if (counts.tickingBits != null) {
+-            this.tickingBits = counts.tickingBits.clone();
++            this.tickingBits = counts.tickingBits; // the store's, until a write here (tickingBitsShared)
++            this.tickingBitsShared = true;
+         } else if (this.tickingBits != null) {
+-            java.util.Arrays.fill(this.tickingBits, 0L);
++            if (this.tickingBitsShared) {
++                this.tickingBits = null;
++                this.tickingBitsShared = false;
++            } else {
++                java.util.Arrays.fill(this.tickingBits, 0L);
++            }
+         }
+         this.athenaCountsKnown = true;
+         this.notifyTickingOwner();
+@@ -837,9 +929,12 @@ public class ChunkSection {
+         }
+ 
+         char[] palette = this.palette;
++        // Athena - one copy off the mapping, then the heap: see recalcBlockCounts
++        byte[] packed = MAPPED_SCRATCH.get();
+ 
++        java.lang.foreign.MemorySegment.copy(mapped, java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt, packed, 0, 2048);
+         for (int k = 0; k < 4096; k += 2) {
+-            int b = mapped.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (k >> 1));
++            int b = packed[k >> 1];
+ 
+             ids[k] = palette[b & 15];
+             ids[k + 1] = palette[b >> 4 & 15];
+@@ -847,6 +942,9 @@ public class ChunkSection {
+         return ids;
+     }
+ 
++    /** A mapped packed section's 2048 bytes, copied off the mapping to be read; one per thread. */
++    static final ThreadLocal<byte[]> MAPPED_SCRATCH = ThreadLocal.withInitial(() -> new byte[2048]);
++
+     /** Takes mapped ids onto the heap, in the form they were mapped in. */
+     private void copyMappedIds() {
+         java.lang.foreign.MemorySegment mapped = this.mappedIds;
+diff --git a/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java b/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java
+index 141abf1a14c777720cd2e892f325791514b20b18..c2351e150c12b7a8e1851a64c0b298681dface07 100644
+--- a/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java
++++ b/src/test/java/net/minecraft/server/ChunkTickingBitsTest.java
+@@ -144,4 +144,60 @@ public class ChunkTickingBitsTest extends AbstractTestingBase {
+         assertEquals(0xFFFF & ~(1 << 7), chunk.tickingSectionMask);
+         assertFalse(new ChunkSection(0, true).isTickingAt(0));
+     }
++
++    /**
++     * Athena - sections filled from one template store share its ticking bitmap (athenaSetCounts)
++     * until a block is written: a write in one world's section must not show in another's, nor in
++     * the store's, and writes that change no bit must not copy.
++     */
++    @Test
++    public void bitsSharedWithTheStoreAreCopiedOnWrite() {
++        Random random = new Random(20261110L);
++        ChunkSection source = new ChunkSection(0, true);
++
++        for (int write = 0; write < 3000; ++write) {
++            source.setType(random.nextInt(16), random.nextInt(16), random.nextInt(16), PALETTE[random.nextInt(PALETTE.length)]);
++        }
++        source.setType(1, 2, 3, Blocks.GRASS.getBlockData());
++        source.setType(4, 5, 6, Blocks.STONE.getBlockData());
++
++        ChunkSection.AthenaCounts counts = source.athenaCounts();
++        long[] stored = counts.tickingBits.clone();
++        ChunkSection[] worlds = new ChunkSection[3];
++
++        for (int w = 0; w < worlds.length; ++w) {
++            worlds[w] = new ChunkSection(0, true);
++            for (int x = 0; x < 16; ++x) {
++                for (int y = 0; y < 16; ++y) {
++                    for (int z = 0; z < 16; ++z) {
++                        worlds[w].setType(x, y, z, source.getType(x, y, z));
++                    }
++                }
++            }
++            worlds[w].athenaSetCounts(counts);
++            assertTrue("shares the store's bitmap", worlds[w].tickingBits == counts.tickingBits);
++            assertBitsAgree(worlds[w], "world " + w + " as loaded");
++        }
++
++        // writes that leave the bitmap as it is: ticking over ticking, not ticking over not ticking
++        worlds[0].setType(1, 2, 3, Blocks.LEAVES.getBlockData());
++        worlds[0].setType(4, 5, 6, Blocks.DIRT.getBlockData());
++        assertTrue("no bit changed, no copy", worlds[0].tickingBits == counts.tickingBits);
++        assertBitsAgree(worlds[0], "world 0 after writes that change no bit");
++
++        worlds[0].setType(1, 2, 3, Blocks.STONE.getBlockData()); // a bit cleared
++        worlds[1].setType(4, 5, 6, Blocks.GRASS.getBlockData()); // a bit set
++        assertFalse(worlds[0].tickingBits == counts.tickingBits);
++        assertFalse(worlds[1].tickingBits == counts.tickingBits);
++        assertTrue(worlds[2].tickingBits == counts.tickingBits);
++        assertBitsAgree(worlds[0], "world 0 after clearing");
++        assertBitsAgree(worlds[1], "world 1 after setting");
++        assertBitsAgree(worlds[2], "world 2, untouched");
++        assertTrue("the store's bitmap is as it was", java.util.Arrays.equals(stored, counts.tickingBits));
++
++        worlds[2].recalcBlockCounts(); // a recount writes a bitmap of its own
++        assertFalse(worlds[2].tickingBits == counts.tickingBits);
++        assertBitsAgree(worlds[2], "world 2 after a recount");
++        assertTrue("the store's bitmap is as it was", java.util.Arrays.equals(stored, counts.tickingBits));
++    }
+ }

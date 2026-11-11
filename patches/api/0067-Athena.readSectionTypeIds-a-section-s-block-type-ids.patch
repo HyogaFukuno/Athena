@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 01:55:39 +0900
+Subject: [PATCH] Athena.readSectionTypeIds: a section's block type ids and a
+ version that moves with every change
+
+For a bot's path search, which keeps its own table of a world's blocks: checking a section costs one
+chunk lookup while it is unchanged, not 4096 block reads. The version is a serial number given to each
+section when it is made, with its modCount; an empty section is 0 and a chunk not loaded -1.
+
+diff --git a/src/main/java/athena/api/Athena.java b/src/main/java/athena/api/Athena.java
+index 54903b45d53209b476d22fb5b717262281e6b00f..081e04da3a8158114a93a44e7eac816412aff5e4 100644
+--- a/src/main/java/athena/api/Athena.java
++++ b/src/main/java/athena/api/Athena.java
+@@ -527,6 +527,28 @@ public final class Athena {
+         getServer().requestGarbageCollection();
+     }
+ 
++    /**
++     * Reads the block type ids ({@link org.bukkit.Material#getId()}, without data) of one 16x16x16
++     * section of a loaded chunk, for code that looks at many blocks of a world again and again (a
++     * bot's path search) and keeps its own copy of what it read. The chunk is never loaded.
++     *
++     * <p>The section's version is a number that changes whenever anything in the section may have
++     * changed: a block, its light, or the section itself (a chunk unloaded and loaded again). Pass
++     * the version you last read as {@code knownVersion}: while the section is unchanged the call
++     * returns it again and leaves {@code typeIds} as it is, so checking costs a lookup, not 4096.
++     *
++     * <p>Must be called on the thread that ticks {@code world}.
++     *
++     * @param sectionY 0 to 15: blocks {@code sectionY * 16} to {@code sectionY * 16 + 15}
++     * @param typeIds at least 4096 long; filled at index {@code y << 8 | z << 4 | x} (coordinates
++     *     within the section) unless the version returned is {@code knownVersion} or -1
++     * @return -1 if the chunk is not loaded ({@code typeIds} untouched); 0 if the section holds only
++     *     air ({@code typeIds} filled with 0); otherwise the section's version
++     */
++    public static long readSectionTypeIds(World world, int chunkX, int sectionY, int chunkZ, long knownVersion, char[] typeIds) {
++        return getServer().readSectionTypeIds(world, chunkX, sectionY, chunkZ, knownVersion, typeIds);
++    }
++
+     /**
+      * Starts a bot: a player the server plays itself (see {@link athena.api.bot.Bot}). It logs in as a
+      * player does - PlayerLoginEvent (from 127.0.0.1, hostname "bot"), PlayerInitialSpawnEvent and
+diff --git a/src/main/java/athena/api/AthenaServer.java b/src/main/java/athena/api/AthenaServer.java
+index 108f00ba3ef027c418945e6445baf9cfcd30d3fe..62e9d79fc1a3c88c11c10314899606e8bf2eebce 100644
+--- a/src/main/java/athena/api/AthenaServer.java
++++ b/src/main/java/athena/api/AthenaServer.java
+@@ -80,6 +80,8 @@ public interface AthenaServer {
+ 
+     void requestGarbageCollection();
+ 
++    long readSectionTypeIds(World world, int chunkX, int sectionY, int chunkZ, long knownVersion, char[] typeIds);
++
+     CompletableFuture<athena.api.bot.Bot> spawnBot(String name, java.util.UUID id, String skinValue, String skinSignature);
+ 
+     athena.api.bot.Bot getBot(Player player);

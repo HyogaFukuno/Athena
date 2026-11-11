@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 12:12:16 +0900
+Subject: [PATCH] A chunk's precipitation heights and sky light columns are
+ made when first written
+
+A kilobyte and a quarter for every chunk, and neither is touched in most: the
+precipitation heights are asked for in the chunks ticked around players, the
+columns are marked where a block change moves the sky light. A match's arena
+of 1,400 chunks held 1.8 MB of them.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 3680dce160e17de54e2ec88e5aa6dc235b20742f..51902674772964950219d85f430d65a2563404f2 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -53,8 +53,13 @@ public class Chunk {
+     }
+     // Athena end
+     private final byte[] blockBiomeArray;
+-    private final int[] precipitationHeightMap;
+-    private final boolean[] updateSkylightColumns;
++    // Athena - both made when first written. A kilobyte and a quarter for every chunk, and neither
++    // is touched in most: the precipitation heights are asked for in the chunks ticked around
++    // players, the columns are marked where a block change moves the sky light. A match's arena
++    // of 1,400 chunks held 1.8 MB of them. null is what they were filled with: every height not yet
++    // known (-999), no column marked.
++    private int[] precipitationHeightMap;
++    private boolean[] updateSkylightColumns;
+     private boolean isChunkLoaded;
+     public final World world;
+     public final int[] heightMap;
+@@ -297,8 +302,6 @@ public class Chunk {
+     public Chunk(World world, int i, int j) {
+         this.sections = new ChunkSection[16];
+         this.blockBiomeArray = new byte[256];
+-        this.precipitationHeightMap = new int[256];
+-        this.updateSkylightColumns = new boolean[256];
+         this.tileEntities = new Long2ObjectOpenHashMap<TileEntity>(0); // Athena - empty chunks need no default-size table
+         this.queuedLightChecks = 4096;
+         this.entitySlices = (List[]) (new List[16]); // Spigot
+@@ -309,7 +312,6 @@ public class Chunk {
+ 
+         java.util.Arrays.fill(this.entitySlices, NO_ENTITIES); // Athena - a list of its own on the first entity; see NO_ENTITIES
+ 
+-        Arrays.fill(this.precipitationHeightMap, -999);
+         Arrays.fill(this.blockBiomeArray, (byte) -1);
+ 
+         // CraftBukkit start
+@@ -389,7 +391,7 @@ public class Chunk {
+             int k = 0;
+ 
+             while (k < 16) {
+-                this.precipitationHeightMap[j + (k << 4)] = -999;
++                if (this.precipitationHeightMap != null) this.precipitationHeightMap[j + (k << 4)] = -999; // Athena
+                 int l = i + 16;
+ 
+                 while (true) {
+@@ -440,6 +442,7 @@ public class Chunk {
+     }
+ 
+     private void propagateSkylightOcclusion(int i, int j) {
++        if (this.updateSkylightColumns == null) this.updateSkylightColumns = new boolean[256]; // Athena
+         this.updateSkylightColumns[i + j * 16] = true;
+         this.isGapLightingUpdated = true;
+     }
+@@ -449,7 +452,7 @@ public class Chunk {
+         if (this.world.areChunksLoaded(new BlockPosition(this.locX * 16 + 8, 0, this.locZ * 16 + 8), 16)) {
+             for (int i = 0; i < 16; ++i) {
+                 for (int j = 0; j < 16; ++j) {
+-                    if (this.updateSkylightColumns[i + j * 16]) {
++                    if (this.updateSkylightColumns != null && this.updateSkylightColumns[i + j * 16]) { // Athena
+                         this.updateSkylightColumns[i + j * 16] = false;
+                         int k = this.getHeightValue(i, j);
+                         int l = this.locX * 16 + i;
+@@ -752,7 +755,7 @@ public class Chunk {
+         int k = blockposition.getZ() & 15;
+         int l = k << 4 | i;
+ 
+-        if (j >= this.precipitationHeightMap[l] - 1) {
++        if (this.precipitationHeightMap != null && j >= this.precipitationHeightMap[l] - 1) { // Athena
+             this.precipitationHeightMap[l] = -999;
+         }
+ 
+@@ -1705,6 +1708,10 @@ public class Chunk {
+         int j = z & 15;
+         int k = i | j << 4;
+ 
++        if (this.precipitationHeightMap == null) { // Athena
++            this.precipitationHeightMap = new int[256];
++            Arrays.fill(this.precipitationHeightMap, -999);
++        }
+         if (this.precipitationHeightMap[k] == -999) {
+             int l = this.getTopFilledSegment() + 15;
+             int i1 = -1;
+@@ -1941,6 +1948,7 @@ public class Chunk {
+     }
+ 
+     private void y() {
++        if (this.updateSkylightColumns == null) this.updateSkylightColumns = new boolean[256]; // Athena
+         for (int i = 0; i < this.updateSkylightColumns.length; ++i) {
+             this.updateSkylightColumns[i] = true;
+         }

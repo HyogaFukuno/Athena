@@ -1,0 +1,300 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 12 Nov 2026 04:24:12 +0900
+Subject: [PATCH] A template section read often reads a shared heap copy of its
+ ids
+
+One block read off the mapping is a call through the segment's var handle, which C1 does not
+inline; collision checks and getType on template sections took some 2% of the world threads.
+A section read 256 times takes the store's heap copy of its ids, made once for every world on
+the template and held weakly; the copies alive at once take at most 4 MB per store.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index c804b6148c3d58b5de47cdbe7cd573f51161e90f..6444105468cbcad44fbd5cf088c6a311b5507044 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -437,9 +437,106 @@ final class AthenaSectionStore {
+         }
+         section.athenaStore = this; // Athena - as this store holds it, until modCount moves
+         section.athenaStoreModCount = section.modCount;
++        section.athenaStoreSlot = index * 16 + sectionY;
+         return true;
+     }
+ 
++    // Athena start - heap copies of the ids of the sections read most; see ChunkSection.mappedStateIdAt.
++    //
++    // Held weakly, like the packets: a copy lives as long as a section of some world reads it, and a
++    // store kept between matches keeps none. By chunk index * 16 + section y. The copies alive at
++    // once take at most HEAP_BYTES; past that a section goes on reading the mapping.
++    static final int HEAP_AFTER = 256;
++    static final long HEAP_BYTES = 4L << 20;
++
++    /** A section's ids off the mapping: a packed section's 2048 bytes, or a raw one's 4096 chars. Never written. */
++    static final class HeapIds {
++        final byte[] packed;
++        final char[] raw;
++
++        HeapIds(byte[] packed, char[] raw) {
++            this.packed = packed;
++            this.raw = raw;
++        }
++
++        long bytes() {
++            return this.raw != null ? 8192L : 2048L;
++        }
++    }
++
++    private static final class HeapReference extends WeakReference<HeapIds> {
++        final long bytes;
++
++        HeapReference(HeapIds ids, java.lang.ref.ReferenceQueue<HeapIds> queue) {
++            super(ids, queue);
++            this.bytes = ids.bytes();
++        }
++    }
++
++    private volatile java.util.concurrent.atomic.AtomicReferenceArray<HeapReference> heapIds;
++    private final java.lang.ref.ReferenceQueue<HeapIds> heapGone = new java.lang.ref.ReferenceQueue<HeapIds>();
++    private final java.util.concurrent.atomic.AtomicLong heapBytes = new java.util.concurrent.atomic.AtomicLong();
++
++    /** The heap copy of the section in {@code slot}, made now if no world has one; null once the copies alive take HEAP_BYTES. */
++    HeapIds heapIds(int slot, MemorySegment mapping, long at, boolean raw) {
++        java.util.concurrent.atomic.AtomicReferenceArray<HeapReference> copies = this.heapIds;
++
++        if (copies == null) {
++            synchronized (this) {
++                copies = this.heapIds;
++                if (copies == null) {
++                    this.heapIds = copies = new java.util.concurrent.atomic.AtomicReferenceArray<HeapReference>(this.keys.length * 16);
++                }
++            }
++        }
++        if (slot < 0 || slot >= copies.length() || mapping != this.mapping) {
++            return null;
++        }
++        for (java.lang.ref.Reference<? extends HeapIds> gone; (gone = this.heapGone.poll()) != null; ) {
++            this.heapBytes.addAndGet(-((HeapReference) gone).bytes);
++        }
++
++        HeapIds made = null;
++        HeapReference mine = null;
++
++        for (;;) {
++            HeapReference reference = copies.get(slot);
++            HeapIds shared = reference == null ? null : reference.get();
++
++            if (shared != null) {
++                if (mine != null) {
++                    mine.clear(); // another world made it first: never enqueued, so given back here
++                    this.heapBytes.addAndGet(-mine.bytes);
++                }
++                return shared;
++            }
++            if (made == null) {
++                long bytes = raw ? 8192L : 2048L;
++
++                if (this.heapBytes.addAndGet(bytes) > HEAP_BYTES) {
++                    this.heapBytes.addAndGet(-bytes);
++                    return null;
++                }
++                made = raw
++                        ? new HeapIds(null, mapping.asSlice(at, 8192L).toArray(CHAR_LE))
++                        : new HeapIds(mapping.asSlice(at, 2048L).toArray(ValueLayout.JAVA_BYTE), null);
++                mine = new HeapReference(made, this.heapGone);
++            }
++            if (copies.compareAndSet(slot, reference, mine)) {
++                return made;
++            }
++        }
++    }
++
++    /** The bytes the heap copies alive take, as far as the store has seen them go; for tests. */
++    long heapBytes() {
++        for (java.lang.ref.Reference<? extends HeapIds> gone; (gone = this.heapGone.poll()) != null; ) {
++            this.heapBytes.addAndGet(-((HeapReference) gone).bytes);
++        }
++        return this.heapBytes.get();
++    }
++    // Athena end
++
+     // Athena start - the chunk packets of this template's worlds; see AthenaChunkPacketCache.Payload.
+     //
+     // Held weakly: a packet lives as long as a chunk of some world uses it, so the worlds that are on
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 3d9bb91636910131ea18439b8d4efd439585bc08..de219644f03a9e624d0218873ec0cd76572c6a8a 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -607,6 +607,8 @@ public class ChunkSection {
+         this.packedIds = null; // Athena
+         this.palette = null; // Athena
+         this.mappedIds = null; // Athena
++        this.mappedHeap = null; // Athena
++        this.mappedReads = 0; // Athena
+         ++this.modCount; // Athena
+     }
+ 
+@@ -916,7 +918,28 @@ public class ChunkSection {
+         return this.blockIds == null && this.packedIds == null;
+     }
+ 
++    // Athena start - a mapped section read block by block often reads a heap copy instead.
++    //
++    // One block read off the mapping is a call through the segment's var handle, which C1 - all the
++    // small servers compile with - does not inline: some 2% of the world threads' time in a match
++    // went to collision checks and getType reading template sections that way. A section read
++    // AthenaSectionStore.HEAP_AFTER times takes the store's heap copy of its ids, made once and
++    // shared by every world on the template that has the section loaded (see
++    // AthenaSectionStore.heapIds); the store caps how many it makes. The copy is never written: the
++    // first setType copies the ids into the section's own arrays as before.
++    private AthenaSectionStore.HeapIds mappedHeap;
++    private int mappedReads;
++    int athenaStoreSlot = -1; // the section's slot in athenaStore, set as it maps the ids
++
+     private char mappedStateIdAt(int index) {
++        AthenaSectionStore.HeapIds heap = this.mappedHeap;
++
++        if (heap == null && ++this.mappedReads == AthenaSectionStore.HEAP_AFTER) {
++            heap = this.mappedHeap = this.athenaHeapIds();
++        }
++        if (heap != null) {
++            return heap.raw != null ? heap.raw[index] : this.palette[heap.packed[index >> 1] >> ((index & 1) << 2) & 15];
++        }
+         java.lang.foreign.MemorySegment ids = this.mappedIds;
+ 
+         if (this.mappedRaw) {
+@@ -925,7 +948,26 @@ public class ChunkSection {
+         return this.palette[ids.get(java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt + (index >> 1)) >> ((index & 1) << 2) & 15];
+     }
+ 
++    /** The store's heap copy of these ids, or null if the store makes no more. */
++    private AthenaSectionStore.HeapIds athenaHeapIds() {
++        AthenaSectionStore store = this.athenaStore;
++
++        return store == null || this.athenaStoreSlot < 0 ? null : store.heapIds(this.athenaStoreSlot, this.mappedIds, this.mappedAt, this.mappedRaw);
++    }
++
++    /** Whether block reads go to the store's heap copy; for tests. */
++    boolean athenaReadsHeapCopy() {
++        return this.isMapped() && this.mappedHeap != null;
++    }
++    // Athena end
++
+     private char[] mappedUnpackInto(char[] ids) {
++        AthenaSectionStore.HeapIds heap = this.mappedHeap; // Athena - the same ids, already off the mapping
++
++        if (heap != null && heap.raw != null) {
++            System.arraycopy(heap.raw, 0, ids, 0, 4096);
++            return ids;
++        }
+         java.lang.foreign.MemorySegment mapped = this.mappedIds;
+ 
+         if (this.mappedRaw) {
+@@ -935,9 +977,14 @@ public class ChunkSection {
+ 
+         char[] palette = this.palette;
+         // Athena - one copy off the mapping, then the heap: see recalcBlockCounts
+-        byte[] packed = MAPPED_SCRATCH.get();
++        byte[] packed;
+ 
+-        java.lang.foreign.MemorySegment.copy(mapped, java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt, packed, 0, 2048);
++        if (heap != null) {
++            packed = heap.packed;
++        } else {
++            packed = MAPPED_SCRATCH.get();
++            java.lang.foreign.MemorySegment.copy(mapped, java.lang.foreign.ValueLayout.JAVA_BYTE, this.mappedAt, packed, 0, 2048);
++        }
+         for (int k = 0; k < 4096; k += 2) {
+             int b = packed[k >> 1];
+ 
+@@ -954,8 +1001,12 @@ public class ChunkSection {
+     private void copyMappedIds() {
+         java.lang.foreign.MemorySegment mapped = this.mappedIds;
+ 
++        AthenaSectionStore.HeapIds heap = this.mappedHeap;
++
+         if (this.mappedRaw) {
+             this.blockIds = this.mappedUnpackInto(new char[4096]);
++        } else if (heap != null) {
++            this.packedIds = heap.packed.clone(); // the store's copy is shared and never written
+         } else {
+             this.packedIds = mapped.asSlice(this.mappedAt, 2048L).toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
+         }
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 82765ab3ba80a240a8c240f478f819fc4b069d8a..403a9babaa04c4fb6e3263e3d4b006d6fdd1d81d 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -230,6 +230,72 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         assertTrue("a mapped section was written", checked > 0);
+     }
+ 
++    /**
++     * A mapped section read block by block HEAP_AFTER times reads the store's heap copy of its ids:
++     * the same blocks, one copy for every loaded copy of the section, and a write still changes the
++     * written section alone.
++     */
++    @Test
++    public void aSectionReadOftenReadsOneSharedHeapCopy() throws Exception {
++        File dir = template(9L);
++        AthenaSectionStore store = built(dir);
++        AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++        int packed = 0, raw = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                NBTTagList sections = region.read(x, z).getCompound("Level").getList("Sections", 10);
++
++                for (int k = 0; k < sections.size(); ++k) {
++                    NBTTagCompound nbt = sections.get(k);
++                    int y = nbt.getByte("Y");
++                    ChunkSection first = new ChunkSection(y << 4, true);
++                    ChunkSection second = new ChunkSection(y << 4, true);
++
++                    assertTrue(store.apply(-32 + x, z, y, first, true));
++                    assertTrue(store.apply(-32 + x, z, y, second, true));
++                    if (!first.isMapped()) {
++                        continue;
++                    }
++                    long before = store.heapBytes();
++
++                    for (int i = 0; i < AthenaSectionStore.HEAP_AFTER - 1; ++i) {
++                        first.getType(i & 15, i >> 8 & 15, i >> 4 & 15);
++                    }
++                    assertFalse("not yet", first.athenaReadsHeapCopy());
++                    first.getType(0, 0, 0);
++                    assertTrue("read often", first.athenaReadsHeapCopy());
++                    long made = store.heapBytes() - before;
++
++                    for (int i = 0; i < AthenaSectionStore.HEAP_AFTER; ++i) {
++                        second.getType(0, 0, 0);
++                    }
++                    assertTrue(second.athenaReadsHeapCopy());
++                    assertEquals("the second copy shares the first's", made, store.heapBytes() - before);
++                    if (made == 8192L) ++raw; else if (made == 2048L) ++packed;
++
++                    ChunkSection expected = fromNbt(nbt);
++
++                    first.recalcBlockCounts();
++                    assertSameContent("heap copy " + x + "," + y + "," + z, expected, first);
++
++                    IBlockData was = second.getType(3, 4, 5);
++
++                    first.setType(3, 4, 5, Blocks.GLASS.getBlockData());
++                    assertFalse(first.isMapped());
++                    assertSame(Blocks.GLASS.getBlockData(), first.getType(3, 4, 5));
++                    assertSame("the shared copy is untouched", was, second.getType(3, 4, 5));
++                    assertTrue(second.athenaReadsHeapCopy());
++                    second.recalcBlockCounts();
++                    assertSameContent("after the other's write " + x + "," + y + "," + z, expected, second);
++                }
++            }
++        }
++        region.close();
++        assertTrue("packed sections read from a heap copy", packed > 0);
++        assertTrue("raw sections read from a heap copy", raw > 0);
++    }
++
+     @Test
+     public void aChangedTemplateIsRebuilt() throws Exception {
+         File dir = template(3L);

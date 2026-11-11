@@ -1,0 +1,282 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:37:18 +0900
+Subject: [PATCH] A player's tick makes fewer positions, lists and events
+ nobody reads
+
+isWet asks whether it rains before making two positions to ask where;
+isInsideOfMaterial, isOnLadder, the friction lookups and a dropped item's read
+their block by coordinates; handleFalling makes its position for a landing
+only. A sprinting entity's running particle, which the server sends nobody, is
+no longer worked out. A move of nothing gathers no collision boxes: a client
+standing still sends one every tick. sendPacketNearby asks canSee of the
+players in range only. ServerTickStartEvent and ServerTickEndEvent are made for
+listeners only, and a world thread walks its worlds by index.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 97915b9d1ab19b0db36d92625546780aa8bca382..e8b9d1df688648bd2d7d6c23401a1f64e6427f75 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -393,12 +393,16 @@ public final class AthenaWorldThread extends Thread {
+                         }
+                     }
+                 }
+-                for (WorldServer world : worlds) ++world.athenaCurrentTick;
++                // Athena - by index from here on: five walks of a CopyOnWriteArrayList a tick made five
++                // iterators a tick. Only this thread takes a world off the list (runLeaves, above),
++                // and one the server thread adds meanwhile is ticked from wherever it is met.
++                for (int w = 0; w < worlds.size(); ++w) ++worlds.get(w).athenaCurrentTick;
+                 // the server thread's tick, for these worlds: chunk loads that finished, time updates, the
+                 // worlds, then the connections of the players in them; their packets are batched the same way
+                 NetworkManager.athenaBeginBatch();
+                 try {
+-                    for (WorldServer world : worlds) {
++                    for (int w = 0; w < worlds.size(); ++w) {
++                        WorldServer world = worlds.get(w);
+                         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick(world);
+                         if (stats != null) stats.mark(AthenaThreadStats.CHUNK_IO);
+                         org.bukkit.craftbukkit.chunkgen.ChunkGenExecutor.tick(world);
+@@ -406,13 +410,14 @@ public final class AthenaWorldThread extends Thread {
+                     }
+                     this.preloader.tick();
+                     if (stats != null) stats.mark(AthenaThreadStats.PRELOAD);
+-                    for (WorldServer world : worlds) {
++                    for (int w = 0; w < worlds.size(); ++w) {
++                        WorldServer world = worlds.get(w);
+                         world.sendWorldTimeUpdate(false);
+                         server.athenaTickWorld(world);
+                     }
+                     if (stats != null) stats.mark(AthenaThreadStats.WORLDS);
+-                    for (WorldServer world : worlds) {
+-                        this.tickConnections(world);
++                    for (int w = 0; w < worlds.size(); ++w) {
++                        this.tickConnections(worlds.get(w));
+                     }
+                     if (stats != null) stats.mark(AthenaThreadStats.CONNECTIONS);
+                 } finally {
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 7015837020ec3b68898cfe64552c1c0801d2b360..58e04f660ad8deff2a8937b939003248a24ce5c6 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -595,7 +595,7 @@ public abstract class Entity implements ICommandListener {
+             try {
+             if (axisScan) {
+                 this.world.getCubes(this, this.boundingBoxMinX, this.boundingBoxMinY + Math.min(d1, 0.0D), this.boundingBoxMinZ, this.boundingBoxMaxX, this.boundingBoxMaxY + Math.max(d1, 0.0D), this.boundingBoxMaxZ, sink);
+-            } else {
++            } else if (d0 != 0.0D || d1 != 0.0D || d2 != 0.0D) { // Athena - a move of nothing is stopped by nothing: a client standing still sends one every tick
+                 this.world.getCubes(this, totalMinX, totalMinY, totalMinZ, totalMaxX, totalMaxY, totalMaxZ, sink);
+             }
+             // PandaSpigot end
+@@ -1103,7 +1103,8 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public boolean isWet() {
+-        return this.inWater || this.world.isRainingAt(new BlockPosition(this.locX, this.locY, this.locZ)) || this.world.isRainingAt(new BlockPosition(this.locX, this.locY + (double) this.length, this.locZ));
++        // Athena - isRainingAt answers false at once when it is not raining; ask that first, without the two positions
++        return this.inWater || this.world.isRaining() && (this.world.isRainingAt(new BlockPosition(this.locX, this.locY, this.locZ)) || this.world.isRainingAt(new BlockPosition(this.locX, this.locY + (double) this.length, this.locZ)));
+     }
+ 
+     public boolean isInWater() {
+@@ -1167,7 +1168,10 @@ public abstract class Entity implements ICommandListener {
+     }
+ 
+     public void spawnRunningParticles() {
+-        if (this.isSprinting() && !this.isInWater()) {
++        // Athena - on a server the particle goes to WorldManager, which does nothing with it: the
++        // block read, the position and the array made for it were for nothing, every tick of every
++        // sprinting player
++        if (this.isSprinting() && !this.isInWater() && !this.world.athenaParticlesGoNowhere()) {
+             this.createRunningParticles();
+         }
+ 
+@@ -1193,13 +1197,13 @@ public abstract class Entity implements ICommandListener {
+ 
+     public boolean isInsideOfMaterial(Material material) {
+         double d0 = this.locY + (double) this.getHeadHeight();
+-        BlockPosition blockposition = new BlockPosition(this.locX, d0, this.locZ);
+-        IBlockData iblockdata = this.world.getType(blockposition);
++        int blockY = MathHelper.floor(d0); // Athena - the position's coordinates, with no position made
++        IBlockData iblockdata = this.world.getType(MathHelper.floor(this.locX), blockY, MathHelper.floor(this.locZ));
+         Block block = iblockdata.getBlock();
+ 
+         if (block.getMaterial() == material) {
+             float f = BlockFluids.getLiquidHeightPercent(iblockdata.getBlock().toLegacyData(iblockdata)) - 0.11111111F;
+-            float f1 = (float) (blockposition.getY() + 1) - f;
++            float f1 = (float) (blockY + 1) - f;
+             boolean flag = d0 < (double) f1;
+ 
+             return !flag && this instanceof EntityHuman ? false : flag;
+diff --git a/src/main/java/net/minecraft/server/EntityItem.java b/src/main/java/net/minecraft/server/EntityItem.java
+index 8ee632e8616ccae546d9c9157ecb8fa1a7687bff..e0c87f8ea2b6ca3d15d92853aa5a72c8ca9fa938 100644
+--- a/src/main/java/net/minecraft/server/EntityItem.java
++++ b/src/main/java/net/minecraft/server/EntityItem.java
+@@ -76,7 +76,7 @@ public class EntityItem extends Entity {
+             boolean flag = (int) this.lastX != (int) this.locX || (int) this.lastY != (int) this.locY || (int) this.lastZ != (int) this.locZ;
+ 
+             if (flag || this.ticksLived % 25 == 0) {
+-                if (this.world.getType(new BlockPosition(this)).getBlock().getMaterial() == Material.LAVA) {
++                if (this.world.getType(MathHelper.floor(this.locX), MathHelper.floor(this.locY), MathHelper.floor(this.locZ)).getBlock().getMaterial() == Material.LAVA /* Athena - no position */) {
+                     this.motY = 0.20000000298023224D;
+                     this.motX = (double) ((this.random.nextFloat() - this.random.nextFloat()) * 0.2F);
+                     this.motZ = (double) ((this.random.nextFloat() - this.random.nextFloat()) * 0.2F);
+@@ -91,7 +91,7 @@ public class EntityItem extends Entity {
+             float f = 0.98F;
+ 
+             if (this.onGround) {
+-                f = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.98F;
++                f = this.world.getType(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ)).getBlock().frictionFactor * 0.98F; // Athena - no position
+             }
+ 
+             this.motX *= (double) f;
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index a747ef777aee291517e8065fa12f5bf9093dfe99..5bbc42755503bd9ad0a10cb35130d2b7a84f96e9 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -935,7 +935,7 @@ public abstract class EntityLiving extends Entity {
+         int i = MathHelper.floor(this.locX);
+         int j = MathHelper.floor(this.boundingBoxMinY);
+         int k = MathHelper.floor(this.locZ);
+-        Block block = this.world.getType(new BlockPosition(i, j, k)).getBlock();
++        Block block = this.world.getType(i, j, k).getBlock(); // Athena - no position
+ 
+         return (block == Blocks.LADDER || block == Blocks.VINE) && (!(this instanceof EntityHuman) || !((EntityHuman) this).isSpectator());
+     }
+@@ -1387,7 +1387,7 @@ public abstract class EntityLiving extends Entity {
+                 float f5 = 0.91F;
+ 
+                 if (this.onGround) {
+-                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                    f5 = this.world.getType(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ)).getBlock().frictionFactor * 0.91F; // Athena - no position
+                 }
+ 
+                 float f6 = 0.16277136F / (f5 * f5 * f5);
+@@ -1401,7 +1401,7 @@ public abstract class EntityLiving extends Entity {
+                 this.moveFlying(f, f1, f3);
+                 f5 = 0.91F;
+                 if (this.onGround) {
+-                    f5 = this.world.getType(new BlockPosition(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ))).getBlock().frictionFactor * 0.91F;
++                    f5 = this.world.getType(MathHelper.floor(this.locX), MathHelper.floor(this.boundingBoxMinY) - 1, MathHelper.floor(this.locZ)).getBlock().frictionFactor * 0.91F; // Athena - no position
+                 }
+ 
+                 if (this.isOnLadder()) {
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index a6447ff1cd5e48d59f69195d068118f8d9b00082..0605e33e8fa5793e9d98e816406fe47e74d2f453 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -820,19 +820,22 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         int i = MathHelper.floor(this.locX);
+         int j = MathHelper.floor(this.locY - 0.20000000298023224D);
+         int k = MathHelper.floor(this.locZ);
+-        BlockPosition blockposition = new BlockPosition(i, j, k);
+-        Block block = this.world.getType(blockposition).getBlock();
++        // Athena start - the position is made for a landing only. EntityLiving.updateFallState and
++        // Entity's read it when the player is on the ground with a fall behind it, and this ran for
++        // every movement packet of every player, making one or two positions each time.
++        Block block = this.world.getType(i, j, k).getBlock();
+ 
+         if (block.getMaterial() == Material.AIR) {
+-            Block block1 = this.world.getType(blockposition.down()).getBlock();
++            Block block1 = this.world.getType(i, j - 1, k).getBlock();
+ 
+             if (block1 instanceof BlockFence || block1 instanceof BlockCobbleWall || block1 instanceof BlockFenceGate) {
+-                blockposition = blockposition.down();
+-                block = this.world.getType(blockposition).getBlock();
++                --j;
++                block = block1;
+             }
+         }
+ 
+-        super.updateFallState(d0, flag, block, blockposition);
++        super.updateFallState(d0, flag, block, flag && this.fallDistance > 0.0F ? new BlockPosition(i, j, k) : BlockPosition.ZERO);
++        // Athena end
+     }
+ 
+     public void openSign(TileEntitySign tileentitysign) {
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index fcc33ebd767a1856b454f8de2185467289663e22..8b6160ebbe674545bc42049b730bdd3d2dc0dad5 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -828,6 +828,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     protected void A() throws ExceptionWorldConflict { // CraftBukkit - added throws
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.startTiming(); // Spigot
+         long i = System.nanoTime();
++        if (com.destroystokyo.paper.event.server.ServerTickStartEvent.getHandlerList().getRegisteredListeners().length != 0) // Athena - no event object nobody listens for
+         new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.ticks + 1).callEvent(); // PandaSpigot - Add ServerTickStartEvent
+ 
+         ++this.ticks;
+@@ -915,6 +916,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         // PandaSpigot start - Add ServerTickEndEvent
+         long endTime = System.nanoTime();
+         long remaining = (TICK_TIME - (endTime - lastTick));
++        if (com.destroystokyo.paper.event.server.ServerTickEndEvent.getHandlerList().getRegisteredListeners().length != 0) // Athena - no event object nobody listens for
+         new com.destroystokyo.paper.event.server.ServerTickEndEvent(this.ticks, ((double)(endTime - lastTick) / 1000000D), remaining).callEvent();
+         // PandaSpigot end
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.stopTiming(); // Spigot
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 0978eb6203628a978903cb0a5b02271eb6b61562..81633df7e901c67741aa273166156ae9c74635b5 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -1259,18 +1259,18 @@ public abstract class PlayerList {
+     public void sendPacketNearby(EntityHuman entityhuman, double d0, double d1, double d2, double d3, int i, Packet packet) {
+         for (EntityPlayer entityplayer : this.players) { // Athena - a snapshot: other threads leave and move
+ 
+-            // CraftBukkit start - Test if player receiving packet can see the source of the packet
+-            if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
+-               continue;
+-            }
+-            // CraftBukkit end
+-
+             if (entityplayer != entityhuman && entityplayer.dimension == i) {
+                 double d4 = d0 - entityplayer.locX;
+                 double d5 = d1 - entityplayer.locY;
+                 double d6 = d2 - entityplayer.locZ;
+ 
+                 if (d4 * d4 + d5 * d5 + d6 * d6 < d3 * d3) {
++                    // CraftBukkit start - Test if player receiving packet can see the source of the packet
++                    // Athena - asked last, of the players in range only: it is a lookup in a concurrent set
++                    if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
++                       continue;
++                    }
++                    // CraftBukkit end
+                     entityplayer.playerConnection.sendPacket(packet);
+                 }
+             }
+@@ -1288,16 +1288,16 @@ public abstract class PlayerList {
+             if (!(human instanceof EntityPlayer)) continue;
+             EntityPlayer entityplayer = (EntityPlayer) human;
+ 
+-            if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
+-               continue;
+-            }
+-
+             if (entityplayer != entityhuman) {
+                 double d4 = d0 - entityplayer.locX;
+                 double d5 = d1 - entityplayer.locY;
+                 double d6 = d2 - entityplayer.locZ;
+ 
+                 if (d4 * d4 + d5 * d5 + d6 * d6 < d3 * d3) {
++                    // asked last, of the players in range only
++                    if (entityhuman != null && entityhuman instanceof EntityPlayer && !entityplayer.getBukkitEntity().canSee(((EntityPlayer) entityhuman).getBukkitEntity())) {
++                       continue;
++                    }
+                     entityplayer.playerConnection.sendPacket(packet);
+                 }
+             }
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index b10f6ab39e2c190fac17e1f58524bd79326b9b95..7a6ff34612ffa6cc11b55597c43a06b8e623882d 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1320,6 +1320,11 @@ public abstract class World implements IBlockAccess {
+         this.spawnParticle(enumparticle.getParticleID(), enumparticle.getShouldIgnoreRange(), d0, d1, d2, d3, d4, d5, aint);
+     }
+ 
++    /** Athena - whether a particle added here reaches nobody: the only listener is the server's own, which ignores particles. */
++    public boolean athenaParticlesGoNowhere() {
++        return this.worldAccesses.size() == 1 && this.worldAccesses.get(0).getClass() == WorldManager.class;
++    }
++
+     private void spawnParticle(int i, boolean flag, double d0, double d1, double d2, double d3, double d4, double d5, int... aint) {
+         for (int j = 0; j < this.worldAccesses.size(); ++j) {
+             ((IWorldAccess) this.worldAccesses.get(j)).spawnParticle(i, flag, d0, d1, d2, d3, d4, d5, aint);

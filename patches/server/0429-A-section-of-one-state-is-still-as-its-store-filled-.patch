@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 17:37:59 +0900
+Subject: [PATCH] A section of one state is still as its store filled it once
+ the loader has counted it
+
+The store leaves a section of one state to count itself, and the loader's
+count moved its modCount past the store's stamp: in a live load a fifth of a
+map's sections, in three quarters of its chunks, were taken for changed, and
+those chunks' packets were not shared between the worlds on the template.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index 42cc670fe955a3112cce1ba93563d5cc0215f77a..b1bd6bf80575a39be99da40535e374f52d9a6c7a 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -429,6 +429,12 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+ 
+             if (!chunksection.athenaTakeCountsKnown()) { // Athena - a template section's store may already know them
+                 chunksection.recalcBlockCounts();
++                // Athena - counting moved modCount and nothing else: a section of one state, which the
++                // store leaves to count itself, is still as the store filled it (in a live load a
++                // fifth of a map's sections, in three quarters of its chunks, were not taken for it)
++                if (chunksection.athenaStore != null) {
++                    chunksection.athenaStoreModCount = chunksection.modCount;
++                }
+             }
+             // Athena - an air section that reads exactly as no section at all is left out
+             if (flag && athenaReadsAsMissing(chunksection, chunk.heightMap)) {
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 5fcacd27781d77ff0ea98d9b8d80681ea942806a..0289215095b0dc1e5e144b461163398df52efbe2 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -624,4 +624,51 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         assertTrue(store.packetSlot(-32, 0, true) != store.packetSlot(-32, 0, false));
+         assertEquals(-1, store.packetSlot(5, 5, true));
+     }
++
++    @Test
++    public void chunksLoadedByTheTemplateLoaderShareTheirPackets() throws Exception {
++        // through the loader, not store.apply alone: it counts the sections the store leaves to
++        // count themselves (those of one state), which moves their modCount after the store's stamp -
++        // a live server took three quarters of a map's chunks for changed because of it
++        File dir = fullTemplate(11L);
++
++        built(dir);
++
++        int shared = 0;
++        int loaded = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            if (x == 14) {
++                continue; // the chunks the store does not hold whole
++            }
++            for (int z = 0; z < 32; z += 9) {
++                AthenaTemplateChunkLoader one = new AthenaTemplateChunkLoader(dir);
++                AthenaTemplateChunkLoader two = new AthenaTemplateChunkLoader(dir);
++                Object[] first = one.loadChunk(skyWorld(), -32 + x, z);
++                Object[] second = two.loadChunk(skyWorld(), -32 + x, z);
++
++                assertNotNull(first);
++                assertNotNull(second);
++                Chunk a = (Chunk) first[0];
++                Chunk b = (Chunk) second[0];
++                boolean any = false;
++
++                for (ChunkSection section : a.getSections()) {
++                    if (section != null) {
++                        any = true;
++                        assertSame("filled from the store", section.athenaStore, b.getSections()[section.getYPosition() >> 4].athenaStore);
++                        assertEquals("and still as it filled it, counted or not", section.athenaStoreModCount, section.modCount);
++                    }
++                }
++                ++loaded;
++                if (any) {
++                    assertTrue((-32 + x) + "," + z, new AthenaChunkPacketCache(a).sharesPacketWith(new AthenaChunkPacketCache(b)));
++                    ++shared;
++                }
++                one.close();
++                two.close();
++            }
++        }
++        assertTrue(loaded > 0 && shared > 0);
++    }
+ }

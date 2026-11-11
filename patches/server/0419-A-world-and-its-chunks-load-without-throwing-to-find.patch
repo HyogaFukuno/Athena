@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 07:37:18 +0900
+Subject: [PATCH] A world and its chunks load without throwing to find things
+ out
+
+Two NumberFormatExceptions for each boolean game rule, each time a world was
+made and again as its rules were read; an EOFException inside Gson for every
+empty line of every sign; a NullPointerException for every head without an id
+and a NumberFormatException for every empty flower pot: about 5,400 in one
+recording of matches starting. The answers are the same. A scoreboard with no
+objective for a criterion answers with the shared empty list.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/GameProfileSerializer.java b/src/main/java/net/minecraft/server/GameProfileSerializer.java
+index 350923a654cfafa59292f41b4ee916d98880f27c..8a96ca02cbfaf77771e9b574f89cbce661119d75 100644
+--- a/src/main/java/net/minecraft/server/GameProfileSerializer.java
++++ b/src/main/java/net/minecraft/server/GameProfileSerializer.java
+@@ -24,6 +24,9 @@ public final class GameProfileSerializer {
+         } else {
+             UUID uuid;
+ 
++            if (s1 == null || s1.isEmpty()) { // Athena - a head with a name only: no exception to find that out
++                uuid = null;
++            } else
+             try {
+                 uuid = UUID.fromString(s1);
+             } catch (Throwable throwable) {
+diff --git a/src/main/java/net/minecraft/server/GameRules.java b/src/main/java/net/minecraft/server/GameRules.java
+index 7d091c0e8a27c65aea864cae200fe94434b518a2..579e5a777cb9375a708a1fed5a491f581336414c 100644
+--- a/src/main/java/net/minecraft/server/GameRules.java
++++ b/src/main/java/net/minecraft/server/GameRules.java
+@@ -113,6 +113,11 @@ public class GameRules {
+             this.valueString = s;
+             this.valueBoolean = Boolean.parseBoolean(s);
+             this.valueInteger = this.valueBoolean ? 1 : 0;
++            // Athena - "true" and "false" are no numbers: finding that out took two exceptions for each
++            // of a world's fifteen rules, each time a world was made and again as its rules were read
++            if (s.equals("true") || s.equals("false")) {
++                return;
++            }
+ 
+             try {
+                 this.valueInteger = Integer.parseInt(s);
+diff --git a/src/main/java/net/minecraft/server/IChatBaseComponent.java b/src/main/java/net/minecraft/server/IChatBaseComponent.java
+index 62a4a6e80839379083afa938dcb71a34b941cc2f..f06a585dac5db72205afdd76c5908e292df7f8c2 100644
+--- a/src/main/java/net/minecraft/server/IChatBaseComponent.java
++++ b/src/main/java/net/minecraft/server/IChatBaseComponent.java
+@@ -205,6 +205,7 @@ public interface IChatBaseComponent extends Iterable<IChatBaseComponent> {
+         }
+ 
+         public static IChatBaseComponent jsonToComponent(String s) {
++            if (s.isEmpty()) return null; // Athena - what Gson answers for an empty document, after throwing and catching an EOFException: every empty line of every sign loaded
+             return (IChatBaseComponent) IChatBaseComponent.ChatSerializer.GSON.fromJson(s, IChatBaseComponent.class);
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/Item.java b/src/main/java/net/minecraft/server/Item.java
+index 7c886ca7bf50590a6dc627f09cac54bcaeb2a964..de54321a5539f7dc1b20db5165fa153d0d760bef 100644
+--- a/src/main/java/net/minecraft/server/Item.java
++++ b/src/main/java/net/minecraft/server/Item.java
+@@ -42,6 +42,7 @@ public class Item {
+         Item item = (Item) Item.REGISTRY.get(new MinecraftKey(s));
+ 
+         if (item == null) {
++            if (s.isEmpty()) return null; // Athena - an empty flower pot: no number, and no exception to find that out
+             try {
+                 return getById(Integer.parseInt(s));
+             } catch (NumberFormatException numberformatexception) {
+diff --git a/src/main/java/net/minecraft/server/Scoreboard.java b/src/main/java/net/minecraft/server/Scoreboard.java
+index 033808fb450386f1121429659965c71bc2789daf..b590296ba200c2ae7f1c8f2a67e5c7f2df5bf391 100644
+--- a/src/main/java/net/minecraft/server/Scoreboard.java
++++ b/src/main/java/net/minecraft/server/Scoreboard.java
+@@ -50,7 +50,8 @@ public class Scoreboard {
+     public synchronized Collection<ScoreboardObjective> getObjectivesForCriteria(IScoreboardCriteria iscoreboardcriteria) {
+         Collection collection = (Collection) this.objectivesByCriteria.get(iscoreboardcriteria);
+ 
+-        return collection == null ? Lists.newArrayList() : Lists.newArrayList(collection);
++        // Athena - no list for no objectives: EntityPlayer.addStat asks for every statistic it counts, several a tick for a moving player
++        return collection == null ? java.util.Collections.<ScoreboardObjective>emptyList() : Lists.newArrayList(collection);
+     }
+ 
+     public synchronized boolean entityHasObjective(String s, ScoreboardObjective scoreboardobjective) {
+diff --git a/src/test/java/net/minecraft/server/AthenaLoadExceptionsTest.java b/src/test/java/net/minecraft/server/AthenaLoadExceptionsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f3b64a943635543f443b2bf15004bd0d19fbd8ea
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaLoadExceptionsTest.java
+@@ -0,0 +1,86 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++
++import com.mojang.authlib.GameProfile;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - what a world and its chunks read as they load used to find out by exception: that "true"
++ * is no number (game rules), that an empty sign line is no JSON, that a head has no id and a flower
++ * pot no item. The answers are the same without the exceptions.
++ */
++public class AthenaLoadExceptionsTest extends AbstractTestingBase {
++
++    @Test
++    public void gameRulesReadAsBefore() {
++        GameRules rules = new GameRules();
++
++        assertTrue(rules.getBoolean("doDaylightCycle"));
++        assertEquals(1, rules.getInt("doDaylightCycle"));
++        rules.set("doDaylightCycle", "false");
++        assertFalse(rules.getBoolean("doDaylightCycle"));
++        assertEquals(0, rules.getInt("doDaylightCycle"));
++        assertEquals("false", rules.get("doDaylightCycle"));
++        rules.set("randomTickSpeed", "7");
++        assertEquals(7, rules.getInt("randomTickSpeed"));
++        assertFalse(rules.getBoolean("randomTickSpeed"));
++        rules.set("randomTickSpeed", "true"); // a number rule given a truth value: 1, as before
++        assertEquals(1, rules.getInt("randomTickSpeed"));
++        rules.set("randomTickSpeed", "2.5"); // no integer: what the truth value gives
++        assertEquals(0, rules.getInt("randomTickSpeed"));
++
++        NBTTagCompound saved = rules.writeToNBT();
++        GameRules read = new GameRules();
++
++        read.readFromNBT(saved);
++        assertFalse(read.getBoolean("doDaylightCycle"));
++        assertEquals("2.5", read.get("randomTickSpeed"));
++    }
++
++    @Test
++    public void anEmptySignLineIsNoComponent() {
++        assertNull(IChatBaseComponent.ChatSerializer.jsonToComponent(""));
++        assertEquals("a", IChatBaseComponent.ChatSerializer.jsonToComponent("\"a\"").getText());
++    }
++
++    @Test
++    public void aHeadWithANameOnlyHasNoId() {
++        NBTTagCompound named = new NBTTagCompound();
++
++        named.setString("Name", "Notch");
++        GameProfile profile = GameProfileSerializer.deserialize(named);
++
++        assertEquals("Notch", profile.getName());
++        assertNull(profile.getId());
++
++        named.setString("Id", "");
++        assertNull(GameProfileSerializer.deserialize(named).getId());
++        named.setString("Id", "not a uuid");
++        assertNull(GameProfileSerializer.deserialize(named).getId());
++        named.setString("Id", "069a79f4-44e9-4726-a5be-fca90e38aaf5");
++        assertEquals(java.util.UUID.fromString("069a79f4-44e9-4726-a5be-fca90e38aaf5"), GameProfileSerializer.deserialize(named).getId());
++    }
++
++    @Test
++    public void anEmptyFlowerPotHoldsNoItem() {
++        assertNull(Item.getByNameOrId(""));
++        assertSame(Items.DIAMOND, Item.getByNameOrId("minecraft:diamond"));
++        assertSame(Items.DIAMOND, Item.getByNameOrId("264"));
++        assertNull(Item.getByNameOrId("no such item"));
++    }
++
++    @Test
++    public void noObjectivesIsAnEmptyList() {
++        Scoreboard scoreboard = new Scoreboard();
++
++        assertTrue(scoreboard.getObjectivesForCriteria(IScoreboardCriteria.health).isEmpty());
++        scoreboard.registerObjective("hp", IScoreboardCriteria.health);
++        assertEquals(1, scoreboard.getObjectivesForCriteria(IScoreboardCriteria.health).size());
++    }
++}

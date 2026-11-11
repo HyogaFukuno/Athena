@@ -1,0 +1,315 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 10 Nov 2026 12:25:13 +0900
+Subject: [PATCH] A world with no settings of its own copies the default ones
+
+Reading a world's spigot.yml and paper.yml settings calls some forty methods
+by reflection, logs each value, and writes the whole file back to disk. A
+server that makes a world for every match did that on its tick thread for
+every match: 0.5% of a match server's CPU, at the moment a match starts. A
+world whose name has no section in the file takes a copy of what the first
+such world read; one with a section, and every world on /reload, is read as
+before. The worlds on the same settings share anti-xray's two tables.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index e0f1cb59cf5daaf968db3cbd1ba917445941c233..c59d73f40c4854e48fa9fdfc6cad1b28152c03e9 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -227,8 +227,8 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     protected World(IDataManager idatamanager, WorldData worlddata, WorldProvider worldprovider, MethodProfiler methodprofiler, boolean flag, ChunkGenerator gen, org.bukkit.World.Environment env) {
+-        this.spigotConfig = new org.spigotmc.SpigotWorldConfig( worlddata.getName() ); // Spigot
+-        this.paperSpigotConfig = new org.github.paperspigot.PaperSpigotWorldConfig( worlddata.getName() ); // PaperSpigot
++        this.spigotConfig = org.spigotmc.SpigotWorldConfig.forWorld( worlddata.getName() ); // Spigot // Athena - a copy of the default settings where it has none of its own
++        this.paperSpigotConfig = org.github.paperspigot.PaperSpigotWorldConfig.forWorld( worlddata.getName() ); // PaperSpigot // Athena
+         this.pandaSpigotConfig = com.hpfxd.pandaspigot.config.PandaSpigotConfig.getWorldConfig(worlddata.getName()); // PandaSpigot
+         this.athenaConfig = athena.server.AthenaConfig.getWorldConfig(worlddata.getName()); // Athena
+         this.generator = gen;
+diff --git a/src/main/java/org/github/paperspigot/PaperSpigotWorldConfig.java b/src/main/java/org/github/paperspigot/PaperSpigotWorldConfig.java
+index 853964ae7d82f403987904da7a403562da488626..a79c07d0c66fdc15e7f4419689d7c8c1471269b4 100644
+--- a/src/main/java/org/github/paperspigot/PaperSpigotWorldConfig.java
++++ b/src/main/java/org/github/paperspigot/PaperSpigotWorldConfig.java
+@@ -5,13 +5,56 @@ import org.bukkit.Bukkit;
+ import org.bukkit.configuration.file.YamlConfiguration;
+ 
+ 
+-public class PaperSpigotWorldConfig
++public class PaperSpigotWorldConfig implements Cloneable // Athena - see forWorld
+ {
+ 
+-    private final String worldName;
++    private String worldName; // Athena - not final: see forWorld
+     private final YamlConfiguration config;
+     private boolean verbose;
+ 
++    // Athena start - a world with no settings of its own takes a copy of the default ones.
++    //
++    // Reading a world's settings calls some forty methods by reflection, each of which looks its
++    // keys up under the world's name and under "default", logs the value - and then the whole file
++    // is written back to disk, for the defaults a read may have added. A server that makes a world
++    // for every match did all of that on its tick thread for every match, for this file and for
++    // PaperSpigot's: together 0.5% of a match server's CPU, at the moment a match starts. A world
++    // whose name has no section in the file can only read the defaults; the first such world
++    // reads them (and writes the file, as before), the ones after it copy what it read. A world
++    // with a section of its own is read as it always was, and so is every world on /reload.
++    private static PaperSpigotWorldConfig athenaDefaults;
++
++    public static PaperSpigotWorldConfig forWorld(String worldName)
++    {
++        YamlConfiguration config = PaperSpigotConfig.config;
++
++        if ( config.isConfigurationSection( "world-settings." + worldName ) )
++        {
++            return new PaperSpigotWorldConfig( worldName );
++        }
++        synchronized ( PaperSpigotWorldConfig.class )
++        {
++            PaperSpigotWorldConfig defaults = athenaDefaults;
++
++            if ( defaults == null || defaults.config != config )
++            {
++                // kept apart from the world's own, which a reload reads again in place
++                athenaDefaults = defaults = new PaperSpigotWorldConfig( worldName );
++            }
++            try
++            {
++                PaperSpigotWorldConfig copy = (PaperSpigotWorldConfig) defaults.clone();
++
++                copy.worldName = worldName;
++                return copy;
++            } catch ( CloneNotSupportedException e )
++            {
++                return new PaperSpigotWorldConfig( worldName );
++            }
++        }
++    }
++    // Athena end
++
+     public PaperSpigotWorldConfig(String worldName)
+     {
+         this.worldName = worldName;
+diff --git a/src/main/java/org/spigotmc/AntiXray.java b/src/main/java/org/spigotmc/AntiXray.java
+index 1d8f8ac45c4279d3f9dc5ba24024966e220948aa..5e3a7c1931b4f8a9fcd05d1a60e2a865141ae364 100644
+--- a/src/main/java/org/spigotmc/AntiXray.java
++++ b/src/main/java/org/spigotmc/AntiXray.java
+@@ -17,7 +17,7 @@ public class AntiXray
+ {
+ 
+     // Used to keep track of which blocks to obfuscate
+-    private final boolean[] obfuscateBlocks = new boolean[ Short.MAX_VALUE ];
++    private final boolean[] obfuscateBlocks; // Athena - made in the constructor, or another world's
+     // Used to select a random replacement ore
+     private final byte[] replacementOres;
+     // PaperSpigot start
+@@ -26,8 +26,18 @@ public class AntiXray
+     public final it.unimi.dsi.fastutil.longs.LongOpenHashSet pendingUpdates = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+     // PaperSpigot end
+ 
++    // Athena start - a world on the same settings: its own queue of updates, the other's two tables,
++    // which are written only as they are made. The first is 32 KB.
++    public AntiXray(AntiXray same)
++    {
++        this.obfuscateBlocks = same.obfuscateBlocks;
++        this.replacementOres = same.replacementOres;
++    }
++    // Athena end
++
+     public AntiXray(SpigotWorldConfig config)
+     {
++        obfuscateBlocks = new boolean[ Short.MAX_VALUE ]; // Athena - from the field
+         // Set all listed blocks as true to be obfuscated
+         for ( int id : ( config.engineMode == 1 ) ? config.hiddenBlocks : config.replaceBlocks )
+         {
+diff --git a/src/main/java/org/spigotmc/SpigotWorldConfig.java b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+index cc4a926f24fa90d1d9d80c2b27351c0cf733a9ac..c218bc6fdd419a0a66eed564c7de0356c8055aa9 100644
+--- a/src/main/java/org/spigotmc/SpigotWorldConfig.java
++++ b/src/main/java/org/spigotmc/SpigotWorldConfig.java
+@@ -6,13 +6,57 @@ import org.bukkit.Bukkit;
+ import org.bukkit.configuration.file.YamlConfiguration;
+ 
+ 
+-public class SpigotWorldConfig
++public class SpigotWorldConfig implements Cloneable // Athena - see forWorld
+ {
+ 
+-    private final String worldName;
++    private String worldName; // Athena - not final: see forWorld
+     private final YamlConfiguration config;
+     private boolean verbose;
+ 
++    // Athena start - a world with no settings of its own takes a copy of the default ones.
++    //
++    // Reading a world's settings calls some forty methods by reflection, each of which looks its
++    // keys up under the world's name and under "default", logs the value - and then the whole file
++    // is written back to disk, for the defaults a read may have added. A server that makes a world
++    // for every match did all of that on its tick thread for every match, for this file and for
++    // PaperSpigot's: together 0.5% of a match server's CPU, at the moment a match starts. A world
++    // whose name has no section in the file can only read the defaults; the first such world
++    // reads them (and writes the file, as before), the ones after it copy what it read. A world
++    // with a section of its own is read as it always was, and so is every world on /reload.
++    private static SpigotWorldConfig athenaDefaults;
++
++    public static SpigotWorldConfig forWorld(String worldName)
++    {
++        YamlConfiguration config = SpigotConfig.config;
++
++        if ( config.isConfigurationSection( "world-settings." + worldName ) )
++        {
++            return new SpigotWorldConfig( worldName );
++        }
++        synchronized ( SpigotWorldConfig.class )
++        {
++            SpigotWorldConfig defaults = athenaDefaults;
++
++            if ( defaults == null || defaults.config != config )
++            {
++                // kept apart from the world's own, which a reload reads again in place
++                athenaDefaults = defaults = new SpigotWorldConfig( worldName );
++            }
++            try
++            {
++                SpigotWorldConfig copy = (SpigotWorldConfig) defaults.clone();
++
++                copy.worldName = worldName;
++            copy.antiXrayInstance = new AntiXray( defaults.antiXrayInstance ); // its own queue of updates
++                return copy;
++            } catch ( CloneNotSupportedException e )
++            {
++                return new SpigotWorldConfig( worldName );
++            }
++        }
++    }
++    // Athena end
++
+     public SpigotWorldConfig(String worldName)
+     {
+         this.worldName = worldName;
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldSettingsCopyTest.java b/src/test/java/net/minecraft/server/AthenaWorldSettingsCopyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8447e458e4bd7b3fee98399382023156ddb66c4
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaWorldSettingsCopyTest.java
+@@ -0,0 +1,120 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertTrue;
++
++import java.io.File;
++import java.lang.reflect.Field;
++import java.lang.reflect.Modifier;
++import java.nio.file.Files;
++import org.bukkit.configuration.file.YamlConfiguration;
++import org.bukkit.support.AbstractTestingBase;
++import org.github.paperspigot.PaperSpigotConfig;
++import org.github.paperspigot.PaperSpigotWorldConfig;
++import org.junit.Test;
++import org.spigotmc.SpigotConfig;
++import org.spigotmc.SpigotWorldConfig;
++
++/**
++ * Athena - a world with no section of its own in spigot.yml or paper.yml takes a copy of the default
++ * settings instead of reading them again (and writing the file back). The copy must hold what a
++ * read would have found, be the world's own, and a world with a section must still be read.
++ */
++public class AthenaWorldSettingsCopyTest extends AbstractTestingBase {
++
++    private static void file(Class<?> owner, File file) throws Exception {
++        Field field = owner.getDeclaredField("CONFIG_FILE");
++
++        field.setAccessible(true);
++        field.set(null, file);
++    }
++
++    /** Every setting of {@code a} and {@code b} but their names and what must be each world's own. */
++    private static void assertSameSettings(Object a, Object b) throws Exception {
++        int compared = 0;
++
++        for (Field field : a.getClass().getDeclaredFields()) {
++            if (Modifier.isStatic(field.getModifiers()) || field.getName().equals("worldName") || field.getName().equals("antiXrayInstance")) {
++                continue;
++            }
++            field.setAccessible(true);
++            assertEquals(field.getName(), field.get(a), field.get(b));
++            ++compared;
++        }
++        assertTrue(compared > 20);
++    }
++
++    /** The test server answers Server.getViewDistance, which SpigotWorldConfig reads its default from. */
++    @SuppressWarnings("unchecked")
++    private static void serverWithViewDistance() throws Exception {
++        Class<?> dummy = Class.forName("org.bukkit.support.DummyServer");
++        Class<?> handler = Class.forName("org.bukkit.support.DummyServer$MethodHandler");
++        Field methods = dummy.getDeclaredField("methods");
++
++        methods.setAccessible(true);
++        ((java.util.Map<java.lang.reflect.Method, Object>) methods.get(null)).put(org.bukkit.Server.class.getMethod("getViewDistance"),
++                java.lang.reflect.Proxy.newProxyInstance(handler.getClassLoader(), new Class<?>[] { handler }, (proxy, method, args) -> Integer.valueOf(10)));
++    }
++
++    @Test
++    public void spigotSettingsAreCopiedForAWorldWithoutASection() throws Exception {
++        File dir = Files.createTempDirectory("athena-settings").toFile();
++
++        serverWithViewDistance();
++
++        file(SpigotConfig.class, new File(dir, "spigot.yml"));
++        SpigotConfig.config = new YamlConfiguration();
++        SpigotConfig.config.options().copyDefaults(true);
++        SpigotConfig.config.set("world-settings.default.verbose", false);
++        SpigotConfig.config.set("world-settings.default.view-distance", 7);
++        SpigotConfig.config.set("world-settings.special.view-distance", 3);
++
++        SpigotWorldConfig first = SpigotWorldConfig.forWorld("match-1");
++        long written = new File(dir, "spigot.yml").length();
++        SpigotWorldConfig second = SpigotWorldConfig.forWorld("match-2");
++        SpigotWorldConfig read = new SpigotWorldConfig("match-3");
++
++        assertTrue("the first world's read wrote the file", written > 0L);
++        assertNotSame(first, second);
++        assertEquals(7, first.viewDistance);
++        assertSameSettings(read, first);
++        assertSameSettings(read, second);
++        assertNotSame("each world queues its own anti-xray updates", first.antiXrayInstance, second.antiXrayInstance);
++
++        second.viewDistance = 5; // a world's settings are its own
++        assertEquals(7, SpigotWorldConfig.forWorld("match-4").viewDistance);
++        assertEquals(7, first.viewDistance);
++
++        assertEquals("a world with a section of its own is read", 3, SpigotWorldConfig.forWorld("special").viewDistance);
++
++        // new settings (a reload): read again
++        SpigotConfig.config = new YamlConfiguration();
++        SpigotConfig.config.options().copyDefaults(true);
++        SpigotConfig.config.set("world-settings.default.verbose", false);
++        SpigotConfig.config.set("world-settings.default.view-distance", 9);
++        assertEquals(9, SpigotWorldConfig.forWorld("match-5").viewDistance);
++        assertEquals(9, SpigotWorldConfig.forWorld("match-6").viewDistance);
++    }
++
++    @Test
++    public void paperSettingsAreCopiedForAWorldWithoutASection() throws Exception {
++        File dir = Files.createTempDirectory("athena-settings").toFile();
++
++        file(PaperSpigotConfig.class, new File(dir, "paper.yml"));
++        PaperSpigotConfig.config = new YamlConfiguration();
++        PaperSpigotConfig.config.options().copyDefaults(true);
++        PaperSpigotConfig.config.set("world-settings.default.verbose", false);
++        PaperSpigotConfig.config.set("world-settings.default.container-update-tick-rate", 3);
++        PaperSpigotConfig.config.set("world-settings.special.container-update-tick-rate", 2);
++
++        PaperSpigotWorldConfig first = PaperSpigotWorldConfig.forWorld("match-1");
++        PaperSpigotWorldConfig second = PaperSpigotWorldConfig.forWorld("match-2");
++
++        assertNotSame(first, second);
++        assertEquals(3, first.containerUpdateTickRate);
++        assertSameSettings(new PaperSpigotWorldConfig("match-3"), first);
++        assertSameSettings(new PaperSpigotWorldConfig("match-3"), second);
++        assertEquals(2, PaperSpigotWorldConfig.forWorld("special").containerUpdateTickRate);
++    }
++}

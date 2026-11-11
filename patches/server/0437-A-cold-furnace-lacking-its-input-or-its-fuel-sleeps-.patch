@@ -1,0 +1,257 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 12 Nov 2026 04:29:06 +0900
+Subject: [PATCH] A cold furnace lacking its input or its fuel sleeps through
+ the world's loop
+
+Its tick changed nothing but the tick it recorded. The loop passes over it in its place in the
+list; a slot gaining an item, a load from NBT, update() or its times being set (a container, a
+plugin through CraftFurnace) wakes it, and its next tick counts one tick elapsed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/TileEntity.java b/src/main/java/net/minecraft/server/TileEntity.java
+index d6f60b3dc3f5613985db9e4baef6f2dc9765eab2..6f6063d80deb22e9987127d1e137845c367d03d7 100644
+--- a/src/main/java/net/minecraft/server/TileEntity.java
++++ b/src/main/java/net/minecraft/server/TileEntity.java
+@@ -23,6 +23,9 @@ public abstract class TileEntity {
+     protected boolean tileEntityInvalid;
+     private int blockMetadata;
+     protected Block blockType;
++    // Athena - a ticking tile entity whose tick would change nothing until something wakes it: the
++    // world's loop passes over it, in its place in the list. Only TileEntityFurnace sleeps.
++    boolean athenaAsleep;
+ 
+     public TileEntity() {
+         this.position = BlockPosition.ZERO;
+diff --git a/src/main/java/net/minecraft/server/TileEntityFurnace.java b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+index e29d138b1af61348dc20d1bd7629e8168ff8bfc2..5a0bb76cc3ee7cd5ee90395beef2001458a39959 100644
+--- a/src/main/java/net/minecraft/server/TileEntityFurnace.java
++++ b/src/main/java/net/minecraft/server/TileEntityFurnace.java
+@@ -51,6 +51,35 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+ 
+     public TileEntityFurnace() {}
+ 
++    // Athena start - a cold, empty furnace sleeps.
++    //
++    // A furnace that is not burning, is not lit and lacks its input or its fuel changes nothing on
++    // its tick: cookTime is already 0, burnTime stays 0, and the tick only records the world's tick
++    // for the next one. Most furnaces on a map are such, and every one was ticked through the
++    // world's loop - the chunk and border checks, the timer, the tick - every tick. One in that
++    // state sleeps: the loop passes over it in its place in the list. It only leaves the state by a
++    // slot gaining an item (setItem, a load from NBT), or a plugin or container setting its times,
++    // and each of those wakes it. A woken furnace's next tick counts one tick elapsed, as a furnace
++    // ticked all along would have counted.
++    private boolean athenaIdle() {
++        return this.burnTime <= 0 && this.cookTime == 0 && (this.items[0] == null || this.items[1] == null)
++                && this.world != null && this.getBlockType() != Blocks.LIT_FURNACE;
++    }
++
++    public void athenaWake() {
++        if (this.athenaAsleep) {
++            this.athenaAsleep = false;
++            this.lastTick = -1; // the next tick counts one elapsed
++        }
++    }
++
++    @Override
++    public void update() {
++        this.athenaWake();
++        super.update();
++    }
++    // Athena end
++
+     public int getSize() {
+         return this.items.length;
+     }
+@@ -92,6 +121,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+     }
+ 
+     public void setItem(int i, ItemStack itemstack) {
++        this.athenaWake(); // Athena
+         boolean flag = itemstack != null && itemstack.doMaterialsMatch(this.items[i]) && ItemStack.equals(itemstack, this.items[i]);
+ 
+         this.items[i] = itemstack;
+@@ -141,6 +171,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+         if (nbttagcompound.hasKeyOfType("CustomName", 8)) {
+             this.furnaceCustomName = nbttagcompound.getString("CustomName");
+         }
++        this.athenaWake(); // Athena
+ 
+     }
+ 
+@@ -260,6 +291,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+         if (flag1) {
+             this.update();
+         }
++        this.athenaAsleep = this.athenaIdle(); // Athena
+ 
+     }
+ 
+@@ -417,6 +449,7 @@ public class TileEntityFurnace extends TileEntityContainer implements IUpdatePla
+     }
+ 
+     public void setField(int i, int j) {
++        this.athenaWake(); // Athena
+         switch (i) {
+         case 0:
+             this.burnTime = j;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index c59d73f40c4854e48fa9fdfc6cad1b28152c03e9..b870cb6d20bf3b88d5f3a017f7b5c2bec3b19023 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -2243,6 +2243,9 @@ public abstract class World implements IBlockAccess {
+                 continue;
+             }
+             // Spigot end
++            if (tileentity.athenaAsleep && !tileentity.isInvalid()) {
++                continue; // Athena - its tick would change nothing; see TileEntityFurnace.athenaIdle
++            }
+ 
+             if (!tileentity.isInvalid() && tileentity.hasWorldObj()) {
+                 BlockPosition blockposition = tileentity.getPosition();
+diff --git a/src/main/java/org/bukkit/craftbukkit/block/CraftFurnace.java b/src/main/java/org/bukkit/craftbukkit/block/CraftFurnace.java
+index e9dc85bd56b8454c3c8012f79377151ac198ac07..b8676f3789dea419ee3fda6eeb21c87bc86a1a80 100644
+--- a/src/main/java/org/bukkit/craftbukkit/block/CraftFurnace.java
++++ b/src/main/java/org/bukkit/craftbukkit/block/CraftFurnace.java
+@@ -44,6 +44,7 @@ public class CraftFurnace extends CraftBlockState implements Furnace {
+ 
+     public void setBurnTime(short burnTime) {
+         furnace.burnTime = burnTime;
++        furnace.athenaWake(); // Athena - a sleeping furnace ticks again
+     }
+ 
+     public short getCookTime() {
+@@ -52,6 +53,7 @@ public class CraftFurnace extends CraftBlockState implements Furnace {
+ 
+     public void setCookTime(short cookTime) {
+         furnace.cookTime = cookTime;
++        furnace.athenaWake(); // Athena
+     }
+ 
+     @Override
+diff --git a/src/test/java/net/minecraft/server/AthenaFurnaceSleepTest.java b/src/test/java/net/minecraft/server/AthenaFurnaceSleepTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd5192821500563f0d6bbea515fda58034ce1c3f
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaFurnaceSleepTest.java
+@@ -0,0 +1,119 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a cold furnace lacking its input or its fuel sleeps through the world's loop, since its
++ * tick would change nothing, and whatever could start it again wakes it.
++ */
++public class AthenaFurnaceSleepTest extends AbstractTestingBase {
++
++    private static TileEntityFurnace furnace() throws Exception {
++        // the fixture world has no chunks: update() wakes, as the furnace's does, and leaves the world alone
++        TileEntityFurnace furnace = new TileEntityFurnace() {
++            @Override
++            public void update() {
++                this.athenaWake();
++            }
++        };
++
++        furnace.world = AthenaAuditFixtures.world();
++        furnace.position = new BlockPosition(0, 64, 0);
++        furnace.blockType = Blocks.FURNACE;
++        return furnace;
++    }
++
++    private static String state(TileEntityFurnace furnace) {
++        StringBuilder out = new StringBuilder();
++
++        for (int i = 0; i < 4; ++i) {
++            out.append(furnace.getProperty(i)).append(' ');
++        }
++        for (int i = 0; i < 3; ++i) {
++            out.append(furnace.getItem(i)).append(' ');
++        }
++        return out.toString();
++    }
++
++    @Test
++    public void aColdEmptyFurnaceSleepsAndItsTicksChangedNothing() throws Exception {
++        TileEntityFurnace furnace = furnace();
++        String before = state(furnace);
++
++        for (int i = 0; i < 5; ++i) {
++            furnace.world.athenaCurrentTick = 100 + i;
++            furnace.c();
++            assertEquals("an idle tick changes nothing", before, state(furnace));
++        }
++        assertTrue(furnace.athenaAsleep);
++
++        // the input alone: still nothing to do
++        furnace.setItem(0, new ItemStack(Blocks.IRON_ORE));
++        assertFalse("a slot gaining an item wakes it", furnace.athenaAsleep);
++        String withOre = state(furnace);
++
++        furnace.c();
++        assertEquals(withOre, state(furnace));
++        assertTrue("without fuel it sleeps again", furnace.athenaAsleep);
++
++        // the fuel alone, in another furnace
++        TileEntityFurnace fuelled = furnace();
++
++        fuelled.c();
++        fuelled.setItem(1, new ItemStack(Items.COAL));
++        assertFalse(fuelled.athenaAsleep);
++        fuelled.c();
++        assertTrue(fuelled.athenaAsleep);
++    }
++
++    @Test
++    public void settingItsTimesWakesIt() throws Exception {
++        TileEntityFurnace furnace = furnace();
++
++        furnace.c();
++        assertTrue(furnace.athenaAsleep);
++        furnace.setField(0, 100); // a container or a plugin setting the burn time
++        assertFalse(furnace.athenaAsleep);
++
++        TileEntityFurnace cooking = furnace();
++
++        cooking.c();
++        cooking.setField(2, 50);
++        assertFalse(cooking.athenaAsleep);
++        cooking.c();
++        assertEquals("a cold furnace drops its cook time on its next tick, as before", 0, cooking.getProperty(2));
++        assertTrue(cooking.athenaAsleep);
++    }
++
++    @Test
++    public void aFurnaceWithBothOrBurningDoesNotSleep() throws Exception {
++        TileEntityFurnace lit = furnace();
++
++        lit.blockType = Blocks.LIT_FURNACE;
++        lit.burnTime = 0;
++        assertFalse("a lit block goes out on its tick", sleepsAfterSettingUp(lit));
++
++        TileEntityFurnace both = furnace();
++
++        both.c();
++        both.setItem(0, new ItemStack(Blocks.STONE)); // nothing smelts from it
++        both.setItem(1, new ItemStack(Items.COAL));
++        both.c();
++        assertFalse("input and fuel: it keeps ticking", both.athenaAsleep);
++        assertNull(both.getItem(2));
++    }
++
++    /** Whether the furnace's state is the idle one, without ticking it (a lit block's tick changes the world). */
++    private static boolean sleepsAfterSettingUp(TileEntityFurnace furnace) throws Exception {
++        java.lang.reflect.Method idle = TileEntityFurnace.class.getDeclaredMethod("athenaIdle");
++
++        idle.setAccessible(true);
++        return (Boolean) idle.invoke(furnace);
++    }
++}

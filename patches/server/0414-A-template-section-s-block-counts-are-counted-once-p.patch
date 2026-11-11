@@ -1,0 +1,193 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 9 Nov 2026 23:43:41 +0900
+Subject: [PATCH] A template section's block counts are counted once per store
+
+Every load of a mapped template section recounted its 4096 blocks through MemorySegment: 16% of all CPU on 8 rooms of bots, on the chunk IO threads, for counts that cannot change. The store now keeps each packed or raw section's counts after the first load, and the loader skips recalcBlockCounts when the store set them. The ticking bitmap is copied per section.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index 5b75345d4b5e86b032f0e50e3172c0c75dedf821..290250db0c58167f7c79af6f99d2e039fb001ae3 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -107,6 +107,9 @@ final class AthenaSectionStore {
+     // Athena - payload validation is lazy and shared by every world using this immutable mapping.
+     // One bit per section avoids scanning its packed bytes again on the next chunk load.
+     private volatile java.util.concurrent.atomic.AtomicIntegerArray validatedPackedSections;
++    // Athena - each packed or raw section's counts once some load has counted them (ChunkSection.AthenaCounts),
++    // by chunk index * 16 + section y. Shared, like the mapping, by every world on this template.
++    private volatile java.util.concurrent.atomic.AtomicReferenceArray<ChunkSection.AthenaCounts> counts;
+ 
+     private AthenaSectionStore(MemorySegment mapping, long[] keys, long entries) {
+         this.mapping = mapping;
+@@ -391,9 +394,34 @@ final class AthenaSectionStore {
+         if (sky) {
+             section.setSkylightArray(this.light(skyLight));
+         }
++        if (kind(ids) != KIND_UNIFORM) { // a uniform section counts itself without a block read
++            this.applyCounts(index * 16 + sectionY, section);
++        }
+         return true;
+     }
+ 
++    private void applyCounts(int slot, ChunkSection section) {
++        java.util.concurrent.atomic.AtomicReferenceArray<ChunkSection.AthenaCounts> counts = this.counts;
++
++        if (counts == null) {
++            synchronized (this) {
++                counts = this.counts;
++                if (counts == null) {
++                    this.counts = counts = new java.util.concurrent.atomic.AtomicReferenceArray<ChunkSection.AthenaCounts>(this.keys.length * 16);
++                }
++            }
++        }
++        ChunkSection.AthenaCounts known = counts.get(slot);
++
++        if (known == null) {
++            section.recalcBlockCounts(); // from the mapped ids just set
++            counts.set(slot, section.athenaCounts()); // two loaders racing count the same blocks
++            section.athenaMarkCountsKnown();
++            return;
++        }
++        section.athenaSetCounts(known);
++    }
++
+     // one per thread that reads chunks: the chunk IO threads and the server thread
+     private static final ThreadLocal<java.util.zip.Inflater> INFLATER = ThreadLocal.withInitial(java.util.zip.Inflater::new);
+ 
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index c0a97e41b4a0e2a73c8e82f502e88a0fa7ae78f8..42cc670fe955a3112cce1ba93563d5cc0215f77a 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -427,7 +427,9 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+             }
+             // Athena end
+ 
+-            chunksection.recalcBlockCounts();
++            if (!chunksection.athenaTakeCountsKnown()) { // Athena - a template section's store may already know them
++                chunksection.recalcBlockCounts();
++            }
+             // Athena - an air section that reads exactly as no section at all is left out
+             if (flag && athenaReadsAsMissing(chunksection, chunk.heightMap)) {
+                 continue;
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 4beebcfbc0b14c482098ca13b4aca9807d67bc03..addbc7af2b7080fccd87c97f49d2f3f6c80d4b47 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -732,6 +732,65 @@ public class ChunkSection {
+         this.mappedIds = mapping;
+     }
+ 
++    // Athena start - a template section's counts, kept by its store. The store's ids never change, so
++    // every load of the same section - every room on the same map, and every reload after an unload -
++    // would count the same 4096 mapped blocks again. On 8 rooms of bots that recount, read through
++    // MemorySegment, was 16% of all CPU, on the chunk IO threads. The first load counts and gives the
++    // store the result; later ones take it. The ticking bitmap is copied: a section changes its own.
++    static final class AthenaCounts {
++        final int nonEmpty, ticking, water, lava, fire, collision;
++        final long[] tickingBits; // null when nothing ticks
++
++        AthenaCounts(ChunkSection section) {
++            this.nonEmpty = section.nonEmptyBlockCount;
++            this.ticking = section.tickingBlockCount;
++            this.water = section.waterCount;
++            this.lava = section.lavaCount;
++            this.fire = section.fireCount;
++            this.collision = section.collisionHandlerCount;
++            this.tickingBits = section.tickingBlockCount > 0 && section.tickingBits != null ? section.tickingBits.clone() : null;
++        }
++    }
++
++    // set by the store when the counts are already right; the loader then skips recalcBlockCounts
++    private boolean athenaCountsKnown;
++
++    AthenaCounts athenaCounts() {
++        return new AthenaCounts(this);
++    }
++
++    /** The counts recalcBlockCounts would have found, as it would have left them. */
++    void athenaSetCounts(AthenaCounts counts) {
++        ++this.modCount; // as after a recount
++        this.nonEmptyBlockCount = counts.nonEmpty;
++        this.tickingBlockCount = counts.ticking;
++        this.waterCount = counts.water;
++        this.lavaCount = counts.lava;
++        this.fireCount = counts.fire;
++        this.collisionHandlerCount = counts.collision;
++        if (counts.tickingBits != null) {
++            this.tickingBits = counts.tickingBits.clone();
++        } else if (this.tickingBits != null) {
++            java.util.Arrays.fill(this.tickingBits, 0L);
++        }
++        this.athenaCountsKnown = true;
++        this.notifyTickingOwner();
++    }
++
++    /** The counts were just recounted: the loader need not count them again. */
++    void athenaMarkCountsKnown() {
++        this.athenaCountsKnown = true;
++    }
++
++    /** Whether the store set the counts; true once, for the load that asks. */
++    boolean athenaTakeCountsKnown() {
++        boolean known = this.athenaCountsKnown;
++
++        this.athenaCountsKnown = false;
++        return known;
++    }
++    // Athena end
++
+     /** Whether the ids are still read from a mapped store; for tests and the audit. */
+     boolean isMapped() {
+         return this.blockIds == null && this.packedIds == null;
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 7e8e43caa33f555fcbea31b83da4407838d51deb..8fd913b7b496c68e078b3dde23e3f67eac60bfbf 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -266,6 +266,47 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         assertEquals(where, counts(section), byTable);
+     }
+ 
++    /**
++     * The second load of a mapped section takes the counts the first one found, and they are what a
++     * recount finds; the loader is told once to skip its recount; and one copy's ticking bitmap is
++     * its own.
++     */
++    @Test
++    public void aSecondLoadTakesTheCountsTheFirstFound() throws Exception {
++        File dir = template(5L);
++        AthenaSectionStore store = built(dir);
++        int reused = 0;
++
++        for (int x = 0; x < 32; x += 7) {
++            for (int z = 0; z < 32; z += 9) {
++                for (int y = 0; y < 16; ++y) {
++                    ChunkSection first = new ChunkSection(y << 4, true);
++
++                    if (!store.apply(-32 + x, z, y, first, true) || !first.isMapped()) {
++                        continue;
++                    }
++                    assertTrue("the first load counted", first.athenaTakeCountsKnown());
++                    assertFalse("and says so once", first.athenaTakeCountsKnown());
++                    String counted = counts(first);
++
++                    ChunkSection second = new ChunkSection(y << 4, true);
++
++                    assertTrue(store.apply(-32 + x, z, y, second, true));
++                    assertTrue(second.athenaTakeCountsKnown());
++                    assertEquals("taken counts", counted, counts(second));
++                    second.recalcBlockCounts();
++                    assertEquals("are a recount's", counted, counts(second));
++                    if (second.tickingBits != null && second.tickingBits != first.tickingBits) {
++                        java.util.Arrays.fill(second.tickingBits, 0L);
++                        assertEquals("one copy's bitmap is its own", counted, counts(first));
++                    }
++                    ++reused;
++                }
++            }
++        }
++        assertTrue("mapped sections were loaded twice", reused > 0);
++    }
++
+     @Test
+     public void theCountsFromTheStateTableMatchACountByBlock() throws Exception {
+         File dir = template(3L);
