@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 11 Nov 2026 19:44:54 +0900
+Subject: [PATCH] athena.yml playerStatistics: false keeps no statistics for
+ players
+
+Every tick each player counted time played and time since death, and each
+move the distance walked, flown or swum: a lookup and a wrapper in the
+statistics file each, with nothing to show for it on a minigame server that
+neither saves statistics nor announces achievements. Off, a player keeps none,
+as a bot already keeps none; the objectives that count a statistic still count
+it. The default keeps them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/athena/server/AthenaConfig.java b/src/main/java/athena/server/AthenaConfig.java
+index a5b888884f91771c5ece8fbb6ddaf7d263fcd595..d7c01d83eb9739b930718db96aa2493677c5253d 100644
+--- a/src/main/java/athena/server/AthenaConfig.java
++++ b/src/main/java/athena/server/AthenaConfig.java
+@@ -237,6 +237,8 @@ public class AthenaConfig {
+         // how long a tick may spend finishing chunk loads, and unloading (saving) chunks
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.setFinishBudgetMillis(config.chunkLoadFinishMillisPerTick);
+         net.minecraft.server.ChunkProviderServer.setUnloadBudgetMillis(config.chunkUnloadMillisPerTick);
++        // whether players keep statistics
++        net.minecraft.server.EntityPlayer.athenaSetStatistics(config.playerStatistics);
+         // how long a world on its own thread may go without a tick before the watchdog reports it
+         net.minecraft.server.AthenaWorldThread.setStallMillis(config.worldThreadStallSeconds * 1000L);
+         // the guard's switches
+@@ -316,6 +318,14 @@ public class AthenaConfig {
+         "Default: 10")
+     public int worldThreadStallSeconds = 10;
+ 
++    @Comment("Keep players' statistics (distance walked, time played, kills...) and achievements. They are\n" +
++        "counted every tick for every player. false keeps none: the client's statistics and achievements\n" +
++        "screens stay as they were, no achievement is awarded, and PlayerStatisticIncrementEvent and\n" +
++        "PlayerAchievementAwardedEvent are not called. Scoreboard objectives on a statistic's criteria\n" +
++        "still count. A minigame with stats.disable-saving in spigot.yml loses nothing it keeps.\n" +
++        "Default: true")
++    public boolean playerStatistics = true;
++
+     @Comment("Server-authoritative checks on what players report. The server decides where a player\n" +
+         "can be and whom they can hit: moves no unmodified client could make are set back, hits\n" +
+         "that could not land are dropped, and fall damage and critical hits follow the ground the\n" +
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 942bbba424d75b4adf8129e903c1601949160c8d..77b05d870d4539a51f9546a80f83dcdca775ce04 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -525,7 +525,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+                 this.playerConnection.sendPacket(new PacketPlayOutExperience(this.exp, this.expTotal, this.expLevel));
+             }
+ 
+-            if (this.ticksLived % 20 * 5 == 0 && !(this instanceof AthenaBotPlayer) && !this.getStatisticManager().hasAchievement(AchievementList.exploreAllBiomes)) { // Athena - a bot keeps no statistics
++            if (this.ticksLived % 20 * 5 == 0 && !(this instanceof AthenaBotPlayer) && athenaStatistics && !this.getStatisticManager().hasAchievement(AchievementList.exploreAllBiomes)) { // Athena - a bot keeps no statistics
+                 this.updateBiomesExplored();
+             }
+ 
+@@ -1034,8 +1034,37 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+ 
+     }
+ 
++    // Athena start - athena.yml playerStatistics: false keeps no statistics for players, as a bot keeps
++    // none (AthenaBotPlayer): the walked, flown, played-time counters went up every tick for each
++    // player, each a map lookup and a wrapper in the statistics file. The objectives that count a
++    // statistic still count it. What goes is the client's statistics screen, achievements, and the
++    // PlayerStatisticIncrementEvent and PlayerAchievementAwardedEvent that come with them.
++    static boolean athenaStatistics = true;
++
++    public static void athenaSetStatistics(boolean enabled) {
++        athenaStatistics = enabled;
++    }
++
++    private void athenaCountObjectives(Statistic statistic, int i, boolean add) {
++        java.util.Collection<ScoreboardObjective> objectives = this.getScoreboard().getObjectivesForCriteria(statistic.getCriteria());
++
++        if (!objectives.isEmpty()) {
++            for (ScoreboardObjective objective : objectives) {
++                ScoreboardScore score = this.getScoreboard().getPlayerScoreForObjective(this.getName(), objective);
++
++                if (add) {
++                    score.addScore(i);
++                } else {
++                    score.setScore(0);
++                }
++            }
++        }
++    }
++    // Athena end
++
+     public void addStat(Statistic statistic, int i) {
+         if (statistic != null) {
++            if (!athenaStatistics) { this.athenaCountObjectives(statistic, i, true); return; } // Athena
+             this.statsFile.increaseStat(this, statistic, i);
+             Iterator iterator = this.getScoreboard().getObjectivesForCriteria(statistic.getCriteria()).iterator();
+ 
+@@ -1054,6 +1083,7 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+ 
+     public void a(Statistic statistic) {
+         if (statistic != null) {
++            if (!athenaStatistics) { this.athenaCountObjectives(statistic, 0, false); return; } // Athena
+             this.statsFile.setStatistic(this, statistic, 0);
+             Iterator iterator = this.getScoreboard().getObjectivesForCriteria(statistic.getCriteria()).iterator();
+ 

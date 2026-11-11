@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 11 Nov 2026 17:16:15 +0900
+Subject: [PATCH] A plugin's scoreboard sends its packets to its own players
+ only
+
+Each score and team change of a scoreboard walked every player online and
+looked up each one's board, to find the few shown this one: with a board for
+every player or every room, that grows with the square of the players. A
+scoreboard from getNewScoreboard now keeps the players it is shown to, with the
+manager's map of players' boards; the main scoreboard walks everyone as before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/ScoreboardServer.java b/src/main/java/net/minecraft/server/ScoreboardServer.java
+index fd61a6350a9ae31900ffd72361acc2e30c7a612e..8385f71fba474798dc43cd52bd1af833aa7cd79e 100644
+--- a/src/main/java/net/minecraft/server/ScoreboardServer.java
++++ b/src/main/java/net/minecraft/server/ScoreboardServer.java
+@@ -15,6 +15,13 @@ public class ScoreboardServer extends Scoreboard {
+     private final Set<ScoreboardObjective> b = Sets.newHashSet();
+     private PersistentScoreboard scoreboardSaveData;
+ 
++    // Athena - the players shown this scoreboard, for a plugin's (CraftScoreboardManager.getNewScoreboard);
++    // null for the main one, which is everyone without a board of their own. Kept by
++    // CraftScoreboardManager with its map of players' boards, so that a packet of this board walks its
++    // own players instead of the whole server's: with a board per player or per room, every score and
++    // team change walked every player online and looked up each one's board.
++    public java.util.Set<org.bukkit.craftbukkit.entity.CraftPlayer> athenaViewers;
++
+     public ScoreboardServer(MinecraftServer minecraftserver) {
+         this.scoreboardMCServer = minecraftserver;
+     }
+@@ -221,6 +228,19 @@ public class ScoreboardServer extends Scoreboard {
+ 
+     // CraftBukkit start - Send to players
+     private void sendAll(Packet packet) {
++        // Athena start - a plugin's board: only its own players; see athenaViewers
++        java.util.Set<org.bukkit.craftbukkit.entity.CraftPlayer> viewers = this.athenaViewers;
++        if (viewers != null) {
++            for (org.bukkit.craftbukkit.entity.CraftPlayer viewer : viewers) {
++                EntityPlayer entityplayer = viewer.getHandle();
++                // as below: the board the player is shown now, should it have changed meanwhile
++                if (entityplayer.playerConnection != null && viewer.getScoreboard().getHandle() == this) {
++                    entityplayer.playerConnection.sendPacket(packet);
++                }
++            }
++            return;
++        }
++        // Athena end
+         for (EntityPlayer entityplayer : (List<EntityPlayer>) this.scoreboardMCServer.getPlayerList().players) {
+             if (entityplayer.getBukkitEntity().getScoreboard().getHandle() == this) {
+                 entityplayer.playerConnection.sendPacket(packet);
+diff --git a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+index b713d1ca060e452b0bd846d6e88400ab93530587..1a4af17c401b0d9e3f43190f43fe1b01d1c10ec4 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
++++ b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScoreboardManager.java
+@@ -52,7 +52,9 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+ 
+     public CraftScoreboard getNewScoreboard() {
+         // Athena - from any thread: the list is guarded by LOCK
+-        CraftScoreboard scoreboard = new CraftScoreboard(new ScoreboardServer(server));
++        ScoreboardServer handle = new ScoreboardServer(server);
++        handle.athenaViewers = java.util.concurrent.ConcurrentHashMap.newKeySet(); // Athena - see ScoreboardServer.athenaViewers
++        CraftScoreboard scoreboard = new CraftScoreboard(handle);
+         // PandaSpigot start
+         if (com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().trackPluginScoreboards) {
+             scoreboard.registeredGlobally = true;
+@@ -87,10 +89,16 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+             return;
+         }
+ 
++        // Athena - the boards' players follow the map; one player's changes in order
++        synchronized (player) {
++        CraftScoreboard previous;
+         if (scoreboard == mainScoreboard) {
+-            playerBoards.remove(player);
++            previous = playerBoards.remove(player);
+         } else {
+-            playerBoards.put(player, (CraftScoreboard) scoreboard);
++            previous = playerBoards.put(player, (CraftScoreboard) scoreboard);
++            athenaAddViewer(scoreboard, player);
++        }
++        if (previous != null && previous != scoreboard) athenaRemoveViewer(previous, player);
+         }
+ 
+         // Old objective tracking
+@@ -116,8 +124,27 @@ public final class CraftScoreboardManager implements ScoreboardManager {
+ 
+     // CraftBukkit method
+     public void removePlayer(Player player) {
+-        playerBoards.remove(player);
++        synchronized (player) { // Athena - see setPlayerBoard
++        CraftScoreboard previous = playerBoards.remove(player);
++        if (previous != null) athenaRemoveViewer(previous, (CraftPlayer) player);
++        }
++    }
++
++    // Athena start - see ScoreboardServer.athenaViewers
++    private static void athenaAddViewer(CraftScoreboard board, CraftPlayer player) {
++        if (board.getHandle() instanceof ScoreboardServer) {
++            java.util.Set<CraftPlayer> viewers = ((ScoreboardServer) board.getHandle()).athenaViewers;
++            if (viewers != null) viewers.add(player);
++        }
++    }
++
++    private static void athenaRemoveViewer(CraftScoreboard board, CraftPlayer player) {
++        if (board.getHandle() instanceof ScoreboardServer) {
++            java.util.Set<CraftPlayer> viewers = ((ScoreboardServer) board.getHandle()).athenaViewers;
++            if (viewers != null) viewers.remove(player);
++        }
+     }
++    // Athena end
+ 
+     // CraftBukkit method
+     public Collection<ScoreboardScore> getScoreboardScores(IScoreboardCriteria criteria, String name, Collection<ScoreboardScore> collection) {

@@ -57,6 +57,7 @@ p.add_argument("--timeout", type=float, default=3600)
 p.add_argument("--sg", default=None)               # the SurvivalGames jar (rooms): the real plugin instead of MatchSim
 p.add_argument("--freeze", action="append", default=[])   # ROOM:MS@SECONDS, with --sg
 p.add_argument("--team-size", type=int, default=None)    # with --sg: 2 for duos (default: the config's)
+p.add_argument("--jfr", action="store_true")                # a flight recording (1 ms execution samples) as sg.jfr in the output
 p.add_argument("--conf", default="sg1")                    # ArcanaServers vps-b/<conf>: sg2 plays duos and the tournament in arenas
 a = p.parse_args()
 CONF = "/Users/glacier/Documents/Minecraft/developments/ArcanaServers/vps-b/" + a.conf
@@ -175,8 +176,9 @@ if GC or a.jit is not None:
     if a.jit is not None: sed += ["-e 's/-XX:TieredStopAtLevel=1/%s/'" % a.jit]
     ssh("sed %s /opt/mc/start-small.sh > %s && chmod 755 %s && chown mc:mc %s" % (" ".join(sed), SCRIPT, SCRIPT, SCRIPT))
     print("  flags: " + ssh("sed -n '/^FLAGS=(/,/^)/p' %s | tr -s ' \\n' ' '" % SCRIPT).strip(), flush=True)
-START = ("cd %s && : > console.out && ATHENA_CACHE_ROOT=%s HEAP=%s JAVA_TOOL_OPTIONS=-Xlog:gc:file=gc.log:uptime "
-         "%s 2>&1 | tee -a console.out") % (D, CACHE, a.heap, SCRIPT)
+START = ("cd %s && : > console.out && ATHENA_CACHE_ROOT=%s HEAP=%s JAVA_TOOL_OPTIONS=%s "
+         "%s 2>&1 | tee -a console.out") % (D, CACHE, a.heap, json.dumps("-Xlog:gc:file=gc.log:uptime" + (
+    " -XX:StartFlightRecording=filename=sg.jfr,settings=profile,jdk.ExecutionSample#period=1ms" if a.jfr else "")), SCRIPT)
 
 
 def start():
@@ -250,7 +252,7 @@ time.sleep(2)
 ssh("kill $(cat /root/simbench-sampler.pid) 2>/dev/null; true", check=False)
 clean = stop_server()
 tunnel.terminate()
-for f in ("console.out", "gc.log", "plugins/SgWatch/ticks.csv" if a.sg else "plugins/MatchSim/ticks.csv"):
+for f in ("console.out", "gc.log", "sg.jfr" if a.jfr else "gc.log", "plugins/SgWatch/ticks.csv" if a.sg else "plugins/MatchSim/ticks.csv"):
     subprocess.run(["scp", "-q", "%s:%s/%s" % (H, D, f), OUT])
 subprocess.run(["scp", "-q", "%s:/root/simbench-samples.txt" % H, os.path.join(OUT, "samples.txt")])
 print("server stopped %s; box now: %s" % ("cleanly" if clean else "by kill", ssh("free -m | sed -n 2p").strip()), flush=True)

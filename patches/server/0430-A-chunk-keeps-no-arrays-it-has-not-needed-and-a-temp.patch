@@ -1,0 +1,495 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 11 Nov 2026 17:16:15 +0900
+Subject: [PATCH] A chunk keeps no arrays it has not needed, and a template's
+ worlds share its heights and biomes
+
+The entity counts, the bucket index and its pads were ten arrays, 0.7 KB, for
+every chunk, and most of a map's chunks never hold an entity: they are the
+shared, never written empty ones until the first entity enters. A player chunk
+makes its list of changed blocks with the first change.
+
+A chunk read from a template's store takes the heights and biomes another
+world on that template already holds for it, 1.3 KB a chunk that every world
+read into arrays of its own. They are held weakly by the store, as the
+packets are. The first write in a world - a relight, a biome set, any caller of
+getHeightMap or getBiomeIndex, which may write - gives that world's chunk
+arrays of its own; the readers in the server read them through athenaHeights
+and athenaBiomes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index d16534a382537da167b4778c264dd5b2d99669dc..c292a975805a179bbb364ac181136b8b91c1cb1e 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -161,7 +161,7 @@ final class AthenaChunkPacketCache {
+         if (slot >= 0) {
+             Payload shared = store.sharedPacket(slot);
+ 
+-            if (shared != null && shared.presentMask == present && Arrays.equals(shared.biomes, chunk.getBiomeIndex())) {
++            if (shared != null && shared.presentMask == present && Arrays.equals(shared.biomes, chunk.athenaBiomes())) {
+                 this.biomes = shared.biomes;
+                 this.payload = shared;
+                 this.dataChecksum = shared.dataChecksum;
+@@ -170,7 +170,7 @@ final class AthenaChunkPacketCache {
+             }
+         }
+ 
+-        byte[] biomes = chunk.getBiomeIndex().clone();
++        byte[] biomes = chunk.athenaBiomes().clone();
+         PacketPlayOutMapChunk.ChunkMap map = PacketPlayOutMapChunk.getExtractedData(chunk, true, sky, FULL_MASK);
+         // only the audit reads it, and a CRC of ~60 KB on every rebuild is not free
+         Payload built = new Payload(present, biomes, map, AthenaIndexAudit.enabled() ? checksum(map.data) : 0L);
+@@ -215,7 +215,7 @@ final class AthenaChunkPacketCache {
+ 
+     /** Whether this was built from exactly the chunk's current contents. */
+     boolean matches(Chunk chunk) {
+-        return this.matchesSections(chunk) && Arrays.equals(this.biomes, chunk.getBiomeIndex());
++        return this.matchesSections(chunk) && Arrays.equals(this.biomes, chunk.athenaBiomes());
+     }
+ 
+     /** The uncompressed data while it is still held, for a packet that may have to fall back to it. */
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index bc6853611f48cea2ae7878704507c52572b37f35..c804b6148c3d58b5de47cdbe7cd573f51161e90f 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -493,6 +493,59 @@ final class AthenaSectionStore {
+     }
+     // Athena end
+ 
++    // Athena start - the heights and biomes of this template's chunks; see Chunk.athenaShareTemplateArrays.
++    //
++    // Held weakly, like the packets: an array lives as long as a chunk of some world has it, and a
++    // store kept between matches keeps none. By chunk index * 2, + 1 for the biomes.
++    private volatile java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<Object>> templateArrays;
++
++    /** Gives {@code chunk}, just read from this store, the heights and biomes the other worlds on it use. */
++    void shareTemplateArrays(int chunkX, int chunkZ, Chunk chunk) {
++        int index = Arrays.binarySearch(this.keys, key(chunkX, chunkZ));
++
++        if (index < 0) {
++            return;
++        }
++        java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<Object>> arrays = this.templateArrays;
++
++        if (arrays == null) {
++            synchronized (this) {
++                arrays = this.templateArrays;
++                if (arrays == null) {
++                    this.templateArrays = arrays = new java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<Object>>(this.keys.length * 2);
++                }
++            }
++        }
++        int[] heights = (int[]) shareArray(arrays, index * 2, chunk.athenaHeights());
++        byte[] biomes = (byte[]) shareArray(arrays, index * 2 + 1, chunk.athenaBiomes());
++
++        chunk.athenaShareTemplateArrays(heights, biomes);
++    }
++
++    /** The array the other worlds use for this slot when it holds the same values as {@code mine}; else {@code mine}, offered to them. */
++    private static Object shareArray(java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<Object>> arrays, int slot, Object mine) {
++        WeakReference<Object> offered = null;
++
++        for (;;) {
++            WeakReference<Object> reference = arrays.get(slot);
++            Object shared = reference == null ? null : reference.get();
++
++            if (shared != null) {
++                // the same store gives the same values; compared all the same, so nothing but an equal array is ever taken
++                boolean same = mine instanceof int[] ? Arrays.equals((int[]) shared, (int[]) mine) : Arrays.equals((byte[]) shared, (byte[]) mine);
++
++                return same ? shared : mine;
++            }
++            if (offered == null) {
++                offered = new WeakReference<Object>(mine);
++            }
++            if (arrays.compareAndSet(slot, reference, offered)) {
++                return mine;
++            }
++        }
++    }
++    // Athena end
++
+     private void applyCounts(int slot, ChunkSection section) {
+         java.util.concurrent.atomic.AtomicReferenceArray<ChunkSection.AthenaCounts> counts = this.counts;
+ 
+diff --git a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+index 28a807376f2bb171e7592cd21ef168540efd8344..e3a1dbb78bce1b9496112a5ff04418e924d97f2c 100644
+--- a/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
++++ b/src/main/java/net/minecraft/server/AthenaTemplateChunkLoader.java
+@@ -57,6 +57,14 @@ final class AthenaTemplateChunkLoader extends ChunkRegionLoader {
+         return applied;
+     }
+ 
++    @Override
++    protected void athenaShareTemplateArrays(int chunkX, int chunkZ, Chunk chunk) {
++        // only a chunk read from the store: the store is what the worlds on this template share
++        if (this.store != null && Boolean.TRUE.equals(this.readingStore.get())) {
++            this.store.shareTemplateArrays(chunkX, chunkZ, chunk);
++        }
++    }
++
+     private synchronized AthenaTemplateRegion region(int chunkX, int chunkZ) throws IOException {
+         if (this.closed) {
+             return MISSING;
+diff --git a/src/main/java/net/minecraft/server/Chunk.java b/src/main/java/net/minecraft/server/Chunk.java
+index 3672cea559a0701985629e7ebfe9b86522b0185f..17e1f717725ce2545e1539546f2907c8aabffeff 100644
+--- a/src/main/java/net/minecraft/server/Chunk.java
++++ b/src/main/java/net/minecraft/server/Chunk.java
+@@ -52,7 +52,7 @@ public class Chunk {
+         }
+     }
+     // Athena end
+-    private final byte[] blockBiomeArray;
++    private byte[] blockBiomeArray; // Athena - may be a template's, shared until written; see athenaOwnBiomes
+     // Athena - both made when first written. A kilobyte and a quarter for every chunk, and neither
+     // is touched in most: the precipitation heights are asked for in the chunks ticked around
+     // players, the columns are marked where a block change moves the sky light. A match's arena
+@@ -62,7 +62,57 @@ public class Chunk {
+     private boolean[] updateSkylightColumns;
+     private boolean isChunkLoaded;
+     public final World world;
+-    public final int[] heightMap;
++    public int[] heightMap; // Athena - may be a template's, shared until written; see athenaOwnHeights
++    // Athena start - a template world's chunks take the heights and biomes their store already holds
++    // for that chunk (athenaShareTemplateArrays): every world made from a template read the same 1.3 KB
++    // into arrays of its own, for each of a match's thousand-odd chunks, and nearly all are never
++    // written. The first write in a world gives that world's chunk arrays of its own. Code outside this
++    // class that may write them asks for them through getHeightMap and getBiomeIndex, which do that; the
++    // readers here and athenaHeights/athenaBiomes read the shared ones as they are.
++    private boolean athenaHeightsShared;
++    private boolean athenaBiomesShared;
++
++    void athenaShareTemplateArrays(int[] heights, byte[] biomes) {
++        if (heights != null && heights.length == 256) {
++            this.heightMap = heights;
++            this.athenaHeightsShared = true;
++        }
++        if (biomes != null && biomes.length == 256) {
++            this.blockBiomeArray = biomes;
++            this.athenaBiomesShared = true;
++        }
++    }
++
++    private int[] athenaOwnHeights() {
++        if (this.athenaHeightsShared) {
++            this.heightMap = this.heightMap.clone();
++            this.athenaHeightsShared = false;
++        }
++        return this.heightMap;
++    }
++
++    private byte[] athenaOwnBiomes() {
++        if (this.athenaBiomesShared) {
++            this.blockBiomeArray = this.blockBiomeArray.clone();
++            this.athenaBiomesShared = false;
++        }
++        return this.blockBiomeArray;
++    }
++
++    /** The heights, to read only: they may be shared with other worlds' chunks. */
++    public int[] athenaHeights() {
++        return this.heightMap;
++    }
++
++    /** The biome ids, to read only: they may be shared with other worlds' chunks. */
++    public byte[] athenaBiomes() {
++        return this.blockBiomeArray;
++    }
++
++    boolean athenaSharesTemplateArrays() {
++        return this.athenaHeightsShared || this.athenaBiomesShared;
++    }
++    // Athena end
+     public final int locX;
+     public final int locZ;
+     private boolean isGapLightingUpdated;
+@@ -129,26 +179,30 @@ public class Chunk {
+     // A bucket is (x << 2) | z, both clamped into the chunk exactly as before; the Z rows are
+     // four blocks deep, so an entity crosses one a quarter as often as it crosses an X column.
+     private static final int BUCKET_THRESHOLD = 24;
+-    private final List<Entity>[][] entityBuckets = (List<Entity>[][]) new List[16][];
+-    private final int[] bucketPadX = new int[16];
+-    private final int[] bucketPadZ = new int[16];
++    // Athena - these and the counts below are the shared, never written NO_* until the chunk needs
++    // its own: most of a map's chunks never hold an entity, and the ten arrays were 0.7 KB a chunk
++    private static final int[] NO_COUNTS = new int[16];
++    private static final List<Entity>[][] NO_BUCKETS = (List<Entity>[][]) new List[16][];
++    private List<Entity>[][] entityBuckets = NO_BUCKETS;
++    private int[] bucketPadX = NO_COUNTS;
++    private int[] bucketPadZ = NO_COUNTS;
+     // Athena end
+     // PaperSpigot start - track the number of minecarts and items
+     // Keep this synced with entitySlices.add() and entitySlices.remove()
+-    private final int[] itemCounts = new int[16];
+-    private final int[] inventoryEntityCounts = new int[16];
++    private int[] itemCounts = NO_COUNTS; // Athena - see NO_COUNTS
++    private int[] inventoryEntityCounts = NO_COUNTS; // Athena - see NO_COUNTS
+     // PaperSpigot end
+     // Athena - two more of the same counts, for the two things mobs spend their time looking for
+     // and rarely find. See AthenaMonsterOnly.
+-    private final int[] monsterCounts = new int[16];
+-    private final int[] playerCounts = new int[16];
++    private int[] monsterCounts = NO_COUNTS; // Athena - see NO_COUNTS
++    private int[] playerCounts = NO_COUNTS; // Athena - see NO_COUNTS
+     // Athena - and one for the entity half of World.getCubes; see Entity.hasCollisionBoundingBox
+-    private final int[] collisionBoxCounts = new int[16];
++    private int[] collisionBoxCounts = NO_COUNTS; // Athena - see NO_COUNTS
+     // Athena - and one for EntityLiving.collideWithNearbyEntities, which discards every living
+     // collision on half of its ticks and so only needs to run its query on those ticks if something
+     // that is not living is nearby. An EntityEnderDragon counts here even though it is living: its
+     // parts are not, and getEntitiesWithinAABBForEntity puts them in the result on their own.
+-    private final int[] nonLivingCounts = new int[16];
++    private int[] nonLivingCounts = NO_COUNTS; // Athena - see NO_COUNTS
+     private boolean done;
+     private boolean lit;
+     private boolean p; public boolean hasTicked() { return this.p; } // PandaSpigot - OBFHELPER
+@@ -386,6 +440,7 @@ public class Chunk {
+         int i = this.getTopFilledSegment();
+ 
+         this.heightMapMinimum = Integer.MAX_VALUE;
++        this.athenaOwnHeights(); // Athena - written below
+ 
+         for (int j = 0; j < 16; ++j) {
+             int k = 0;
+@@ -527,7 +582,7 @@ public class Chunk {
+ 
+         if (i1 != l) {
+             this.world.markBlocksDirtyVertical(i + this.locX * 16, k + this.locZ * 16, i1, l);
+-            this.heightMap[k << 4 | i] = i1;
++            this.athenaOwnHeights()[k << 4 | i] = i1; // Athena - a world's own from its first change
+             int j1 = this.locX * 16 + i;
+             int k1 = this.locZ * 16 + k;
+             int l1;
+@@ -956,10 +1011,28 @@ public class Chunk {
+         }
+     }
+ 
++    // Athena - the counts of a chunk's first entity
++    private void athenaOwnCounts() {
++        if (this.itemCounts == NO_COUNTS) {
++            this.itemCounts = new int[16];
++            this.inventoryEntityCounts = new int[16];
++            this.monsterCounts = new int[16];
++            this.playerCounts = new int[16];
++            this.collisionBoxCounts = new int[16];
++            this.nonLivingCounts = new int[16];
++        }
++    }
++
+     /** Builds (or rebuilds) the bucket index of one slice from the slice itself. */
+     private void buildBuckets(int slice) {
+         List<Entity>[] buckets = (List<Entity>[]) new List[16]; // Athena - 4 x 4
+ 
++        if (this.entityBuckets == NO_BUCKETS) { // Athena - the chunk's first index
++            this.entityBuckets = (List<Entity>[][]) new List[16][];
++            this.bucketPadX = new int[16];
++            this.bucketPadZ = new int[16];
++        }
++
+         this.entityBuckets[slice] = buckets;
+         this.bucketPadX[slice] = 1;
+         this.bucketPadZ[slice] = 1;
+@@ -1112,6 +1185,7 @@ public class Chunk {
+             this.buildBuckets(k);
+         }
+         // Athena end
++        this.athenaOwnCounts(); // Athena
+         // PaperSpigot start - update counts
+         if (entity instanceof EntityItem) {
+             itemCounts[k]++;
+@@ -1196,6 +1270,7 @@ public class Chunk {
+         entity.athenaChunk = null;
+         entity.athenaBucket = -1;
+         // Athena end
++        this.athenaOwnCounts(); // Athena - never the shared zeros, even for an entity this chunk did not count
+         // PaperSpigot start - update counts
+         if (entity instanceof EntityItem) {
+             itemCounts[i]--;
+@@ -1356,7 +1431,7 @@ public class Chunk {
+ 
+             if (flat.size() >= BUCKET_THRESHOLD) {
+                 this.buildBuckets(i);
+-            } else {
++            } else if (this.entityBuckets != NO_BUCKETS) { // Athena - the shared one is never written
+                 this.entityBuckets[i] = null;
+                 this.bucketPadX[i] = 0;
+                 this.bucketPadZ[i] = 0;
+@@ -1394,9 +1469,11 @@ public class Chunk {
+                 }
+             }
+ 
+-            this.entityBuckets[i] = null;
+-            this.bucketPadX[i] = 0;
+-            this.bucketPadZ[i] = 0;
++            if (this.entityBuckets != NO_BUCKETS) { // Athena - the shared one is never written
++                this.entityBuckets[i] = null;
++                this.bucketPadX[i] = 0;
++                this.bucketPadZ[i] = 0;
++            }
+         }
+         // Athena end
+         Iterator iterator = this.tileEntities.values().iterator();
+@@ -1839,7 +1916,7 @@ public class Chunk {
+         if (k == 255) {
+             biomebase = worldchunkmanager.getBiome(blockposition, BiomeBase.PLAINS);
+             k = biomebase.id;
+-            this.blockBiomeArray[j << 4 | i] = (byte) (k & 255);
++            this.athenaOwnBiomes()[j << 4 | i] = (byte) (k & 255); // Athena - a world's own from its first change
+         }
+ 
+         biomebase = BiomeBase.getBiome(k);
+@@ -1847,13 +1924,14 @@ public class Chunk {
+     }
+ 
+     public byte[] getBiomeIndex() {
+-        return this.blockBiomeArray;
++        return this.athenaOwnBiomes(); // Athena - the caller may write it; athenaBiomes() to read
+     }
+ 
+     public void setBiomeArray(byte[] abyte) {
+         if (this.blockBiomeArray.length != abyte.length) {
+             Chunk.logger.warn("Could not set level chunk biomes, array length is " + abyte.length + " instead of " + this.blockBiomeArray.length);
+         } else {
++            this.athenaOwnBiomes(); // Athena
+             for (int i = 0; i < this.blockBiomeArray.length; ++i) {
+                 this.blockBiomeArray[i] = abyte[i];
+             }
+@@ -2023,13 +2101,14 @@ public class Chunk {
+     }
+ 
+     public int[] getHeightMap() {
+-        return this.heightMap;
++        return this.athenaOwnHeights(); // Athena - the caller may write it; athenaHeights() to read
+     }
+ 
+     public void setHeightMap(int[] aint) {
+         if (this.heightMap.length != aint.length) {
+             Chunk.logger.warn("Could not set level chunk heightmap, array length is " + aint.length + " instead of " + this.heightMap.length);
+         } else {
++            this.athenaOwnHeights(); // Athena
+             for (int i = 0; i < this.heightMap.length; ++i) {
+                 this.heightMap[i] = aint[i];
+             }
+diff --git a/src/main/java/net/minecraft/server/ChunkRegionLoader.java b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+index b1bd6bf80575a39be99da40535e374f52d9a6c7a..fa2e279d2f6eea36900de19ab2aad056c2311c1a 100644
+--- a/src/main/java/net/minecraft/server/ChunkRegionLoader.java
++++ b/src/main/java/net/minecraft/server/ChunkRegionLoader.java
+@@ -227,7 +227,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+         nbttagcompound.setInt("xPos", chunk.locX);
+         nbttagcompound.setInt("zPos", chunk.locZ);
+         nbttagcompound.setLong("LastUpdate", world.getTime());
+-        nbttagcompound.setIntArray("HeightMap", chunk.getHeightMap());
++        nbttagcompound.setIntArray("HeightMap", chunk.athenaHeights()); // Athena - read only
+         nbttagcompound.setBoolean("TerrainPopulated", chunk.isDone());
+         nbttagcompound.setBoolean("LightPopulated", chunk.isLightPopulated());
+         nbttagcompound.setLong("InhabitedTime", chunk.getInhabitedTime());
+@@ -259,7 +259,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+         }
+ 
+         nbttagcompound.set("Sections", nbttaglist);
+-        nbttagcompound.setByteArray("Biomes", chunk.getBiomeIndex());
++        nbttagcompound.setByteArray("Biomes", chunk.athenaBiomes()); // Athena - read only
+         chunk.setHasEntities(false);
+         NBTTagList nbttaglist1 = new NBTTagList();
+ 
+@@ -366,6 +366,10 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+     protected boolean athenaSectionFromStore(int chunkX, int chunkZ, int sectionY, ChunkSection section, boolean sky) {
+         return false;
+     }
++
++    /** A template's loader: the chunk's heights and biomes, as read, may be shared with the other worlds on it. */
++    protected void athenaShareTemplateArrays(int chunkX, int chunkZ, Chunk chunk) {
++    }
+     // Athena end
+ 
+     /**
+@@ -447,6 +451,7 @@ public class ChunkRegionLoader implements IChunkLoader, IAsyncChunkSaver {
+         if (nbttagcompound.hasKeyOfType("Biomes", 7)) {
+             chunk.setBiomeArray(nbttagcompound.getByteArray("Biomes"));
+         }
++        this.athenaShareTemplateArrays(i, j, chunk); // Athena
+ 
+         // CraftBukkit start - End this method here and split off entity loading to another method
+         return chunk;
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index a62f8bbcbf4cd9c5618d734b10bdfd68ef52b230..2bc26894145f0b1193f634a367a7b7c6368944f5 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -153,7 +153,7 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+         }
+ 
+         if (flag) {
+-            a(chunk.getBiomeIndex(), packetplayoutmapchunk_chunkmap.data, j);
++            a(chunk.athenaBiomes(), packetplayoutmapchunk_chunkmap.data, j); // Athena - read only
+         }
+ 
+         return packetplayoutmapchunk_chunkmap;
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 4292af512e5b7ed73f7ccacb7c25576f06ad0583..c81b2952c9c239e56b51aabc407eaf25bb73bcd5 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -710,7 +710,7 @@ public class PlayerChunkMap {
+ 
+         private final List<EntityPlayer> playersWatchingChunk = Lists.newArrayList();
+         private final ChunkCoordIntPair location;
+-        private short[] dirtyBlocks = new short[64];
++        private short[] dirtyBlocks; // Athena - made by the first block change: most chunks a player sees never have one
+         private int dirtyCount;
+         private int flagsYAreasToUpdate;
+         private long previousWorldTime;
+@@ -878,6 +878,7 @@ public class PlayerChunkMap {
+                     }
+                 }
+ 
++                if (this.dirtyBlocks == null) this.dirtyBlocks = new short[64]; // Athena
+                 this.dirtyBlocks[this.dirtyCount++] = short0;
+             }
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 0289215095b0dc1e5e144b461163398df52efbe2..82765ab3ba80a240a8c240f478f819fc4b069d8a 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -671,4 +671,41 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         }
+         assertTrue(loaded > 0 && shared > 0);
+     }
++
++    @Test
++    public void chunksLoadedFromTheStoreShareHeightsAndBiomesUntilWritten() throws Exception {
++        File dir = fullTemplate(12L);
++
++        built(dir);
++
++        AthenaTemplateChunkLoader one = new AthenaTemplateChunkLoader(dir);
++        AthenaTemplateChunkLoader two = new AthenaTemplateChunkLoader(dir);
++        Chunk a = (Chunk) one.loadChunk(skyWorld(), -32, 0)[0];
++        Chunk b = (Chunk) two.loadChunk(skyWorld(), -32, 0)[0];
++
++        assertTrue(a.athenaSharesTemplateArrays());
++        assertSame("one copy of the heights for both worlds", a.athenaHeights(), b.athenaHeights());
++        assertSame("and of the biomes", a.athenaBiomes(), b.athenaBiomes());
++
++        int[] heightsBefore = b.athenaHeights().clone();
++        byte[] biomesBefore = b.athenaBiomes().clone();
++
++        a.getHeightMap()[3] = heightsBefore[3] + 1; // a caller that may write takes the chunk's own
++        a.getBiomeIndex()[4] = (byte) (biomesBefore[4] + 1);
++
++        assertFalse(a.athenaSharesTemplateArrays());
++        assertArrayEquals("the other world's chunk is as it was", heightsBefore, b.athenaHeights());
++        assertArrayEquals(biomesBefore, b.athenaBiomes());
++        assertEquals(heightsBefore[3] + 1, a.athenaHeights()[3]);
++
++        // the next world on the template still takes the untouched arrays
++        AthenaTemplateChunkLoader three = new AthenaTemplateChunkLoader(dir);
++        Chunk c = (Chunk) three.loadChunk(skyWorld(), -32, 0)[0];
++
++        assertSame(b.athenaHeights(), c.athenaHeights());
++        assertSame(b.athenaBiomes(), c.athenaBiomes());
++        one.close();
++        two.close();
++        three.close();
++    }
+ }

@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 11 Nov 2026 17:16:15 +0900
+Subject: [PATCH] No packets for an entity nobody sees, and no Locations for a
+ move nobody listens to
+
+An entity tracked by no player still made its move, look, velocity and head
+packets every tick, for nobody; its tracked state still goes on as before. A
+player's move with no PlayerMoveEvent listener makes none of the event's three
+Locations: what the event block did with an event nobody can change is done on
+the fields, with the same check for a move made after a teleport.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index c388cfe4682691a227fedfd3e8f09413c0bd2da4..7c9dd6fd331fa7cf9bbbd2c68e20ba9095164ad4 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -270,6 +270,9 @@ public class EntityTrackerEntry {
+                     // CraftBukkit end
+ 
+                     if (j1 >= -128 && j1 < 128 && k1 >= -128 && k1 < 128 && l1 >= -128 && l1 < 128 && this.ticksSinceLastForcedTeleport <= 400 && !this.ridingEntity && this.onGround == this.tracker.onGround) {
++                        // Athena - a move nobody is shown: the state above is kept, no packet is made
++                        if (this.viewerCount == 0) {
++                        } else
+                         if ((!flag || !flag1) && !(this.tracker instanceof EntityArrow)) {
+                             if (flag) {
+                                 object = new PacketPlayOutEntity.PacketPlayOutRelEntityMove(this.tracker.getId(), (byte) j1, (byte) k1, (byte) l1, this.tracker.onGround);
+@@ -302,6 +305,7 @@ public class EntityTrackerEntry {
+                         this.lastTrackedEntityMotionX = this.tracker.motX;
+                         this.lastTrackedEntityMotionY = this.tracker.motY;
+                         this.motionZ = this.tracker.motZ;
++                        if (this.viewerCount != 0) // Athena - no packet nobody is sent
+                         this.broadcast(new PacketPlayOutEntityVelocity(this.tracker.getId(), this.lastTrackedEntityMotionX, this.lastTrackedEntityMotionY, this.motionZ));
+                     }
+                 }
+@@ -352,6 +356,7 @@ public class EntityTrackerEntry {
+                 boolean flag2 = Math.abs(i - this.yRot) >= 4 || Math.abs(j - this.xRot) >= 4;
+ 
+                 if (flag2) {
++                    if (this.viewerCount != 0) // Athena - no packet nobody is sent
+                     this.broadcast(new PacketPlayOutEntity.PacketPlayOutEntityLook(this.tracker.getId(), (byte) i, (byte) j, this.tracker.onGround));
+                     this.yRot = i;
+                     this.xRot = j;
+@@ -366,6 +371,7 @@ public class EntityTrackerEntry {
+ 
+             i = MathHelper.floor_float(this.tracker.getHeadRotation() * 256.0F / 360.0F);
+             if (Math.abs(i - this.lastHeadMotion) >= 4) {
++                if (this.viewerCount != 0) // Athena - no packet nobody is sent
+                 this.broadcast(new PacketPlayOutEntityHeadRotation(this.tracker, (byte) i));
+                 this.lastHeadMotion = i;
+             }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 422a63609f8438508f549d4ca99e60ee44c5249c..ccad70bc7a4b821b84e24c2d293a87e322f372e9 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -301,6 +301,31 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                 double delta = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ; // Math.pow(d, 2) is d * d
+                 float deltaAngle = Math.abs(this.lastYaw - toYaw) + Math.abs(this.lastPitch - toPitch);
+ 
++                if ((delta > 1f / 256 || deltaAngle > 10f) && (this.checkMovement && !this.player.dead)
++                        && PlayerMoveEvent.getHandlerList().getRegisteredListeners().length == 0) {
++                    // Athena start - nobody listens: what the block below does with an event nobody can
++                    // change, without its three Locations. The event's destination is the one it was
++                    // given, so only the last check can return; it compares the event's start with where
++                    // the player is now, as Location.equals does.
++                    final double fromX = this.lastPosX, fromY = this.lastPosY, fromZ = this.lastPosZ;
++                    final float fromYaw = this.lastYaw, fromPitch = this.lastPitch;
++                    this.lastPosX = toX;
++                    this.lastPosY = toY;
++                    this.lastPosZ = toZ;
++                    this.lastYaw = toYaw;
++                    this.lastPitch = toPitch;
++                    boolean movedSince = Double.doubleToLongBits(fromX) != Double.doubleToLongBits(this.player.locX)
++                            || Double.doubleToLongBits(fromY) != Double.doubleToLongBits(this.player.locY)
++                            || Double.doubleToLongBits(fromZ) != Double.doubleToLongBits(this.player.locZ)
++                            || Float.floatToIntBits(fromPitch) != Float.floatToIntBits(this.player.pitch)
++                            || Float.floatToIntBits(fromYaw) != Float.floatToIntBits(this.player.yaw);
++                    if (movedSince && this.justTeleported) {
++                        this.justTeleported = false;
++                        this.guard.reset(); // as below
++                        return;
++                    }
++                    // Athena end
++                } else
+                 if ((delta > 1f / 256 || deltaAngle > 10f) && (this.checkMovement && !this.player.dead)) {
+                     org.bukkit.World bukkitWorld = player.getWorld();
+                     Location from = new Location(bukkitWorld, lastPosX, lastPosY, lastPosZ, lastYaw, lastPitch); // Get the Players previous Event location.
