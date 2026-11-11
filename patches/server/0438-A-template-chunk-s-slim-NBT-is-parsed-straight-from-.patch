@@ -1,0 +1,544 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Thu, 12 Nov 2026 04:32:05 +0900
+Subject: [PATCH] A template chunk's slim NBT is parsed straight from its
+ inflated bytes
+
+A DataInputStream over a ByteArrayInputStream read every int through a synchronized read of the
+stream, 256 of them for the height map alone. AthenaBytesInput reads the same values from the
+array, NBTTagIntArray takes an int array in one pass, and strings still decode through
+DataInputStream.readUTF. With C1, on map_fallen_haven's 4,305 chunks: 7.6 -> 3.5 us a chunk.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBytesInput.java b/src/main/java/net/minecraft/server/AthenaBytesInput.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..88a7a1dd5deae2ba80f00167cd62c6a810a3cc6b
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaBytesInput.java
+@@ -0,0 +1,133 @@
++package net.minecraft.server;
++
++import java.io.DataInput;
++import java.io.DataInputStream;
++import java.io.EOFException;
++import java.io.IOException;
++
++/**
++ * Athena - a DataInput over a byte array, for NBT already inflated into one (a template chunk's slim
++ * NBT, AthenaSectionStore.chunk). A DataInputStream over a ByteArrayInputStream reads every int
++ * through a synchronized read of the stream: a chunk's height map alone is 256 of them, and the
++ * slim NBT took some 12 us a chunk to read, as long as everything else in its load together. This
++ * reads the same values in the same order, and NBTTagIntArray takes an int array in one pass. The
++ * strings are read by DataInputStream.readUTF itself, so they decode exactly as before.
++ */
++final class AthenaBytesInput implements DataInput {
++
++    private final byte[] bytes;
++    private int at;
++    private final int end;
++
++    AthenaBytesInput(byte[] bytes, int from, int length) {
++        this.bytes = bytes;
++        this.at = from;
++        this.end = from + length;
++    }
++
++    private int take(int n) throws EOFException {
++        int from = this.at;
++
++        if (n < 0 || n > this.end - from) {
++            throw new EOFException();
++        }
++        this.at = from + n;
++        return from;
++    }
++
++    @Override
++    public void readFully(byte[] into) throws IOException {
++        this.readFully(into, 0, into.length);
++    }
++
++    @Override
++    public void readFully(byte[] into, int off, int len) throws IOException {
++        if (off < 0 || len < 0 || len > into.length - off) {
++            throw new IndexOutOfBoundsException();
++        }
++        System.arraycopy(this.bytes, this.take(len), into, off, len);
++    }
++
++    /** {@code into.length} ints, as that many readInt calls read them. */
++    void readInts(int[] into) throws IOException {
++        byte[] b = this.bytes;
++        int p = this.take(into.length * 4);
++
++        for (int i = 0; i < into.length; ++i, p += 4) {
++            into[i] = b[p] << 24 | (b[p + 1] & 255) << 16 | (b[p + 2] & 255) << 8 | b[p + 3] & 255;
++        }
++    }
++
++    @Override
++    public int skipBytes(int n) {
++        int skipped = Math.max(0, Math.min(n, this.end - this.at));
++
++        this.at += skipped;
++        return skipped;
++    }
++
++    @Override
++    public boolean readBoolean() throws IOException {
++        return this.readByte() != 0;
++    }
++
++    @Override
++    public byte readByte() throws IOException {
++        return this.bytes[this.take(1)];
++    }
++
++    @Override
++    public int readUnsignedByte() throws IOException {
++        return this.readByte() & 255;
++    }
++
++    @Override
++    public short readShort() throws IOException {
++        int p = this.take(2);
++
++        return (short) (this.bytes[p] << 8 | this.bytes[p + 1] & 255);
++    }
++
++    @Override
++    public int readUnsignedShort() throws IOException {
++        return this.readShort() & 0xFFFF;
++    }
++
++    @Override
++    public char readChar() throws IOException {
++        return (char) this.readShort();
++    }
++
++    @Override
++    public int readInt() throws IOException {
++        byte[] b = this.bytes;
++        int p = this.take(4);
++
++        return b[p] << 24 | (b[p + 1] & 255) << 16 | (b[p + 2] & 255) << 8 | b[p + 3] & 255;
++    }
++
++    @Override
++    public long readLong() throws IOException {
++        return (long) this.readInt() << 32 | this.readInt() & 0xFFFFFFFFL;
++    }
++
++    @Override
++    public float readFloat() throws IOException {
++        return Float.intBitsToFloat(this.readInt());
++    }
++
++    @Override
++    public double readDouble() throws IOException {
++        return Double.longBitsToDouble(this.readLong());
++    }
++
++    @Override
++    public String readLine() {
++        throw new UnsupportedOperationException(); // NBT has no lines
++    }
++
++    @Override
++    public String readUTF() throws IOException {
++        return DataInputStream.readUTF(this);
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index 6444105468cbcad44fbd5cf088c6a311b5507044..8b893cdce664281fe7f7f87f7afe720de4637d1a 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -718,7 +718,7 @@ final class AthenaSectionStore {
+             inflater.reset(); // also lets go of the mapping, which a world that unloads frees
+         }
+         try {
+-            return NBTCompressedStreamTools.read((java.io.DataInput) new java.io.DataInputStream(new java.io.ByteArrayInputStream(nbt, 0, length)), new NBTReadLimiter(MAX_SLIM_NBT * 8L));
++            return NBTCompressedStreamTools.read((java.io.DataInput) new AthenaBytesInput(nbt, 0, length), new NBTReadLimiter(MAX_SLIM_NBT * 8L)); // Athena - see AthenaBytesInput
+         } catch (IOException | RuntimeException invalid) {
+             return null; // Athena - invalid cached metadata must fall back to the original region
+         }
+diff --git a/src/main/java/net/minecraft/server/NBTTagIntArray.java b/src/main/java/net/minecraft/server/NBTTagIntArray.java
+index c9ba23cd30332f12168f443369952578519d2eb7..9ada95cb10303abbed84313f1623654e885c3573 100644
+--- a/src/main/java/net/minecraft/server/NBTTagIntArray.java
++++ b/src/main/java/net/minecraft/server/NBTTagIntArray.java
+@@ -33,6 +33,10 @@ public class NBTTagIntArray extends NBTBase {
+         nbtreadlimiter.read((long) (32 * j));
+         this.data = new int[j];
+ 
++        if (datainput instanceof AthenaBytesInput) {
++            ((AthenaBytesInput) datainput).readInts(this.data); // Athena - in one pass
++            return;
++        }
+         for (int k = 0; k < j; ++k) {
+             this.data[k] = datainput.readInt();
+         }
+diff --git a/src/test/java/net/minecraft/server/AthenaBytesInputTest.java b/src/test/java/net/minecraft/server/AthenaBytesInputTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..639e7c928243e698a381be988f9caffcd2417c49
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaBytesInputTest.java
+@@ -0,0 +1,160 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.DataInput;
++import java.io.DataInputStream;
++import java.io.DataOutputStream;
++import java.io.EOFException;
++import java.util.Random;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/** Athena - AthenaBytesInput reads what a DataInputStream over the same bytes reads, NBT included. */
++public class AthenaBytesInputTest extends AbstractTestingBase {
++
++    @Test
++    public void everyReadMatchesADataInputStream() throws Exception {
++        Random random = new Random(7L);
++
++        for (int round = 0; round < 2000; ++round) {
++            byte[] bytes = new byte[random.nextInt(64)];
++
++            random.nextBytes(bytes);
++            int[] ops = new int[20];
++
++            for (int i = 0; i < ops.length; ++i) {
++                ops[i] = random.nextInt(11);
++            }
++            assertEquals("round " + round, run(new DataInputStream(new ByteArrayInputStream(bytes)), ops), run(new AthenaBytesInput(bytes, 0, bytes.length), ops));
++        }
++    }
++
++    /** What the reads give, up to the first one that runs out, as text. */
++    private static String run(DataInput in, int[] ops) {
++        StringBuilder out = new StringBuilder();
++
++        try {
++            for (int op : ops) {
++                switch (op) {
++                    case 0: out.append(in.readByte()); break;
++                    case 1: out.append(in.readUnsignedByte()); break;
++                    case 2: out.append(in.readShort()); break;
++                    case 3: out.append(in.readUnsignedShort()); break;
++                    case 4: out.append((int) in.readChar()); break;
++                    case 5: out.append(in.readInt()); break;
++                    case 6: out.append(in.readLong()); break;
++                    case 7: out.append(Float.floatToRawIntBits(in.readFloat())); break;
++                    case 8: out.append(Double.doubleToRawLongBits(in.readDouble())); break;
++                    case 9: out.append(in.readBoolean()); break;
++                    default: {
++                        byte[] b = new byte[3];
++
++                        in.readFully(b);
++                        out.append(java.util.Arrays.toString(b));
++                    }
++                }
++                out.append(',');
++            }
++        } catch (EOFException e) {
++            out.append("EOF");
++        } catch (Exception e) {
++            out.append(e.getClass().getSimpleName());
++        }
++        return out.toString();
++    }
++
++    @Test
++    public void stringsDecodeAsDataInputStreamDecodesThem() throws Exception {
++        String[] strings = {"", "chest", "Ä ö ü ß", "日本語の看板", "\u0000nul", "😀 surrogates", "§aColour"};
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++        DataOutputStream out = new DataOutputStream(bytes);
++
++        for (String s : strings) {
++            out.writeUTF(s);
++        }
++        byte[] b = bytes.toByteArray();
++        AthenaBytesInput in = new AthenaBytesInput(b, 0, b.length);
++
++        for (String s : strings) {
++            assertEquals(s, in.readUTF());
++        }
++        try {
++            in.readUTF();
++            fail("past the end");
++        } catch (EOFException expected) {
++        }
++    }
++
++    @Test
++    public void nbtReadsAsBefore() throws Exception {
++        Random random = new Random(11L);
++
++        for (int round = 0; round < 200; ++round) {
++            NBTTagCompound root = new NBTTagCompound();
++            NBTTagCompound level = new NBTTagCompound();
++            int[] heights = new int[256];
++
++            for (int i = 0; i < heights.length; ++i) {
++                heights[i] = random.nextInt();
++            }
++            level.setIntArray("HeightMap", heights);
++            level.setIntArray("Empty", new int[0]);
++            byte[] biomes = new byte[256];
++
++            random.nextBytes(biomes);
++            level.setByteArray("Biomes", biomes);
++            level.setLong("InhabitedTime", random.nextLong());
++            level.setDouble("d", random.nextDouble());
++            level.setFloat("f", random.nextFloat());
++            level.setShort("s", (short) random.nextInt());
++            level.setString("name", "sign line " + random.nextInt() + " 日本");
++            NBTTagList list = new NBTTagList();
++
++            for (int i = 0; i < random.nextInt(5); ++i) {
++                NBTTagCompound tile = new NBTTagCompound();
++
++                tile.setString("id", "Chest");
++                tile.setInt("x", random.nextInt());
++                tile.setIntArray("ints", new int[] {random.nextInt(), random.nextInt()});
++                list.add(tile);
++            }
++            level.set("TileEntities", list);
++            root.set("Level", level);
++
++            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++
++            NBTCompressedStreamTools.write(root, (java.io.DataOutput) new DataOutputStream(bytes));
++            byte[] b = bytes.toByteArray();
++            NBTTagCompound before = NBTCompressedStreamTools.read((DataInput) new DataInputStream(new ByteArrayInputStream(b)), new NBTReadLimiter(1L << 23));
++            NBTTagCompound now = NBTCompressedStreamTools.read((DataInput) new AthenaBytesInput(b, 0, b.length), new NBTReadLimiter(1L << 23));
++
++            assertEquals(before, now);
++            assertEquals(root, now);
++        }
++    }
++
++    @Test
++    public void aCutShortIntArrayRunsOut() throws Exception {
++        NBTTagCompound root = new NBTTagCompound();
++
++        root.setIntArray("a", new int[] {1, 2, 3, 4});
++        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
++
++        NBTCompressedStreamTools.write(root, (java.io.DataOutput) new DataOutputStream(bytes));
++        byte[] b = bytes.toByteArray();
++
++        try {
++            NBTCompressedStreamTools.read((DataInput) new AthenaBytesInput(b, 0, b.length - 6), new NBTReadLimiter(1L << 23));
++            fail("cut short");
++        } catch (EOFException expected) {
++            assertTrue(true);
++        } catch (RuntimeException wrapped) {
++            assertTrue(String.valueOf(wrapped), wrapped.getCause() instanceof EOFException);
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaHeapIdsTiming.java b/src/test/java/net/minecraft/server/AthenaHeapIdsTiming.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3265fc948e2a923d14e422c5858895e2fdf61345
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaHeapIdsTiming.java
+@@ -0,0 +1,85 @@
++package net.minecraft.server;
++
++import java.io.File;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Assume;
++import org.junit.Test;
++
++/**
++ * Athena - not a test: times getType on a real template's mapped sections, read off the mapping
++ * and from the store's heap copy (ChunkSection.mappedStateIdAt). Runs only with
++ * ATHENA_TIMING_TEMPLATE set to a template folder that has a built store; run it with C1 alone
++ * (JAVA_TOOL_OPTIONS=-XX:TieredStopAtLevel=1) as the small servers run.
++ */
++public class AthenaHeapIdsTiming extends AbstractTestingBase {
++
++    @Test
++    public void time() throws Exception {
++        String path = System.getenv("ATHENA_TIMING_TEMPLATE");
++
++        Assume.assumeTrue(path != null);
++        AthenaSectionStore store = AthenaSectionStore.open(new File(path));
++
++        if (store == null) {
++            AthenaSectionStore.awaitBuilds();
++            store = AthenaSectionStore.open(new File(path));
++        }
++        java.lang.reflect.Field reads = ChunkSection.class.getDeclaredField("mappedReads");
++
++        reads.setAccessible(true);
++        java.util.List<ChunkSection> mapped = new java.util.ArrayList<ChunkSection>();
++        java.util.List<ChunkSection> heap = new java.util.ArrayList<ChunkSection>();
++
++        for (int x = -40; x <= 40 && mapped.size() < 1500; ++x) {
++            for (int z = -40; z <= 40 && mapped.size() < 1500; ++z) {
++                for (int y = 0; y < 16; ++y) {
++                    ChunkSection a = new ChunkSection(y << 4, true);
++                    ChunkSection b = new ChunkSection(y << 4, true);
++
++                    if (store.apply(x, z, y, a, true) && a.isMapped() && store.apply(x, z, y, b, true)) {
++                        reads.setInt(a, Integer.MIN_VALUE); // never takes the heap copy
++                        for (int i = 0; i < AthenaSectionStore.HEAP_AFTER; ++i) {
++                            b.getType(0, 0, 0);
++                        }
++                        if (b.athenaReadsHeapCopy()) {
++                            mapped.add(a);
++                            heap.add(b);
++                        }
++                    }
++                }
++            }
++        }
++        System.out.println("sections: " + mapped.size());
++        java.util.Random random = new java.util.Random(1L);
++        int[] at = new int[1 << 16];
++
++        for (int i = 0; i < at.length; ++i) {
++            at[i] = random.nextInt(4096);
++        }
++        long sink = 0;
++
++        for (int round = 0; round < 8; ++round) {
++            long a = System.nanoTime();
++
++            for (ChunkSection section : mapped) {
++                for (int i = 0; i < 400; ++i) {
++                    int k = at[(int) (i * 31 + sink) & (at.length - 1)];
++                    sink += section.getType(k & 15, k >> 8, k >> 4 & 15).hashCode() & 1;
++                }
++            }
++            long b = System.nanoTime();
++
++            for (ChunkSection section : heap) {
++                for (int i = 0; i < 400; ++i) {
++                    int k = at[(int) (i * 31 + sink) & (at.length - 1)];
++                    sink += section.getType(k & 15, k >> 8, k >> 4 & 15).hashCode() & 1;
++                }
++            }
++            long c = System.nanoTime();
++            long n = 400L * mapped.size();
++
++            System.out.printf("round %d: off the mapping %.1f ns, heap copy %.1f ns a getType%n", round, (b - a) / (double) n, (c - b) / (double) n);
++        }
++        System.out.println(sink == 42 ? "" : "done");
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaTemplateLoadTiming.java b/src/test/java/net/minecraft/server/AthenaTemplateLoadTiming.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..44da29cf57929d8dcddae5d697f016fc3cde92a9
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaTemplateLoadTiming.java
+@@ -0,0 +1,101 @@
++package net.minecraft.server;
++
++import java.io.File;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Assume;
++import org.junit.Test;
++
++/**
++ * Athena - not a test: times a template chunk load from its section store, part by part: the slim
++ * NBT (inflating and parsing it), the chunk built from it, and the copies of its tile entities'
++ * NBT. Runs only with ATHENA_TIMING_TEMPLATE set to a template folder that has a built store:
++ * ATHENA_TIMING_TEMPLATE=/path/to/map_fallen_haven ./gradlew :PandaSpigot-Server:test --tests '*AthenaTemplateLoadTiming'
++ */
++public class AthenaTemplateLoadTiming extends AbstractTestingBase {
++
++    @Test
++    public void time() throws Exception {
++        String path = System.getenv("ATHENA_TIMING_TEMPLATE");
++
++        Assume.assumeTrue(path != null);
++        File dir = new File(path);
++        AthenaSectionStore store = AthenaSectionStore.open(dir);
++
++        if (store == null) {
++            AthenaSectionStore.awaitBuilds();
++            store = AthenaSectionStore.open(dir);
++        }
++        java.util.List<long[]> chunks = new java.util.ArrayList<long[]>();
++
++        for (int x = -200; x <= 200; ++x) {
++            for (int z = -200; z <= 200; ++z) {
++                if (store.hasSlim(x, z)) {
++                    chunks.add(new long[] {x, z});
++                }
++            }
++        }
++        WorldServer world = AthenaAuditFixtures.world();
++
++        world.worldProvider = new WorldProviderNormal();
++        AthenaTemplateChunkLoader loader = new AthenaTemplateChunkLoader(dir);
++        long tileEntities = 0, entities = 0, slimBytes = 0;
++
++        for (int round = 0; round < 8; ++round) {
++            long read = 0, build = 0, copy = 0;
++
++            for (long[] c : chunks) {
++                int x = (int) c[0], z = (int) c[1];
++                long a = System.nanoTime();
++                NBTTagCompound slim = store.chunk(x, z);
++                long b = System.nanoTime();
++                Object[] data = loader.loadChunk(world, x, z);
++                long d = System.nanoTime();
++                NBTTagCompound level = ((NBTTagCompound) data[1]).getCompound("Level");
++                NBTTagCompound copied = (NBTTagCompound) level.clone();
++                long e = System.nanoTime();
++
++                read += b - a;
++                build += (d - b) - (b - a); // loadChunk reads the slim NBT again
++                copy += e - d;
++                if (round == 0) {
++                    tileEntities += level.getList("TileEntities", 10).size();
++                    entities += level.getList("Entities", 10).size();
++                    java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
++                    NBTCompressedStreamTools.write(slim, (java.io.DataOutput) new java.io.DataOutputStream(out));
++                    slimBytes += out.size();
++                }
++                if (copied == null) throw new AssertionError();
++            }
++            System.out.printf("round %d: %d chunks, read slim %.1f ms (%.1f us), build %.1f ms (%.1f us), NBT copy %.1f ms (%.1f us)%n",
++                    round, chunks.size(), read / 1e6, read / 1e3 / chunks.size(), build / 1e6, build / 1e3 / chunks.size(),
++                    copy / 1e6, copy / 1e3 / chunks.size());
++        }
++        System.out.printf("tile entities %d, entities %d, slim NBT %.1f KB a chunk%n", tileEntities, entities, slimBytes / 1024.0 / chunks.size());
++
++        // the parse alone, from the inflated bytes: through a DataInputStream as before, and through AthenaBytesInput
++        java.util.List<byte[]> inflated = new java.util.ArrayList<byte[]>();
++
++        for (long[] c : chunks) {
++            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
++
++            NBTCompressedStreamTools.write(store.chunk((int) c[0], (int) c[1]), (java.io.DataOutput) new java.io.DataOutputStream(out));
++            inflated.add(out.toByteArray());
++        }
++        for (int round = 0; round < 8; ++round) {
++            long a = System.nanoTime();
++
++            for (byte[] bytes : inflated) {
++                NBTCompressedStreamTools.read((java.io.DataInput) new java.io.DataInputStream(new java.io.ByteArrayInputStream(bytes)), new NBTReadLimiter(1L << 23));
++            }
++            long b = System.nanoTime();
++
++            for (byte[] bytes : inflated) {
++                NBTCompressedStreamTools.read((java.io.DataInput) new AthenaBytesInput(bytes, 0, bytes.length), new NBTReadLimiter(1L << 23));
++            }
++            long c = System.nanoTime();
++
++            System.out.printf("parse round %d: DataInputStream %.1f us, AthenaBytesInput %.1f us a chunk%n", round,
++                    (b - a) / 1e3 / inflated.size(), (c - b) / 1e3 / inflated.size());
++        }
++    }
++}
