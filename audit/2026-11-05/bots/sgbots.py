@@ -141,6 +141,10 @@ if a.vps:
             for _ in range(60):
                 if not up(): break
                 time.sleep(2)
+            if up():
+                # a server that does not stop (out of heap, say) must not stay on the box beside production
+                print("!! the server did not stop: killing it", flush=True)
+                ssh("for p in $(pgrep -u mc -f '[o]rg.bukkit.craftbukkit.Main'); do [ \"$(readlink /proc/$p/cwd)\" = %s ] && kill -9 $p; done; %s kill-server; true" % (D, TMUX), check=False)
         return ssh("cat %s/console.out" % D, check=False), samples
 
     text, samples = run_once()
