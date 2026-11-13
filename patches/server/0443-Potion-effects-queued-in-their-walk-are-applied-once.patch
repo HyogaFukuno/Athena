@@ -1,0 +1,231 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] Potion effects queued in their walk are applied once; fewer
+ objects a tick
+
+CraftBukkit never cleared effectsToProcess: an effect added or removed from inside
+the effects' walk (a listener of the event a poison or regeneration tick calls) was
+added or removed again every tick after, so a removal queued once took that effect
+off for good. The list is cleared after it is applied, and an entity with no effects
+skips the walk and its two iterators. Also without allocating: inBlock's position,
+the world of a movement packet (getWorldServer walked the world list), the players of
+a ticked chunk, and the boss bar's target.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBossBar.java b/src/main/java/net/minecraft/server/AthenaBossBar.java
+index 68667030d9ef0847923ef7678e3403c2ff3befd9..f9b8ebb3b9b66a51450aa64fd273791f304250ca 100644
+--- a/src/main/java/net/minecraft/server/AthenaBossBar.java
++++ b/src/main/java/net/minecraft/server/AthenaBossBar.java
+@@ -66,10 +66,10 @@ public final class AthenaBossBar {
+             this.spawn();
+             return;
+         }
+-        double[] at = this.target();
+-        int x = MathHelper.floor(at[0] * 32.0D);
+-        int y = MathHelper.floor(at[1] * 32.0D);
+-        int z = MathHelper.floor(at[2] * 32.0D);
++        this.target();
++        int x = MathHelper.floor(this.atX * 32.0D);
++        int y = MathHelper.floor(this.atY * 32.0D);
++        int z = MathHelper.floor(this.atZ * 32.0D);
+         // Moved only once it is a block from where the client has it: that is a degree or two of
+         // looking around, and the wither stays in view, without a packet every tick
+         long dx = x - this.lastX, dy = y - this.lastY, dz = z - this.lastZ;
+@@ -90,12 +90,12 @@ public final class AthenaBossBar {
+     }
+ 
+     private void spawn() {
+-        double[] at = this.target();
++        this.target();
+         this.boss.world = this.player.world;
+-        this.boss.setPosition(at[0], at[1], at[2]);
+-        this.lastX = MathHelper.floor(at[0] * 32.0D);
+-        this.lastY = MathHelper.floor(at[1] * 32.0D);
+-        this.lastZ = MathHelper.floor(at[2] * 32.0D);
++        this.boss.setPosition(this.atX, this.atY, this.atZ);
++        this.lastX = MathHelper.floor(this.atX * 32.0D);
++        this.lastY = MathHelper.floor(this.atY * 32.0D);
++        this.lastZ = MathHelper.floor(this.atZ * 32.0D);
+         this.player.playerConnection.sendPacket(new PacketPlayOutSpawnEntityLiving(this.boss));
+         this.spawnedIn = this.player.world;
+     }
+@@ -105,7 +105,10 @@ public final class AthenaBossBar {
+      * blocks, back to the furthest point in a chunk that is loaded and within the player's view (so
+      * the client has it), and no nearer than {@value #MIN_DISTANCE}.
+      */
+-    private double[] target() {
++    // Athena - into these rather than a new double[3] every tick for every player with a bar
++    private double atX, atY, atZ;
++
++    private void target() {
+         Vec3D look = this.player.getLookVec();
+         double eyes = this.player.locY + this.player.getHeadHeight();
+         int view = Math.max(2, Math.min(this.player.viewDistance, this.player.athenaClientViewDistance)) - 1;
+@@ -122,9 +125,8 @@ public final class AthenaBossBar {
+             }
+         }
+         double y = eyes + look.yCoord * distance;
+-        return new double[] {
+-                this.player.locX + look.xCoord * distance,
+-                Math.max(1.0D, Math.min(254.0D, y)),
+-                this.player.locZ + look.zCoord * distance };
++        this.atX = this.player.locX + look.xCoord * distance;
++        this.atY = Math.max(1.0D, Math.min(254.0D, y));
++        this.atZ = this.player.locZ + look.zCoord * distance;
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/Entity.java b/src/main/java/net/minecraft/server/Entity.java
+index 58e04f660ad8deff2a8937b939003248a24ce5c6..645c62258ab81be432e23531cdaa3ac739b83a53 100644
+--- a/src/main/java/net/minecraft/server/Entity.java
++++ b/src/main/java/net/minecraft/server/Entity.java
+@@ -1701,16 +1701,21 @@ public abstract class Entity implements ICommandListener {
+         if (this.noclip) {
+             return false;
+         } else {
+-            BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition(Integer.MIN_VALUE, Integer.MIN_VALUE, Integer.MIN_VALUE);
++            // Athena - the last block looked at as three ints, read with getType(int, int, int): the
++            // MutableBlockPosition this made every tick for every living entity was 0.9% of what a
++            // match allocated (VPS-B, 8 rooms), and C1 does not take it off the heap
++            int lastX = Integer.MIN_VALUE, lastY = Integer.MIN_VALUE, lastZ = Integer.MIN_VALUE;
+ 
+             for (int i = 0; i < 8; ++i) {
+                 int j = MathHelper.floor(this.locY + (double) (((float) ((i >> 0) % 2) - 0.5F) * 0.1F) + (double) this.getHeadHeight());
+                 int k = MathHelper.floor(this.locX + (double) (((float) ((i >> 1) % 2) - 0.5F) * this.width * 0.8F));
+                 int l = MathHelper.floor(this.locZ + (double) (((float) ((i >> 2) % 2) - 0.5F) * this.width * 0.8F));
+ 
+-                if (blockposition_mutableblockposition.getX() != k || blockposition_mutableblockposition.getY() != j || blockposition_mutableblockposition.getZ() != l) {
+-                    blockposition_mutableblockposition.set(k, j, l);
+-                    if (this.world.getType(blockposition_mutableblockposition).getBlock().isVisuallyOpaque()) {
++                if (lastX != k || lastY != j || lastZ != l) {
++                    lastX = k;
++                    lastY = j;
++                    lastZ = l;
++                    if (this.world.getType(k, j, l).getBlock().isVisuallyOpaque()) {
+                         return true;
+                     }
+                 }
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index acf3e72b7517dab9b93e79a90c4d1b8a3a6d378c..6d5a547ffe1d52f6e0b82cc422d4aea8a527b905 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -477,6 +477,9 @@ public abstract class EntityLiving extends Entity {
+     // CraftBukkit end
+ 
+     protected void updatePotionEffects() {
++        // Athena - no effects, nothing to walk: two iterators a tick for every living entity were
++        // 2.2% of what a match allocated (VPS-B, 8 rooms); effectsToProcess is empty unless a walk queued
++        if (!this.effects.isEmpty() || !this.effectsToProcess.isEmpty()) {
+         Iterator iterator = this.effects.values().iterator(); // Athena - boxing真の削除: 値イテレータで整数キーのボックス化を回避
+ 
+         isTickingEffects = true; // CraftBukkit
+@@ -494,13 +497,20 @@ public abstract class EntityLiving extends Entity {
+         }
+         // CraftBukkit start
+         isTickingEffects = false;
+-        for (Object e : effectsToProcess) {
+-            if (e instanceof MobEffect) {
+-                addEffect((MobEffect) e);
++        // Athena - by index and emptied after: CraftBukkit never cleared the list, so an effect added
++        // or removed from inside the walk (a listener of the event a poison or regeneration tick
++        // calls) was added or removed again every tick after, for as long as the entity lived - a
++        // removal queued once took that effect off for good, however often it was given again
++        for (int e = 0; e < effectsToProcess.size(); ++e) {
++            Object queued = effectsToProcess.get(e);
++            if (queued instanceof MobEffect) {
++                addEffect((MobEffect) queued);
+             } else {
+-                removeEffect((Integer) e);
++                removeEffect((Integer) queued);
+             }
+         }
++        effectsToProcess.clear();
++        } // Athena
+         // CraftBukkit end
+ 
+         if (this.updateEffects) {
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index c81b2952c9c239e56b51aabc407eaf25bb73bcd5..56d1155975d9e89a8b910f544ae3f5a826926ee8 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -963,7 +963,9 @@ public class PlayerChunkMap {
+ 
+         // PandaSpigot start - Alternative Chunk Ticking Selection
+         public boolean hasPlayerMatching(double range, Predicate<EntityPlayer> predicate) {
+-            for (EntityPlayer player : this.playersWatchingChunk) {
++            // Athena - by index: an iterator for every ticked chunk every tick (0.5% of a match's allocation)
++            for (int i = 0, n = this.playersWatchingChunk.size(); i < n; ++i) {
++                EntityPlayer player = this.playersWatchingChunk.get(i);
+                 if (predicate.apply(player) && this.location.distanceToSqr(player) < range * range) {
+                     return true;
+                 }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index ccad70bc7a4b821b84e24c2d293a87e322f372e9..4a443438915fc7ae9f5d301b941ab393061ff40f 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -102,6 +102,19 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     private final boolean legacy17; // Athena - a 1.7.10 client, translated by AthenaLegacy17
+     final AthenaGuard guard; // Athena - server-authoritative movement and combat checks
+ 
++    // Athena - the world getWorldServer(player.dimension) finds, without its walk: that is the
++    // player's own world whenever its dimension is the player's, which is always but in the middle of
++    // a move between worlds. The walk went through MinecraftServer.worlds - a CopyOnWriteArrayList,
++    // so an iterator - for every movement packet: 1.1% of what a match allocated (VPS-B, 8 rooms).
++    private WorldServer athenaPlayerWorld() {
++        World world = this.player.world;
++
++        if (world instanceof WorldServer && ((WorldServer) world).dimension == this.player.dimension) {
++            return (WorldServer) world;
++        }
++        return this.minecraftServer.getWorldServer(this.player.dimension);
++    }
++
+     public PlayerConnection(MinecraftServer minecraftserver, NetworkManager networkmanager, EntityPlayer entityplayer) {
+         this.minecraftServer = minecraftserver;
+         this.networkManager = networkmanager;
+@@ -241,7 +254,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                 return;
+             }
+             // Athena end
+-            WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
++            WorldServer worldserver = this.athenaPlayerWorld(); // Athena
+ 
+             this.h = true;
+             if (!this.player.viewingCredits) {
+@@ -696,7 +709,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     public void processPlayerDigging(PacketPlayInBlockDig packetplayinblockdig) {
+         if (PlayerConnectionUtils.postToMainThread(packetplayinblockdig, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         if (this.player.dead) return; // CraftBukkit
+-        WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
++        WorldServer worldserver = this.athenaPlayerWorld(); // Athena
+         BlockPosition blockposition = packetplayinblockdig.getPosition();
+ 
+         this.player.resetIdleTimer();
+@@ -789,7 +802,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     public void processPlayerBlockPlacement(PacketPlayInBlockPlace packetplayinblockplace) {
+         if (PlayerConnectionUtils.postToMainThread(packetplayinblockplace, this, this.player.getServerForPlayer())) return; // Athena - no exception
+-        WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
++        WorldServer worldserver = this.athenaPlayerWorld(); // Athena
+         boolean throttled = false;
+         // PaperSpigot - Allow disabling the player interaction limiter
+         if (org.github.paperspigot.PaperSpigotConfig.interactLimitEnabled && lastPlace != -1 && packetplayinblockplace.timestamp - lastPlace < 30 && packets++ >= 4) {
+@@ -1467,7 +1480,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     public void processUseEntity(PacketPlayInUseEntity packetplayinuseentity) {
+         if (this.player.dead) return; // CraftBukkit
+         if (PlayerConnectionUtils.postToMainThread(packetplayinuseentity, this, this.player.getServerForPlayer())) return; // Athena - no exception
+-        WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
++        WorldServer worldserver = this.athenaPlayerWorld(); // Athena
+         Entity entity = packetplayinuseentity.getEntityFromWorld((World) worldserver);
+         // Spigot Start
+         if ( entity == player && !player.isSpectator() )
+@@ -2041,7 +2054,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         if (this.player.dead) return; // CraftBukkit
+         if (PlayerConnectionUtils.postToMainThread(packetplayinupdatesign, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+-        WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
++        WorldServer worldserver = this.athenaPlayerWorld(); // Athena
+         BlockPosition blockposition = packetplayinupdatesign.getPosition();
+ 
+         if (worldserver.isLoaded(blockposition)) {

@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:37 +0900
+Subject: [PATCH] /reload says why when the server refuses it
+
+With worlds on their own threads the server refuses a reload (server 0440);
+the command said "Reload complete" after the refusal. It now says the reload
+failed, and why.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/org/bukkit/command/defaults/ReloadCommand.java b/src/main/java/org/bukkit/command/defaults/ReloadCommand.java
+index c70d512935ad698d572cb48d549fe05bd9524604..c7a27c41bfb759927e70fc9cf06fd1913a0a0119 100644
+--- a/src/main/java/org/bukkit/command/defaults/ReloadCommand.java
++++ b/src/main/java/org/bukkit/command/defaults/ReloadCommand.java
+@@ -22,7 +22,14 @@ public class ReloadCommand extends BukkitCommand {
+ 
+         Command.broadcastCommandMessage(sender, ChatColor.RED + "Please note that this command is not supported and may cause issues when using some plugins.");
+         Command.broadcastCommandMessage(sender, ChatColor.RED + "If you encounter any issues please use the /stop command to restart your server.");
+-        Bukkit.reload();
++        // Athena start - the server refuses a reload while worlds tick on their own threads
++        try {
++            Bukkit.reload();
++        } catch (IllegalStateException failed) {
++            Command.broadcastCommandMessage(sender, ChatColor.RED + "Reload failed: " + failed.getMessage());
++            return true;
++        }
++        // Athena end
+         Command.broadcastCommandMessage(sender, ChatColor.GREEN + "Reload complete.");
+ 
+         return true;

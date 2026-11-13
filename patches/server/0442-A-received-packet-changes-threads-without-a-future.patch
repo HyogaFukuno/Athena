@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] A received packet changes threads without a future
+
+WorldServer.postToMainThread wrapped every packet's task in a ListenableFutureTask,
+its ExecutionList, a RunnableAdapter and a logging lambda, for callers that never
+wait: seven objects a packet with the Runnable, the Task and the queue node, 2.8% of
+what a match allocated (VPS-B, 8 rooms). The packet goes through
+athenaRunOnTickThread instead, to the same thread, and logs a handler that throws as
+the future did.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+index 45fbd27c6de708149c58ace3ccbf15cd5759ff10..6a526ca6013988f5eb2e423b1a8306d31f9e52ee 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
++++ b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+@@ -24,14 +24,14 @@ public class PlayerConnectionUtils {
+     // for anything outside the server that calls it.
+     public static <T extends PacketListener> boolean postToMainThread(final Packet<T> packet, final T t0, IAsyncTaskHandler iasynctaskhandler) {
+         if (!iasynctaskhandler.isMainThread()) {
+-            iasynctaskhandler.postToMainThread(new Runnable() {
++            Runnable handle = new Runnable() {
+                 public void run() {
+                     // the player's world may have moved to or from its own thread since this was
+                     // queued: then the packet goes on to the thread that owns the player now
+                     if (t0 instanceof PlayerConnection) {
+                         WorldServer now = ((PlayerConnection) t0).player.getServerForPlayer();
+                         if (!now.isMainThread()) {
+-                            now.postToMainThread(this);
++                            now.athenaRunOnTickThread(this); // Athena - see athenaPost
+                             return;
+                         }
+                         // on its way into this world from another thread's: the packet waits until it is in
+@@ -39,12 +39,39 @@ public class PlayerConnectionUtils {
+                             return;
+                         }
+                     }
+-                    packet.processPacket(t0);
++                    // Athena - as the future WorldServer.postToMainThread wraps a task in did: a
++                    // handler that throws is logged and the tick goes on (the server thread's
++                    // queue, unlike a world thread's, does not catch)
++                    try {
++                        packet.processPacket(t0);
++                    } catch (CancelledPacketHandleException cancelled) {
++                        // a handler that still throws the old way: nothing to do
++                    } catch (RuntimeException | Error failure) {
++                        LOGGER.error("Failed to handle packet " + packet.getClass().getSimpleName() + " for " + t0, failure);
++                    }
+                 }
+-            });
++            };
++            athenaPost(iasynctaskhandler, handle);
+             return true;
+         }
+         return false;
+     }
++
++    private static final org.apache.logging.log4j.Logger LOGGER = org.apache.logging.log4j.LogManager.getLogger();
++
++    // Athena - a packet goes to the thread that ticks the player's world without a future around it.
++    //
++    // WorldServer.postToMainThread wraps every task in a ListenableFutureTask (with its ExecutionList,
++    // the RunnableAdapter it makes and a lambda that logs) so its caller can wait on the task, and no
++    // packet caller ever does: with the Runnable here, the Task and the queue node, a received packet
++    // made seven objects just to change threads - 2.8% of what a match allocated (VPS-B, 8 rooms, about
++    // 110 players over the network). athenaRunOnTickThread queues the same Runnable, to the same thread.
++    private static void athenaPost(IAsyncTaskHandler iasynctaskhandler, Runnable handle) {
++        if (iasynctaskhandler instanceof WorldServer) {
++            ((WorldServer) iasynctaskhandler).athenaRunOnTickThread(handle);
++        } else {
++            iasynctaskhandler.postToMainThread(handle);
++        }
++    }
+     // Athena end
+ }

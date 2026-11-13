@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] The world border's sides are kept: World gives the border its
+ world
+
+WorldBorder.athenaSides kept the sides for one tick of the border's world, but
+nothing set the border's world - only the test did - so in a server every side was
+worked out again, the 1.3% of a match's CPU (VPS-B, 8 rooms) the change was for.
+World's constructor now sets it. A border that is not moving keeps its sides until
+its centre, size or limit changes, world or not; only a moving one is read again
+each tick. The sides take the centre from its getters, which the nether's border
+scales.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index b870cb6d20bf3b88d5f3a017f7b5c2bec3b19023..60c920f5a27c4adaea615e3c943201fa33fcd85a 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -255,6 +255,7 @@ public abstract class World implements IBlockAccess {
+         this.worldProvider = worldprovider;
+         this.isClientSide = flag;
+         this.worldBorder = worldprovider.getWorldBorder();
++        if (this instanceof WorldServer) this.worldBorder.world = (WorldServer) this; // Athena - a moving border's sides are worked out once a tick of this world; see WorldBorder.athenaSides
+         // CraftBukkit start
+         // Moved from PlayerList
+         this.worldBorder.addListener(new IWorldBorderListener() {
+diff --git a/src/main/java/net/minecraft/server/WorldBorder.java b/src/main/java/net/minecraft/server/WorldBorder.java
+index 1537e57466a64bf5e6631d310097ba7ff7421ab5..83199cd8db3f021113c490256587d10148aab164 100644
+--- a/src/main/java/net/minecraft/server/WorldBorder.java
++++ b/src/main/java/net/minecraft/server/WorldBorder.java
+@@ -91,23 +91,37 @@ public class WorldBorder {
+     private double athenaMinZ;
+     private double athenaMaxZ;
+ 
++    //
++    // A border that is not moving keeps its sides until the next change of its centre, size or
++    // limit, each of which forgets them; it needs no world. The world (set by World's constructor;
++    // it was never set before, so the cache only ever worked in the test) is only for a border that
++    // is moving.
+     private boolean athenaSides() {
++        boolean moving = this.endDiameter != this.startDiameter;
++
++        if (this.athenaSidesKnown && !moving) {
++            return true;
++        }
++
+         WorldServer world = this.world;
+ 
+-        if (world == null) {
++        if (moving && world == null) {
+             return false;
+         }
+ 
+-        int tick = world.athenaCurrentTick;
++        int tick = world == null ? 0 : world.athenaCurrentTick;
+ 
+         if (!this.athenaSidesKnown || tick != this.athenaSidesTick) {
+             double half = this.getSize() / 2.0D; // may end a transition (setSize), which forgets the sides: set below
+             double limit = (double) this.worldSize;
+-
+-            this.athenaMinX = Math.max(this.centerX - half, -limit);
+-            this.athenaMaxX = Math.min(this.centerX + half, limit);
+-            this.athenaMinZ = Math.max(this.centerZ - half, -limit);
+-            this.athenaMaxZ = Math.min(this.centerZ + half, limit);
++            // the getters, not the fields: the nether's border scales its centre (WorldProviderHell)
++            double centerX = this.getCenterX();
++            double centerZ = this.getCenterZ();
++
++            this.athenaMinX = Math.max(centerX - half, -limit);
++            this.athenaMaxX = Math.min(centerX + half, limit);
++            this.athenaMinZ = Math.max(centerZ - half, -limit);
++            this.athenaMaxZ = Math.min(centerZ + half, limit);
+             this.athenaSidesTick = tick;
+             this.athenaSidesKnown = true;
+         }
+diff --git a/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java b/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java
+index 9914088490bced9fcfabc840947383a956e34ebf..544a0770670d75be010fc800a5feac91d3abc208 100644
+--- a/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java
++++ b/src/test/java/net/minecraft/server/AthenaWorldBorderSidesTest.java
+@@ -42,6 +42,34 @@ public class AthenaWorldBorderSidesTest {
+         }
+     }
+ 
++    @Test
++    public void theNethersBorderKeepsItsScaledCentre() throws Exception {
++        for (boolean withWorld : new boolean[] { false, true }) {
++            WorldBorder border = new WorldProviderHell().getWorldBorder();
++
++            if (withWorld) {
++                border.world = AthenaAuditFixtures.world();
++            }
++            border.setCenter(80.0D, -160.0D);
++            border.setSize(10.0D);
++            assertSides(border, 5.0D, 15.0D, -25.0D, -15.0D);
++        }
++    }
++
++    @Test
++    public void aMovingBorderWithNoWorldIsReadEachTime() throws Exception {
++        WorldBorder border = new WorldBorder();
++
++        border.transitionSizeBetween(1000.0D, 10.0D, 400L);
++
++        double first = border.maxX();
++
++        Thread.sleep(60L);
++        assertTrue("no world, no tick to keep the sides for", border.maxX() < first);
++        border.setSize(20.0D);
++        assertSides(border, -10.0D, 10.0D, -10.0D, 10.0D);
++    }
++
+     @Test
+     public void aMovingBorderIsReadOnceATick() throws Exception {
+         WorldBorder border = new WorldBorder();
