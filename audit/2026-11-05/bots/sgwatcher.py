@@ -84,7 +84,7 @@ while True:
     elif pid == 0x00: sys.exit("refused: " + r.string())
 c.sock.settimeout(0.05)
 COMPASS = len(sys.argv) > 4 and sys.argv[4] == "compass"; clicked = False; last_use = 0
-seen_mobs = set(); watch = None; got = {}; t0 = time.time(); worlds = 0; chunks = 0; bad = 0; empty = 0; last_send = 0; pos = None; nxt = time.time() + 5
+tab = {}; tab_logged = 0; seen_mobs = set(); watch = None; got = {}; t0 = time.time(); worlds = 0; chunks = 0; bad = 0; empty = 0; last_send = 0; pos = None; nxt = time.time() + 5
 def log(s): print("%7.1f %s" % (time.time() - t0, s), flush=True)
 while time.time() - t0 < SECONDS:
     now = time.time()
@@ -104,6 +104,24 @@ while time.time() - t0 < SECONDS:
     except EOFError:
         log("disconnected"); break
     if pid == 0x00: c.send(0x00, varint(r.varint()))
+    elif pid == 0x38:   # the tab list: names the client has now
+        action = r.varint()
+        for _ in range(r.varint()):
+            who = r.take(16)
+            if action == 0:
+                name = r.string()
+                for _p in range(r.varint()):
+                    r.string(); r.string()
+                    if r.u8(): r.string()
+                r.varint(); r.varint()
+                if r.u8(): r.string()
+                tab[who] = name
+            elif action == 4:
+                tab.pop(who, None)
+            else:
+                break
+        if action in (0, 4) and now - tab_logged > 2:
+            tab_logged = now; log("tab list: %d names" % len(tab))
     elif pid in (0x01, 0x07):
         if pid == 0x01: r.unpack(">i"); r.u8(); dim = r.unpack(">b")[0]
         else: dim = r.unpack(">i")[0]
@@ -157,3 +175,4 @@ while time.time() - t0 < SECONDS:
     elif pid == 0x40:
         log("KICK " + r.string()); break
 log("end: chunks in the last world %d" % chunks)
+log("tab list at the end: %d names: %s" % (len(tab), sorted(tab.values())[:30]))
