@@ -1,0 +1,590 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 07:40:20 +0900
+Subject: [PATCH] A play connection's frames are split, inflated and decoded in
+ one handler
+
+Each frame went through three ByteToMessageDecoders, each with its output list,
+cumulation, slice and serializer: 5% of a match's CPU (VPS-B, 8 rooms, ~110 players
+over the network). With the server's own decompressor and decoder right after it, the
+splitter reads the frame where it lies and passes the packet on from the decoder's
+place. Anything else in between, the 1.7 translator, or another protocol takes the
+three stages. -Dathena.disableDirectDecode=true turns it off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PacketDecoder.java b/src/main/java/net/minecraft/server/PacketDecoder.java
+index 23b95b739e3e9f7671b80b2bef458b2d6caba4da..b4f206de61f1daace0e312b509106b20d33219f4 100644
+--- a/src/main/java/net/minecraft/server/PacketDecoder.java
++++ b/src/main/java/net/minecraft/server/PacketDecoder.java
+@@ -21,6 +21,10 @@ public class PacketDecoder extends ByteToMessageDecoder {
+         this.direction = enumprotocoldirection;
+     }
+ 
++    boolean athenaServerbound() { // Athena - for PacketSplitter's direct decode
++        return this.direction == EnumProtocolDirection.SERVERBOUND;
++    }
++
+     protected void decode(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, List<Object> list) throws Exception {
+         if (bytebuf.readableBytes() != 0) {
+             PacketDataSerializer packetdataserializer = new PacketDataSerializer(bytebuf);
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 895f7d5c1487f652e19a0abff66a17c41d4fc209..1ba15d1bab34fb20b8913038bfb2245892ec26df 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -36,78 +36,89 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                 // packet decoder has read it, as the copy was held.
+                 list.add(packetdataserializer.readRetainedSlice(packetdataserializer.readableBytes()));
+             } else {
+-                if (i < this.treshold) {
+-                    throw new DecoderException("Badly compressed packet - size of " + i + " is below server threshold of " + this.treshold);
+-                }
++                list.add(athenaInflate(channelhandlercontext, bytebuf, packetdataserializer, i, this.treshold)); // Athena - see athenaInflate
++                // Athena end
++            }
+ 
+-                if (i > 2097152) {
+-                    throw new DecoderException("Badly compressed packet - size of " + i + " is larger than protocol maximum of " + 2097152);
+-                }
++        }
++    }
+ 
+-                // Athena start - feed the inflater from the buffer it already has; see
+-                // PacketCompressor for why, including why reset() belongs in a finally.
+-                //
+-                // The output grows as inflated bytes arrive instead of being allocated at the size
+-                // the client declares: a ten-byte frame declaring 2 MiB made the server allocate
+-                // 2 MiB, every packet, whatever it inflated to (vanilla did the same). And the
+-                // packet has to inflate to exactly that size; a short one was passed on padded with
+-                // zeros, a long one cut off.
+-                ByteBuf out = channelhandlercontext.alloc().heapBuffer(Math.min(i, 8192), i);
+-                Inflater inflater = INFLATER.get(); // Athena
+-
+-                try {
+-                    int j = packetdataserializer.readableBytes();
+-
+-                    if (bytebuf.nioBufferCount() == 1) {
+-                        inflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), j));
+-                        bytebuf.skipBytes(j);
+-                    } else {
+-                        byte[] abyte = new byte[j];
+-
+-                        packetdataserializer.readBytes(abyte);
+-                        inflater.setInput(abyte);
+-                    }
++    // Athena - the inflation of one frame, for this decoder and for PacketSplitter's direct decode:
++    // {@code bytebuf} is the frame, read through {@code packetdataserializer} up to the compressed
++    // data (past the data length {@code i}); the inflated packet is returned
++    static ByteBuf athenaInflate(ChannelHandlerContext channelhandlercontext, ByteBuf bytebuf, PacketDataSerializer packetdataserializer, int i, int treshold) {
++        if (i < treshold) {
++            throw new DecoderException("Badly compressed packet - size of " + i + " is below server threshold of " + treshold);
++        }
+ 
+-                    boolean longer = false;
+-
+-                    while (!inflater.finished()) {
+-                        if (out.writerIndex() == i) {
+-                            // full: the end of the stream may still be one call away, or more data
+-                            // (reading that byte can itself finish the stream, hence the flag)
+-                            if (inflater.inflate(new byte[1]) > 0) {
+-                                longer = true;
+-                                break;
+-                            }
+-                            if (!inflater.finished()) {
+-                                break; // neither: the input ran out
+-                            }
+-                            continue;
+-                        }
+-                        out.ensureWritable(Math.min(i - out.writerIndex(), Math.max(8192, out.writerIndex())));
+-
+-                        int n = inflater.inflate(out.nioBuffer(out.writerIndex(), Math.min(out.writableBytes(), i - out.writerIndex())));
+-
+-                        if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) {
+-                            break; // the input ran out before the packet did
+-                        }
+-                        out.writerIndex(out.writerIndex() + n);
+-                    }
++        if (i > 2097152) {
++            throw new DecoderException("Badly compressed packet - size of " + i + " is larger than protocol maximum of " + 2097152);
++        }
++
++        // Athena start - feed the inflater from the buffer it already has; see
++        // PacketCompressor for why, including why reset() belongs in a finally.
++        //
++        // The output grows as inflated bytes arrive instead of being allocated at the size
++        // the client declares: a ten-byte frame declaring 2 MiB made the server allocate
++        // 2 MiB, every packet, whatever it inflated to (vanilla did the same). And the
++        // packet has to inflate to exactly that size; a short one was passed on padded with
++        // zeros, a long one cut off.
++        ByteBuf out = channelhandlercontext.alloc().heapBuffer(Math.min(i, 8192), i);
++        Inflater inflater = INFLATER.get(); // Athena
++
++        try {
++            int j = packetdataserializer.readableBytes();
++
++            if (bytebuf.nioBufferCount() == 1) {
++                inflater.setInput(bytebuf.nioBuffer(bytebuf.readerIndex(), j));
++                bytebuf.skipBytes(j);
++            } else {
++                byte[] abyte = new byte[j];
+ 
+-                    if (longer || !inflater.finished() || out.writerIndex() != i) {
+-                        throw new DecoderException("Badly compressed packet - inflated " + (longer ? "to more than " : "to ") + out.writerIndex() + " bytes, declared " + i);
++                packetdataserializer.readBytes(abyte);
++                inflater.setInput(abyte);
++            }
++
++            boolean longer = false;
++
++            while (!inflater.finished()) {
++                if (out.writerIndex() == i) {
++                    // full: the end of the stream may still be one call away, or more data
++                    // (reading that byte can itself finish the stream, hence the flag)
++                    if (inflater.inflate(new byte[1]) > 0) {
++                        longer = true;
++                        break;
+                     }
+-                } catch (Throwable t) {
+-                    out.release();
+-                    throw t instanceof DecoderException ? (DecoderException) t : new DecoderException(t);
+-                } finally {
+-                    inflater.reset();
++                    if (!inflater.finished()) {
++                        break; // neither: the input ran out
++                    }
++                    continue;
+                 }
++                out.ensureWritable(Math.min(i - out.writerIndex(), Math.max(8192, out.writerIndex())));
+ 
+-                list.add(out);
+-                // Athena end
++                int n = inflater.inflate(out.nioBuffer(out.writerIndex(), Math.min(out.writableBytes(), i - out.writerIndex())));
++
++                if (n == 0 && (inflater.needsInput() || inflater.needsDictionary())) {
++                    break; // the input ran out before the packet did
++                }
++                out.writerIndex(out.writerIndex() + n);
+             }
+ 
++            if (longer || !inflater.finished() || out.writerIndex() != i) {
++                throw new DecoderException("Badly compressed packet - inflated " + (longer ? "to more than " : "to ") + out.writerIndex() + " bytes, declared " + i);
++            }
++        } catch (Throwable t) {
++            out.release();
++            throw t instanceof DecoderException ? (DecoderException) t : new DecoderException(t);
++        } finally {
++            inflater.reset();
+         }
++
++        return out;
++    }
++
++    int athenaThreshold() { // Athena - for PacketSplitter's direct decode
++        return this.treshold;
+     }
+ 
+     public void setCompressionTreshold(int i) {
+diff --git a/src/main/java/net/minecraft/server/PacketSplitter.java b/src/main/java/net/minecraft/server/PacketSplitter.java
+index 2e40323fa1a947b703a957d436fa8849de4b0313..44d29a51941759100c5ce0a9f508eff988554eee 100644
+--- a/src/main/java/net/minecraft/server/PacketSplitter.java
++++ b/src/main/java/net/minecraft/server/PacketSplitter.java
+@@ -19,6 +19,12 @@ public class PacketSplitter extends ByteToMessageDecoder {
+             bytebuf.clear();
+             return;
+         }
++        // Athena start - see athenaDirect
++        if (ATHENA_DIRECT && this.athenaDirect(channelhandlercontext)) {
++            this.athenaDecodeDirect(channelhandlercontext, bytebuf);
++            return;
++        }
++        // Athena end
+         
+         final VarIntByteDecoder reader = new VarIntByteDecoder();
+         int varIntEnd = bytebuf.forEachByte(reader);
+@@ -58,4 +64,181 @@ public class PacketSplitter extends ByteToMessageDecoder {
+         }
+         // PandaSpigot end
+     }
++
++    // Athena start - a play connection's frames are split, inflated and decoded here, in one handler.
++    //
++    // Each frame went through three decoders: this one cut it out as a retained slice, the
++    // decompressor took that and cut it again after the data length, the packet decoder read the
++    // packet out of the second slice. Each stage is a ByteToMessageDecoder of its own - its output
++    // list, its cumulation, a fireChannelRead to the next context - and each made a slice and a
++    // PacketDataSerializer: together 5% of a match's CPU and a tenth of the event loop's (VPS-B,
++    // 8 rooms, ~110 players over the network). Here the frame is read where it lies in the
++    // cumulation, an uncompressed one with no copy and no slice, and the packet goes on from the
++    // decoder's place in the pipeline, exactly as the decoder would have passed it on.
++    //
++    // Only where it is certain to be the same thing: the play protocol, and the server's own
++    // decompressor (if compression is on) and packet decoder right after this handler, nothing between
++    // them. A plugin's decoder in there (a protocol translator), the 1.7 translator, or any other
++    // protocol takes the three stages as before. -Dathena.disableDirectDecode=true turns it off.
++    private static final boolean ATHENA_DIRECT = !Boolean.getBoolean("athena.disableDirectDecode");
++    /** Packets decoded here; for tests and measurements (a plain count several event loops may put out by a few). */
++    static long athenaDecoded;
++
++    // the event loop's, found again for every read (athenaDirect)
++    private ChannelHandlerContext athenaDecoderContext;
++    private PacketDecompressor athenaDecompressor;
++
++    private boolean athenaDirect(ChannelHandlerContext context) {
++        io.netty.channel.Channel channel = context.channel();
++
++        if (channel.attr(NetworkManager.attrKeyConnectionState).get() != EnumProtocol.PLAY) {
++            return false;
++        }
++
++        io.netty.channel.ChannelPipeline pipeline = channel.pipeline();
++
++        if (!io.netty.channel.AthenaPipelineWalk.walkable(pipeline)) {
++            return false;
++        }
++        synchronized (pipeline) { // as names() walks
++            final ChannelHandlerContext end = io.netty.channel.AthenaPipelineWalk.end(pipeline);
++            ChannelHandlerContext at = io.netty.channel.AthenaPipelineWalk.next(context);
++            PacketDecompressor decompressor = null;
++
++            if (at != end && at.handler() instanceof PacketDecompressor) {
++                if (at.handler().getClass() != PacketDecompressor.class) {
++                    return false;
++                }
++                decompressor = (PacketDecompressor) at.handler();
++                at = io.netty.channel.AthenaPipelineWalk.next(at);
++            }
++            if (at == end || at.handler() == null || at.handler().getClass() != PacketDecoder.class || ((PacketDecoder) at.handler()).athenaServerbound() == false) {
++                return false;
++            }
++            this.athenaDecoderContext = at;
++            this.athenaDecompressor = decompressor;
++        }
++        return true;
++    }
++
++    private void athenaDecodeDirect(ChannelHandlerContext context, ByteBuf bytebuf) throws Exception {
++        final ChannelHandlerContext decoder = this.athenaDecoderContext;
++        final PacketDecompressor decompressor = this.athenaDecompressor;
++        final int threshold = decompressor != null ? decompressor.athenaThreshold() : -1;
++
++        while (bytebuf.isReadable()) {
++            if (!context.channel().isActive() || context.isRemoved()) {
++                bytebuf.clear();
++                return;
++            }
++
++            // the frame length, read as VarIntByteDecoder reads it: zeros before it are skipped,
++            // three bytes at most, an empty frame is passed over
++            int at = bytebuf.readerIndex();
++            final int limit = bytebuf.writerIndex();
++
++            while (at < limit && bytebuf.getByte(at) == 0) {
++                ++at;
++            }
++            if (at == limit) {
++                bytebuf.clear(); // nothing but zeros
++                return;
++            }
++            bytebuf.readerIndex(at);
++
++            int length = 0;
++            int bytes = 0;
++            boolean done = false;
++
++            while (at + bytes < limit) {
++                byte k = bytebuf.getByte(at + bytes);
++
++                length |= (k & 0x7F) << bytes++ * 7;
++                if (bytes > 3) {
++                    bytebuf.clear();
++                    throw new CorruptedFrameException("VarInt too big");
++                }
++                if ((k & 0x80) != 128) {
++                    done = true;
++                    break;
++                }
++            }
++            if (!done) {
++                return; // the length is not all here yet
++            }
++            if (length == 0) {
++                bytebuf.readerIndex(at + bytes);
++                continue;
++            }
++            if (!bytebuf.isReadable(bytes + length)) {
++                return; // nor the frame
++            }
++
++            final int frameStart = at + bytes;
++            final int frameEnd = frameStart + length;
++            Packet packet;
++
++            bytebuf.readerIndex(frameStart);
++            if (decompressor == null) {
++                packet = this.athenaReadPacket(context, bytebuf, frameEnd);
++            } else {
++                PacketDataSerializer frame = new PacketDataSerializer(bytebuf);
++                int dataLength;
++                // the data length must be read inside the frame, as the decompressor reads it from its slice
++                int savedWriter = bytebuf.writerIndex();
++
++                bytebuf.writerIndex(frameEnd);
++                try {
++                    dataLength = frame.readVarIntFromBuffer();
++                } finally {
++                    bytebuf.writerIndex(savedWriter);
++                }
++                if (dataLength == 0) {
++                    packet = this.athenaReadPacket(context, bytebuf, frameEnd);
++                } else {
++                    ByteBuf compressed = bytebuf.slice(bytebuf.readerIndex(), frameEnd - bytebuf.readerIndex());
++                    ByteBuf inflated = PacketDecompressor.athenaInflate(context, compressed, new PacketDataSerializer(compressed), dataLength, threshold);
++
++                    try {
++                        packet = this.athenaReadPacket(context, inflated, inflated.writerIndex());
++                    } finally {
++                        inflated.release();
++                    }
++                }
++            }
++            bytebuf.readerIndex(frameEnd);
++            if (packet != null) {
++                ++athenaDecoded;
++                decoder.fireChannelRead(packet);
++            }
++        }
++    }
++
++    /** PacketDecoder.decode, for the bytes of {@code in} from its reader index up to {@code end}; null for an empty packet. */
++    private Packet athenaReadPacket(ChannelHandlerContext context, ByteBuf in, int end) throws Exception {
++        if (in.readerIndex() == end) {
++            return null; // the packet decoder passes an empty frame over
++        }
++
++        int savedWriter = in.writerIndex();
++
++        in.writerIndex(end); // the packet may read no further than its frame, as from a slice
++        try {
++            PacketDataSerializer packetdataserializer = new PacketDataSerializer(in);
++            int i = packetdataserializer.readVarIntFromBuffer();
++            Packet packet = EnumProtocol.PLAY.getPacket(EnumProtocolDirection.SERVERBOUND, i);
++
++            if (packet == null) {
++                throw new java.io.IOException("Bad packet id " + i);
++            }
++            packet.readPacketData(packetdataserializer);
++            if (packetdataserializer.readableBytes() > 0) {
++                throw new java.io.IOException("Packet " + EnumProtocol.PLAY.getId() + "/" + i + " (" + packet.getClass().getSimpleName() + ") was larger than I expected, found " + packetdataserializer.readableBytes() + " bytes extra whilst reading packet " + i);
++            }
++            return packet;
++        } finally {
++            in.writerIndex(Math.max(savedWriter, in.readerIndex()));
++        }
++    }
++    // Athena end
+ }
+diff --git a/src/test/java/net/minecraft/server/AthenaDirectDecodeTest.java b/src/test/java/net/minecraft/server/AthenaDirectDecodeTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e06718e249177d07ac48a34d3de15de75b49648
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDirectDecodeTest.java
+@@ -0,0 +1,199 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.Unpooled;
++import io.netty.channel.ChannelHandlerContext;
++import io.netty.channel.ChannelInboundHandlerAdapter;
++import io.netty.channel.embedded.EmbeddedChannel;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.Random;
++import java.util.zip.Deflater;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - PacketSplitter decodes a play connection's frames itself (athenaDecodeDirect) when the
++ * server's own decompressor and decoder follow it: the packets that come out of the decoder's place
++ * must be the ones the three stages made, whatever way the bytes arrive, compressed or not, and a
++ * pipeline with anything else in it must take the three stages.
++ */
++public class AthenaDirectDecodeTest extends AbstractTestingBase {
++
++    private static final class Capture extends ChannelInboundHandlerAdapter {
++        final List<Object> read = new ArrayList<Object>();
++
++        @Override
++        public void channelRead(ChannelHandlerContext ctx, Object msg) {
++            this.read.add(msg);
++        }
++    }
++
++    private static EmbeddedChannel channel(Capture capture, int threshold, boolean pluginBetween) {
++        EmbeddedChannel channel = new EmbeddedChannel();
++
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.PLAY);
++        channel.pipeline().addLast("splitter", new PacketSplitter());
++        if (pluginBetween) {
++            channel.pipeline().addLast("plugin", new ChannelInboundHandlerAdapter());
++        }
++        if (threshold >= 0) {
++            channel.pipeline().addLast("decompress", new PacketDecompressor(threshold));
++        }
++        channel.pipeline().addLast("decoder", new PacketDecoder(EnumProtocolDirection.SERVERBOUND))
++                .addLast("packet_handler", capture);
++        return channel;
++    }
++
++    private static void varInt(ByteBuf out, int value) {
++        new PacketDataSerializer(out).writeVarIntToBuffer(value);
++    }
++
++    private static byte[] body(int id, java.util.function.Consumer<PacketDataSerializer> fields) {
++        PacketDataSerializer out = new PacketDataSerializer(Unpooled.buffer());
++        out.writeVarIntToBuffer(id);
++        fields.accept(out);
++        byte[] bytes = new byte[out.readableBytes()];
++        out.readBytes(bytes);
++        return bytes;
++    }
++
++    /** The frame the client sends for {@code body}: compressed past the threshold, as the vanilla client does. */
++    private static void frame(ByteBuf out, byte[] body, int threshold) {
++        ByteBuf frame = Unpooled.buffer();
++
++        if (threshold < 0) {
++            frame.writeBytes(body);
++        } else if (body.length < threshold) {
++            varInt(frame, 0);
++            frame.writeBytes(body);
++        } else {
++            varInt(frame, body.length);
++            Deflater deflater = new Deflater();
++            deflater.setInput(body);
++            deflater.finish();
++            byte[] buffer = new byte[8192];
++            while (!deflater.finished()) {
++                frame.writeBytes(buffer, 0, deflater.deflate(buffer));
++            }
++            deflater.end();
++        }
++        varInt(out, frame.readableBytes());
++        out.writeBytes(frame);
++    }
++
++    private static List<byte[]> bodies() {
++        List<byte[]> bodies = new ArrayList<byte[]>();
++        Random random = new Random(5);
++
++        for (int i = 0; i < 40; ++i) {
++            final int n = i;
++            switch (i % 3) {
++                case 0:
++                    bodies.add(body(0x00, out -> out.writeVarIntToBuffer(n * 7919)));
++                    break;
++                case 1:
++                    bodies.add(body(0x01, out -> out.writeString("chat " + n + " 日本語")));
++                    break;
++                default:
++                    final byte[] payload = new byte[random.nextInt(2000)];
++                    random.nextBytes(payload);
++                    bodies.add(body(0x17, out -> {
++                        out.writeString("MC|Test");
++                        out.writeBytes(payload);
++                    }));
++            }
++        }
++        return bodies;
++    }
++
++    private static String describe(Object packet) {
++        if (packet instanceof PacketPlayInKeepAlive) return "keepalive " + ((PacketPlayInKeepAlive) packet).getKey();
++        if (packet instanceof PacketPlayInChat) return "chat " + ((PacketPlayInChat) packet).getMessage();
++        if (packet instanceof PacketPlayInCustomPayload) {
++            PacketDataSerializer data = ((PacketPlayInCustomPayload) packet).getBufferData();
++            return "payload " + ((PacketPlayInCustomPayload) packet).getChannelName() + " " + io.netty.buffer.ByteBufUtil.hexDump(data);
++        }
++        return String.valueOf(packet);
++    }
++
++    private static List<String> decode(int threshold, boolean pluginBetween, int pieces) {
++        Capture capture = new Capture();
++        EmbeddedChannel channel = channel(capture, threshold, pluginBetween);
++        ByteBuf all = Unpooled.buffer();
++
++        all.writeZero(3); // a run of zeros before the first frame is passed over
++        for (byte[] body : bodies()) {
++            frame(all, body, threshold);
++        }
++        // the bytes arrive in pieces of every size, frames cut anywhere
++        Random random = new Random(pieces);
++        while (all.isReadable()) {
++            int n = pieces == 1 ? all.readableBytes() : Math.min(all.readableBytes(), 1 + random.nextInt(pieces));
++            channel.writeInbound(all.readRetainedSlice(n));
++        }
++        all.release();
++        List<String> out = new ArrayList<String>();
++        for (Object packet : capture.read) {
++            out.add(describe(packet));
++        }
++        assertFalse(channel.finish());
++        return out;
++    }
++
++    @Test
++    public void theDirectDecodeReadsWhatTheThreeStagesRead() {
++        for (int threshold : new int[] { -1, 256 }) {
++            List<String> expected = decode(threshold, true, 1); // a handler in between: the three stages
++            assertEquals(40, expected.size());
++            for (int pieces : new int[] { 1, 3, 17, 300 }) {
++                long before = PacketSplitter.athenaDecoded;
++                assertEquals("threshold " + threshold + ", pieces of up to " + pieces, expected, decode(threshold, false, pieces));
++                assertEquals("decoded directly", before + 40, PacketSplitter.athenaDecoded);
++            }
++        }
++    }
++
++    @Test
++    public void anotherProtocolTakesTheThreeStages() {
++        Capture capture = new Capture();
++        EmbeddedChannel channel = channel(capture, -1, false);
++        channel.attr(NetworkManager.attrKeyConnectionState).set(EnumProtocol.HANDSHAKING);
++        ByteBuf in = Unpooled.buffer();
++        frame(in, body(0x00, out -> {
++            out.writeVarIntToBuffer(47);
++            out.writeString("localhost");
++            out.writeShort(25565);
++            out.writeVarIntToBuffer(2);
++        }), -1);
++        long before = PacketSplitter.athenaDecoded;
++        channel.writeInbound(in);
++        assertEquals(1, capture.read.size());
++        assertTrue(capture.read.get(0) instanceof PacketHandshakingInSetProtocol);
++        assertEquals(before, PacketSplitter.athenaDecoded);
++        channel.finish();
++    }
++
++    @Test
++    public void aPacketLongerThanItsFrameCloses() {
++        Capture capture = new Capture();
++        EmbeddedChannel channel = channel(capture, -1, false);
++        ByteBuf in = Unpooled.buffer();
++        frame(in, body(0x00, out -> {
++            out.writeVarIntToBuffer(1);
++            out.writeByte(9); // one byte more than a keep-alive
++        }), -1);
++        try {
++            channel.writeInbound(in);
++        } catch (Exception expected) {
++            // the decoder's exception, as from the three stages
++        }
++        assertTrue(capture.read.isEmpty());
++        assertNull(channel.readInbound());
++    }
++}

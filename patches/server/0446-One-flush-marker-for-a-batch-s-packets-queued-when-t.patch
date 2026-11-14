@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 07:40:20 +0900
+Subject: [PATCH] One flush marker for a batch's packets, queued when the batch
+ ends
+
+Every packet sent with a flush put a marker on the hand-off queue after it, an
+offer and a poll each; the drain only ever flushed once. The thread whose batch the
+connection waits in now notes the flush and queues one marker as the batch ends. A
+keep-alive and a kick queue theirs at once, and a close is always flushed before it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index 8d4cc1ef222ececf32ac4ddbfff4b95a79698a5c..9fc31dfdad38f5947e73e8774959c9c540b34870 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -133,7 +133,7 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.channel.flush();
+         } else {
+-            this.athenaHandOff(NetworkManager.ATHENA_FLUSH); // Athena - in order with the packets before it
++            this.athenaQueueFlush(false); // Athena - in order with the packets before it
+         }
+     }
+     // PandaSpigot end
+@@ -392,7 +392,7 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+                 this.athenaHandOff(new AthenaPendingWrite(packet, agenericfuturelistener, enumprotocol, enumprotocol1));
+             }
+             if (flush) {
+-                this.athenaHandOff(NetworkManager.ATHENA_FLUSH);
++                this.athenaQueueFlush(packet instanceof PacketPlayOutKeepAlive || packet instanceof PacketPlayOutKickDisconnect); // Athena
+             }
+         }
+ 
+@@ -510,6 +510,10 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         for (int i = 0, n = athenaToPost.size(); i < n; ++i) {
+             NetworkManager manager = athenaToPost.get(i);
+ 
++            if (manager.athenaFlushPending) { // Athena - see athenaQueueFlush
++                manager.athenaFlushPending = false;
++                manager.athenaHandOff.offer(NetworkManager.ATHENA_FLUSH);
++            }
+             manager.athenaPostPendingBy = null;
+             manager.athenaPostDrain();
+         }
+@@ -531,6 +535,27 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         this.athenaPostDrain();
+     }
+ 
++    // Athena start - one flush for a batch's packets, queued when the batch ends.
++    //
++    // Every packet sent with a flush put a flush marker on the hand-off queue after it: in a match
++    // nearly every packet outside the tracker, each an offer and a poll of the queue on top of the
++    // packet's own. The drain only ever kept one of them - it flushes once, at its end - so the
++    // thread whose batch this connection waits in (athenaPostPendingBy) now notes the flush and
++    // queues one marker when its batch ends, just before it posts the drain. A drain that runs
++    // before then (posted by another thread) writes those packets and leaves them for that marker:
++    // a delay inside the tick. A keep-alive and a kick, which never wait, queue theirs at once, as
++    // does every thread outside a batch. A close is flushed before it whatever is queued (drain).
++    private boolean athenaFlushPending; // the batching thread's (athenaPostPendingBy) only
++
++    private void athenaQueueFlush(boolean now) {
++        if (!now && athenaBatch.get() != null && this.athenaPostPendingBy == Thread.currentThread()) {
++            this.athenaFlushPending = true;
++            return;
++        }
++        this.athenaHandOff(NetworkManager.ATHENA_FLUSH);
++    }
++    // Athena end
++
+     private void athenaPostDrain() {
+         if (this.athenaDrainPosted.compareAndSet(false, true)) {
+             try {
+@@ -573,10 +598,10 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+                     this.athenaFraming = 0;
+                 } else {
+                     this.athenaWriteFrames();
+-                    if (flush) {
+-                        flush = false;
+-                        this.channel.flush();
+-                    }
++                    // Athena - always, not only after a flush marker: what was written before a
++                    // close goes out before it (a batch's marker may not be queued yet; athenaQueueFlush)
++                    flush = false;
++                    this.channel.flush();
+                     ((Runnable) entry).run(); // a close
+                     this.athenaFraming = 0;
+                 }

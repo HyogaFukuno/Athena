@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 07:40:20 +0900
+Subject: [PATCH] A player's movement speed alone goes to that player only
+
+Every sprint started or stopped changes it, and the attribute packet went to
+everyone who sees the player (0.5% of a match's CPU, VPS-B, 8 rooms). A client uses
+an entity's movement speed only for itself; any other attribute in the change still
+goes to everyone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 7c9dd6fd331fa7cf9bbbd2c68e20ba9095164ad4..93e11cb5827fd51ffd702202c6c12294c16e7c31 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -407,6 +407,15 @@ public class EntityTrackerEntry {
+ 
+     }
+ 
++    // Athena - whether a change of attributes is the movement speed alone; see sendMetadataToAllAssociatedPlayers
++    static boolean athenaSpeedOnly(Set<?> set) {
++        if (set.size() != 1) {
++            return false;
++        }
++        Object only = set.iterator().next();
++        return only instanceof AttributeInstance && ((AttributeInstance) only).getAttribute() == GenericAttributes.MOVEMENT_SPEED;
++    }
++
+     private void sendMetadataToAllAssociatedPlayers() {
+         DataWatcher datawatcher = this.tracker.getDataWatcher();
+ 
+@@ -419,11 +428,23 @@ public class EntityTrackerEntry {
+             Set set = attributemapserver.getAttributes();
+ 
+             if (!set.isEmpty()) {
++                // Athena start - a player's movement speed alone goes to that player only.
++                //
++                // Every sprint started or stopped changes it, and the change went to everyone who
++                // sees the player: an attribute packet each time, written for every viewer (0.5% of
++                // a match's CPU, VPS-B, 8 rooms). A client uses an entity's movement speed only for
++                // itself - another player moves where its position packets put it - so only the
++                // player is sent it. Any other attribute in the change goes to everyone, as before.
++                boolean speedOnly = this.tracker instanceof EntityPlayer && athenaSpeedOnly(set);
++                // Athena end
+                 // CraftBukkit start - Send scaled max health
+                 if (this.tracker instanceof EntityPlayer) {
+                     ((EntityPlayer) this.tracker).getBukkitEntity().injectScaledMaxHealth(set, false);
+                 }
+                 // CraftBukkit end
++                if (speedOnly) { // Athena
++                    ((EntityPlayer) this.tracker).playerConnection.sendPacket(new PacketPlayOutUpdateAttributes(this.tracker.getId(), set));
++                } else
+                 this.broadcastIncludingSelf(new PacketPlayOutUpdateAttributes(this.tracker.getId(), set));
+             }
+ 
+diff --git a/src/test/java/net/minecraft/server/AthenaSpeedOnlyTest.java b/src/test/java/net/minecraft/server/AthenaSpeedOnlyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4758d9ce2e9692b6821ccc3fc4358557a485a4fc
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSpeedOnlyTest.java
+@@ -0,0 +1,32 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashSet;
++import java.util.Set;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a player's attribute change that is the movement speed alone goes to that player only;
++ * anything else in the change, or another attribute, goes to everyone as before.
++ */
++public class AthenaSpeedOnlyTest extends AbstractTestingBase {
++
++    @Test
++    public void onlyAChangeOfTheMovementSpeedAloneIsKeptToThePlayer() {
++        AttributeMapServer map = new AttributeMapServer();
++        AttributeInstance speed = map.registerAttribute(GenericAttributes.MOVEMENT_SPEED);
++        AttributeInstance health = map.registerAttribute(GenericAttributes.maxHealth);
++        Set<Object> set = new HashSet<Object>();
++
++        assertFalse("nothing changed", EntityTrackerEntry.athenaSpeedOnly(set));
++        set.add(speed);
++        assertTrue(EntityTrackerEntry.athenaSpeedOnly(set));
++        set.add(health);
++        assertFalse("with the max health: to everyone", EntityTrackerEntry.athenaSpeedOnly(set));
++        set.remove(speed);
++        assertFalse(EntityTrackerEntry.athenaSpeedOnly(set));
++    }
++}

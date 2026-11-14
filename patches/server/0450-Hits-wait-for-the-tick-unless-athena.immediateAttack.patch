@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 10:47:03 +0900
+Subject: [PATCH] Hits wait for the tick unless athena.immediateAttacks is set
+
+Waking the world thread for every hit cost about 10% more server CPU while every
+room fought (VPS-B, 8 rooms, ~110 players over the network): 0.483 against 0.549
+cores. It stays, off by default, for a server that wants the shorter hit delay
+more than the CPU.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 8801d60d28e6fa3c550e0ab3662a087f1901e840..127267078988343fd14c3d1b91e9744efa7d2c27 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -497,8 +497,14 @@ public final class AthenaWorldThread extends Thread {
+     // queue between two ticks: the same tasks in the same order and at the same point between the
+     // world's ticks as at the start of the next one - only sooner - so the packets ahead of the hit
+     // (the victim's moves) are still handled first, and the world's tick number is the same.
+-    // -Dathena.immediateAttacks=false leaves hits for the next tick.
+-    static final boolean IMMEDIATE_ATTACKS = !"false".equals(System.getProperty("athena.immediateAttacks"));
++    //
++    // Off unless -Dathena.immediateAttacks=true. Measured on VPS-B (8 rooms, ~110 players over the
++    // network, 2026-11-14) it cost about 10% more of the server's CPU while every room fought (0.483
++    // against 0.549 cores, the world threads 0.304 against 0.355): players hit many times a tick,
++    // and every hit woke the thread and sent what it made in a drain of its own, where the tick sends
++    // a whole tick's packets in one. It is for a server that wants the shorter hit delay more than
++    // the CPU.
++    static final boolean IMMEDIATE_ATTACKS = Boolean.getBoolean("athena.immediateAttacks");
+     private volatile boolean urgent;
+ 
+     /** From any thread: run the queued tasks now if the thread is waiting for its next tick. */

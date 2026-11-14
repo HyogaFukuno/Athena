@@ -1,0 +1,603 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 07:40:20 +0900
+Subject: [PATCH] A template's chunk packets are kept in a mapped frame file
+ beside its store
+
+The compressed full-chunk packets of a template were made on the heap, 8 to 11 MB a
+map, for every server on the box and again for every match once the last world on
+the map had gone (3% of a server's allocation). Frames made for chunks still as the
+template has them are now written, a few dozen at a time, to
+athena-frames-<fingerprint>-p<id>-l<level>-t<threshold>.bin, renamed into place and
+mapped read only; a chunk with the same sections and biomes is sent from the
+mapping. -Dathena.disableFrameFiles=true keeps them on the heap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+index c292a975805a179bbb364ac181136b8b91c1cb1e..15bb5acf2e01b310daa67c212ab9ae23f72858ab 100644
+--- a/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
++++ b/src/main/java/net/minecraft/server/AthenaChunkPacketCache.java
+@@ -103,6 +103,12 @@ final class AthenaChunkPacketCache {
+         volatile PacketPlayOutMapChunk.ChunkMap map;
+         volatile byte[] frame;
+         volatile byte[] legacy17;
++        // Athena - the frame in a template's frame file (AthenaFrameFile), in place of frame
++        volatile java.lang.foreign.MemorySegment mappedFrame;
++        // Athena - the store and slot this packet is shared under, so that its frame can be written
++        // to the store's frame file once it is made; null for a packet no other world can share
++        volatile AthenaSectionStore store;
++        volatile int slot = -1;
+ 
+         Payload(int presentMask, byte[] biomes, PacketPlayOutMapChunk.ChunkMap map, long dataChecksum) {
+             this.presentMask = presentMask;
+@@ -110,6 +116,13 @@ final class AthenaChunkPacketCache {
+             this.map = map;
+             this.dataChecksum = dataChecksum;
+         }
++
++        static Payload mapped(int presentMask, byte[] biomes, java.lang.foreign.MemorySegment frame) {
++            Payload payload = new Payload(presentMask, biomes, null, 0L);
++
++            payload.mappedFrame = frame;
++            return payload;
++        }
+     }
+ 
+     private final Payload payload;
+@@ -124,7 +137,32 @@ final class AthenaChunkPacketCache {
+ 
+     /** Whether the frame is made already: nothing is left to compress ahead. */
+     boolean hasFrame() {
+-        return this.payload.frame != null;
++        return this.payload.frame != null || this.payload.mappedFrame != null;
++    }
++
++    /** Whether this packet's frame is read from a template's frame file; for tests. */
++    boolean frameIsMapped() {
++        return this.payload.mappedFrame != null;
++    }
++
++    /**
++     * Writes the compressed frame body to {@code out} (see frame), from the template's frame file if
++     * it is there; false if the packet goes out the ordinary way.
++     */
++    boolean writeFrame(int packetId, int threshold, ByteBuf out) {
++        java.lang.foreign.MemorySegment mapped = this.payload.mappedFrame;
++
++        if (mapped != null) {
++            out.writeBytes(mapped.asByteBuffer());
++            return true;
++        }
++        byte[] frame = this.frame(packetId, threshold);
++
++        if (frame == null) {
++            return false;
++        }
++        out.writeBytes(frame);
++        return true;
+     }
+     // Athena end
+ 
+@@ -307,6 +345,10 @@ final class AthenaChunkPacketCache {
+             }
+             this.payload.frame = result;
+             this.payload.map = null;
++            AthenaSectionStore store = this.payload.store; // Athena - for the template's frame file
++            if (store != null) {
++                store.recordFrame(this.payload.slot, this.payload, packetId, threshold);
++            }
+             return result;
+         } finally {
+             header.release();
+@@ -357,7 +399,11 @@ final class AthenaChunkPacketCache {
+                     mask = data.dataSize & 0xFFFF;
+                 } else {
+                     // frame is set before map is cleared: map gone means frame is there
+-                    PacketDataSerializer body = new PacketDataSerializer(Unpooled.wrappedBuffer(inflateFrame(this.payload.frame)));
++                    byte[] frame = this.payload.frame; // Athena - or the frame file's
++                    if (frame == null) {
++                        frame = this.payload.mappedFrame.toArray(java.lang.foreign.ValueLayout.JAVA_BYTE);
++                    }
++                    PacketDataSerializer body = new PacketDataSerializer(Unpooled.wrappedBuffer(inflateFrame(frame)));
+ 
+                     body.readVarIntFromBuffer();    // packet id
+                     body.skipBytes(4 + 4 + 1);      // x, z, full chunk
+diff --git a/src/main/java/net/minecraft/server/AthenaFrameFile.java b/src/main/java/net/minecraft/server/AthenaFrameFile.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbd5e1642fb6bdae88023297098990bcae22f565
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaFrameFile.java
+@@ -0,0 +1,247 @@
++package net.minecraft.server;
++
++import java.io.File;
++import java.io.IOException;
++import java.lang.foreign.Arena;
++import java.lang.foreign.MemorySegment;
++import java.lang.foreign.ValueLayout;
++import java.nio.ByteBuffer;
++import java.nio.ByteOrder;
++import java.nio.channels.FileChannel;
++import java.nio.file.Files;
++import java.nio.file.StandardCopyOption;
++import java.nio.file.StandardOpenOption;
++import java.util.Arrays;
++import java.util.Map;
++import java.util.TreeMap;
++import org.apache.logging.log4j.LogManager;
++import org.apache.logging.log4j.Logger;
++
++// Athena - a template's compressed chunk packets, in a file mapped into memory beside its section store.
++//
++// Every world on a template sends the same full-chunk packets as long as its chunks are as the
++// template has them, and AthenaChunkPacketCache already shares one packet between the worlds on a
++// template at the same time. But those packets lived on the heap - 8 to 11 MB of compressed frames
++// for a map - and went with the last world on the map, so the next match extracted and deflated
++// every chunk again (3% of what a server of eight rooms allocated) and kept another 8 to 11 MB of
++// heap; and every server on the box held a copy of its own. Here the frames are written, once some
++// have been made, into a file that is mapped read only: the page cache holds them for every server
++// on the box, the garbage collector never sees them, and a match's chunk packets are copied out of
++// the mapping straight onto the wire.
++//
++// A frame depends on the template (the store's fingerprint), on the packet id, the compression level
++// and the compression threshold, and is only used for a chunk still as the template has it, with the
++// same sections present and the same biomes (both kept in the file). All four are in the file's name,
++// so a file is only ever replaced by a new one, renamed into place, never rewritten: a file mapped by
++// a running server keeps its pages until that server lets it go.
++//
++// File layout, little-endian:
++//   header   MAGIC (8), version (4), slots (4), store fingerprint (8), count (4), reserved (4)
++//   entries  count x 24 bytes, ascending slot: slot (4), present mask (4), frame length (4),
++//            reserved (4), offset of the biomes (8)
++//   data     at each offset: 256 bytes of biomes, then the frame
++final class AthenaFrameFile {
++
++    private static final Logger LOGGER = LogManager.getLogger("Athena/FrameFile");
++
++    static final String PREFIX = "athena-frames-";
++    private static final long MAGIC = 0x3130524D46485441L; // "ATHFRM01"
++    private static final int VERSION = 1;
++    private static final int HEADER = 32;
++    private static final int ENTRY = 24;
++    private static final int BIOMES = 256;
++    private static final ValueLayout.OfInt INT_LE = ValueLayout.JAVA_INT_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
++    private static final ValueLayout.OfLong LONG_LE = ValueLayout.JAVA_LONG_UNALIGNED.withOrder(ByteOrder.LITTLE_ENDIAN);
++
++    /** -Dathena.disableFrameFiles=true keeps every chunk packet on the heap, as before. */
++    static final boolean ENABLED = !Boolean.getBoolean("athena.disableFrameFiles");
++
++    private final MemorySegment mapping;
++    /** Entry index by slot, -1 for a slot with no frame. */
++    private final int[] index;
++    final int count;
++
++    private AthenaFrameFile(MemorySegment mapping, int[] index, int count) {
++        this.mapping = mapping;
++        this.index = index;
++        this.count = count;
++    }
++
++    static File file(File directory, long fingerprint, int packetId, int level, int threshold) {
++        return new File(directory, String.format("%s%016x-p%d-l%d-t%d.bin", PREFIX, fingerprint, packetId, level, threshold));
++    }
++
++    boolean has(int slot) {
++        return slot >= 0 && slot < this.index.length && this.index[slot] >= 0;
++    }
++
++    /** The packet in {@code slot} as a payload backed by the mapping, or null if the file has none for it. */
++    AthenaChunkPacketCache.Payload payload(int slot) {
++        if (!this.has(slot)) {
++            return null;
++        }
++        long entry = HEADER + (long) this.index[slot] * ENTRY;
++        int mask = this.mapping.get(INT_LE, entry + 4);
++        int length = this.mapping.get(INT_LE, entry + 8);
++        long at = this.mapping.get(LONG_LE, entry + 16);
++        byte[] biomes = this.mapping.asSlice(at, BIOMES).toArray(ValueLayout.JAVA_BYTE);
++
++        return AthenaChunkPacketCache.Payload.mapped(mask, biomes, this.mapping.asSlice(at + BIOMES, length));
++    }
++
++    /** Maps {@code file} if it is a frame file for a store of {@code slots} slots and this fingerprint; else null. */
++    static AthenaFrameFile map(File file, long fingerprint, int slots) {
++        if (!file.isFile()) {
++            return null;
++        }
++        try (FileChannel channel = FileChannel.open(file.toPath(), StandardOpenOption.READ)) {
++            long size = channel.size();
++
++            if (size < HEADER) {
++                return null;
++            }
++            MemorySegment mapping = channel.map(FileChannel.MapMode.READ_ONLY, 0L, size, Arena.ofAuto());
++
++            if (mapping.get(LONG_LE, 0L) != MAGIC || mapping.get(INT_LE, 8L) != VERSION || mapping.get(INT_LE, 12L) != slots
++                    || mapping.get(LONG_LE, 16L) != fingerprint) {
++                return null;
++            }
++            int count = mapping.get(INT_LE, 24L);
++
++            if (count < 0 || count > slots || HEADER + (long) count * ENTRY > size) {
++                return null;
++            }
++            int[] index = new int[slots];
++            Arrays.fill(index, -1);
++            int last = -1;
++
++            for (int i = 0; i < count; ++i) {
++                long entry = HEADER + (long) i * ENTRY;
++                int slot = mapping.get(INT_LE, entry);
++                int length = mapping.get(INT_LE, entry + 8);
++                long at = mapping.get(LONG_LE, entry + 16);
++
++                if (slot <= last || slot >= slots || length <= 0 || at < HEADER + (long) count * ENTRY || at + BIOMES + length > size) {
++                    return null;
++                }
++                index[slot] = i;
++                last = slot;
++            }
++            return new AthenaFrameFile(mapping, index, count);
++        } catch (IOException | RuntimeException e) {
++            LOGGER.warn("Could not map {}", file, e);
++            return null;
++        }
++    }
++
++    /** A frame made on the heap, waiting to be written. */
++    static final class Pending {
++        final int mask;
++        final byte[] biomes;
++        final byte[] frame;
++
++        Pending(int mask, byte[] biomes, byte[] frame) {
++            this.mask = mask;
++            this.biomes = biomes;
++            this.frame = frame;
++        }
++    }
++
++    /**
++     * Writes the frames of {@code old} (if any) and {@code added} into a new file, renamed onto
++     * {@code file}; answers the number written.
++     */
++    static int write(File file, long fingerprint, int slots, AthenaFrameFile old, Map<Integer, Pending> added) throws IOException {
++        TreeMap<Integer, Object> all = new TreeMap<Integer, Object>();
++
++        if (old != null) {
++            for (int slot = 0; slot < old.index.length; ++slot) {
++                if (old.index[slot] >= 0) all.put(slot, Integer.valueOf(old.index[slot]));
++            }
++        }
++        for (Map.Entry<Integer, Pending> entry : added.entrySet()) {
++            if (entry.getValue().biomes.length == BIOMES && entry.getKey() >= 0 && entry.getKey() < slots) {
++                all.put(entry.getKey(), entry.getValue());
++            }
++        }
++
++        File tmp = new File(file.getParentFile(), file.getName() + ".tmp" + ProcessHandle.current().pid());
++
++        try {
++            try (FileChannel out = FileChannel.open(tmp.toPath(), StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
++                int count = all.size();
++                ByteBuffer head = ByteBuffer.allocate(HEADER + count * ENTRY).order(ByteOrder.LITTLE_ENDIAN);
++                long at = HEADER + (long) count * ENTRY;
++
++                head.putLong(MAGIC).putInt(VERSION).putInt(slots).putLong(fingerprint).putInt(count).putInt(0);
++                for (Map.Entry<Integer, Object> entry : all.entrySet()) {
++                    int mask;
++                    int length;
++
++                    if (entry.getValue() instanceof Pending) {
++                        Pending pending = (Pending) entry.getValue();
++                        mask = pending.mask;
++                        length = pending.frame.length;
++                    } else {
++                        long e = HEADER + (long) ((Integer) entry.getValue()) * ENTRY;
++                        mask = old.mapping.get(INT_LE, e + 4);
++                        length = old.mapping.get(INT_LE, e + 8);
++                    }
++                    head.putInt(entry.getKey()).putInt(mask).putInt(length).putInt(0).putLong(at);
++                    at += BIOMES + length;
++                }
++                head.flip();
++                while (head.hasRemaining()) out.write(head);
++                for (Map.Entry<Integer, Object> entry : all.entrySet()) {
++                    ByteBuffer data;
++
++                    if (entry.getValue() instanceof Pending) {
++                        Pending pending = (Pending) entry.getValue();
++                        data = ByteBuffer.allocate(BIOMES + pending.frame.length);
++                        data.put(pending.biomes).put(pending.frame).flip();
++                    } else {
++                        long e = HEADER + (long) ((Integer) entry.getValue()) * ENTRY;
++                        int length = old.mapping.get(INT_LE, e + 8);
++                        long from = old.mapping.get(LONG_LE, e + 16);
++                        data = old.mapping.asSlice(from, BIOMES + length).asByteBuffer();
++                    }
++                    while (data.hasRemaining()) out.write(data);
++                }
++                out.force(false);
++                Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
++                return count;
++            }
++        } finally {
++            tmp.delete(); // gone already once moved
++        }
++    }
++
++    /** Frame files of other fingerprints in {@code directory}, and leftovers of writes whose process is gone. */
++    static void removeLeftovers(File directory, long fingerprint) {
++        File[] files = directory.listFiles((dir, name) -> name.startsWith(PREFIX));
++
++        if (files == null) {
++            return;
++        }
++        String current = String.format("%s%016x-", PREFIX, fingerprint);
++
++        for (File file : files) {
++            String name = file.getName();
++            int tmp = name.lastIndexOf(".tmp");
++
++            if (tmp >= 0) {
++                try {
++                    long pid = Long.parseLong(name.substring(tmp + 4));
++
++                    if (!ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false)) {
++                        file.delete();
++                    }
++                } catch (NumberFormatException ignored) {
++                    // not one of ours
++                }
++            } else if (!name.startsWith(current)) {
++                file.delete(); // an older template's; a server still mapping it keeps its pages
++            }
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaSectionStore.java b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+index 8b893cdce664281fe7f7f87f7afe720de4637d1a..23cbae86a13c633e1d8d1875c18f8e0cf8dee4d5 100644
+--- a/src/main/java/net/minecraft/server/AthenaSectionStore.java
++++ b/src/main/java/net/minecraft/server/AthenaSectionStore.java
+@@ -283,6 +283,7 @@ final class AthenaSectionStore {
+                 if (keys[i - 1] >= keys[i]) return null;
+             }
+             AthenaSectionStore store = new AthenaSectionStore(mapping, keys, keysAt + (long) count * 8L);
++            store.file = file; // Athena - its frame file lies beside it
+             // Athena - validate metadata here, without faulting in every section's block payload.
+             return store.validEntries(keysAt) ? store : null;
+         } catch (IOException | RuntimeException e) {
+@@ -551,12 +552,27 @@ final class AthenaSectionStore {
+         return index < 0 ? -1 : index * 2 + (sky ? 1 : 0);
+     }
+ 
+-    /** The packet a world on this template made for the chunk and still uses, or null. */
++    /**
++     * The packet a world on this template made for the chunk and still uses, or else the one in the
++     * template's frame file (see AthenaFrameFile); null if neither has it.
++     */
+     AthenaChunkPacketCache.Payload sharedPacket(int slot) {
+         java.util.concurrent.atomic.AtomicReferenceArray<WeakReference<AthenaChunkPacketCache.Payload>> packets = this.packets;
+         WeakReference<AthenaChunkPacketCache.Payload> reference = packets == null ? null : packets.get(slot);
++        AthenaChunkPacketCache.Payload shared = reference == null ? null : reference.get();
++
++        if (shared == null) {
++            AthenaFrameFile frames = this.frames();
+ 
+-        return reference == null ? null : reference.get();
++            if (frames != null && frames.has(slot)) {
++                AthenaChunkPacketCache.Payload mapped = frames.payload(slot);
++
++                if (mapped != null) {
++                    shared = this.sharePacket(slot, mapped);
++                }
++            }
++        }
++        return shared;
+     }
+ 
+     /** Offers {@code built} to the other worlds; answers the packet that is shared now - another world's, if it got there first. */
+@@ -584,12 +600,118 @@ final class AthenaSectionStore {
+                 mine = new WeakReference<AthenaChunkPacketCache.Payload>(built);
+             }
+             if (packets.compareAndSet(slot, reference, mine)) {
++                if (built.mappedFrame == null) { // Athena - its frame goes to the frame file once made
++                    built.slot = slot;
++                    built.store = this;
++                }
+                 return built;
+             }
+         }
+     }
+     // Athena end
+ 
++    // Athena start - the template's frame file; see AthenaFrameFile.
++    //
++    // Looked for once, for the compression this server runs with, and replaced by a newer file each
++    // time enough frames made on the heap have been written to it (recordFrame). Kept by the store,
++    // so between matches too: what it holds on the heap is an index of a few kilobytes; the frames
++    // are address space, paged in as they are sent.
++    private File file; // the store's own file, set by map
++    private volatile boolean framesLooked;
++    private volatile AthenaFrameFile frames;
++    private int framesPacketId = -1, framesLevel, framesThreshold;
++    private final Map<Integer, AthenaFrameFile.Pending> pendingFrames = new ConcurrentHashMap<Integer, AthenaFrameFile.Pending>();
++    private final java.util.concurrent.atomic.AtomicBoolean framesWriting = new java.util.concurrent.atomic.AtomicBoolean();
++    /** How many frames made on the heap are written to the file together. */
++    static int FRAMES_WRITE_AT = 64;
++
++    private AthenaFrameFile frames() {
++        if (!this.framesLooked) {
++            synchronized (this) {
++                if (!this.framesLooked) {
++                    MinecraftServer server = MinecraftServer.getServer();
++                    int threshold = server != null ? server.aK() : framesThresholdForTest;
++
++                    if (AthenaFrameFile.ENABLED && this.file != null && threshold >= 0 && !AthenaIndexAudit.enabled()) {
++                        Integer id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, new PacketPlayOutMapChunk());
++                        this.framesPacketId = id != null ? id : -1;
++                        this.framesLevel = PacketCompressor.level();
++                        this.framesThreshold = threshold;
++                        if (this.framesPacketId >= 0) {
++                            this.frames = AthenaFrameFile.map(this.framesFile(), this.fingerprint(), this.keys.length * 2);
++                        }
++                    }
++                    this.framesLooked = true;
++                }
++            }
++        }
++        return this.frames;
++    }
++
++    private File framesFile() {
++        return AthenaFrameFile.file(this.file.getParentFile(), this.fingerprint(), this.framesPacketId, this.framesLevel, this.framesThreshold);
++    }
++
++    /** A frame made on the heap for a packet shared under {@code slot}: written to the frame file with the next ones. */
++    void recordFrame(int slot, AthenaChunkPacketCache.Payload payload, int packetId, int threshold) {
++        this.frames();
++        if (this.framesPacketId < 0 || packetId != this.framesPacketId || threshold != this.framesThreshold) {
++            return; // not the compression the file is for
++        }
++        AthenaFrameFile frames = this.frames;
++        byte[] frame = payload.frame;
++
++        if (frame == null || slot < 0 || (frames != null && frames.has(slot)) || payload.biomes.length != 256) {
++            return;
++        }
++        this.pendingFrames.put(slot, new AthenaFrameFile.Pending(payload.presentMask, payload.biomes, frame));
++        if (this.pendingFrames.size() >= FRAMES_WRITE_AT && this.framesWriting.compareAndSet(false, true)) {
++            try {
++                BUILDER.execute(this::writeFrames);
++            } catch (RuntimeException e) {
++                this.framesWriting.set(false);
++            }
++        }
++    }
++
++    private void writeFrames() {
++        try {
++            Map<Integer, AthenaFrameFile.Pending> batch = new HashMap<Integer, AthenaFrameFile.Pending>(this.pendingFrames);
++            File target = this.framesFile();
++            int slots = this.keys.length * 2;
++            int written = AthenaFrameFile.write(target, this.fingerprint(), slots, this.frames, batch);
++            AthenaFrameFile mapped = AthenaFrameFile.map(target, this.fingerprint(), slots);
++
++            if (mapped != null) {
++                this.frames = mapped;
++                for (Integer slot : batch.keySet()) {
++                    this.pendingFrames.remove(slot, batch.get(slot));
++                }
++                AthenaFrameFile.removeLeftovers(target.getParentFile(), this.fingerprint());
++                LOGGER.info("Wrote {} chunk packets to {}", written, target.getName());
++            }
++        } catch (Throwable t) {
++            LOGGER.warn("Could not write the chunk packets of {}: they stay on the heap", this.file, t);
++            this.pendingFrames.clear();
++        } finally {
++            this.framesWriting.set(false);
++        }
++    }
++
++    /** For tests, which run with no server: the compression threshold frame files are for (-1: none). */
++    static volatile int framesThresholdForTest = -1;
++
++    /** Writes what is recorded now; for tests. */
++    void writeFramesForTest() {
++        this.writeFrames();
++    }
++
++    /** Forgets the packets the worlds share, as when the last of them unloads; for tests. */
++    void forgetPacketsForTest() {
++        this.packets = null;
++    }
++    // Athena end
++
+     // Athena start - the heights and biomes of this template's chunks; see Chunk.athenaShareTemplateArrays.
+     //
+     // Held weakly, like the packets: an array lives as long as a chunk of some world has it, and a
+diff --git a/src/main/java/net/minecraft/server/PacketEncoder.java b/src/main/java/net/minecraft/server/PacketEncoder.java
+index fb1d048d0f5bf1d23444c302314120452101cf53..a687ee2d9e770897d9ea5f350f46dc56324af1cf 100644
+--- a/src/main/java/net/minecraft/server/PacketEncoder.java
++++ b/src/main/java/net/minecraft/server/PacketEncoder.java
+@@ -44,10 +44,8 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+ 
+                 if (handler instanceof PacketCompressor) {
+                     PacketCompressor compressor = (PacketCompressor) handler;
+-                    byte[] frame = ((PacketPlayOutMapChunk) packet).athenaCache.frame(integer, compressor.getThreshold());
+-
+-                    if (frame != null) {
+-                        bytebuf.writeBytes(frame);
++                    // Athena - from the template's frame file when it has the packet; see AthenaFrameFile
++                    if (((PacketPlayOutMapChunk) packet).athenaCache.writeFrame(integer, compressor.getThreshold(), bytebuf)) {
+                         compressor.passThroughNext = true;
+                         return;
+                     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+index 403a9babaa04c4fb6e3263e3d4b006d6fdd1d81d..6a566c643b5ad391a00952d0778a5f2792d17870 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionStoreTest.java
+@@ -774,4 +774,62 @@ public class AthenaSectionStoreTest extends AbstractTestingBase {
+         two.close();
+         three.close();
+     }
++
++    // ---- the template's frame file (AthenaFrameFile) ----
++
++    @Test
++    public void aTemplatesFramesAreWrittenToItsFrameFileAndReadBackAsTheyWere() throws Exception {
++        AthenaSectionStore.framesThresholdForTest = 256;
++        try {
++            File dir = template(21L);
++            AthenaSectionStore store = built(dir);
++            AthenaTemplateRegion region = AthenaTemplateRegion.open(new File(dir, "region/r.-1.0.mca"));
++            NBTTagCompound level = region.read(0, 0).getCompound("Level");
++
++            region.close();
++
++            int id = EnumProtocol.PLAY.getPacketId(EnumProtocolDirection.CLIENTBOUND, new PacketPlayOutMapChunk());
++            Chunk a = fromStore(store, level, skyWorld(), -32, 0);
++            AthenaChunkPacketCache forA = new AthenaChunkPacketCache(a);
++            byte[] frame = forA.frame(id, 256);
++
++            assertNotNull(frame);
++            assertFalse(forA.frameIsMapped());
++            store.writeFramesForTest();
++
++            File[] files = dir.listFiles((d, name) -> name.startsWith(AthenaFrameFile.PREFIX));
++            assertEquals("one frame file, under the template's directory", 1, files.length);
++            assertFalse(files[0].getName().contains(".tmp"));
++
++            // the worlds on the template are gone: the next one reads the frame from the file
++            store.forgetPacketsForTest();
++            Chunk b = fromStore(store, level, skyWorld(), -32, 0);
++            AthenaChunkPacketCache forB = new AthenaChunkPacketCache(b);
++
++            assertTrue(forB.frameIsMapped());
++            assertTrue(forB.hasFrame());
++            assertTrue(forB.matches(b));
++
++            io.netty.buffer.ByteBuf out = io.netty.buffer.Unpooled.buffer();
++            assertTrue(forB.writeFrame(id, 256, out));
++            byte[] written = new byte[out.readableBytes()];
++            out.readBytes(written);
++            assertArrayEquals("the same bytes as the frame made on the heap", frame, written);
++
++            // a 1.7 client's packet is made from the mapped frame too
++            assertNotNull(forB.legacy17(id, 256));
++
++            // a chunk with other biomes takes no frame from the file
++            store.forgetPacketsForTest();
++            Chunk c = fromStore(store, level, skyWorld(), -32, 0);
++            c.getBiomeIndex()[0] = (byte) (c.getBiomeIndex()[0] + 1);
++            AthenaChunkPacketCache forC = new AthenaChunkPacketCache(c);
++            assertFalse(forC.frameIsMapped());
++
++            // a store opened again (another server) finds the file
++            assertTrue(AthenaFrameFile.map(files[0], 0L, 0) == null); // the wrong store is refused
++        } finally {
++            AthenaSectionStore.framesThresholdForTest = -1;
++        }
++    }
+ }
