@@ -1,0 +1,336 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 15 Nov 2026 06:57:29 +0900
+Subject: [PATCH] Query results, the batch list and the connections' copy are
+ reused per thread
+
+Pushing, a player's pick-up range and a hopper's inventory look fill a list kept per thread
+(AthenaScratchLists, one per depth) instead of a new ArrayList each: 148 MB, 3.7% of what a
+match allocated. The packet batch keeps its list from batch to batch, and a world thread's
+connection tick copies the players into an array it keeps.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaScratchLists.java b/src/main/java/net/minecraft/server/AthenaScratchLists.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6778c91b7fe770c8fbc60ed1ce0ee623f3fe56e4
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaScratchLists.java
+@@ -0,0 +1,70 @@
++package net.minecraft.server;
++
++import java.util.ArrayList;
++
++/**
++ * Athena - lists an entity query fills and its caller reads, then lets go, reused per thread.
++ *
++ * The push of every living entity (EntityLiving.collideWithNearbyEntities), a player's pick-up range
++ * (EntityHuman) and a hopper's look for an inventory entity each made a new ArrayList a tick and grew
++ * it: 148 MB, 3.7% of what a match allocated (VPS-B, 8 rooms). The result never leaves the caller,
++ * so the caller takes a list here, fills it, walks it and gives it back. What the walk calls - a
++ * pick-up event, a collision - may run another query on the same thread before the list is given
++ * back: each depth has a list of its own. A list that grew past {@value #KEEP} entries is let go
++ * rather than kept at that size.
++ */
++final class AthenaScratchLists {
++
++    static final int KEEP = 256;
++
++    private static final ThreadLocal<AthenaScratchLists> LOCAL = new ThreadLocal<AthenaScratchLists>() {
++        @Override
++        protected AthenaScratchLists initialValue() {
++            return new AthenaScratchLists();
++        }
++    };
++
++    private ArrayList<Entity>[] lists = newLists(4);
++    private int depth;
++
++    @SuppressWarnings("unchecked")
++    private static ArrayList<Entity>[] newLists(int n) {
++        return (ArrayList<Entity>[]) new ArrayList[n];
++    }
++
++    /** An empty list for this thread; give it back with {@link #release} when done with it. */
++    static ArrayList<Entity> take() {
++        AthenaScratchLists local = LOCAL.get();
++        int depth = local.depth++;
++
++        if (depth == local.lists.length) {
++            local.lists = java.util.Arrays.copyOf(local.lists, depth * 2);
++        }
++        ArrayList<Entity> list = local.lists[depth];
++        if (list == null) {
++            list = local.lists[depth] = new ArrayList<Entity>();
++        }
++        return list;
++    }
++
++    /** Gives back the list {@link #take} gave last on this thread, emptied. */
++    static void release(ArrayList<Entity> list) {
++        AthenaScratchLists local = LOCAL.get();
++        int depth = --local.depth;
++
++        if (depth < 0 || local.lists[depth] != list) {
++            local.depth = Math.max(0, depth + 1);
++            throw new IllegalStateException("scratch lists given back out of order");
++        }
++        if (list.size() > KEEP) {
++            local.lists[depth] = null; // let a list that grew that far go
++        } else {
++            list.clear();
++        }
++    }
++
++    /** How many lists this thread holds out now (for the test). */
++    static int depthForTest() {
++        return LOCAL.get().depth;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 127267078988343fd14c3d1b91e9744efa7d2c27..3099048a6120dff55d4e6fb7576e335e6b12133e 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -470,9 +470,20 @@ public final class AthenaWorldThread extends Thread {
+      * and its tick (keep-alive, chat throttle, idle kick). A closed connection is left to the server
+      * thread, which takes it off its list and posts its disconnect here.
+      */
++    // Athena - a copy of the world's players, kept from tick to tick (this thread's only): a packet
++    // handled here can take its player out of the list (a teleport to another world), so the walk is
++    // over a copy, and toArray made a new array for every world every tick
++    private Object[] connectionScratch = new Object[16];
++
+     private void tickConnections(WorldServer world) {
+-        Object[] players = world.players.toArray();
+-        for (Object human : players) {
++        int count = world.players.size();
++        if (this.connectionScratch.length < count) {
++            this.connectionScratch = new Object[Math.max(count, this.connectionScratch.length * 2)];
++        }
++        Object[] players = world.players.toArray(this.connectionScratch);
++        try {
++        for (int p = 0; p < count; ++p) {
++            Object human = players[p];
+             if (!(human instanceof EntityPlayer)) continue;
+             PlayerConnection connection = ((EntityPlayer) human).playerConnection;
+             if (connection == null) continue;
+@@ -487,6 +498,9 @@ public final class AthenaWorldThread extends Thread {
+                 networkmanager.disableAutoRead();
+             }
+         }
++        } finally {
++            java.util.Arrays.fill(players, 0, count, null); // hold no player past the walk
++        }
+     }
+ 
+     // Athena start - a hit is handled when it arrives, not at the next tick.
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 04c0d3b2c7545639699a1a353a3a0c8b2aedb84a..20109be2267fd74ab14773a50fe23fd233522f23 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -442,9 +442,10 @@ public abstract class EntityHuman extends EntityLiving {
+                 pushMinZ = Math.min(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D); pushMaxZ = Math.max(this.boundingBoxMinZ - 1.0D, this.boundingBoxMaxZ + 1.0D);
+             }
+ 
+-            List list = this.world.getEntities(this, pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ);
+-
+             if (this.canBePushed()) { // Spigot: Add this.ae() condition (second !this.isDead near bottom of EntityLiving)
++            // Athena - the query only when its result is used, into a list reused per thread (AthenaScratchLists)
++            java.util.ArrayList<Entity> list = this.world.athenaEntitiesInto(this, pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ, IEntitySelector.NOT_SPECTATING, AthenaScratchLists.take());
++            try {
+             for (int i = 0; i < list.size(); ++i) {
+                 Entity entity = (Entity) list.get(i);
+ 
+@@ -452,6 +453,9 @@ public abstract class EntityHuman extends EntityLiving {
+                     this.collideWithPlayer(entity);
+                 }
+             }
++            } finally {
++                AthenaScratchLists.release(list);
++            }
+             } // Spigot 
+         }
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 6d5a547ffe1d52f6e0b82cc422d4aea8a527b905..5e163ed9a84aa1a52e99c88445ee076a0aa02878 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -1796,7 +1796,8 @@ public abstract class EntityLiving extends Entity {
+             return;
+         }
+ 
+-        List list = this.world.getEntitiesInAABBexcluding((Entity) this, minX, minY, minZ, maxX, maxY, maxZ, NOT_SPECTATING_AND_PUSHABLE);
++        java.util.ArrayList<Entity> list = this.world.athenaEntitiesInto((Entity) this, minX, minY, minZ, maxX, maxY, maxZ, NOT_SPECTATING_AND_PUSHABLE, AthenaScratchLists.take()); // Athena - see AthenaScratchLists
++        try { // Athena
+ 
+         if (!list.isEmpty()) { // Athena - canBeCollidedWith() asked above
+         // Athena end
+@@ -1818,6 +1819,9 @@ public abstract class EntityLiving extends Entity {
+             }
+             numCollisions = 0; // Spigot
+         }
++        } finally { // Athena
++            AthenaScratchLists.release(list);
++        }
+ 
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index 9fc31dfdad38f5947e73e8774959c9c540b34870..305aecc773c0088c9c05ae2522a610a4573912f0 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -494,19 +494,30 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     // Athena - per thread: the server thread and every world thread (AthenaWorldThread) batch their
+     // own ticks. A connection waits in the batch of the one thread that queued it first; another
+     // thread sending to it meanwhile posts at once, as threads outside a batch always did.
++    // Athena - one list per thread, kept from batch to batch (a new ArrayList every batch was one a
++    // tick for each tick thread and one for each burst of urgent tasks); null outside a batch
+     private static final ThreadLocal<java.util.ArrayList<NetworkManager>> athenaBatch = new ThreadLocal<java.util.ArrayList<NetworkManager>>();
++    private static final ThreadLocal<java.util.ArrayList<NetworkManager>> athenaBatchKept = new ThreadLocal<java.util.ArrayList<NetworkManager>>() {
++        @Override
++        protected java.util.ArrayList<NetworkManager> initialValue() {
++            return new java.util.ArrayList<NetworkManager>();
++        }
++    };
+     private static final java.util.concurrent.atomic.AtomicReferenceFieldUpdater<NetworkManager, Thread> ATHENA_POST_PENDING_BY =
+             java.util.concurrent.atomic.AtomicReferenceFieldUpdater.newUpdater(NetworkManager.class, Thread.class, "athenaPostPendingBy");
+     private volatile Thread athenaPostPendingBy;
+ 
+     public static void athenaBeginBatch() {
+-        athenaBatch.set(new java.util.ArrayList<NetworkManager>());
++        java.util.ArrayList<NetworkManager> kept = athenaBatchKept.get();
++        if (athenaBatch.get() == kept) return; // already in one: it goes on, and its end posts everything
++        athenaBatch.set(kept);
+     }
+ 
+     public static void athenaEndBatch() {
+         java.util.ArrayList<NetworkManager> athenaToPost = athenaBatch.get();
+-        athenaBatch.remove();
++        athenaBatch.set(null); // Athena - not remove: that drops the map entry, and the next set makes another
+         if (athenaToPost == null) return;
++        try { // Athena
+         for (int i = 0, n = athenaToPost.size(); i < n; ++i) {
+             NetworkManager manager = athenaToPost.get(i);
+ 
+@@ -517,6 +528,9 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+             manager.athenaPostPendingBy = null;
+             manager.athenaPostDrain();
+         }
++        } finally {
++            athenaToPost.clear(); // Athena - kept for the next batch (athenaBatchKept)
++        }
+     }
+ 
+     private void athenaHandOff(Object entry) {
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index 732270c66e36a5f5f7ebdaf4dccc1deb81bb8ce1..66eec2d80f1061ea190739eae26464713f8d748b 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -570,11 +570,12 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+         }
+ 
+         if (object == null) {
+-            List list = world.getEntitiesInAABBexcluding((Entity) null, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectInventories); // Athena - scalar overload
++            java.util.ArrayList<Entity> list = world.athenaEntitiesInto((Entity) null, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectInventories, AthenaScratchLists.take()); // Athena - scalar overload; a list reused per thread (AthenaScratchLists)
+ 
+             if (list.size() > 0) {
+                 object = (IInventory) list.get(world.random.nextInt(list.size()));
+             }
++            AthenaScratchLists.release(list); // Athena - nothing between take and here calls out
+         }
+ 
+         return (IInventory) object;
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 60c920f5a27c4adaea615e3c943201fa33fcd85a..c397b713f9d077217882ef660334e4664789e424 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -3702,7 +3702,11 @@ public abstract class World implements IBlockAccess {
+     // Athena end
+ 
+     public List<Entity> getEntitiesInAABBexcluding(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Predicate<? super Entity> predicate) {
+-        ArrayList arraylist = Lists.newArrayList();
++        return this.athenaEntitiesInto(entity, minX, minY, minZ, maxX, maxY, maxZ, predicate, Lists.<Entity>newArrayList());
++    }
++
++    // Athena - the same query into a list the caller gives (an AthenaScratchLists list)
++    <L extends List<Entity>> L athenaEntitiesInto(Entity entity, double minX, double minY, double minZ, double maxX, double maxY, double maxZ, Predicate<? super Entity> predicate, L arraylist) {
+         int i = MathHelper.floor((minX - 2.0D) / 16.0D);
+         int j = MathHelper.floor((maxX + 2.0D) / 16.0D);
+         int k = MathHelper.floor((minZ - 2.0D) / 16.0D);
+diff --git a/src/test/java/net/minecraft/server/AthenaScratchListsTest.java b/src/test/java/net/minecraft/server/AthenaScratchListsTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..59d26530c33d4ae9c2451da583596bdb3ebbc4df
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaScratchListsTest.java
+@@ -0,0 +1,71 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotSame;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
++
++import java.util.ArrayList;
++import org.junit.Test;
++
++/**
++ * Athena - a query's result list is reused per thread: a query run while another's list is held
++ * (from what its walk calls) gets a list of its own, a list comes back empty, one that grew too far
++ * is let go, and lists are given back in the order they were taken.
++ */
++public class AthenaScratchListsTest {
++
++    @Test
++    public void eachDepthHasItsOwnListAndItIsReused() {
++        assertEquals(0, AthenaScratchLists.depthForTest());
++        java.util.ArrayDeque<ArrayList<Entity>> held = new java.util.ArrayDeque<ArrayList<Entity>>();
++        java.util.Set<ArrayList<Entity>> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<ArrayList<Entity>, Boolean>());
++        for (int i = 0; i < 8; ++i) { // deeper than the first array of lists
++            ArrayList<Entity> list = AthenaScratchLists.take();
++            assertTrue("a list of its own at depth " + i, seen.add(list));
++            assertTrue(list.isEmpty());
++            list.add(null);
++            held.push(list);
++        }
++        assertEquals(8, AthenaScratchLists.depthForTest());
++        ArrayList<Entity> outer = held.peekLast();
++        while (!held.isEmpty()) {
++            AthenaScratchLists.release(held.pop());
++        }
++        assertEquals(0, AthenaScratchLists.depthForTest());
++
++        ArrayList<Entity> again = AthenaScratchLists.take();
++        assertSame("reused", outer, again);
++        assertTrue("emptied", again.isEmpty());
++        AthenaScratchLists.release(again);
++    }
++
++    @Test
++    public void aListThatGrewTooFarIsLetGo() {
++        ArrayList<Entity> list = AthenaScratchLists.take();
++        for (int i = 0; i <= AthenaScratchLists.KEEP; ++i) {
++            list.add(null);
++        }
++        AthenaScratchLists.release(list);
++        ArrayList<Entity> next = AthenaScratchLists.take();
++        assertNotSame(list, next);
++        assertTrue(next.isEmpty());
++        AthenaScratchLists.release(next);
++    }
++
++    @Test
++    public void listsComeBackInTheOrderTheyWereTaken() {
++        ArrayList<Entity> outer = AthenaScratchLists.take();
++        ArrayList<Entity> inner = AthenaScratchLists.take();
++        try {
++            AthenaScratchLists.release(outer);
++            fail("the outer list given back before the inner one");
++        } catch (IllegalStateException expected) {
++            // the depth is left as it was
++        }
++        AthenaScratchLists.release(inner);
++        AthenaScratchLists.release(outer);
++        assertEquals(0, AthenaScratchLists.depthForTest());
++    }
++}
