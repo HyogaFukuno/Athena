@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 07:40:20 +0900
+Subject: [PATCH] A hit is handled when it arrives, not at the next tick
+
+An attack packet waited for the start of the next tick, 25 ms on average and 50 at
+worst, and its knockback went out that much later. It now wakes its world's thread,
+which runs the queue between two ticks: the same tasks in the same order and at the
+same point between the world's ticks, only sooner. -Dathena.immediateAttacks=false
+leaves hits for the next tick.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 34d028105bf4a89e912b3b3c22a46deef751d462..8801d60d28e6fa3c550e0ab3662a087f1901e840 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -369,6 +369,10 @@ public final class AthenaWorldThread extends Thread {
+                 if (!this.running) break;
+                 long now = System.nanoTime();
+                 if (now < next) {
++                    if (this.urgent) {
++                        this.runUrgent();
++                        continue;
++                    }
+                     java.util.concurrent.locks.LockSupport.parkNanos(next - now);
+                     continue;
+                 }
+@@ -485,6 +489,35 @@ public final class AthenaWorldThread extends Thread {
+         }
+     }
+ 
++    // Athena start - a hit is handled when it arrives, not at the next tick.
++    //
++    // A packet from a player waits in the queue for the start of the next tick, as in vanilla: a hit
++    // landed on average 25 ms, at worst 50 ms, after it reached the server, and the knockback went out
++    // that much later. An attack wakes this thread instead (PlayerConnectionUtils), which runs the
++    // queue between two ticks: the same tasks in the same order and at the same point between the
++    // world's ticks as at the start of the next one - only sooner - so the packets ahead of the hit
++    // (the victim's moves) are still handled first, and the world's tick number is the same.
++    // -Dathena.immediateAttacks=false leaves hits for the next tick.
++    static final boolean IMMEDIATE_ATTACKS = !"false".equals(System.getProperty("athena.immediateAttacks"));
++    private volatile boolean urgent;
++
++    /** From any thread: run the queued tasks now if the thread is waiting for its next tick. */
++    void wakeForPacket() {
++        this.urgent = true;
++        java.util.concurrent.locks.LockSupport.unpark(this);
++    }
++
++    private void runUrgent() {
++        this.urgent = false; // before the tasks: a hit queued while they run wakes the loop again
++        NetworkManager.athenaBeginBatch(); // what the tasks send goes out once, when they are done
++        try {
++            this.runTasks();
++        } finally {
++            NetworkManager.athenaEndBatch();
++        }
++    }
++    // Athena end
++
+     private void runTasks() {
+         Task task;
+         while ((task = this.tasks.poll()) != null) {
+diff --git a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+index 6a526ca6013988f5eb2e423b1a8306d31f9e52ee..d4c52c70cdda7676e1a4df6664b14afe7483e78c 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
++++ b/src/main/java/net/minecraft/server/PlayerConnectionUtils.java
+@@ -51,7 +51,7 @@ public class PlayerConnectionUtils {
+                     }
+                 }
+             };
+-            athenaPost(iasynctaskhandler, handle);
++            athenaPost(iasynctaskhandler, handle, packet);
+             return true;
+         }
+         return false;
+@@ -66,9 +66,15 @@ public class PlayerConnectionUtils {
+     // packet caller ever does: with the Runnable here, the Task and the queue node, a received packet
+     // made seven objects just to change threads - 2.8% of what a match allocated (VPS-B, 8 rooms, about
+     // 110 players over the network). athenaRunOnTickThread queues the same Runnable, to the same thread.
+-    private static void athenaPost(IAsyncTaskHandler iasynctaskhandler, Runnable handle) {
++    private static void athenaPost(IAsyncTaskHandler iasynctaskhandler, Runnable handle, Packet<?> packet) {
+         if (iasynctaskhandler instanceof WorldServer) {
+-            ((WorldServer) iasynctaskhandler).athenaRunOnTickThread(handle);
++            WorldServer world = (WorldServer) iasynctaskhandler;
++            world.athenaRunOnTickThread(handle);
++            // Athena - a hit is handled when it arrives; see AthenaWorldThread.wakeForPacket
++            AthenaWorldThread thread = world.athenaThread;
++            if (thread != null && AthenaWorldThread.IMMEDIATE_ATTACKS && packet instanceof PacketPlayInUseEntity && ((PacketPlayInUseEntity) packet).getAction() == PacketPlayInUseEntity.EnumEntityUseAction.ATTACK) {
++                thread.wakeForPacket();
++            }
+         } else {
+             iasynctaskhandler.postToMainThread(handle);
+         }

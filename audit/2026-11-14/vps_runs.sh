@@ -22,6 +22,8 @@ ssh -o BatchMode=yes $H 'systemctl stop sg@sg2; systemctl is-active sg@sg2; free
 for spec in "$@"; do
   TAG=${spec%%:*}; rest=${spec#*:}; JAR=${rest%%:*}; J=(--jit "-XX:TieredStopAtLevel=1 --sun-misc-unsafe-memory-access=allow")  # as production: Unsafe allowed
   [[ $rest == *:inline* ]] && J=(--jit "-XX:TieredStopAtLevel=1 -XX:C1MaxInlineSize=70 -XX:C1MaxInlineLevel=15 --sun-misc-unsafe-memory-access=allow")  # P2-4
+  [[ $rest == *:noatk* ]] && J=(--jit "-XX:TieredStopAtLevel=1 -Dathena.immediateAttacks=false --sun-misc-unsafe-memory-access=allow")
+  [[ $rest == *:nodec* ]] && J=(--jit "-XX:TieredStopAtLevel=1 -Dathena.disableDirectDecode=true --sun-misc-unsafe-memory-access=allow")
   [[ $rest == *:jfr* ]] && J+=(--jfr)
   echo "== $TAG $JAR $J $(date +%T)"
   python3 sim_vps.py ../../../run/jars/$JAR $TAG --sg ../../../run/sgjar/sg2-live.jar --conf sg2 --map Shady_Hollow,Shady_Hollow \
