@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] A sign's lines are made into JSON once per text
+
+Each player a sign was sent to had its four lines serialized again on the event
+loop: 0.6% of a match's CPU and 2% of its allocation (VPS-B, 8 rooms). The sign keeps
+the JSON against the line objects it was made from; a line set anew, or set on the
+packet by a plugin, is serialized again.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutUpdateSign.java b/src/main/java/net/minecraft/server/PacketPlayOutUpdateSign.java
+index 13bd9862382ba9c8e427bc6e5c2e6c28b510078d..31cb17169875c6eba004ae27557ecc23cfdef898 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutUpdateSign.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutUpdateSign.java
+@@ -8,9 +8,20 @@ public class PacketPlayOutUpdateSign implements Packet<PacketListenerPlayOut> {
+     private World world;
+     private BlockPosition blockPos;
+     private IChatBaseComponent[] lines;
++    // Athena - the lines as JSON, made once per text by the sign (TileEntitySign.athenaLinesJson);
++    // null for a packet made any other way, whose lines are serialized when it is written
++    private String[] linesJson;
++    private IChatBaseComponent[] linesJsonOf; // the lines it was made from: a line set on the packet since (a packet plugin) is serialized itself
+ 
+     public PacketPlayOutUpdateSign() {}
+ 
++    // Athena
++    PacketPlayOutUpdateSign(World world, BlockPosition blockposition, IChatBaseComponent[] aichatbasecomponent, String[] linesJson, IChatBaseComponent[] linesJsonOf) {
++        this(world, blockposition, aichatbasecomponent);
++        this.linesJson = linesJson;
++        this.linesJsonOf = linesJsonOf;
++    }
++
+     public PacketPlayOutUpdateSign(World world, BlockPosition blockposition, IChatBaseComponent[] aichatbasecomponent) {
+         this.world = world;
+         this.blockPos = blockposition;
+@@ -32,8 +43,14 @@ public class PacketPlayOutUpdateSign implements Packet<PacketListenerPlayOut> {
+     public void writePacketData(PacketDataSerializer packetdataserializer) throws IOException {
+         packetdataserializer.writeBlockPos(this.blockPos);
+ 
++        String[] json = this.linesJson; // Athena
++        IChatBaseComponent[] of = this.linesJsonOf; // Athena
+         for (int i = 0; i < 4; ++i) {
++            if (json != null && this.lines[i] == of[i]) {
++                packetdataserializer.writeString(json[i]); // Athena - as writeChatComponent writes it
++            } else {
+             packetdataserializer.writeChatComponent(this.lines[i]);
++            } // Athena
+         }
+ 
+     }
+diff --git a/src/main/java/net/minecraft/server/TileEntitySign.java b/src/main/java/net/minecraft/server/TileEntitySign.java
+index cef864662c973da960b9b94ece1d550910013612..9a753415257eebada61daf44293ad8403034e54f 100644
+--- a/src/main/java/net/minecraft/server/TileEntitySign.java
++++ b/src/main/java/net/minecraft/server/TileEntitySign.java
+@@ -111,9 +111,35 @@ public class TileEntitySign extends TileEntity {
+         IChatBaseComponent[] aichatbasecomponent = new IChatBaseComponent[4];
+ 
+         System.arraycopy(this.lines, 0, aichatbasecomponent, 0, 4);
+-        return new PacketPlayOutUpdateSign(this.world, this.position, aichatbasecomponent);
++        return new PacketPlayOutUpdateSign(this.world, this.position, aichatbasecomponent, this.athenaLinesJson(aichatbasecomponent), this.athenaJsonOf); // Athena - athenaLinesJson sets athenaJsonOf first: arguments are evaluated in order
+     }
+ 
++    // Athena start - a sign's lines are turned into JSON once per text, not once per player sent it.
++    //
++    // Every player a map's signs were sent to had each line serialized again on the event loop, through
++    // Gson's tree and a StringWriter: 0.6% of a match's CPU and 2% of what it allocated (VPS-B,
++    // 8 rooms). The JSON is kept against the line objects it was made from: whatever sets a line -
++    // a player's edit, CraftSign.update, an NBT load - puts a new component there, and the next
++    // packet makes the JSON again.
++    private IChatBaseComponent[] athenaJsonOf;
++    private String[] athenaJson;
++
++    private String[] athenaLinesJson(IChatBaseComponent[] lines) {
++        IChatBaseComponent[] of = this.athenaJsonOf;
++        String[] json = this.athenaJson;
++
++        if (of == null || of[0] != lines[0] || of[1] != lines[1] || of[2] != lines[2] || of[3] != lines[3]) {
++            json = new String[4];
++            for (int i = 0; i < 4; ++i) {
++                json[i] = IChatBaseComponent.ChatSerializer.componentToJson(lines[i]);
++            }
++            this.athenaJsonOf = lines.clone();
++            this.athenaJson = json;
++        }
++        return json;
++    }
++    // Athena end
++
+     public boolean F() {
+         return true;
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaSignJsonTest.java b/src/test/java/net/minecraft/server/AthenaSignJsonTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ad1262771d882f5f652a3821ce1ce92cf9fd36b
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaSignJsonTest.java
+@@ -0,0 +1,64 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertArrayEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import io.netty.buffer.Unpooled;
++import java.lang.reflect.Field;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++/**
++ * Athena - a sign's update packet writes the JSON its sign made once for its text: the same bytes as
++ * serializing the lines, a new text made again, and a line a packet plugin sets on the packet
++ * serialized as it is.
++ */
++public class AthenaSignJsonTest extends AbstractTestingBase {
++
++    private static byte[] bytes(Packet<?> packet) throws Exception {
++        PacketDataSerializer out = new PacketDataSerializer(Unpooled.buffer());
++        packet.writePacketData(out);
++        byte[] bytes = new byte[out.readableBytes()];
++        out.readBytes(bytes);
++        return bytes;
++    }
++
++    private static byte[] plain(TileEntitySign sign) throws Exception {
++        return bytes(new PacketPlayOutUpdateSign(null, BlockPosition.ZERO, sign.lines));
++    }
++
++    @Test
++    public void theSignsJsonIsWhatSerializingTheLinesWrites() throws Exception {
++        TileEntitySign sign = new TileEntitySign();
++        ChatComponentText styled = new ChatComponentText("red");
++        styled.getChatModifier().setColor(EnumChatFormat.RED).setBold(true);
++        sign.lines[0] = new ChatComponentText("日本語 ☃");
++        sign.lines[1] = styled;
++        sign.lines[3] = new ChatComponentText("a").addSibling(new ChatComponentText("b"));
++
++        Packet<?> first = sign.getUpdatePacket();
++        assertArrayEquals(plain(sign), bytes(first));
++        assertArrayEquals("sent again: the same", plain(sign), bytes(sign.getUpdatePacket()));
++
++        sign.lines[2] = new ChatComponentText("changed");
++        assertArrayEquals("a new line: made again", plain(sign), bytes(sign.getUpdatePacket()));
++        assertFalse(java.util.Arrays.equals(bytes(first), bytes(sign.getUpdatePacket())));
++    }
++
++    @Test
++    public void aLineSetOnThePacketIsWrittenAsItIs() throws Exception {
++        TileEntitySign sign = new TileEntitySign();
++        sign.lines[0] = new ChatComponentText("original");
++        Packet<?> packet = sign.getUpdatePacket();
++
++        Field lines = PacketPlayOutUpdateSign.class.getDeclaredField("lines");
++        lines.setAccessible(true);
++        ((IChatBaseComponent[]) lines.get(packet))[0] = new ChatComponentText("plugin");
++
++        TileEntitySign expected = new TileEntitySign();
++        expected.lines[0] = new ChatComponentText("plugin");
++        assertArrayEquals(plain(expected), bytes(packet));
++        assertTrue(bytes(packet).length > 0);
++    }
++}

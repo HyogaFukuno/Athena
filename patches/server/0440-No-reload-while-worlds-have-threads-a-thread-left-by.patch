@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] No reload while worlds have threads; a thread left by its
+ last world hands back its tasks; unregistered states read as air
+
+Three findings of the 2026-11-10 review (F1-F3):
+- CraftServer.reload disabled plugins and read every config again while world
+  threads ticked and called events. It now refuses while any world thread runs.
+- A thread whose last world left ended without handBack, so a task posted after its
+  last runTasks by someone who still saw it was never run.
+- athenaTypeIdsInto gave a state id with no registered state its block's type id,
+  where getType answers air.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index e8b9d1df688648bd2d7d6c23401a1f64e6427f75..34d028105bf4a89e912b3b3c22a46deef751d462 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -440,6 +440,12 @@ public final class AthenaWorldThread extends Thread {
+                 for (final WorldServer world : this.worlds) {
+                     server.processQueue.add(() -> world.athenaTakeBack(self));
+                 }
++            } else if (this.worlds.isEmpty()) {
++                // Athena - the last world left (runLeaves): nobody calls athenaTakeBack for it, so
++                // a task posted after the runTasks above by someone who still saw this thread would
++                // wait here for good (an async chat's Waitable, a teleportAsync future). From here
++                // post hands such tasks on, and each finds its world's owner (athenaRunOnOwner).
++                this.handBack();
+             }
+         } catch (Throwable throwable) {
+             this.failure = throwable;
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index de219644f03a9e624d0218873ec0cd76572c6a8a..9442117957c36efdc9f57110fd658bae83338628 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -680,8 +680,14 @@ public class ChunkSection {
+         if (ids == null) {
+             ids = this.unpackInto(ID_SCRATCH.get());
+         }
++        // Athena - a state id with no registered state is air, as getType answers for it; the
++        // registry is an array, so the check is one load per block
++        RegistryID<IBlockData> states = Block.BLOCK_STATE_IDS;
++
+         for (int i = 0; i < 4096; ++i) {
+-            typeIds[i] = (char) (ids[i] >> 4);
++            char id = ids[i];
++
++            typeIds[i] = states.getByValue(id) != null ? (char) (id >> 4) : (char) 0;
+         }
+     }
+     // Athena end
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 4f14e628015ba66e106d7c7f04bb8f207de29946..75f1ffcac5bd5016cf9ece685e13261111bfce3c 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -714,6 +714,18 @@ public final class CraftServer implements Server {
+ 
+     @Override
+     public void reload() {
++        // Athena start - not while a world ticks on a thread of its own.
++        //
++        // A reload disables every plugin, takes its listeners off and reads every config again in
++        // place, while the world threads go on ticking and calling events: listeners vanish under
++        // them, settings change half way through their tick, and a plugin's onDisable that stops a
++        // world thread may run on that very thread. Stopping the threads first does not help: an
++        // onDisable that waits for a world thread to stop would then wait for one that is waiting
++        // for it. A restart is the only safe way.
++        if (net.minecraft.server.AthenaWorldThread.anyRunning()) {
++            throw new IllegalStateException("Cannot reload while worlds tick on their own threads; restart the server instead");
++        }
++        // Athena end
+         reloadCount++;
+         configuration = YamlConfiguration.loadConfiguration(getConfigFile());
+         commandsConfiguration = YamlConfiguration.loadConfiguration(getCommandsConfigFile());
+diff --git a/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java b/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java
+index dde1016f3043d16ba31beaac271c8c1673d0e5e6..e84da41917050b6718c48d96cd57d60abedade7c 100644
+--- a/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java
++++ b/src/test/java/net/minecraft/server/AthenaSectionTypeIdsTest.java
+@@ -72,4 +72,26 @@ public class AthenaSectionTypeIdsTest extends AbstractTestingBase {
+         assertEquals(Block.getId(Blocks.WOOL), read[300]);
+         assertEquals(Block.getId(Blocks.STONE), read[5]);
+     }
++
++    @Test
++    public void anIdWithNoRegisteredStateIsAirAsGetTypeSaysIt() {
++        int unregistered = -1;
++        for (int id = 1; id < 65536; ++id) {
++            if (Block.BLOCK_STATE_IDS.getByValue(id) == null && (id >> 4) != 0) {
++                unregistered = id;
++                break;
++            }
++        }
++        assertNotEquals("the registry has gaps (stone:7, grass:1, ...)", -1, unregistered);
++        char[] ids = new char[4096];
++        ids[7] = (char) unregistered;
++        ids[8] = (char) (Block.getId(Blocks.STONE) << 4);
++        ChunkSection section = new ChunkSection(2, true);
++        section.setDataSharingUniform(ids);
++        assertTypeIds(section);
++        char[] read = new char[4096];
++        section.athenaTypeIdsInto(read);
++        assertEquals(0, read[7]);
++        assertEquals(Block.getId(Blocks.STONE), read[8]);
++    }
+ }

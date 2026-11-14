@@ -1,0 +1,157 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sat, 14 Nov 2026 01:12:30 +0900
+Subject: [PATCH] No flush task for every connection every tick:
+ paper.explicit-flush is off
+
+processReceivedPackets put a flush on the event loop for every connection every
+tick, 1.4% of a match's CPU (VPS-B, 8 rooms). It covered one gap: a write from
+another thread that counted itself just before the tracker turned flushing off, and
+read canFlush just after, was flushed by neither. Now only the thread that turned
+flushing off leaves its writes to enableAutomaticFlush; any other thread flushes
+what it writes. -Dpaper.explicit-flush=true still turns the task on.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/NetworkManager.java b/src/main/java/net/minecraft/server/NetworkManager.java
+index cd3d7fd74979438d20f4b4509909152b4b0d97b1..8d4cc1ef222ececf32ac4ddbfff4b95a79698a5c 100644
+--- a/src/main/java/net/minecraft/server/NetworkManager.java
++++ b/src/main/java/net/minecraft/server/NetworkManager.java
+@@ -93,12 +93,14 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+     public void disableAutomaticFlush() {
+         synchronized (this.flushLock) {
+             this.flushPacketsStart = this.packetWrites.get(); // must be volatile and before canFlush = false
++            this.athenaFlushOffBy = Thread.currentThread(); // Athena
+             this.canFlush = false;
+         }
+     }
+ 
+     public void enableAutomaticFlush() {
+         synchronized (this.flushLock) {
++            this.athenaFlushOffBy = null; // Athena
+             this.canFlush = true;
+             if (this.packetWrites.get() != this.flushPacketsStart) { // must be after canFlush = true
+                 this.flush(); // only make the flush call if we need to
+@@ -106,6 +108,27 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         }
+     }
+ 
++    // Athena start - whether a write that leaves the flush to canFlush flushes, counted so that a write
++    // made while flushing is off is flushed when it comes back on.
++    //
++    // The write used to count itself and then read canFlush. A write from another thread (an async
++    // chat line, a plugin's async packet) could count itself just before the tracker turned flushing
++    // off - so enableAutomaticFlush saw no new write - and read canFlush just after: no flush from
++    // either side. The packet then sat in the channel until something else flushed it, and
++    // paper.explicit-flush, a flush task on the event loop for every connection every tick, was what
++    // came round to it. Counting under a lock would not do either: off the event loop the count goes
++    // up before the packet reaches the hand-off queue, so the flush enableAutomaticFlush queues could
++    // still land in front of it. Only the thread that turned flushing off (the world's, in the
++    // tracker) leaves its writes to enableAutomaticFlush, which it reaches after them; any other
++    // thread flushes what it writes, as it would have a moment before or after.
++    private volatile Thread athenaFlushOffBy;
++
++    boolean athenaAutoFlush() { // package-private for AthenaAutoFlushTest
++        this.packetWrites.getAndIncrement();
++        return this.canFlush || this.athenaFlushOffBy != Thread.currentThread();
++    }
++    // Athena end
++
+     private void flush() {
+         if (this.channel.eventLoop().inEventLoop()) {
+             this.channel.flush();
+@@ -329,8 +352,13 @@ public class NetworkManager extends SimpleChannelInboundHandler<Packet> {
+         this.writePacket(packet, agenericfuturelistener, Boolean.TRUE);
+     }
+     private void writePacket(final Packet packet, final GenericFutureListener<? extends Future<? super Void>>[] agenericfuturelistener, Boolean flushConditional) {
+-        this.packetWrites.getAndIncrement(); // must be before using canFlush
+-        boolean effectiveFlush = flushConditional == null ? this.canFlush : flushConditional.booleanValue();
++        boolean effectiveFlush; // Athena - see athenaAutoFlush
++        if (flushConditional == null) {
++            effectiveFlush = this.athenaAutoFlush();
++        } else {
++            this.packetWrites.getAndIncrement();
++            effectiveFlush = flushConditional.booleanValue();
++        }
+         final boolean flush = effectiveFlush || packet instanceof PacketPlayOutKeepAlive || packet instanceof PacketPlayOutKickDisconnect; // no delay for certain packets
+         // PandaSpigot end
+         final EnumProtocol enumprotocol = EnumProtocol.getFromPacket(packet);
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index d842ae53b53d20d093ef33a63f0dd9a3e5c33a58..292b38daf5c79190d1c6c2d71032aa42943db9e7 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -18,7 +18,10 @@ public class Main {
+     public static boolean useConsole = true;
+ 
+     public static void main(String[] args) {
+-        if (System.getProperty("paper.explicit-flush") == null) System.setProperty("paper.explicit-flush", "true"); // PandaSpigot
++        // Athena - off unless asked for: every write is flushed by its own drain or by the tracker's
++        // enableAutomaticFlush (NetworkManager.athenaAutoFlush), and the flush task this put on the
++        // event loop for every connection every tick was 1.4% of a match's CPU (VPS-B, 8 rooms)
++        if (System.getProperty("paper.explicit-flush") == null) System.setProperty("paper.explicit-flush", "false"); // PandaSpigot
+         // Todo: Installation script
+         if (System.getProperty("jdk.nio.maxCachedBufferSize") == null) System.setProperty("jdk.nio.maxCachedBufferSize", "262144"); // PandaSpigot - cap per-thread NIO cache size
+         // Athena - Netty 4.2 made its adaptive allocator the default. Over whole 20-player matches on
+diff --git a/src/test/java/net/minecraft/server/AthenaAutoFlushTest.java b/src/test/java/net/minecraft/server/AthenaAutoFlushTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ffef9bbe47c6cdd9063f9c0b678cce062343f550
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaAutoFlushTest.java
+@@ -0,0 +1,57 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.lang.reflect.Constructor;
++import java.lang.reflect.Field;
++import java.util.concurrent.atomic.AtomicBoolean;
++import org.junit.BeforeClass;
++import org.junit.Test;
++
++/**
++ * Athena - with paper.explicit-flush off, nothing flushes a connection every tick, so a write that
++ * leaves its flush to canFlush must never be left unflushed: only the thread that turned flushing off
++ * (and flushes in enableAutomaticFlush, after its writes) may skip the flush; any other thread
++ * writing meanwhile flushes its own packet.
++ */
++public class AthenaAutoFlushTest {
++
++    @BeforeClass
++    public static void bootstrap() throws Exception {
++        Field config = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredField("config");
++        config.setAccessible(true);
++        if (config.get(null) == null) {
++            Constructor<com.hpfxd.pandaspigot.config.PandaSpigotConfig> make = com.hpfxd.pandaspigot.config.PandaSpigotConfig.class.getDeclaredConstructor();
++            make.setAccessible(true);
++            config.set(null, make.newInstance());
++        }
++    }
++
++    private static boolean onAnotherThread(NetworkManager manager) throws InterruptedException {
++        AtomicBoolean flushed = new AtomicBoolean();
++        Thread other = new Thread(() -> flushed.set(manager.athenaAutoFlush()));
++        other.start();
++        other.join();
++        return flushed.get();
++    }
++
++    @Test
++    public void onlyTheThreadThatTurnedFlushingOffLeavesItsWritesUnflushed() throws Exception {
++        NetworkManager manager = new NetworkManager(EnumProtocolDirection.CLIENTBOUND);
++
++        assertTrue("flushing on: flush", manager.athenaAutoFlush());
++        assertTrue(onAnotherThread(manager));
++
++        manager.disableAutomaticFlush();
++        assertFalse("its own writes wait for enableAutomaticFlush", manager.athenaAutoFlush());
++        assertTrue("another thread's write is flushed by its writer", onAnotherThread(manager));
++
++        // enableAutomaticFlush would flush the counted writes; with no channel here, look at the count instead
++        Field writes = NetworkManager.class.getDeclaredField("packetWrites");
++        Field start = NetworkManager.class.getDeclaredField("flushPacketsStart");
++        writes.setAccessible(true);
++        start.setAccessible(true);
++        assertTrue("the writes made while off are counted", ((java.util.concurrent.atomic.AtomicInteger) writes.get(manager)).get() != start.getInt(manager));
++    }
++}
