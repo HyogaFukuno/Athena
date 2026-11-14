@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Sun, 15 Nov 2026 01:20:43 +0900
+Subject: [PATCH] A player moved into another world while joining is spawned
+ again after the tab entries
+
+SurvivalGames teleports a joining player to their room's lobby in PlayerJoinEvent. The
+move put the player in that world, and its tracker sent the spawn to everyone there,
+before onPlayerJoin sent the tab entries. A 1.8 client drops a player spawn without a
+tab entry, so the later joiner stayed invisible in the lobby until changing worlds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 93e11cb5827fd51ffd702202c6c12294c16e7c31..e19a513fda895dac930a61f87a3d8bcf6dd2c2cd 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -720,4 +720,15 @@ public class EntityTrackerEntry {
+         }
+ 
+     }
++
++    // Athena - the entity's spawn once more to everyone who has it (PlayerList.onPlayerJoin): a
++    // destroy (for a player, clear sends it at once; one the client never spawned it ignores), then
++    // the spawn packets as when the viewer first saw it
++    void athenaSpawnAgain() {
++        org.spigotmc.AsyncCatcher.catchOp("player tracker spawn again", this.tracker.world);
++        for (EntityPlayer viewer : this.trackedPlayers.toArray(new EntityPlayer[0])) {
++            this.clear(viewer);
++            this.updatePlayer(viewer);
++        }
++    }
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 81633df7e901c67741aa273166156ae9c74635b5..d6bcd0be82b3f43d76422121fcf7f0ca71d42e4a 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -382,6 +382,20 @@ public abstract class PlayerList {
+         // PandaSpigot end
+         // CraftBukkit end
+ 
++        // Athena start - a join listener that moved the player into another world this thread ticks
++        // (a teleport in PlayerJoinEvent: SurvivalGames sends a player to their room's lobby) put it in
++        // that world, and its tracker sent the player's spawn to everyone there, before the tab
++        // entries above. A 1.8 client drops a player spawn whose tab entry it has not got: the player
++        // stayed invisible to them until it changed worlds again. The spawn goes out once more, now.
++        WorldServer athenaIn = (WorldServer) entityplayer.world;
++        if (athenaIn != worldserver && athenaIn.isMainThread() && athenaIn.players.contains(entityplayer)) {
++            EntityTrackerEntry athenaEntry = athenaIn.tracker.trackedEntities.get(entityplayer.getId());
++            if (athenaEntry != null) {
++                athenaEntry.athenaSpawnAgain();
++            }
++        }
++        // Athena end
++
+         // CraftBukkit start - Only add if the player wasn't moved in the event
+         if (entityplayer.world == worldserver && !worldserver.players.contains(entityplayer)) {
+             worldserver.addEntity(entityplayer);
