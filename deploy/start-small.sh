@@ -16,6 +16,12 @@
 # reloaded fill the old generation and 160M ran a full GC every 3-5 minutes.
 # With the flags below and that GC: RSS ~259 MB of which ~177 MB is the server's own, 0.056 vCPU in
 # a match.
+#
+# Production runs ArcanaServers' common/start-small.sh, the same script with the same defaults, from
+# systemd with its own values: sg2 (12 rooms in one JVM) sets HEAP=256M and GC=shenandoah in
+# /etc/systemd/system/sg@sg2.service.d/rooms.conf. The defaults here (ParallelGC, 128M) are those of
+# one small server of a single match, which the measurements above are about. A change to the flags
+# goes into both scripts: the flags are part of the AOT cache key.
 # What it does, and why:
 #
 # - The server runs from the patched jar directly instead of through paperclip. Paperclip adds the
@@ -66,22 +72,36 @@
 #   stopped - the first login took 41 ms.
 # - ParallelGC rather than Serial: the same heap and CPU, but a full GC runs on both vCPUs and
 #   pauses 77-107 ms where Serial paused 125-185 ms (2-4 ticks, which players see as a hitch).
-# - --enable-native-access and --sun-misc-unsafe-memory-access=allow say out loud what the server
-#   needs from Java 25: Netty's epoll/io_uring and jline load native libraries (JEP 472), and Netty
-#   allocates with sun.misc.Unsafe (JEP 471/498). Java 25 allows both and warns, with six WARNING
-#   lines at every start; a future release will refuse them unless asked for, as here.
+# - --enable-native-access says out loud what the server needs from Java 25: Netty's epoll/io_uring
+#   and jline load native libraries (JEP 472). Java 25 allows it and warns at every start; a future
+#   release will refuse it unless asked for, as here. (Production's script does not pass it yet.)
+# - --sun-misc-unsafe-memory-access=allow: Netty 4.2 on Java 25 sets io.netty.noUnsafe=true without
+#   it, and every buffer read and write then goes through a ByteBuffer (PooledDirectByteBuf, 8% of
+#   the event loop's time in a real match). Measured on VPS-B with 104-112 network bots through 8
+#   rooms of sg2: ~3% less event-loop CPU per packet (audit/2026-11-11/c-net/RESULTS.md).
+#
+# GC=shenandoah (as sg2 runs): for a server of many rooms, where a stop of the whole JVM stops every
+# match - concurrent, and System.gc() runs concurrently too (audit/2026-11-05/bots/RESULTS.md).
 set -euo pipefail
 
 JAVA="${JAVA:-java}"
 HEAP="${HEAP:-128M}"
 PAPERCLIP="paperclip.jar"
+
+if [ "${GC:-parallel}" = shenandoah ]; then
+    COLLECTOR=(-XX:+UseShenandoahGC -XX:+ExplicitGCInvokesConcurrent)
+    COMPACTION=()
+else
+    COLLECTOR=(-XX:+UseParallelGC)
+    COMPACTION=(-XX:-UseMaximumCompactionOnSystemGC)
+fi
 MAIN="org.bukkit.craftbukkit.Main"
 
 FLAGS=(
     "-Xms$HEAP" "-Xmx$HEAP"
-    -XX:+UseParallelGC
+    "${COLLECTOR[@]}"
     -XX:TieredStopAtLevel=1
-    -XX:-UseMaximumCompactionOnSystemGC
+    "${COMPACTION[@]}"
     -XX:+UseCompactObjectHeaders
     -XX:TrimNativeHeapInterval=5000
     -XX:ReservedCodeCacheSize=48m

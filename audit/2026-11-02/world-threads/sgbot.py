@@ -160,6 +160,7 @@ class Bot:
         s.pos = None; s.teleports = 0; s.corrections = 0; s.last_tp = 0.0; s.tp_log = []; s.chunk_log = []
         s.eid = None; s.spectator = False
         s.players = {}                       # eid -> [x, y, z]
+        s.tab = set()                        # Athena - uuids the server has listed (Player List Item, add)
         s.chests = {}                        # (cx, cz) -> [(x, y, z)]
         s.window = None; s.window_slots = {}; s.window_size = 0
         s.phase = "connect"; s.phases = []   # (unix time, phase)
@@ -245,6 +246,32 @@ class Bot:
             s.chests[key] = found
         return at + n * 8192 + n * 2048 + (n * 2048 if sky else 0)
 
+    def tabcheck(s, pid, rr, ph):
+        if pid == 0x0C:
+            rr.vi()
+            uid = rr.take(16)
+            s.rx["%s spawn player" % ph] += 1
+            if uid not in s.tab:
+                s.rx["%s spawn before tab" % ph] += 1
+            return
+        action = rr.vi()
+        for _ in range(rr.vi()):
+            uid = rr.take(16)
+            if action == 0:
+                rr.string()
+                for _ in range(rr.vi()):
+                    rr.string(); rr.string()
+                    if rr.u8(): rr.string()
+                rr.vi(); rr.vi()
+                if rr.u8(): rr.string()
+                s.tab.add(uid)
+            elif action in (1, 2):
+                rr.vi()
+            elif action == 3:
+                if rr.u8(): rr.string()
+            elif action == 4:
+                s.tab.discard(uid)
+
     def reader(s):
         try:
             while not s.dead:
@@ -269,6 +296,11 @@ class Bot:
                                 s.rx["clickpos %d,%d,%d" % (x // 8, y // 8, z // 8)] += 1
                         except Exception:
                             pass
+                    if pid in (0x38, 0x0C):   # Athena - a player spawned before it is in the tab list: a 1.8 client never shows it
+                        try:
+                            s.tabcheck(pid, R(r.d, r.i), ph)
+                        except Exception:
+                            s.rx["%s tabcheck error" % ph] += 1
                 if not s.play:
                     if pid == 0x03: s.threshold = r.vi(); continue
                     if pid == 0x02: s.play = True; continue
