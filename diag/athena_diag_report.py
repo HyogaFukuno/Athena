@@ -280,6 +280,12 @@ def analyse(files):
         a["chunks_max"] = max(r["chunks"] for r in athena)
         a["entities_max"] = max(r["entities"] for r in athena)
         a["active_share"] = sum(1 for r in athena if r["players"]) / len(athena)
+        # the matches' world threads (Athena 0455 and later)
+        if "world_ticks" in athena[0]:
+            wworst = max(athena, key=lambda r: r["world_tick_ms_max"])
+            a["world_tick_max"] = wworst["world_tick_ms_max"]
+            a["world_over50"] = sum(r["world_ticks_over_50ms"] for r in athena)
+            a["world_threads_max"] = max(r["world_threads"] for r in athena)
     return a
 
 
@@ -562,6 +568,7 @@ def page(a, recs, source_name):
         kpis += [
             kpi(n(a.get("tps"), "%.2f"), "TPS（期間の平均）", "5秒間の最低 %s" % n(a.get("tps_min"), "%.1f")),
             kpi("%d 回" % a.get("over50", 0), "50 msを超えたtick", "最長 %s ms" % n(a.get("tick_max"))),
+            *([kpi("%d 回" % a["world_over50"], "部屋のスレッドで50 msを超えたtick", "最長 %s ms、スレッド最大 %d 本" % (n(a["world_tick_max"]), a["world_threads_max"]))] if "world_over50" in a else []),
             kpi(n(a.get("players_max")) + " 人", "最大のプレイヤー数", "プレイ中だった時間 %s%%" % n(a.get("active_share", 0) * 100)),
             kpi(n(a.get("chunks_max")), "読み込んだチャンクの最大", "エンティティ最大 %s" % n(a.get("entities_max"))),
         ]
@@ -604,6 +611,11 @@ def page(a, recs, source_name):
             ("最長のtick（5秒ごと）", "--c4", [(r["epoch_ms"] / 1000.0, r["tick_ms_max"]) for r in ath], "line"),
             ("平均のtick", "--c1", [(r["epoch_ms"] / 1000.0, r["tick_ms_sum"] / r["ticks"] if r["ticks"] else None) for r in ath], "line"),
         ], "tickにかかった時間", "ms", hline=50, hline_label="50 ms（1 tickの持ち時間）", xrange=xr))
+        if "world_ticks" in ath[0]:
+            charts.append(svg_chart([
+                ("最長のtick（5秒ごと）", "--c4", [(r["epoch_ms"] / 1000.0, r["world_tick_ms_max"]) for r in ath], "line"),
+                ("平均のtick", "--c1", [(r["epoch_ms"] / 1000.0, r["world_tick_ms_sum"] / r["world_ticks"] if r["world_ticks"] else None) for r in ath], "line"),
+            ], "部屋のスレッドのtickにかかった時間（全部屋）", "ms", hline=50, hline_label="50 ms（1 tickの持ち時間）", xrange=xr))
     charts.append(svg_chart([
         ("RSS", "--c1", [(s["epoch"], mib(s["rss_kb"])) for s in a["samples"]], "line"),
         ("anon", "--c2", [(s["epoch"], mib(s["anon_kb"])) for s in a["samples"]], "line"),

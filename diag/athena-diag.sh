@@ -182,6 +182,8 @@ finish() {
     # give Athena one more window to write its last line and close the file
     sleep $(( INTERVAL + 1 ))
     if [ -f "$DIR/athena-diag.csv" ]; then
+        # Athena moves a file with other columns aside (athena-diag.csv.old) and starts a new one
+        [ -f "$DIR/athena-diag.csv.old" ] && [ "$(wc -l < "$DIR/athena-diag.csv")" -lt "$CSV_BEFORE" ] && CSV_BEFORE=1
         { head -1 "$DIR/athena-diag.csv"; tail -n +$(( CSV_BEFORE + 1 )) "$DIR/athena-diag.csv" | grep -v '^epoch_ms'; } > "$D/athena.csv"
         # the kit made the file: leave the directory as it found it
         [ "$CSV_BEFORE" = 0 ] && rm -f "$DIR/athena-diag.csv"

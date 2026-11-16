@@ -1,0 +1,1005 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 17 Nov 2026 02:49:00 +0900
+Subject: [PATCH] The rest of the 2026-11-16 review: per-thread tick times in
+ /tps and the diagnostics, a checksum on frame files, an inflate budget per
+ connection, unique 1.7 tab names, a UUID of its own for a disguise, /temptp
+ by permission
+
+
+diff --git a/src/main/java/athena/server/AthenaServerImpl.java b/src/main/java/athena/server/AthenaServerImpl.java
+index 9fe6c44573b68ffbb2d70f39088310fb0e0fba8c..5f3ae4c5e90f04867841f1504201300e2f0abf78 100644
+--- a/src/main/java/athena/server/AthenaServerImpl.java
++++ b/src/main/java/athena/server/AthenaServerImpl.java
+@@ -267,7 +267,7 @@ public final class AthenaServerImpl implements AthenaServer {
+         if (DisguiseCommand.taken(name, handle)) {
+             name = DisguiseCommand.randomName(handle);
+         }
+-        com.mojang.authlib.GameProfile disguise = new com.mojang.authlib.GameProfile(player.getUniqueId(), name);
++        com.mojang.authlib.GameProfile disguise = new com.mojang.authlib.GameProfile(DisguiseCommand.disguiseUuid(), name); // a UUID of its own
+         if (skinValue != null) {
+             disguise.getProperties().put("textures", new com.mojang.authlib.properties.Property("textures", skinValue, skinSignature));
+         }
+diff --git a/src/main/java/athena/server/DisguiseCommand.java b/src/main/java/athena/server/DisguiseCommand.java
+index ea64252bcdba49b51c58bd5f11dd512d37ad5679..0c2cae5ac10fa826fe93828396de932c791e6d1d 100644
+--- a/src/main/java/athena/server/DisguiseCommand.java
++++ b/src/main/java/athena/server/DisguiseCommand.java
+@@ -28,9 +28,9 @@ import org.bukkit.entity.Player;
+  * Disguising takes off a /mask put on before, so a new disguise starts in the Regular rank's green;
+  * /mask after it colours the disguised name.
+  *
+- * <p>Nothing about it runs per packet: the server picks which tab list entry to build when it
+- * builds one (PacketPlayOutPlayerInfo.athenaSeenBy), which only happens when a player joins,
+- * becomes visible or changes list name. The skins come with the server, already signed by Mojang
++ * <p>The disguise has a UUID of its own (disguiseUuid), so the packets carry nothing of the real
++ * player: every tab list packet a viewer is sent is checked for disguised players
++ * (PacketPlayOutPlayerInfo.athenaFor) and a disguised player's spawn carries the disguise's UUID. The skins come with the server, already signed by Mojang
+  * (a 1.8 client shows another player's skin only with Mojang's signature), so disguising asks
+  * nobody anything.
+  */
+@@ -88,7 +88,7 @@ public final class DisguiseCommand extends Command {
+         }
+ 
+         String name = randomName(player.getHandle());
+-        GameProfile disguise = new GameProfile(player.getUniqueId(), name); // the same UUID: the entity is still this player's
++        GameProfile disguise = new GameProfile(disguiseUuid(), name); // a UUID of its own: the real one would say who it is
+         List<Property> skins = skins();
+         if (!skins.isEmpty()) {
+             disguise.getProperties().put("textures", skins.get(ThreadLocalRandom.current().nextInt(skins.size())));
+@@ -113,6 +113,20 @@ public final class DisguiseCommand extends Command {
+         return true;
+     }
+ 
++    /**
++     * The UUID others see for a disguise (tab list, spawn): random and new for each disguise, so
++     * that a client or mod reading the packets cannot tell who it is. The server and plugins keep
++     * the real one (Player.getUniqueId).
++     */
++    static java.util.UUID disguiseUuid() {
++        while (true) {
++            java.util.UUID uuid = java.util.UUID.randomUUID();
++            if (MinecraftServer.getServer() == null || MinecraftServer.getServer().getPlayerList().getPlayerByUUID(uuid) == null) {
++                return uuid;
++            }
++        }
++    }
++
+     /**
+      * A name like SwiftFox482 that no one on the server has, real or disguised: two tab list
+      * entries of one name confuse the clients' teams and name tags.
+diff --git a/src/main/java/athena/server/TempTpCommand.java b/src/main/java/athena/server/TempTpCommand.java
+index ceae41412bc553bee9b199126dbf933e1a62cd40..8178f0a4cb9fb69f65c8e41b6dd8c78d2d648273 100644
+--- a/src/main/java/athena/server/TempTpCommand.java
++++ b/src/main/java/athena/server/TempTpCommand.java
+@@ -35,8 +35,7 @@ public final class TempTpCommand extends Command {
+             sender.sendMessage(AthenaMessages.format("&cOnly a player can use /temptp: it teleports whoever runs it."));
+             return true;
+         }
+-        if (!sender.isOp()) {
+-            sender.sendMessage(AthenaMessages.format("&cYou must be an operator to use /temptp."));
++        if (!this.testPermission(sender)) { // Athena - athena.command.temptp, which operators have by default
+             return true;
+         }
+         if (args.length < 2) {
+diff --git a/src/main/java/net/minecraft/server/AthenaDiagnostics.java b/src/main/java/net/minecraft/server/AthenaDiagnostics.java
+index a813fe9cd5909108188256b17492fd9b680f7e9a..c30431d0abc20d6c2c54edb48c224d799228c368 100644
+--- a/src/main/java/net/minecraft/server/AthenaDiagnostics.java
++++ b/src/main/java/net/minecraft/server/AthenaDiagnostics.java
+@@ -23,19 +23,26 @@ import org.apache.logging.log4j.Logger;
+ // ran over 50 ms (a tick a player can feel), then the state at the end of the window. The duration
+ // is the tick itself - from the start of the loop iteration to the end of the tick, the wait for the
+ // next one excluded. No player names or addresses are written.
++//
++// The matches tick on world threads of their own (AthenaWorldThread), which the server thread's
++// numbers do not cover: the world_ columns add them up over all world threads for the same 100
++// server ticks (their ticks, total and longest duration, and how many ran over 50 ms). The entity
++// and chunk counts of worlds on other threads are read without a lock, so they are approximate.
+ final class AthenaDiagnostics {
+ 
+     private static final Logger LOGGER = LogManager.getLogger("Athena/Diagnostics");
+     private static final File REQUEST = new File("athena-diag.request");
+     private static final File OUTPUT = new File("athena-diag.csv");
+     private static final int EVERY = 100;
+-    private static final String HEADER = "epoch_ms,tick,ticks,tick_ms_sum,tick_ms_max,ticks_over_50ms,players,worlds,chunks,entities,tile_entities,heap_used_mb";
++    private static final String HEADER = "epoch_ms,tick,ticks,tick_ms_sum,tick_ms_max,ticks_over_50ms,players,worlds,chunks,entities,tile_entities,heap_used_mb,world_threads,world_ticks,world_tick_ms_sum,world_tick_ms_max,world_ticks_over_50ms";
+ 
+     private static Writer out;
+     private static int ticks;
+     private static long sumNanos;
+     private static long maxNanos;
+     private static int over50;
++    /** Per world thread: its totals at the last line (ticks, nanos, over 50 ms). */
++    private static final java.util.Map<AthenaWorldThread, long[]> seen = new java.util.WeakHashMap<AthenaWorldThread, long[]>();
+ 
+     private AthenaDiagnostics() {}
+ 
+@@ -77,6 +84,13 @@ final class AthenaDiagnostics {
+     private static void start() {
+         try {
+             boolean fresh = !OUTPUT.isFile() || OUTPUT.length() == 0L;
++            if (!fresh && !HEADER.equals(firstLine())) {
++                // written by an older version with other columns: keep it aside, start a new file
++                File old = new File(OUTPUT.getPath() + ".old");
++                old.delete();
++                if (!OUTPUT.renameTo(old)) throw new IOException("cannot move aside " + OUTPUT + " with other columns");
++                fresh = true;
++            }
+ 
+             out = new BufferedWriter(new OutputStreamWriter(new FileOutputStream(OUTPUT, true), StandardCharsets.UTF_8));
+             if (fresh) {
+@@ -85,6 +99,12 @@ final class AthenaDiagnostics {
+                 out.flush();
+             }
+             reset();
++            seen.clear();
++            for (AthenaWorldThread thread : AthenaWorldThread.threads(MinecraftServer.getServer())) {
++                AthenaTickTimes times = thread.tickTimes;
++                seen.put(thread, new long[] { times.totalTicks(), times.totalNanos(), times.totalOver50() });
++                times.takeMax();
++            }
+             LOGGER.info("Diagnostics started: {} every {} ticks", OUTPUT, EVERY);
+         } catch (IOException e) {
+             LOGGER.warn("Cannot start diagnostics: {}", OUTPUT, e);
+@@ -92,6 +112,12 @@ final class AthenaDiagnostics {
+         }
+     }
+ 
++    private static String firstLine() throws IOException {
++        try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(new java.io.FileInputStream(OUTPUT), StandardCharsets.UTF_8))) {
++            return in.readLine();
++        }
++    }
++
+     private static void stop() {
+         if (out != null) {
+             try {
+@@ -123,6 +149,23 @@ final class AthenaDiagnostics {
+             tileEntities += world.tileEntityList.size();
+         }
+ 
++        int worldThreads = 0;
++        long worldTicks = 0L;
++        long worldNanos = 0L;
++        long worldMax = 0L;
++        long worldOver50 = 0L;
++        for (AthenaWorldThread thread : AthenaWorldThread.threads(server)) {
++            AthenaTickTimes times = thread.tickTimes;
++            long[] now = { times.totalTicks(), times.totalNanos(), times.totalOver50() };
++            long[] before = seen.put(thread, now);
++            if (before == null) before = new long[3]; // started since the last line
++            ++worldThreads;
++            worldTicks += now[0] - before[0];
++            worldNanos += now[1] - before[1];
++            worldOver50 += now[2] - before[2];
++            worldMax = Math.max(worldMax, times.takeMax());
++        }
++
+         Runtime runtime = Runtime.getRuntime();
+         StringBuilder line = new StringBuilder(128)
+                 .append(System.currentTimeMillis()).append(',')
+@@ -136,7 +179,12 @@ final class AthenaDiagnostics {
+                 .append(chunks).append(',')
+                 .append(entities).append(',')
+                 .append(tileEntities).append(',')
+-                .append((runtime.totalMemory() - runtime.freeMemory()) >> 20);
++                .append((runtime.totalMemory() - runtime.freeMemory()) >> 20).append(',')
++                .append(worldThreads).append(',')
++                .append(worldTicks).append(',')
++                .append(String.format(java.util.Locale.ROOT, "%.3f", worldNanos / 1.0E6D)).append(',')
++                .append(String.format(java.util.Locale.ROOT, "%.3f", worldMax / 1.0E6D)).append(',')
++                .append(worldOver50);
+ 
+         out.write(line.toString());
+         out.write('\n');
+diff --git a/src/main/java/net/minecraft/server/AthenaFrameFile.java b/src/main/java/net/minecraft/server/AthenaFrameFile.java
+index fbd5e1642fb6bdae88023297098990bcae22f565..70c276de5901ad797a20070970cfb7e1c2d0c22f 100644
+--- a/src/main/java/net/minecraft/server/AthenaFrameFile.java
++++ b/src/main/java/net/minecraft/server/AthenaFrameFile.java
+@@ -36,7 +36,9 @@ import org.apache.logging.log4j.Logger;
+ // a running server keeps its pages until that server lets it go.
+ //
+ // File layout, little-endian:
+-//   header   MAGIC (8), version (4), slots (4), store fingerprint (8), count (4), reserved (4)
++//   header   MAGIC (8), version (4), slots (4), store fingerprint (8), count (4), CRC-32C (4) of
++//            everything after the header: checked once when the file is mapped, so a file damaged on
++//            disk or written over from outside is made again instead of sending broken chunks
+ //   entries  count x 24 bytes, ascending slot: slot (4), present mask (4), frame length (4),
+ //            reserved (4), offset of the biomes (8)
+ //   data     at each offset: 256 bytes of biomes, then the frame
+@@ -46,7 +48,7 @@ final class AthenaFrameFile {
+ 
+     static final String PREFIX = "athena-frames-";
+     private static final long MAGIC = 0x3130524D46485441L; // "ATHFRM01"
+-    private static final int VERSION = 1;
++    private static final int VERSION = 2; // 2: the CRC
+     private static final int HEADER = 32;
+     private static final int ENTRY = 24;
+     private static final int BIOMES = 256;
+@@ -111,6 +113,12 @@ final class AthenaFrameFile {
+             if (count < 0 || count > slots || HEADER + (long) count * ENTRY > size) {
+                 return null;
+             }
++            java.util.zip.CRC32C crc = new java.util.zip.CRC32C();
++            crc.update(mapping.asSlice(HEADER).asByteBuffer());
++            if ((int) crc.getValue() != mapping.get(INT_LE, 28L)) {
++                LOGGER.warn("{} is damaged (its checksum does not match): its chunk packets will be made again", file.getName());
++                return null;
++            }
+             int[] index = new int[slots];
+             Arrays.fill(index, -1);
+             int last = -1;
+@@ -173,7 +181,8 @@ final class AthenaFrameFile {
+                 ByteBuffer head = ByteBuffer.allocate(HEADER + count * ENTRY).order(ByteOrder.LITTLE_ENDIAN);
+                 long at = HEADER + (long) count * ENTRY;
+ 
+-                head.putLong(MAGIC).putInt(VERSION).putInt(slots).putLong(fingerprint).putInt(count).putInt(0);
++                java.util.zip.CRC32C crc = new java.util.zip.CRC32C();
++                head.putLong(MAGIC).putInt(VERSION).putInt(slots).putLong(fingerprint).putInt(count).putInt(0); // the CRC, filled in below
+                 for (Map.Entry<Integer, Object> entry : all.entrySet()) {
+                     int mask;
+                     int length;
+@@ -191,6 +200,7 @@ final class AthenaFrameFile {
+                     at += BIOMES + length;
+                 }
+                 head.flip();
++                crc.update(head.duplicate().position(HEADER));
+                 while (head.hasRemaining()) out.write(head);
+                 for (Map.Entry<Integer, Object> entry : all.entrySet()) {
+                     ByteBuffer data;
+@@ -205,8 +215,11 @@ final class AthenaFrameFile {
+                         long from = old.mapping.get(LONG_LE, e + 16);
+                         data = old.mapping.asSlice(from, BIOMES + length).asByteBuffer();
+                     }
++                    crc.update(data.duplicate());
+                     while (data.hasRemaining()) out.write(data);
+                 }
++                ByteBuffer sum = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(0, (int) crc.getValue());
++                while (sum.hasRemaining()) out.write(sum, 28L + sum.position());
+                 out.force(false);
+                 Files.move(tmp.toPath(), file.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                 return count;
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17.java b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+index 97c2b89b507b8d978d266d73f8aff674dcbe529e..3c2c5cc3f23127a5c1eb4d37b34fc7db06eceec0 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17.java
+@@ -115,6 +115,8 @@ public final class AthenaLegacy17 {
+         String displayName;
+         int ping;
+         int gamemode;
++        /** The name this entry is listed under on the client, null until it is; see uniqueListName. */
++        String listed;
+ 
+         Profile(String name) {
+             this.name = name;
+@@ -131,6 +133,34 @@ public final class AthenaLegacy17 {
+         }
+     }
+ 
++    /**
++     * The 1.7 tab list knows its entries by name alone, at most 16 characters: two players whose
++     * names are the same once cut to 16 shared one entry, and when one left the other went too.
++     * The name to list {@code profile} under, unlike every other entry of the session: if taken, a
++     * colour code is added at the end (invisible), or put over the last two characters.
++     */
++    static String uniqueListName(Map<UUID, Profile> profiles, UUID uuid, Profile profile) {
++        String base = profile.listName();
++        if (!listedByOther(profiles, uuid, base)) return base;
++        String stem = base.length() <= 14 ? base : base.substring(0, 14);
++        for (int k = 0; k < 16; ++k) {
++            String name = stem + '\u00a7' + Character.forDigit(k, 16);
++            if (!listedByOther(profiles, uuid, name)) return name;
++        }
++        for (int k = 0; ; ++k) { // more than 16 of the same name: numbers
++            String digits = Integer.toString(k);
++            String name = (base.length() + digits.length() <= 16 ? base : base.substring(0, 16 - digits.length())) + digits;
++            if (!listedByOther(profiles, uuid, name)) return name;
++        }
++    }
++
++    private static boolean listedByOther(Map<UUID, Profile> profiles, UUID uuid, String name) {
++        for (Map.Entry<UUID, Profile> entry : profiles.entrySet()) {
++            if (name.equals(entry.getValue().listed) && !entry.getKey().equals(uuid)) return true;
++        }
++        return false;
++    }
++
+     // --- items ----------------------------------------------------------------------------------
+ 
+     /** The tag an item replaced for a 1.7 client keeps its real id and damage under. */
+diff --git a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+index 1fa3b68aae2c7b68cc88c64a086ccd52c71d04ca..cf31c027b6e8d5ca6e08f3017f73f181ab3be64c 100644
+--- a/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
++++ b/src/main/java/net/minecraft/server/AthenaLegacy17Encoder.java
+@@ -982,10 +982,11 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                     }
+                     AthenaLegacy17.Profile old = this.session.profiles.put(uuid, profile);
+ 
+-                    if (old != null && !old.listName().equals(profile.listName())) {
+-                        listEntry(ctx, id, out, old.listName(), false, 0);
++                    profile.listed = AthenaLegacy17.uniqueListName(this.session.profiles, uuid, profile);
++                    if (old != null && old.listed != null && !old.listed.equals(profile.listed)) {
++                        listEntry(ctx, id, out, old.listed, false, 0);
+                     }
+-                    listEntry(ctx, id, out, profile.listName(), true, profile.ping);
++                    listEntry(ctx, id, out, profile.listed, true, profile.ping);
+                     break;
+                 }
+                 case 1: // game mode
+@@ -1002,7 +1003,7 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+ 
+                     if (profile != null && profile.ping != ping) {
+                         profile.ping = ping;
+-                        listEntry(ctx, id, out, profile.listName(), true, ping);
++                        listEntry(ctx, id, out, profile.listed, true, ping);
+                     }
+                     break;
+                 case 3: { // display name
+@@ -1010,12 +1011,13 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                     String displayName = in.readBoolean() ? AthenaLegacy17.legacyText(in.readStringFromBuffer(32767), EnumChatFormat.WHITE) : null;
+ 
+                     if (profile != null) {
+-                        String before = profile.listName();
++                        String before = profile.listed;
+ 
+                         profile.displayName = displayName;
+-                        if (!before.equals(profile.listName())) {
++                        profile.listed = AthenaLegacy17.uniqueListName(this.session.profiles, uuid, profile);
++                        if (!profile.listed.equals(before)) {
+                             listEntry(ctx, id, out, before, false, 0);
+-                            listEntry(ctx, id, out, profile.listName(), true, profile.ping);
++                            listEntry(ctx, id, out, profile.listed, true, profile.ping);
+                         }
+                     }
+                     break;
+@@ -1023,7 +1025,7 @@ final class AthenaLegacy17Encoder extends ChannelOutboundHandlerAdapter {
+                 case 4: // remove
+                     profile = this.session.profiles.remove(uuid);
+                     if (profile != null) {
+-                        listEntry(ctx, id, out, profile.listName(), false, 0);
++                        listEntry(ctx, id, out, profile.listed, false, 0);
+                     }
+                     break;
+                 default:
+diff --git a/src/main/java/net/minecraft/server/AthenaTickTimes.java b/src/main/java/net/minecraft/server/AthenaTickTimes.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..97af89eafb1a43b04174552870fc853c5f7a2616
+--- /dev/null
++++ b/src/main/java/net/minecraft/server/AthenaTickTimes.java
+@@ -0,0 +1,90 @@
++package net.minecraft.server;
++
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * Athena - how long a world thread's ticks take, for /tps and the diagnostics kit: the server
++ * thread's numbers say nothing about the matches, which tick on threads of their own.
++ *
++ * <p>Only the owning thread records. Readers see the last full window of {@link #WINDOW} ticks
++ * (for /tps) and running totals (for the kit, which takes the difference between two reads).
++ */
++final class AthenaTickTimes {
++
++    static final int WINDOW = 100;
++    static final long OVER_NANOS = 50_000_000L;
++
++    /** One full window, immutable. */
++    static final class Window {
++        final int ticks;
++        final long sumNanos;
++        final long maxNanos;
++        final int over50;
++        /** System.nanoTime() when the window ended. */
++        final long endNanos;
++
++        Window(int ticks, long sumNanos, long maxNanos, int over50, long endNanos) {
++            this.ticks = ticks;
++            this.sumNanos = sumNanos;
++            this.maxNanos = maxNanos;
++            this.over50 = over50;
++            this.endNanos = endNanos;
++        }
++    }
++
++    // the window being filled: the owning thread only
++    private int ticks;
++    private long sumNanos;
++    private long maxNanos;
++    private int over50;
++
++    private volatile Window last;
++    /** Totals since the thread started; one writer, so plain increments of volatiles are safe. */
++    private volatile long totalTicks;
++    private volatile long totalNanos;
++    private volatile long totalOver50;
++    /** The longest tick since the kit last took it. */
++    private final AtomicLong maxSinceTaken = new AtomicLong();
++
++    /** On the owning thread, after each tick. */
++    void record(long nanos) {
++        ++this.ticks;
++        this.sumNanos += nanos;
++        if (nanos > this.maxNanos) this.maxNanos = nanos;
++        boolean over = nanos > OVER_NANOS;
++        if (over) ++this.over50;
++        this.totalTicks = this.totalTicks + 1;
++        this.totalNanos = this.totalNanos + nanos;
++        if (over) this.totalOver50 = this.totalOver50 + 1;
++        if (nanos > this.maxSinceTaken.get()) this.maxSinceTaken.accumulateAndGet(nanos, Math::max);
++        if (this.ticks == WINDOW) {
++            this.last = new Window(this.ticks, this.sumNanos, this.maxNanos, this.over50, System.nanoTime());
++            this.ticks = 0;
++            this.sumNanos = 0L;
++            this.maxNanos = 0L;
++            this.over50 = 0;
++        }
++    }
++
++    /** The last full window, or null before the first. */
++    Window last() {
++        return this.last;
++    }
++
++    long totalTicks() {
++        return this.totalTicks;
++    }
++
++    long totalNanos() {
++        return this.totalNanos;
++    }
++
++    long totalOver50() {
++        return this.totalOver50;
++    }
++
++    /** The longest tick since the last call, and starts over. */
++    long takeMax() {
++        return this.maxSinceTaken.getAndSet(0L);
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/AthenaWorldThread.java b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+index 3099048a6120dff55d4e6fb7576e335e6b12133e..e4550ceea540c757f57ada7845ae4ef930129639 100644
+--- a/src/main/java/net/minecraft/server/AthenaWorldThread.java
++++ b/src/main/java/net/minecraft/server/AthenaWorldThread.java
+@@ -27,6 +27,8 @@ public final class AthenaWorldThread extends Thread {
+ 
+     private static final Logger LOGGER = LogManager.getLogger();
+     private static final long TICK_NANOS = 50_000_000L;
++    /** The ticks each line of /tps covers for a world thread. */
++    public static final int TICK_WINDOW = AthenaTickTimes.WINDOW;
+     /** How far behind the thread may fall before it stops trying to catch up, in ticks. */
+     private static final int MAX_CATCH_UP = 20;
+ 
+@@ -55,6 +57,8 @@ public final class AthenaWorldThread extends Thread {
+ 
+     /** Where this thread's time goes, with -Dathena.threadStats=<file>; see AthenaThreadStats. */
+     private final AthenaThreadStats stats = AthenaThreadStats.ENABLED ? new AthenaThreadStats() : null;
++    /** How long its ticks take, always on: for /tps and the diagnostics kit (AthenaTickTimes). */
++    final AthenaTickTimes tickTimes = new AthenaTickTimes();
+ 
+     /** For tests only (set by reflection): the name of a world whose next tick throws. */
+     static volatile String crashForTest;
+@@ -120,6 +124,37 @@ public final class AthenaWorldThread extends Thread {
+         return threads;
+     }
+ 
++    /**
++     * For /tps: one line per world thread, from its last full window of ticks. Empty when the worlds
++     * all tick on the server thread.
++     */
++    public static java.util.List<String> describeTicks() {
++        java.util.List<String> lines = new java.util.ArrayList<String>();
++        MinecraftServer server = MinecraftServer.getServer();
++        if (server == null) return lines;
++        for (AthenaWorldThread thread : threads(server)) {
++            String names = thread.worldNames();
++            if (thread.failure != null) {
++                lines.add(org.bukkit.ChatColor.RED + names + ": stopped (a tick threw)");
++                continue;
++            }
++            AthenaTickTimes.Window window = thread.tickTimes.last();
++            if (window == null) {
++                lines.add(org.bukkit.ChatColor.GRAY + names + ": no full window of " + AthenaTickTimes.WINDOW + " ticks yet");
++                continue;
++            }
++            double avg = window.sumNanos / 1.0E6D / window.ticks;
++            double max = window.maxNanos / 1.0E6D;
++            org.bukkit.ChatColor colour = window.over50 == 0 ? org.bukkit.ChatColor.GREEN
++                    : window.over50 <= 5 ? org.bukkit.ChatColor.YELLOW : org.bukkit.ChatColor.RED;
++            String stalled = thread.stallReported ? org.bukkit.ChatColor.RED + " (stalled " + thread.millisSinceTick() / 1000L + " s)" : "";
++            lines.add(org.bukkit.ChatColor.GOLD + names + ": " + colour
++                    + String.format(java.util.Locale.ROOT, "avg %.1f ms, max %.1f ms, over 50 ms %d of %d", avg, max, window.over50, window.ticks)
++                    + stalled);
++        }
++        return lines;
++    }
++
+     // ---- the watchdog ----
+ 
+     /** How long a world thread may go without finishing a tick before it is reported; athena.yml. */
+@@ -429,6 +464,7 @@ public final class AthenaWorldThread extends Thread {
+                 }
+                 ++this.ticks;
+                 this.lastTickEnd = System.nanoTime();
++                this.tickTimes.record(this.lastTickEnd - now);
+                 if (stats != null) stats.end(this.worldNames(), this.worlds.size(), this.tasks.size());
+             }
+             this.runTasks();
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 1ba15d1bab34fb20b8913038bfb2245892ec26df..60250e5db77f39df61f78f621ca18fe676ae4334 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -20,6 +20,32 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+     };
+     private int treshold;
+ 
++    // Athena start - what one connection may inflate. The event loop is one thread (0381), so a
++    // connection inflating 2 MiB frames back to back held up everyone else's packets, and the packet
++    // limit (3,500 in 7 s) only counts packets after they are inflated. A budget per connection,
++    // charged with the size each frame declares (the size it must inflate to): a bucket of BURST
++    // bytes refilled at RATE bytes a second. Far above anything a client sends: books, signs and
++    // plugin messages are capped at 32 KiB, and a creative item in the megabytes is rare.
++    static final long ATHENA_INFLATE_RATE = Long.getLong("athena.inflateBytesPerSecond", 4L << 20);
++    static final long ATHENA_INFLATE_BURST = Long.getLong("athena.inflateBurstBytes", 8L << 20);
++    private long athenaBudget = ATHENA_INFLATE_BURST;
++    private long athenaBudgetAt = System.nanoTime();
++
++    /** Takes {@code bytes} from this connection's budget, or refuses the frame. */
++    void athenaCharge(int bytes) {
++        long now = System.nanoTime();
++        long refill = (now - this.athenaBudgetAt) * ATHENA_INFLATE_RATE / 1_000_000_000L;
++        if (refill > 0) {
++            this.athenaBudget = Math.min(ATHENA_INFLATE_BURST, this.athenaBudget + refill);
++            this.athenaBudgetAt = now;
++        }
++        if (bytes > this.athenaBudget) {
++            throw new DecoderException("Too much compressed data: " + bytes + " bytes to inflate with " + this.athenaBudget + " left of the budget");
++        }
++        this.athenaBudget -= bytes;
++    }
++    // Athena end
++
+     public PacketDecompressor(int i) {
+         this.treshold = i;
+     }
+@@ -36,6 +62,7 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                 // packet decoder has read it, as the copy was held.
+                 list.add(packetdataserializer.readRetainedSlice(packetdataserializer.readableBytes()));
+             } else {
++                this.athenaCharge(i); // Athena
+                 list.add(athenaInflate(channelhandlercontext, bytebuf, packetdataserializer, i, this.treshold)); // Athena - see athenaInflate
+                 // Athena end
+             }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayInSpectate.java b/src/main/java/net/minecraft/server/PacketPlayInSpectate.java
+index a65baf02b751ba1a7c47965344d8b45c013d55b7..170a83787b52fc6e14061cae2b818cff7c31312d 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayInSpectate.java
++++ b/src/main/java/net/minecraft/server/PacketPlayInSpectate.java
+@@ -29,6 +29,16 @@ public class PacketPlayInSpectate implements Packet<PacketListenerPlayIn> {
+     }
+ 
+     public Entity getEntity(WorldServer worldserver) {
+-        return worldserver.getEntity(this.id);
++        // Athena start - /disguise: the client knows a disguised player by the disguise's UUID
++        Entity entity = worldserver.getEntity(this.id);
++        if (entity == null) {
++            for (EntityHuman human : worldserver.players) {
++                if (human instanceof EntityPlayer && ((EntityPlayer) human).athenaDisguise != null && this.id.equals(((EntityPlayer) human).athenaDisguise.getId())) {
++                    return human;
++                }
++            }
++        }
++        return entity;
++        // Athena end
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutNamedEntitySpawn.java b/src/main/java/net/minecraft/server/PacketPlayOutNamedEntitySpawn.java
+index ed4a6c7c2cad22513d5f43361f66e29963c9db22..32c97e5e86284fd7e75f29bc4de34a0771668864 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutNamedEntitySpawn.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutNamedEntitySpawn.java
+@@ -22,7 +22,9 @@ public class PacketPlayOutNamedEntitySpawn implements Packet<PacketListenerPlayO
+ 
+     public PacketPlayOutNamedEntitySpawn(EntityHuman entityhuman) {
+         this.entityId = entityhuman.getId();
+-        this.playerId = entityhuman.getProfile().getId();
++        // Athena - /disguise: the UUID of the disguise's tab entry (a player is never sent their own spawn)
++        this.playerId = entityhuman instanceof EntityPlayer && ((EntityPlayer) entityhuman).athenaDisguise != null
++                ? ((EntityPlayer) entityhuman).athenaDisguise.getId() : entityhuman.getProfile().getId();
+         this.x = MathHelper.floor(entityhuman.locX * 32.0D);
+         this.y = MathHelper.floor(entityhuman.locY * 32.0D);
+         this.z = MathHelper.floor(entityhuman.locZ * 32.0D);
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java b/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
+index e3e6efda1c8abddd804e65926c3f8f94b31a13e6..3ce3780d508d3310f771b7be1328e368f75be1cb 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
+@@ -12,6 +12,8 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+ 
+     private PacketPlayOutPlayerInfo.EnumPlayerInfoAction action;
+     private final List<PacketPlayOutPlayerInfo.PlayerInfoData> players = Lists.newArrayList();
++    /** Athena - the players the entries were made from, one each, for athenaFor; null if made otherwise. */
++    private EntityPlayer[] athenaSources;
+ 
+     public PacketPlayOutPlayerInfo() {}
+ 
+@@ -21,23 +23,26 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+         for (EntityPlayer entityplayer : aentityplayer) {
+             this.players.add(new PacketPlayOutPlayerInfo.PlayerInfoData(entityplayer.getProfile(), entityplayer.ping, entityplayer.playerInteractManager.getGameMode(), entityplayer.getPlayerListName()));
+         }
++        this.athenaSources = aentityplayer.clone(); // Athena
+ 
+     }
+ 
+     public PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction packetplayoutplayerinfo_enumplayerinfoaction, Iterable<EntityPlayer> iterable) {
+         this.action = packetplayoutplayerinfo_enumplayerinfoaction;
+ 
++        List<EntityPlayer> sources = Lists.newArrayList(); // Athena
+         for (EntityPlayer entityplayer : iterable) {
+             this.players.add(new PacketPlayOutPlayerInfo.PlayerInfoData(entityplayer.getProfile(), entityplayer.ping, entityplayer.playerInteractManager.getGameMode(), entityplayer.getPlayerListName()));
++            sources.add(entityplayer); // Athena
+         }
++        this.athenaSources = sources.toArray(new EntityPlayer[0]); // Athena
+ 
+     }
+ 
+     // Athena start - /disguise
+     /**
+      * The packet {@code viewer} should get about {@code players}: a disguised player's entry carries the
+-     * disguise (name, skin, list name) for everyone but that player. Only ADD_PLAYER and
+-     * UPDATE_DISPLAY_NAME carry a name; the other actions carry just the UUID, so they need none of this.
++     * disguise (UUID, name, skin, list name) for everyone but that player.
+      */
+     public static PacketPlayOutPlayerInfo athenaSeenBy(PacketPlayOutPlayerInfo.EnumPlayerInfoAction action, EntityPlayer viewer, EntityPlayer... players) {
+         PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo();
+@@ -49,6 +54,44 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+         }
+         return packet;
+     }
++
++    /**
++     * What {@code viewer} is sent of this packet (PlayerConnection.sendPacket): the entries of players
++     * disguised at the time of sending, other than the viewer, carry the disguise. The disguise has a
++     * UUID of its own, so every action needs it, not only those that carry a name: the UUID would
++     * otherwise tell anyone reading the packets who it is. Answers this packet when nothing changes.
++     */
++    public PacketPlayOutPlayerInfo athenaFor(EntityPlayer viewer) {
++        EntityPlayer[] sources = this.athenaSources;
++        if (sources == null || sources.length != this.players.size()) return this;
++        boolean any = false;
++        for (EntityPlayer source : sources) {
++            if (source.athenaDisguise != null && source != viewer) {
++                any = true;
++                break;
++            }
++        }
++        if (!any) return this;
++        PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo();
++        packet.action = this.action;
++        for (int i = 0; i < sources.length; ++i) {
++            EntityPlayer source = sources[i];
++            GameProfile disguise = source.athenaDisguise;
++            PlayerInfoData data = this.players.get(i);
++            packet.players.add(disguise != null && source != viewer
++                    ? packet.new PlayerInfoData(disguise, data.ping, data.gamemode, source.athenaDisguisedListName())
++                    : data);
++        }
++        return packet;
++    }
++
++    /** Takes the entry of {@code uuid} off the tab list, as it is: for the UUID a disguise had. */
++    public static PacketPlayOutPlayerInfo athenaRemove(java.util.UUID uuid) {
++        PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo();
++        packet.action = EnumPlayerInfoAction.REMOVE_PLAYER;
++        packet.players.add(packet.new PlayerInfoData(new GameProfile(uuid, null), 0, null, null));
++        return packet;
++    }
+     // Athena end
+ 
+     @Override
+diff --git a/src/main/java/net/minecraft/server/PacketSplitter.java b/src/main/java/net/minecraft/server/PacketSplitter.java
+index 44d29a51941759100c5ce0a9f508eff988554eee..adc63b06e282e4a68572ab7c50431c33690c4ba8 100644
+--- a/src/main/java/net/minecraft/server/PacketSplitter.java
++++ b/src/main/java/net/minecraft/server/PacketSplitter.java
+@@ -196,6 +196,7 @@ public class PacketSplitter extends ByteToMessageDecoder {
+                 if (dataLength == 0) {
+                     packet = this.athenaReadPacket(context, bytebuf, frameEnd);
+                 } else {
++                    decompressor.athenaCharge(dataLength); // Athena - see PacketDecompressor.athenaCharge
+                     ByteBuf compressed = bytebuf.slice(bytebuf.readerIndex(), frameEnd - bytebuf.readerIndex());
+                     ByteBuf inflated = PacketDecompressor.athenaInflate(context, compressed, new PacketDataSerializer(compressed), dataLength, threshold);
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index cbdd7a89b9c15a885e5e9c9ee755b90e9c52589e..5a3715c66bffaca07faa2754915b62b80dd3b948 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -1085,7 +1085,8 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         // CraftBukkit end
+ 
+         try {
+-            this.networkManager.handle(packet);
++            // Athena - /disguise: a disguised player's tab entry shows others the disguise and its UUID
++            this.networkManager.handle(packet instanceof PacketPlayOutPlayerInfo ? ((PacketPlayOutPlayerInfo) packet).athenaFor(this.player) : packet);
+         } catch (Throwable throwable) {
+             CrashReport crashreport = CrashReport.makeCrashReport(throwable, "Sending packet");
+             CrashReportSystemDetails crashreportsystemdetails = crashreport.makeCategory("Packet being sent");
+diff --git a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+index 588481565a44bdee8ad8dd30fb72da0747083131..c6a9609f2e2f7c8f53b6d5ca962c9a4cf6b82648 100644
+--- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
++++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1169,7 +1169,7 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+     private String athenaRealDisplayName; // the display name to give back when neither masked nor disguised
+ 
+     /**
+-     * Shows everyone else {@code disguise} (a profile with this player's UUID) in place of this player's
++     * Shows everyone else {@code disguise} (a profile with a UUID of its own) in place of this player's
+      * name and skin, or the real ones again if it is null. This player keeps seeing the real ones.
+      * The display name follows the disguise for everyone, since chat shows one line to all.
+      * Each other player gets the tab list entry again and, if they can see this player, the entity
+@@ -1177,16 +1177,31 @@ public class CraftPlayer extends CraftHumanEntity implements Player {
+      */
+     public void athenaDisguise(GameProfile disguise) {
+         EntityPlayer self = getHandle();
++        final java.util.UUID before = self.athenaDisguise != null ? self.athenaDisguise.getId() : self.getUniqueID(); // the UUID others list it under
+         self.athenaDisguise = disguise;
+         this.athenaUpdateDisplayName();
+         for (final EntityPlayer player : server.getServer().getPlayerList().players) {
+             if (player != self) {
+                 // Athena - on the thread of the viewer's world: it changes what that viewer is tracking
+-                net.minecraft.server.WorldServer.athenaRunForEntity(player, () -> player.getBukkitEntity().reregisterPlayer(self));
++                net.minecraft.server.WorldServer.athenaRunForEntity(player, () -> player.getBukkitEntity().athenaReregister(self, before));
+             }
+         }
+     }
+ 
++    /**
++     * As reregisterPlayer, for a disguise that came, went or changed: the disguise has a UUID of its
++     * own, so the entry to take off is the one under the UUID {@code player} was listed under before.
++     */
++    private void athenaReregister(EntityPlayer player, java.util.UUID before) {
++        if (getHandle().playerConnection == null || hiddenPlayers.contains(player.getUniqueID())) return;
++        EntityTrackerEntry entry = (EntityTrackerEntry) ((WorldServer) entity.world).tracker.trackedEntities.get(player.getId());
++        if (entry != null) {
++            entry.clear(getHandle());
++        }
++        getHandle().playerConnection.sendPacket(PacketPlayOutPlayerInfo.athenaRemove(before));
++        this.registerPlayer(player);
++    }
++
+     /**
+      * The display name (chat, plugins' messages) for the mask and disguise: the name everyone sees
+      * (the disguise's or the real one) in the mask's colour, or in the Regular rank's green when
+diff --git a/src/main/java/org/spigotmc/TicksPerSecondCommand.java b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
+index 8c03db7a5327001d82b6ddb1c9f59c9411ddff7e..4f6c431ef9983a825c1a7d92d6e4fb30a9cc9967 100644
+--- a/src/main/java/org/spigotmc/TicksPerSecondCommand.java
++++ b/src/main/java/org/spigotmc/TicksPerSecondCommand.java
+@@ -32,6 +32,17 @@ public class TicksPerSecondCommand extends Command
+              tpsAvg[i] = format( tps[i] );
+         }
+         sender.sendMessage( ChatColor.GOLD + "TPS from last 1m, 5m, 15m: " + org.apache.commons.lang.StringUtils.join(tpsAvg, ", "));
++        // Athena start - the matches tick on world threads of their own, which the numbers above do not cover
++        java.util.List<String> worlds = net.minecraft.server.AthenaWorldThread.describeTicks();
++        if ( !worlds.isEmpty() )
++        {
++            sender.sendMessage( ChatColor.GOLD + "World threads, last " + net.minecraft.server.AthenaWorldThread.TICK_WINDOW + " ticks each:" );
++            for ( String line : worlds )
++            {
++                sender.sendMessage( "  " + line );
++            }
++        }
++        // Athena end
+ 
+         return true;
+     }
+diff --git a/src/test/java/net/minecraft/server/AthenaDisguiseUuidTest.java b/src/test/java/net/minecraft/server/AthenaDisguiseUuidTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..06f95acdd1397cea9cf900cee01cf85e3d45a684
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaDisguiseUuidTest.java
+@@ -0,0 +1,56 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertSame;
++
++import com.mojang.authlib.GameProfile;
++import java.lang.reflect.Field;
++import java.util.List;
++import java.util.UUID;
++import org.junit.Test;
++
++/**
++ * Athena - a disguise has a UUID of its own, and every tab list packet a viewer is sent carries it
++ * for the disguised player (not only those that carry a name): only the player sees their own.
++ */
++public class AthenaDisguiseUuidTest {
++
++    private static EntityPlayer player(String name) throws Exception {
++        EntityPlayer player = AthenaAuditFixtures.allocate(EntityPlayer.class);
++        player.setProfile(new GameProfile(UUID.randomUUID(), name));
++        AthenaAuditFixtures.set(player, EntityPlayer.class, "playerInteractManager", AthenaAuditFixtures.allocate(PlayerInteractManager.class));
++        return player;
++    }
++
++    @SuppressWarnings("unchecked")
++    private static UUID uuid(PacketPlayOutPlayerInfo packet, int i) throws Exception {
++        Field field = PacketPlayOutPlayerInfo.class.getDeclaredField("players");
++        field.setAccessible(true);
++        return ((List<PacketPlayOutPlayerInfo.PlayerInfoData>) field.get(packet)).get(i).getProfile().getId();
++    }
++
++    @Test
++    public void everyActionCarriesTheDisguisesUuidForOthers() throws Exception {
++        EntityPlayer hidden = player("RealName");
++        EntityPlayer other = player("Other");
++        GameProfile disguise = new GameProfile(UUID.randomUUID(), "SwiftFox482");
++        hidden.athenaDisguise = disguise;
++
++        for (PacketPlayOutPlayerInfo.EnumPlayerInfoAction action : PacketPlayOutPlayerInfo.EnumPlayerInfoAction.values()) {
++            PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo(action, hidden, other);
++            PacketPlayOutPlayerInfo seenByOther = packet.athenaFor(other);
++            assertEquals(action + ", seen by another", disguise.getId(), uuid(seenByOther, 0));
++            assertEquals(other.getProfile().getId(), uuid(seenByOther, 1));
++            assertSame(action + ", seen by the player: as made", packet, packet.athenaFor(hidden));
++            assertEquals(hidden.getProfile().getId(), uuid(packet.athenaFor(hidden), 0));
++        }
++
++        // no one disguised: the same packet for everyone
++        hidden.athenaDisguise = null;
++        PacketPlayOutPlayerInfo packet = new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.UPDATE_LATENCY, java.util.Arrays.asList(hidden, other));
++        assertSame(packet, packet.athenaFor(other));
++
++        // the entry a disguise had is taken off as it is
++        assertEquals(disguise.getId(), uuid(PacketPlayOutPlayerInfo.athenaRemove(disguise.getId()).athenaFor(other), 0));
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaFrameFileCrcTest.java b/src/test/java/net/minecraft/server/AthenaFrameFileCrcTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b51bc074697bd49c12b93336de50941058f618b
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaFrameFileCrcTest.java
+@@ -0,0 +1,51 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++import java.io.File;
++import java.io.RandomAccessFile;
++import java.nio.file.Files;
++import java.util.HashMap;
++import java.util.Map;
++import org.junit.Test;
++
++/** Athena - a frame file damaged on disk is not mapped (its chunk packets are made again instead). */
++public class AthenaFrameFileCrcTest {
++
++    @Test
++    public void aDamagedFileIsNotMapped() throws Exception {
++        File dir = Files.createTempDirectory("athena-frames").toFile();
++        try {
++            File file = AthenaFrameFile.file(dir, 0x1234L, 0x21, 6, 256);
++            Map<Integer, AthenaFrameFile.Pending> added = new HashMap<Integer, AthenaFrameFile.Pending>();
++            added.put(1, new AthenaFrameFile.Pending(3, new byte[256], new byte[] { 1, 2, 3, 4, 5 }));
++            added.put(3, new AthenaFrameFile.Pending(1, new byte[256], new byte[] { 9, 8, 7 }));
++            assertEquals(2, AthenaFrameFile.write(file, 0x1234L, 4, null, added));
++
++            AthenaFrameFile mapped = AthenaFrameFile.map(file, 0x1234L, 4);
++            assertNotNull("as written", mapped);
++            assertTrue(mapped.has(1) && mapped.has(3));
++
++            // rewritten with an old file's frames kept: still whole
++            added.clear();
++            added.put(2, new AthenaFrameFile.Pending(7, new byte[256], new byte[] { 6, 6 }));
++            assertEquals(3, AthenaFrameFile.write(file, 0x1234L, 4, mapped, added));
++            assertNotNull("rewritten", AthenaFrameFile.map(file, 0x1234L, 4));
++
++            // one byte of the last frame changed
++            try (RandomAccessFile raf = new RandomAccessFile(file, "rw")) {
++                raf.seek(raf.length() - 1);
++                int b = raf.read();
++                raf.seek(raf.length() - 1);
++                raf.write(b ^ 0x40);
++            }
++            assertNull("damaged", AthenaFrameFile.map(file, 0x1234L, 4));
++        } finally {
++            for (File f : dir.listFiles()) f.delete();
++            dir.delete();
++        }
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaInflateBudgetTest.java b/src/test/java/net/minecraft/server/AthenaInflateBudgetTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ada666fc6d8eb51c050c2d132954508946b2a3ce
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaInflateBudgetTest.java
+@@ -0,0 +1,31 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.fail;
++
++import io.netty.handler.codec.DecoderException;
++import org.junit.Test;
++
++/** Athena - one connection cannot keep the event loop inflating: a budget of bytes per connection. */
++public class AthenaInflateBudgetTest {
++
++    @Test
++    public void theBurstPassesThenFramesAreRefusedUntilItRefills() throws Exception {
++        PacketDecompressor decompressor = new PacketDecompressor(256);
++        int frame = 2 << 20; // the protocol's largest
++        long frames = PacketDecompressor.ATHENA_INFLATE_BURST / frame;
++        for (int i = 0; i < frames; ++i) {
++            decompressor.athenaCharge(frame);
++        }
++        try {
++            decompressor.athenaCharge(frame);
++            fail("over the burst");
++        } catch (DecoderException expected) {
++        }
++        // small packets still pass while the bucket refills
++        Thread.sleep(50L);
++        decompressor.athenaCharge(32 << 10);
++        // a second's refill is enough for RATE bytes
++        Thread.sleep(1100L);
++        decompressor.athenaCharge((int) Math.min(PacketDecompressor.ATHENA_INFLATE_RATE, frame));
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaLegacy17ListNameTest.java b/src/test/java/net/minecraft/server/AthenaLegacy17ListNameTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a8d16e1cb038c4e486b5945c54521094d437213
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaLegacy17ListNameTest.java
+@@ -0,0 +1,54 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Map;
++import java.util.Set;
++import java.util.UUID;
++import org.junit.Test;
++
++/** Athena - 1.7 tab entries are known by name: two names the same once cut to 16 get entries of their own. */
++public class AthenaLegacy17ListNameTest {
++
++    private static AthenaLegacy17.Profile listed(Map<UUID, AthenaLegacy17.Profile> profiles, UUID uuid, String name, String displayName) {
++        AthenaLegacy17.Profile profile = new AthenaLegacy17.Profile(name);
++        profile.displayName = displayName;
++        profiles.put(uuid, profile);
++        profile.listed = AthenaLegacy17.uniqueListName(profiles, uuid, profile);
++        return profile;
++    }
++
++    @Test
++    public void namesCutToTheSameSixteenGetEntriesOfTheirOwn() {
++        Map<UUID, AthenaLegacy17.Profile> profiles = new HashMap<UUID, AthenaLegacy17.Profile>();
++        UUID a = UUID.randomUUID();
++        UUID b = UUID.randomUUID();
++        AthenaLegacy17.Profile first = listed(profiles, a, "Steve", "§aSteve the Great One");
++        AthenaLegacy17.Profile second = listed(profiles, b, "Steve2", "§aSteve the Great Two");
++        assertEquals("Steve the Great ", first.listed);
++        assertNotEquals(first.listed, second.listed);
++        assertTrue(second.listed.length() <= 16);
++
++        // a short name: the colour code goes at the end, nothing visible changes
++        UUID c = UUID.randomUUID();
++        UUID d = UUID.randomUUID();
++        listed(profiles, c, "Alex", null);
++        AthenaLegacy17.Profile alex = listed(profiles, d, "Bob", "Alex");
++        assertEquals("Alex§0", alex.listed);
++
++        // the same uuid listed again keeps its name
++        assertEquals(first.listed, AthenaLegacy17.uniqueListName(profiles, a, first));
++
++        // many of the same name: all different, none over 16
++        Set<String> names = new HashSet<String>();
++        for (int i = 0; i < 40; ++i) {
++            AthenaLegacy17.Profile p = listed(profiles, UUID.randomUUID(), "x" + i, "SameSameSameSameSame");
++            assertTrue(p.listed.length() <= 16);
++            assertTrue(names.add(p.listed));
++        }
++    }
++}
