@@ -88,7 +88,7 @@
 | L9 | SG が `WorldThreadFailureEvent` を受け、その部屋の試合を打ち切る（中の人をロビーへ、Cleanup へ進める） | SG |
 | L14 | Hub の参加看板は 1 人 1 秒に 1 回まで | AthenaHub |
 
-- **試験**：Athena 全件 5,741 件・失敗 0（`AthenaTickTimes` を使う `/tps` 以外に、`AthenaFrameFileCrcTest`・`AthenaInflateBudgetTest`・`AthenaLegacy17ListNameTest`・`AthenaDisguiseUuidTest` を足した）。SG のビルドの試験は通過。Hub 22 件・失敗 0。
+- **試験**：Athena 全件 5,741 件・失敗 0（新しく `AthenaFrameFileCrcTest`・`AthenaInflateBudgetTest`・`AthenaLegacy17ListNameTest`・`AthenaDisguiseUuidTest` を足した）。SG のビルドの試験は通過。Hub 22 件・失敗 0。
 
 ## 動かして確かめたこと
 
