@@ -1,0 +1,208 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 16 Nov 2026 09:11:44 +0900
+Subject: [PATCH] Tab completions are made and sent on the player's tick
+ thread; a person logging in under a bot's name comes first
+
+A tab completion was handled on the event loop, which waited there for the player's tick thread to
+make the completions: up to a tick, or for good if that world's thread was stuck. The server has one
+event loop, so every player's reads and writes waited with it - 40 completions sent at once held
+another connection's ping for 1,962 ms. The completions are now made and sent from that thread,
+and nothing waits for them.
+
+A bot's made-up name could be a real player's, and that player could log in while the bot played:
+their UUIDs differ, so two players had one name, and when either left, the name went from the name
+map with it. The login now asks a bot of that name to leave first and waits for it, as it does for
+a player of the same UUID; the name map lets go of a name only for the player who holds it; and a
+bot detached from a stuck world leaves the bots' list too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/AthenaBotPlayer.java b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+index 85967a463d0230d98a88a2bf02197e4754efe1b3..b3e4c71575259828b10fd78c7b2d15461d8b90fd 100644
+--- a/src/main/java/net/minecraft/server/AthenaBotPlayer.java
++++ b/src/main/java/net/minecraft/server/AthenaBotPlayer.java
+@@ -33,6 +33,8 @@ public final class AthenaBotPlayer extends EntityPlayer {
+     float strafe;
+     boolean jumping;
+     athena.api.bot.BotController controller;
++    /** Asked to leave for a player of its name (PlayerList.athenaNameHeldByBot); set once, on the server thread. */
++    volatile boolean athenaLeaving;
+ 
+     public AthenaBotPlayer(MinecraftServer server, WorldServer world, GameProfile profile, PlayerInteractManager interactManager) {
+         super(server, world, profile, interactManager);
+diff --git a/src/main/java/net/minecraft/server/LoginListener.java b/src/main/java/net/minecraft/server/LoginListener.java
+index c0eaaeff2f8415d02b7e31d7428e37e5edc3c2da..85e931c3f483b30415e0fe17fa003e85c5f86de9 100644
+--- a/src/main/java/net/minecraft/server/LoginListener.java
++++ b/src/main/java/net/minecraft/server/LoginListener.java
+@@ -62,7 +62,7 @@ public class LoginListener implements PacketLoginInListener, IUpdatePlayerListBo
+         } else if (this.currentLoginState == LoginListener.EnumProtocolState.e) {
+             EntityPlayer entityplayer = this.server.getPlayerList().getPlayerByUUID(this.loginGameProfile.getId());
+ 
+-            if (entityplayer == null) {
++            if (entityplayer == null && !this.server.getPlayerList().athenaNameHeldByBot(this.loginGameProfile.getName())) { // Athena - and no bot of this name: see athenaNameHeldByBot
+                 this.currentLoginState = LoginListener.EnumProtocolState.READY_TO_ACCEPT;
+                 this.server.getPlayerList().initializeConnectionToPlayer(this.networkManager, this.player);
+                 this.player = null;
+@@ -147,7 +147,7 @@ public class LoginListener implements PacketLoginInListener, IUpdatePlayerListBo
+             this.networkManager.handle(new PacketLoginOutSuccess(this.loginGameProfile));
+             EntityPlayer entityplayer = this.server.getPlayerList().getPlayerByUUID(this.loginGameProfile.getId());
+ 
+-            if (entityplayer != null) {
++            if (entityplayer != null || this.server.getPlayerList().athenaNameHeldByBot(this.loginGameProfile.getName())) { // Athena - a bot of this name leaves first
+                 this.currentLoginState = LoginListener.EnumProtocolState.e;
+                 this.player = this.server.getPlayerList().processLogin(this.loginGameProfile, s); // CraftBukkit - add player reference
+             } else {
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 4a443438915fc7ae9f5d301b941ab393061ff40f..480e5b588b3bca25f16459e712528091f7e6694d 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -2156,20 +2156,18 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         if (!event.isHandled()) {
+             // If the event isn't handled, we can assume that we have no completions, and so we'll ask the server
+ 
+-            Waitable<java.util.List<String>> syncCompletions = new Waitable<java.util.List<String>>() {
+-                @Override
+-                protected java.util.List<String> evaluate() {
+-                    return minecraftServer.tabCompleteCommand(player, buffer, blockpos);
+-                }
+-            };
+-            WorldServer.athenaRunForEntity(this.player, syncCompletions); // Athena - the thread that ticks the player's world, wherever it has gone by then
+-            try {
+-                completions = syncCompletions.get();
+-            } catch (InterruptedException | ExecutionException e1) {
+-                e1.printStackTrace();
+-            }
+-
+-            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(completions.toArray(new String[0])));
++            // Athena start - the completions are made, and sent, on the thread that ticks the player's world;
++            // nothing waits for them here.
++            //
++            // This packet is handled where it arrives, on the event loop, and it waited there for that
++            // thread to get to the task: up to a tick, or for good if the world's thread was stuck. The
++            // server has one event loop, so every player's reads and writes waited with it - 40 completions
++            // sent at once held a ping on another connection for 1,962 ms (local, 2026-11-16).
++            WorldServer.athenaRunForEntity(this.player, () -> { // the thread that ticks the player's world, wherever it has gone by then
++                java.util.List<String> sync = this.minecraftServer.tabCompleteCommand(this.player, buffer, blockpos);
++                this.sendPacket(new PacketPlayOutTabComplete(sync.toArray(new String[0])));
++            });
++            // Athena end
+         } else if (!event.isCancelled()) {
+             this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(completions.toArray(new String[0])));
+         }
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index d6bcd0be82b3f43d76422121fcf7f0ca71d42e4a..4c2be1ed70e25c3fcc4bee92a7f757c6b4723402 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -431,7 +431,7 @@ public abstract class PlayerList {
+         worldserver.getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer); // Athena - disconnecting: no unload packets
+         if (entityplayer instanceof AthenaBotPlayer) AthenaBotPlayer.ONLINE.remove(((AthenaBotPlayer) entityplayer).api); // Athena
+         this.players.remove(entityplayer);
+-        this.playersByName.remove(entityplayer.getName()); // Spigot
++        this.playersByName.remove(entityplayer.getName(), entityplayer); // Spigot // Athena - only if the name is still this player's: see athenaNameHeldByBot
+         UUID uuid = entityplayer.getUniqueID();
+         EntityPlayer entityplayer1 = (EntityPlayer) this.uuidToPlayerMap.get(uuid);
+ 
+@@ -513,7 +513,7 @@ public abstract class PlayerList {
+                 } catch (RuntimeException again) {
+                     exception.addSuppressed(again);
+                     this.players.remove(bot);
+-                    this.playersByName.remove(bot.getName());
++                    this.playersByName.remove(bot.getName(), bot);
+                     this.uuidToPlayerMap.remove(bot.getUniqueID(), bot);
+                     this.sendAll(new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.REMOVE_PLAYER, bot));
+                 }
+@@ -523,6 +523,36 @@ public abstract class PlayerList {
+         return bot;
+     }
+ 
++    /**
++     * Athena - whether a bot holds {@code name} (any case) now; if one does, it is asked to leave.
++     *
++     * A bot's name is made up, and the person whose name it is may log in while it plays: their UUIDs
++     * differ, so nothing stopped it, and two players had one name - two tab entries, and a name that
++     * found either. When one left, the name went from the name map with it, and the other could no
++     * longer be found by name at all. The person comes first: LoginListener asks this before it lets
++     * them in, and waits (as for a player of the same UUID) until it answers false. The bot leaves on
++     * the thread that ticks its world; if that thread is stuck, it is detached from here. Server thread.
++     */
++    public boolean athenaNameHeldByBot(String name) {
++        EntityPlayer named = this.getPlayer(name);
++        if (!(named instanceof AthenaBotPlayer)) {
++            return false;
++        }
++        final AthenaBotPlayer bot = (AthenaBotPlayer) named;
++        if (!bot.athenaLeaving) {
++            bot.athenaLeaving = true;
++            PlayerList.logger.info("Bot " + bot.getName() + " leaves: a player of that name is logging in");
++            if (bot.getServerForPlayer().athenaStalled()) {
++                this.athenaDetach(bot, "a player of that name is logging in");
++            } else {
++                WorldServer.athenaRunForEntity(bot, () -> {
++                    if (bot.api.isOnline()) bot.api.remove();
++                });
++            }
++        }
++        return true;
++    }
++
+     /** The API's bot for {@code bot}. */
+     public athena.api.bot.Bot athenaBotOf(AthenaBotPlayer bot) {
+         return bot.api;
+@@ -676,7 +706,7 @@ public abstract class PlayerList {
+         // entityplayer.u().getTracker().untrackEntity(entityplayer); // CraftBukkit
+         entityplayer.getServerForPlayer().getPlayerChunkMap().athenaRemoveLeavingPlayer(entityplayer); // Athena - the respawn below clears the client's chunks
+         this.players.remove(entityplayer);
+-        this.playersByName.remove(entityplayer.getName()); // Spigot
++        this.playersByName.remove(entityplayer.getName(), entityplayer); // Spigot // Athena - only if still this player's
+         this.server.getWorldServer(entityplayer.dimension).removeEntity(entityplayer);
+         BlockPosition blockposition = entityplayer.getBed();
+         boolean flag1 = entityplayer.isRespawnForced();
+@@ -1341,8 +1371,9 @@ public abstract class PlayerList {
+             PlayerList.logger.warn("Could not save " + entityplayer.getName() + " while its world is stuck", throwable);
+         }
+ 
++        if (entityplayer instanceof AthenaBotPlayer) AthenaBotPlayer.ONLINE.remove(((AthenaBotPlayer) entityplayer).api); // Athena - as disconnect does
+         this.players.remove(entityplayer);
+-        this.playersByName.remove(entityplayer.getName());
++        this.playersByName.remove(entityplayer.getName(), entityplayer); // Athena - only if still this player's
+         UUID uuid = entityplayer.getUniqueID();
+         if (this.uuidToPlayerMap.get(uuid) == entityplayer) {
+             this.uuidToPlayerMap.remove(uuid);
+diff --git a/src/test/java/net/minecraft/server/AthenaNameMapTest.java b/src/test/java/net/minecraft/server/AthenaNameMapTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..02077149705f173e2b0606d318b4bf6d70e05aab
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaNameMapTest.java
+@@ -0,0 +1,31 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++
++import java.util.Collections;
++import java.util.Map;
++import org.junit.Test;
++
++/**
++ * Athena - PlayerList's name map lets go of a name only for the player who holds it (remove(name,
++ * player)), whatever the case the name is spelt in: a bot that leaves after a player of its name came
++ * in must not take that player's entry with it (PlayerList.athenaNameHeldByBot).
++ */
++public class AthenaNameMapTest {
++
++    @Test
++    public void aNameGoesOnlyWithItsOwnHolder() {
++        Map<String, Object> names = Collections.synchronizedMap(new org.spigotmc.CaseInsensitiveMap<Object>());
++        Object bot = new Object();
++        Object person = new Object();
++
++        names.put("EpicFox", bot);
++        names.put("epicfox", person); // the person came in under the bot's name, in another case
++        names.remove("EpicFox", bot); // the bot leaves after them
++        assertSame("the person keeps the name", person, names.get("EPICFOX"));
++
++        names.remove("EPICFOX", person);
++        assertNull(names.get("EpicFox"));
++    }
++}
