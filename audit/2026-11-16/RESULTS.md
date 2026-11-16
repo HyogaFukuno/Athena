@@ -73,3 +73,56 @@
 - **試験**：全件 5,737 件、失敗 0。`AthenaCustomPayloadCopyTest`（中身が元のフレームを返したあとも読め、プールのものでないこと）を足した。
 - **ローカル（bungeecord 有効、トークンなし）**：IP アドレス（203.0.113.7）を転送したログインは通った。ホスト名（no-such-host.invalid）を転送したログインは 3 ms で断られ、「the forwarded address is not an IP address」と記録された。
 - **VPS-B（sg2 の設定、SG・ボットあり、使い捨て）**：ボット入りの試合を、デスマッチの門が開くところまで回した。エラーは 0 件。終わったあとで消した。
+
+# 残りの修正と確認（server 0455・SG・Hub）
+
+| # | 直したこと | 場所 |
+|---|---|---|
+| M3 | ワールドのスレッドごとに直近 100 tick の平均・最長・50 ms 超えを持ち、`/tps` に部屋ごとの行を出す。診断の CSV に `world_threads`・`world_ticks`・`world_tick_ms_sum`・`world_tick_ms_max`・`world_ticks_over_50ms` を足し、レポートにグラフと数字を足した。古い列の CSV は `athena-diag.csv.old` に退けて新しく書く | Athena 0455、`diag/` |
+| L2 | 偽装に自分の UUID を持たせる（偽装のたびに新しい乱数）。ほかの人へ送るタブの全部の操作（追加・ゲームモード・ping・表示名・削除）とスポーンが偽装の UUID になる。本人には本物。スペクテイトは偽装の UUID でも相手が見つかる | Athena 0455 |
+| L6 | フレームのファイルの見出しに CRC-32C を入れ、マップするときに 1 回確かめる。合わなければ使わずに作り直す（形式は 2 に上げたので、古いファイルも作り直される） | Athena 0455 |
+| L7 | 接続ごとに伸長の予算（8 MiB の桶、毎秒 4 MiB 回復）。超えたフレームで切る。`-Dathena.inflateBytesPerSecond`・`-Dathena.inflateBurstBytes` で変えられる | Athena 0455 |
+| L13 | 1.7 のタブで、16 文字に切った名前が重なったら末尾に色コードを足して（入らなければ最後の 2 文字に重ねて）別の名前にする | Athena 0455 |
+| — | `/temptp` を OP ではなく権限 `athena.command.temptp` で判定（OP は今までどおり使える） | Athena 0455 |
+| L8 | `deploy/sg@.service` に `NoNewPrivileges`・`ProtectSystem=strict`（書けるのは `/opt/mc` と `/tmp`）・`ProtectHome` ほか。`PrivateTmp` は tmux と jcmd のソケットが見えなくなるので入れない | Athena の deploy |
+| L9 | SG が `WorldThreadFailureEvent` を受け、その部屋の試合を打ち切る（中の人をロビーへ、Cleanup へ進める） | SG |
+| L14 | Hub の参加看板は 1 人 1 秒に 1 回まで | AthenaHub |
+
+- **試験**：Athena 全件 5,741 件・失敗 0（新しく `AthenaFrameFileCrcTest`・`AthenaInflateBudgetTest`・`AthenaLegacy17ListNameTest`・`AthenaDisguiseUuidTest` を足した）。SG のビルドの試験は通過。Hub 22 件・失敗 0。
+
+## 動かして確かめたこと
+
+### L9 部屋のスレッドが落ちたとき（`l9.py`、試験用プラグイン `CrashTest` で 1 部屋の tick に例外を投げさせる）
+
+| 場所 | SG | 落とした時 | 結果 |
+|---|---|---|---|
+| ローカル | 前（v2 df91c15） | ライブゲーム | 部屋は止まったワールドのまま試合を続け、200 秒たっても次の試合は始まらなかった（デスマッチ会場の準備は続いていた） |
+| ローカル | 後 | PreGame | 「Room 1: the thread of … failed in PRE_GAME; the match is stopped」。54 秒後に次の試合が始まった。人の接続は切れない |
+| ローカル | 後 | ライブゲーム | 同じく打ち切り、54 秒後に次の試合 |
+| VPS-B（sg2 の設定、囲ったユニット） | 後 | ライブゲーム | 同じく打ち切り、54 秒後に次の試合。作った例外のほかのエラーは 0 件 |
+
+### M3 `/tps`
+
+どの回も、`World threads, last 100 ticks each:` の下に部屋ごとの行が出た（例：`sg-1-Lobby_Games, sg-1-dm-Deathmatch_Arena-0: avg 2.8 ms, max 11.6 ms, over 50 ms 0 of 100`、VPS-B）。
+
+### L2 偽装の UUID（`l2.py`、プラグインなしのローカル）
+
+Alpha が `/disguise` し、Beta が受け取るタブとスポーンのパケットを読んだ。偽装中にゲームモードを変え、ping の更新（30 秒ごと）も待った。
+
+| jar | 偽装中に Beta へ本物の UUID で届いたもの |
+|---|---|
+| 0454 | 追加・スポーン・ゲームモード・ping・削除（すべて） |
+| 0455 | 偽装した瞬間の、本物の項目の削除だけ。追加・スポーン・ゲームモード・ping は偽装の UUID |
+
+`/undisguise` のあとは、偽装の項目が消え、本物の UUID で追加とスポーンが届いた。VPS-B では、Alpha が試合中の部屋に入ったため SG が偽装を許さず、試していない。
+
+### L8 囲ったユニット（VPS-B）
+
+`deploy/sg@.service` と同じ中身の試験用ユニット（`sgh@athtest`）で使い捨てのサーバーを動かした。起動、試合、コンソール（tmux）への入力はすべて動いた。プロセスから見て `/` は読み取り専用、`/opt/mc` と `/tmp` は書ける、`NoNewPrivs: 1`。`systemd-analyze security` の点は、本番の sg@sg2 が 9.2、囲ったユニットが 7.6。本番のユニットは変えていない。試験のあとでユニットとサーバーは消した。
+
+## まだのこと
+
+- **M2**（VPS-B の SSH を鍵だけにする）は、サーバーの安全の設定なので変えていない。手順は REVIEW.md の M2。
+- **L8**：本番の `/etc/systemd/system/sg@.service` への反映は、マージのあとで入れるとき。
+- **L14**：Hub は試験だけで、本物のクライアントで看板を押してはいない。
+- **L6・L7・L13**：試験だけ（壊れたファイル、伸長の予算、1.7 の名前）。本物のクライアントでは見ていない。
