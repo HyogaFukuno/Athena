@@ -1,0 +1,175 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Mon, 16 Nov 2026 10:05:27 +0900
+Subject: [PATCH] Small fixes from the 2026-11-16 review: forwarded addresses,
+ plugin message data, spectate, scratch lists, resource pack answers
+
+- A forwarded address that is not an IP address is refused: new InetSocketAddress looked it up in
+  DNS on the event loop, before the BungeeGuard token was checked (L1).
+- A plugin message's data is a heap copy of its own: the pooled buffer readBytes(int) took was given
+  back only by the handler, so a packet dropped before it kept it from the pool (L3).
+- Spectating looks only at the worlds this thread ticks: another thread's entity map is not this
+  one's to read (L4).
+- A query's scratch list is taken inside the try, so a query that throws still gives it back (L5).
+- The resource pack answer runs on the player's tick thread: its event is a synchronous one (L10).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 20109be2267fd74ab14773a50fe23fd233522f23..ef7446acd16b9ad1c9d9435aa871ca005ef5b35c 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -444,8 +444,9 @@ public abstract class EntityHuman extends EntityLiving {
+ 
+             if (this.canBePushed()) { // Spigot: Add this.ae() condition (second !this.isDead near bottom of EntityLiving)
+             // Athena - the query only when its result is used, into a list reused per thread (AthenaScratchLists)
+-            java.util.ArrayList<Entity> list = this.world.athenaEntitiesInto(this, pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ, IEntitySelector.NOT_SPECTATING, AthenaScratchLists.take());
+-            try {
++            java.util.ArrayList<Entity> list = AthenaScratchLists.take();
++            try { // the query inside: a query that throws still gives its list back
++            this.world.athenaEntitiesInto(this, pushMinX, pushMinY, pushMinZ, pushMaxX, pushMaxY, pushMaxZ, IEntitySelector.NOT_SPECTATING, list);
+             for (int i = 0; i < list.size(); ++i) {
+                 Entity entity = (Entity) list.get(i);
+ 
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 5e163ed9a84aa1a52e99c88445ee076a0aa02878..3545072692d7524804f7fcd877ebdcdcbbe2c7bd 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -1796,8 +1796,9 @@ public abstract class EntityLiving extends Entity {
+             return;
+         }
+ 
+-        java.util.ArrayList<Entity> list = this.world.athenaEntitiesInto((Entity) this, minX, minY, minZ, maxX, maxY, maxZ, NOT_SPECTATING_AND_PUSHABLE, AthenaScratchLists.take()); // Athena - see AthenaScratchLists
+-        try { // Athena
++        java.util.ArrayList<Entity> list = AthenaScratchLists.take(); // Athena - see AthenaScratchLists
++        try { // Athena - the query inside: a query that throws still gives its list back
++        this.world.athenaEntitiesInto((Entity) this, minX, minY, minZ, maxX, maxY, maxZ, NOT_SPECTATING_AND_PUSHABLE, list);
+ 
+         if (!list.isEmpty()) { // Athena - canBeCollidedWith() asked above
+         // Athena end
+diff --git a/src/main/java/net/minecraft/server/HandshakeListener.java b/src/main/java/net/minecraft/server/HandshakeListener.java
+index 36660745446715ab29a683f61722b34f6e407d89..c55769e06efb360dc44cd10687a66b6a78e2224d 100644
+--- a/src/main/java/net/minecraft/server/HandshakeListener.java
++++ b/src/main/java/net/minecraft/server/HandshakeListener.java
+@@ -114,6 +114,16 @@ public class HandshakeListener implements PacketHandshakingInListener {
+                 // Spigot Start
+                 //if (org.spigotmc.SpigotConfig.bungee) { // PandaSpigot - comment out, we check above!
+                     String[] split = packethandshakinginsetprotocol.hostname.split("\00");
++                    // Athena - the forwarded address must be an IP address. Anything else was looked up in DNS
++                    // by new InetSocketAddress below, on the event loop (one for the whole server), before the
++                    // BungeeGuard token was checked; a proxy only ever forwards an address.
++                    if ( ( split.length == 3 || split.length == 4 ) && !com.google.common.net.InetAddresses.isInetAddress( split[1] ) ) {
++                        org.apache.logging.log4j.LogManager.getLogger().warn("Refused a forwarded login from {}: the forwarded address is not an IP address", remoteAddress);
++                        chatcomponenttext = new ChatComponentText("Unable to authenticate - no data was forwarded by the proxy.");
++                        this.networkManager.handle(new PacketLoginOutDisconnect(chatcomponenttext));
++                        this.networkManager.close(chatcomponenttext);
++                        return;
++                    }
+                     if ( split.length == 3 || split.length == 4 ) {
+                         // PandaSpigot start - Unix domain socket support
+                         java.net.SocketAddress socketAddress = networkManager.getSocketAddress();
+diff --git a/src/main/java/net/minecraft/server/PacketPlayInCustomPayload.java b/src/main/java/net/minecraft/server/PacketPlayInCustomPayload.java
+index 75799961151bb29aeeb8d9452e3fa9e2c1b86911..767ccc8d45fa876e407ef5b1d32cb9325f5e886b 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayInCustomPayload.java
++++ b/src/main/java/net/minecraft/server/PacketPlayInCustomPayload.java
+@@ -17,7 +17,12 @@ public class PacketPlayInCustomPayload implements Packet<PacketListenerPlayIn> {
+         int i = packetdataserializer.readableBytes();
+ 
+         if (i >= 0 && i <= 32767) {
+-            this.data = new PacketDataSerializer(packetdataserializer.readBytes(i));
++            // Athena - into a heap buffer of its own, not one from the channel's pool. readBytes(int) took a
++            // pooled buffer that only the handler's finally gave back: a packet dropped before it got there
++            // (the packet limiter, a closed connection, a player who left) kept it from the pool for good.
++            byte[] bytes = new byte[i];
++            packetdataserializer.readBytes(bytes);
++            this.data = new PacketDataSerializer(io.netty.buffer.Unpooled.wrappedBuffer(bytes));
+         } else {
+             throw new IOException("Payload may not be larger than 32767 bytes");
+         }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 480e5b588b3bca25f16459e712528091f7e6694d..cbdd7a89b9c15a885e5e9c9ee755b90e9c52589e 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -942,7 +942,9 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             // CraftBukkit - use the worlds array list
+             for (WorldServer worldserver : minecraftServer.worlds) {
+ 
+-                if (worldserver != null) {
++                // Athena - only the worlds this thread ticks: another thread's entity map is not this one's
++                // to read, and a teleport into a world on another thread is handed over all the same
++                if (worldserver != null && worldserver.isMainThread()) {
+                     entity = packetplayinspectate.getEntity(worldserver);
+                     if (entity != null) {
+                         break;
+@@ -989,6 +991,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     // CraftBukkit start
+     public void handleResourcePackStatus(PacketPlayInResourcePackStatus packetplayinresourcepackstatus) {
++        if (PlayerConnectionUtils.postToMainThread(packetplayinresourcepackstatus, this, this.player.getServerForPlayer())) return; // Athena - its event is a synchronous one: not on the event loop
+         this.server.getPluginManager().callEvent(new PlayerResourcePackStatusEvent(getPlayer(), PlayerResourcePackStatusEvent.Status.values()[packetplayinresourcepackstatus.status.ordinal()]));
+     }
+     // CraftBukkit end
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index 66eec2d80f1061ea190739eae26464713f8d748b..7027383fb429250fe7612995b0432500f3ade74e 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -570,12 +570,16 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+         }
+ 
+         if (object == null) {
+-            java.util.ArrayList<Entity> list = world.athenaEntitiesInto((Entity) null, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectInventories, AthenaScratchLists.take()); // Athena - scalar overload; a list reused per thread (AthenaScratchLists)
++            java.util.ArrayList<Entity> list = AthenaScratchLists.take(); // Athena - a list reused per thread (AthenaScratchLists)
+ 
+-            if (list.size() > 0) {
+-                object = (IInventory) list.get(world.random.nextInt(list.size()));
++            try { // Athena - a query that throws still gives its list back
++                world.athenaEntitiesInto((Entity) null, d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D, IEntitySelector.selectInventories, list); // Athena - scalar overload
++                if (list.size() > 0) {
++                    object = (IInventory) list.get(world.random.nextInt(list.size()));
++                }
++            } finally {
++                AthenaScratchLists.release(list);
+             }
+-            AthenaScratchLists.release(list); // Athena - nothing between take and here calls out
+         }
+ 
+         return (IInventory) object;
+diff --git a/src/test/java/net/minecraft/server/AthenaCustomPayloadCopyTest.java b/src/test/java/net/minecraft/server/AthenaCustomPayloadCopyTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1403d575f13f923c180e9c6d66d5169d632dd28
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaCustomPayloadCopyTest.java
+@@ -0,0 +1,33 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++
++import io.netty.buffer.ByteBuf;
++import io.netty.buffer.PooledByteBufAllocator;
++import java.nio.charset.StandardCharsets;
++import org.junit.Test;
++
++/**
++ * Athena - a plugin message's data is a heap copy of its own, not a buffer from the frame's pool: a
++ * packet dropped before its handler (which gives the data back) leaves nothing taken from the pool.
++ */
++public class AthenaCustomPayloadCopyTest {
++
++    @Test
++    public void theDataOutlivesItsFrameAndIsNotPooled() throws Exception {
++        ByteBuf frame = PooledByteBufAllocator.DEFAULT.buffer();
++        PacketDataSerializer out = new PacketDataSerializer(frame);
++        out.writeString("MC|Brand");
++        out.writeBytes("vanilla".getBytes(StandardCharsets.UTF_8));
++
++        PacketPlayInCustomPayload packet = new PacketPlayInCustomPayload();
++        packet.readPacketData(new PacketDataSerializer(frame));
++        frame.release(); // the frame goes back to the pool as soon as the packet is read
++
++        ByteBuf data = packet.getBufferData();
++        assertFalse("not from the pool", data.alloc() instanceof PooledByteBufAllocator);
++        assertEquals("vanilla", data.toString(StandardCharsets.UTF_8));
++        assertEquals("MC|Brand", packet.getChannelName());
++    }
++}
