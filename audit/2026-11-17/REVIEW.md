@@ -4,7 +4,7 @@
 
 - **対象**：`origin/master` `1eb6999`（server 0455・api 0070）。
 - **実測**：VPS-B の JFR `run/vps-out/r-b-1/sg.jfr`（2026-11-15、server 0452、8 部屋、ネットワーク越しのボット約 112 体と SG のボット）。0453〜0455 は重い経路を変えていない。
-- **数字**：サンプルの割合（全 63,091 個）と確保の重み（2,882 MB）。効き目は見積もりで、前後の計測はしていない（A1・A3 は `RESULTS.md` で確かめた）。
+- **数字**：サンプルの割合（全 63,091 個）と確保の重み（2,882 MB）。効き目は見積もりで、前後の計測はしていない（A1・A3 は `RESULTS.md`、A2 は `RESULTS-A2.md` で確かめた）。
 - **読んだ所**：`AthenaWorldThread`、`WorldServer` のスレッド周り、`NetworkManager` の送信、受け渡し、0455 の差分、static な共有状態、本番設定（ArcanaServers `7c739e4`）、SG のボットの経路探索。
 
 ## まとめ
@@ -17,7 +17,7 @@
 | # | 内容 | 裏付け | 直し方 |
 |---|---|---|---|
 | A1 | メインワールド `lobby` のスポーン周辺 625 チャンクがヒープに常駐する（`paper.yml` の `keep-spawn-loaded: true`） | 起動時の読み込みがサーバースレッドの 29%、`NBTTagByteArray.load` が確保の 7.2% | `keep-spawn-loaded: false`（**確かめた**：`RESULTS.md`） |
-| A2 | SG のボットの経路探索が、1 tick 12 ms の予算を使い切っている（`Navigator.PLAN_NANOS_PER_TICK`） | `Navigator.plan` が 20.3%、`Terrain.flags` の自分の時間 12.4% | `-Dsgbots.planNanosPerTick` を 4〜6 ms にして A/B。根本は D1 |
+| A2 | SG のボットの経路探索が全体の約 20%（`Navigator.plan`） | `Navigator.plan` が 20.3%、`Terrain.flags` の自分の時間 12.4% | 予算は上限として効いておらず、下げても効かない。半分以上は試験の人役が空を飛ぶことから来ていた。宙の目的地は真下の地面へ（**直した**：`RESULTS-A2.md`）。根本は D1 |
 | A3 | `CraftScore.getScore` が呼ぶたびに全エントリ名を写して線形に探す | `Scoreboard.getPlayers` 経由の確保 92 MB（3.2%） | server 0456（**直した**） |
 
 ## 中

@@ -60,6 +60,7 @@ p.add_argument("--team-size", type=int, default=None)    # with --sg: 2 for duos
 p.add_argument("--jfr", action="store_true")                # a flight recording (1 ms execution samples) as sg.jfr in the output
 p.add_argument("--main-world", default=None)              # the main world's folder (default: bench/run_sg/lobby)
 p.add_argument("--keep-spawn", default=None)              # paper.yml keep-spawn-loaded: true or false (default: the config's)
+p.add_argument("--java-opts", default="")                  # more JVM options (e.g. -Dsgbots.planNanosPerTick=6000000), after the bench's own
 p.add_argument("--conf", default="sg1")                    # ArcanaServers vps-b/<conf>: sg2 plays duos and the tournament in arenas
 a = p.parse_args()
 CONF = "/Users/glacier/Documents/Minecraft/developments/ArcanaServers/vps-b/" + a.conf
@@ -169,6 +170,7 @@ desc = "%s: %d bots, %d at once (%s), %d rounds, live %d s, heap %s%s, jar %s, c
     if a.sg else ("threaded" if a.threaded else "one thread"), a.rounds, a.live, a.heap,
     (", no System.gc() after a match" if a.no_gc_after_match else "") + (", GC " + GC if GC else "") + (", JIT %r" % a.jit if a.jit is not None else ""), jar_key, conf_rev)
 if a.keep_spawn is not None: desc += ", keep-spawn-loaded " + a.keep_spawn
+if a.java_opts: desc += ", JVM options " + a.java_opts
 if a.main_world: desc += ", main world " + os.path.basename(os.path.normpath(a.main_world))
 print(desc, flush=True)
 
@@ -184,7 +186,8 @@ if GC or a.jit is not None:
     print("  flags: " + ssh("sed -n '/^FLAGS=(/,/^)/p' %s | tr -s ' \\n' ' '" % SCRIPT).strip(), flush=True)
 START = ("cd %s && : > console.out && ATHENA_CACHE_ROOT=%s HEAP=%s JAVA_TOOL_OPTIONS=%s "
          "%s 2>&1 | tee -a console.out") % (D, CACHE, a.heap, json.dumps("-Xlog:gc:file=gc.log:uptime" + (
-    " -XX:StartFlightRecording=filename=sg.jfr,settings=profile,jdk.ExecutionSample#period=1ms" if a.jfr else "")), SCRIPT)
+    " -XX:StartFlightRecording=filename=sg.jfr,settings=profile,jdk.ExecutionSample#period=1ms" if a.jfr else "") + (
+    " " + a.java_opts if a.java_opts else "")), SCRIPT)
 
 
 def start():
