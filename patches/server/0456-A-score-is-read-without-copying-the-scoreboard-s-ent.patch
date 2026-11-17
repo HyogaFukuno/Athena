@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 17 Nov 2026 08:08:56 +0900
+Subject: [PATCH] A score is read without copying the scoreboard's entries
+
+CraftScore.getScore and isScoreSet copied every entry's name (Scoreboard.getPlayers) and then the entry's scores (getPlayerObjectives) to read one number. Scoreboard.athenaScore looks it up under the board's lock and makes nothing.
+
+diff --git a/src/main/java/net/minecraft/server/Scoreboard.java b/src/main/java/net/minecraft/server/Scoreboard.java
+index b590296ba200c2ae7f1c8f2a67e5c7f2df5bf391..f5ce913c3e3f5e12d57d1814608b0d3d94a1e1b9 100644
+--- a/src/main/java/net/minecraft/server/Scoreboard.java
++++ b/src/main/java/net/minecraft/server/Scoreboard.java
+@@ -76,6 +76,17 @@ public class Scoreboard {
+         }
+     }
+ 
++    // Athena start - the score of {@code s} for {@code scoreboardobjective}, or null if it has none, and
++    // nothing made: CraftScore.getScore asked getPlayers() (a copy of every entry's name) and then
++    // getPlayerObjectives (a copy of the entry's scores) to read one number. A plugin that renders a
++    // sidebar every tick read each line so - 3% of what a match allocated (VPS-B, 8 rooms).
++    public synchronized ScoreboardScore athenaScore(String s, ScoreboardObjective scoreboardobjective) {
++        Map<ScoreboardObjective, ScoreboardScore> scores = this.playerScores.get(s);
++
++        return scores == null ? null : scores.get(scoreboardobjective);
++    }
++    // Athena end
++
+     public synchronized Collection<ScoreboardScore> getScoresForObjective(ScoreboardObjective scoreboardobjective) {
+         ArrayList arraylist = Lists.newArrayList();
+ 
+diff --git a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScore.java b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScore.java
+index 6cc16c4440b64004755f3106c3105f50dfbafe20..3b443b4bf36df806c392d326e96d96ee02794068 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScore.java
++++ b/src/main/java/org/bukkit/craftbukkit/scoreboard/CraftScore.java
+@@ -42,15 +42,9 @@ final class CraftScore implements Score {
+     public int getScore() throws IllegalStateException {
+         Scoreboard board = objective.checkState().board;
+ 
+-        if (board.getPlayers().contains(entry)) { // Lazy
+-            Map<ScoreboardObjective, ScoreboardScore> scores = board.getPlayerObjectives(entry);
+-            ScoreboardScore score = scores.get(objective.getHandle());
+-            if (score != null) { // Lazy
+-                return score.getScore();
+-            }
+-        }
+-
+-        return 0; // Lazy
++        // Athena - one lookup, nothing copied (Scoreboard.athenaScore); an unset score is 0 as before
++        ScoreboardScore score = board.athenaScore(entry, objective.getHandle());
++        return score != null ? score.getScore() : 0; // Lazy
+     }
+ 
+     public void setScore(int score) throws IllegalStateException {
+@@ -66,7 +60,7 @@ final class CraftScore implements Score {
+     public boolean isScoreSet() throws IllegalStateException {
+         Scoreboard board = objective.checkState().board;
+ 
+-        return board.getPlayers().contains(entry) && board.getPlayerObjectives(entry).containsKey(objective.getHandle());
++        return board.athenaScore(entry, objective.getHandle()) != null; // Athena - see getScore
+     }
+     // Spigot end
+ }
+diff --git a/src/test/java/net/minecraft/server/AthenaScoreLookupTest.java b/src/test/java/net/minecraft/server/AthenaScoreLookupTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a04b535d2ffe9f6c73db81e6fb4f4db65c4cb24
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaScoreLookupTest.java
+@@ -0,0 +1,33 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/** Scoreboard.athenaScore answers what getPlayers() and getPlayerObjectives() answered, and makes no entry. */
++public class AthenaScoreLookupTest {
++
++    @Test
++    public void answersAsTheCopiesDid() {
++        Scoreboard board = new Scoreboard();
++        ScoreboardObjective a = board.registerObjective("a", new ScoreboardBaseCriteria("athena_score_lookup_a"));
++        ScoreboardObjective b = board.registerObjective("b", new ScoreboardBaseCriteria("athena_score_lookup_b"));
++
++        assertNull(board.athenaScore("nobody", a));
++        assertFalse(board.getPlayers().contains("nobody")); // asking made no entry
++
++        ScoreboardScore score = board.getPlayerScoreForObjective("someone", a);
++        score.setScore(7);
++        assertSame(score, board.athenaScore("someone", a));
++        assertEquals(7, board.athenaScore("someone", a).getScore());
++        assertNull(board.athenaScore("someone", b)); // set for another objective only
++        assertTrue(board.getPlayerObjectives("someone").containsKey(a));
++
++        board.resetPlayerScores("someone", a);
++        assertNull(board.athenaScore("someone", a));
++    }
++}
