@@ -48,7 +48,8 @@
 - やり直しの回からは、台本が初めに VPS 側へ systemd のタイマー（40 分後に試験用のサーバーを止めて sg2 を起動する）を置き、正常に終わったら外す。
 - 最初の回（08:11）は SgWatch が作れずに終わっていた（Gradle のキャッシュの sources の jar がクラスパスに入っていた）。`sgwatch/build.sh` で sources と javadoc の jar を除いた。もう 1 回はローカルのポート 25650 が使われていて、ボットがつながらずに終わった。
 
-## まだのこと
+## 本番の sg2 に入れた（10:32、ユーザー承認）
 
-- ArcanaServers の `vps-b/sg2/paper.yml` で `keep-spawn-loaded: false` にする変更は別の PR。本番の sg2 にはまだ入れていない。
-- 0456 は本番に入れていない。
+- jar は 0456（`f924f492`）、`paper.yml` は `keep-spawn-loaded: false`（ArcanaServers PR #6 の中身）。前の jar（0455 `9d9d12af`）と `paper.yml` は VPS-B の `/root/bak-before-0456/`。
+- `say` で予告して 30 秒待ってから止めた。接続は 0 人。`Done (1.212s)`、警告は前の起動と同じ 16 行。AOT キーは `88c6ad201290f173` で、この起動は記録の回。
+- `deploy.sh` は使わず、`paper.yml` の 1 行だけを書き換えた。ArcanaServers の main は本番より古く（`sg@.service` の囲い、`athena.yml` の新しい項目がない）、そのまま配ると囲いが外れるため。
