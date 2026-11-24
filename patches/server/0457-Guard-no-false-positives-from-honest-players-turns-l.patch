@@ -19,7 +19,7 @@ From the 9 checks honest players failed on sg2 (2026-11-05 to 11-15):
   vertical speed, not its average over the ticks.
 
 diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
-index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2ae1877e9 100644
+index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..be931535ec665338b997f03dd219b9ee9fa5cb05 100644
 --- a/src/main/java/net/minecraft/server/AthenaGuard.java
 +++ b/src/main/java/net/minecraft/server/AthenaGuard.java
 @@ -84,6 +84,8 @@ public final class AthenaGuard {
@@ -31,19 +31,20 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
      private final int[] gaps = new int[12]; // the last gaps between movement packets, ms, for the log
      private int gapHead;
      private long positionSentNanos;
-@@ -97,6 +99,11 @@ public final class AthenaGuard {
+@@ -97,6 +99,12 @@ public final class AthenaGuard {
      // combat
      private int swings;
      private int lastAttackTick = Integer.MIN_VALUE;
 +    // an attack whose aim waits for the look that follows it; see attackCheck
 +    private boolean aimPending;
 +    private double aimEyeX, aimEyeY, aimEyeZ;
-+    private final double[] aimBox = new double[6];
++    private final double[] aimBoxes = new double[21 * 6]; // where the target stood in the lookback, newest first
++    private int aimBoxCount;
 +    private String aimTarget;
  
      // a check failed while enforcing with kick on: PlayerConnection disconnects once the packet is dropped
      private boolean kickPending;
-@@ -270,21 +277,10 @@ public final class AthenaGuard {
+@@ -270,21 +278,10 @@ public final class AthenaGuard {
      boolean timerOk(PacketPlayInFlying packet) {
          long now = packet.athenaReceivedNanos != 0L ? packet.athenaReceivedNanos : System.nanoTime();
  
@@ -66,7 +67,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
          if (!timer || this.exempt()) {
              this.balanceMillis = Math.max(this.balanceMillis, 0.0D);
              return true;
-@@ -299,6 +295,44 @@ public final class AthenaGuard {
+@@ -299,6 +296,44 @@ public final class AthenaGuard {
          return true;
      }
  
@@ -111,7 +112,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
      private String timerContext() {
          if (!log) {
              return "";
-@@ -405,7 +439,7 @@ public final class AthenaGuard {
+@@ -405,7 +440,7 @@ public final class AthenaGuard {
          double slipNow = slipperiness(world, x, y, z);
  
          if (!this.known) {
@@ -120,7 +121,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
              return true;
          }
  
-@@ -590,6 +624,16 @@ public final class AthenaGuard {
+@@ -590,6 +625,16 @@ public final class AthenaGuard {
              this.grantH = this.grantV = 0.0D;
          }
  
@@ -137,7 +138,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
          this.liquidGrace = inLiquid ? 3 : Math.max(this.liquidGrace - 1, 0);
          this.carriedH = this.carriedVy = this.carriedDown = 0.0D; // a checked move: the bounds carry the motion from here
          // several ticks: the net distance can be less than the last tick's when the direction turned, so
-@@ -598,6 +642,16 @@ public final class AthenaGuard {
+@@ -598,6 +643,16 @@ public final class AthenaGuard {
          return result;
      }
  
@@ -154,7 +155,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
      private void seedFresh(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
          this.freshTicks = 0;
          this.seed(Math.max(h, this.carriedH), Math.max(dy, this.carriedVy), groundNow, maybeGround, certain, slipNow);
-@@ -766,16 +820,27 @@ public final class AthenaGuard {
+@@ -766,16 +821,27 @@ public final class AthenaGuard {
          }
      }
  
@@ -184,7 +185,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
          }
  
          int tick = this.athenaTick(); // Athena - the player's world's tick; see athenaTick
-@@ -783,14 +848,14 @@ public final class AthenaGuard {
+@@ -783,14 +849,14 @@ public final class AthenaGuard {
          if (this.swings <= 0) {
              this.flag(3, "noswing", "attacked %s without swinging", target.getName());
              if (enforce) {
@@ -201,7 +202,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
          }
          this.lastAttackTick = tick;
  
-@@ -800,9 +865,9 @@ public final class AthenaGuard {
+@@ -800,9 +866,9 @@ public final class AthenaGuard {
          // the attack was made a tick before the move that follows it, so the eye may be off by that move
          double slack = Math.min(this.lastH, 1.0D) + 0.03D;
          double reach = maxReach + 0.1D + slack;
@@ -209,17 +210,18 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
 +        int lookback = reachLookback(this.player.ping);
          double best = Double.MAX_VALUE;
 -        double bestMinX = 0, bestMinY = 0, bestMinZ = 0, bestMaxX = 0, bestMaxY = 0, bestMaxZ = 0;
-+        double[] bestBox = null;
++        this.aimBoxCount = 0;
  
          for (int back = 0; back <= lookback; ++back) {
              double[] box = target instanceof EntityPlayer ? ((EntityPlayer) target).athenaBoxAt(tick - back) : null;
-@@ -818,47 +883,101 @@ public final class AthenaGuard {
+@@ -818,47 +884,119 @@ public final class AthenaGuard {
  
              if (d < best) {
                  best = d;
 -                bestMinX = box[0]; bestMinY = box[1]; bestMinZ = box[2]; bestMaxX = box[3]; bestMaxY = box[4]; bestMaxZ = box[5];
-+                bestBox = box;
              }
++            System.arraycopy(box, 0, this.aimBoxes, this.aimBoxCount * 6, 6);
++            ++this.aimBoxCount;
          }
  
          if (best > reach) {
@@ -237,10 +239,9 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
 -        double cy = (bestMinY + bestMaxY) / 2.0D - eyeY;
 -        double cz = (bestMinZ + bestMaxZ) / 2.0D - eyeZ;
 -        double len = Math.sqrt(cx * cx + cy * cy + cz * cz);
-+        if (aimOff(eyeX, eyeY, eyeZ, bestBox, this.player.yaw, this.player.pitch) > MAX_AIM_OFF) {
++        if (aimOff(eyeX, eyeY, eyeZ, this.aimBoxes, this.aimBoxCount, this.player.yaw, this.player.pitch) > MAX_AIM_OFF) {
 +            this.aimPending = true;
 +            this.aimEyeX = eyeX; this.aimEyeY = eyeY; this.aimEyeZ = eyeZ;
-+            System.arraycopy(bestBox, 0, this.aimBox, 0, 6);
 +            this.aimTarget = target.getName();
 +            return enforce ? AIM_LATER : ATTACK; // when only logging, the hit lands and the look is still checked
 +        }
@@ -279,7 +280,7 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
 +            return true;
          }
 +        this.aimPending = false;
-+        double off = aimOff(this.aimEyeX, this.aimEyeY, this.aimEyeZ, this.aimBox, yaw, pitch);
++        double off = aimOff(this.aimEyeX, this.aimEyeY, this.aimEyeZ, this.aimBoxes, this.aimBoxCount, yaw, pitch);
  
 +        if (off > MAX_AIM_OFF) {
 +            this.flag(5, "aim", "hit %s %.0f degrees off the line of sight", this.aimTarget, off);
@@ -292,12 +293,30 @@ index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..4128517f0074fbd6508e937d27b9e3d2
 +    void athenaAimPending(double eyeX, double eyeY, double eyeZ, double[] box) {
 +        this.aimPending = true;
 +        this.aimEyeX = eyeX; this.aimEyeY = eyeY; this.aimEyeZ = eyeZ;
-+        System.arraycopy(box, 0, this.aimBox, 0, 6);
++        System.arraycopy(box, 0, this.aimBoxes, 0, 6);
++        this.aimBoxCount = 1;
 +        this.aimTarget = "target";
 +    }
 +
 +    /** How far off the line of sight a hit may be, past what the box itself covers. */
 +    static final double MAX_AIM_OFF = 60.0D;
++
++    /**
++     * The smallest aimOff of the first count boxes in boxes (6 values each): the attacker aimed at the
++     * target where it saw it, which is any of the positions the reach looks back over - not the
++     * nearest one. Checked against the nearest only, a target several players piled onto from above,
++     * knocked about between their hits, was hit 60 to 94 degrees off the look.
++     */
++    static double aimOff(double eyeX, double eyeY, double eyeZ, double[] boxes, int count, float yawDegrees, float pitchDegrees) {
++        double least = Double.MAX_VALUE;
++        double[] box = new double[6];
++
++        for (int i = 0; i < count; ++i) {
++            System.arraycopy(boxes, i * 6, box, 0, 6);
++            least = Math.min(least, aimOff(eyeX, eyeY, eyeZ, box, yawDegrees, pitchDegrees));
++        }
++        return count > 0 ? least : 0.0D;
++    }
 +
 +    /**
 +     * The angle from the line of sight to the box's centre, less the angle the box itself covers, in
@@ -417,10 +436,10 @@ index 5a3715c66bffaca07faa2754915b62b80dd3b948..3dbd3036ca340b149d6f3dfcfdc5355e
          this.player.resetIdleTimer();
 diff --git a/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java b/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6db249f8ca9869c27aad075699ae5b96d9861e1
+index 0000000000000000000000000000000000000000..1907306ee46af5244b01abe67bd8f046cb119707
 --- /dev/null
 +++ b/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,108 @@
 +package net.minecraft.server;
 +
 +import static org.junit.Assert.assertEquals;
@@ -477,6 +496,20 @@ index 0000000000000000000000000000000000000000..d6db249f8ca9869c27aad075699ae5b9
 +    public void aTargetBesideOrBehindIsNot() {
 +        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(3, 0, 0), 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
 +        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(0, 0, -3), 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++    }
++
++    @Test
++    public void theTargetMayBeAimedAtWhereverItStoodInTheLookback() {
++        // knocked about: now beside the attacker (+x), a few ticks ago ahead of it (+z), where it was seen
++        double[] boxes = new double[12];
++        System.arraycopy(box(2, 0, 0), 0, boxes, 0, 6);
++        System.arraycopy(box(0, 0, 3), 0, boxes, 6, 6);
++
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 1, 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 2, 0.0F, 0.0F) <= AthenaGuard.MAX_AIM_OFF);
++        // behind it all along is still off
++        System.arraycopy(box(0, 0, -3), 0, boxes, 6, 6);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 2, 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
 +    }
 +
 +    @Test
