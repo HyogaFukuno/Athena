@@ -25,7 +25,7 @@
 
 ## 中（運用）
 
-### M1 自動更新のあと、`needrestart` が sg2・Hub・Velocity・MariaDB を予告なしで再起動する
+### M1 自動更新のあと、`needrestart` が sg2・Hub・Velocity・MariaDB を予告なしで再起動する（**直した**：ArcanaServers #9、案 1）
 
 - **何が起きるか**：
   - 両方の VPS で `unattended-upgrades` が毎朝 6〜7 時にセキュリティ更新を入れる。そのあとに `needrestart` が、更新したライブラリを使っているサービスを自動で再起動する（Ubuntu 24.04 の既定）。
@@ -57,6 +57,10 @@
 - **直し方の案**（どれにするかはユーザーが決める）：
   1. `needrestart` に、ゲームのサービスを自動で再起動しないよう書く（`/etc/needrestart/conf.d/` で `$nrconf{override_rc}` に `qr(^sg@)`・`qr(^hub)`・`qr(^velocity)`・`qr(^mariadb)` を 0 で足す）。再起動が要ることだけは一覧に出るので、人のいない時間に、予告してから手で再起動する。
      - 気を付けること：再起動しないと、JVM は入れ替わる前の JDK のまま動き続ける。あとから読み込むネイティブのライブラリがあると、新しいファイルと混ざって落ちることがある。だから、遅くともその日のうちに再起動する。
+     - **これにした**（2026-11-24）。両方の箱の `/etc/needrestart/conf.d/arcana-games.conf` に置いた。
+       - `needrestart -r l -b -vv` が設定をエラーなく読んだ。
+       - 箱の上の設定全体を needrestart と同じやり方で読むと、`sg@sg2`・`hub`・`velocity`・`mariadb` だけが「defer」、`ssh` などは「restart」のままだった。
+       - 更新の場面ではまだ通っていない。
   2. 1 のうえで、「再起動が要るなら、say で予告して 30 秒待ってから再起動する」タイマーを VPS に置く。自動のまま、予告も入る。
   3. sg2 のユニットの `ExecStop` で、say のあと 30 秒待ってから stop を送るようにする。どの止め方でも予告が入るが、手で止めるときも 30 秒待つことになる。
 
