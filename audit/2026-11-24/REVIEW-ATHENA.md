@@ -72,6 +72,7 @@
   - timer の 249 ms は、35 秒届かなかった位置のあとにまとめて届いた回。通信が止まったあとの一気の到着を、速すぎる時計と数えたように見える。
 - **直し方の案**（どれにするかはユーザーが決める）：
   1. すぐにできること：直すまで、本番の `guard.kick` を false にして、正直な人を切らないようにする。当たりを止めるのも避けるなら、`guard.combat` も false にする。
+     - **した（11-24 16:34）**：sg2 の `guard.kick` を false にした（ユーザーの判断、ArcanaServers PR #10）。止めるのは続く。`guard.combat` はそのまま。前の設定は VPS-B の `/root/bak-before-guard-no-kick/`。
   2. 試験を足す：
      - 今の試験は、動きと ping の分の 2 つ（`AthenaGuardMovementTest`・`AthenaGuardLagTest`）だけで、`attackOk` を通るものはない。
      - 素早く振り向きながら殴る試験、飛ばされている相手を殴る試験、通信が止まったあとにまとめて届く試験を足す。
