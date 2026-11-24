@@ -1,0 +1,788 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Tue, 24 Nov 2026 20:43:53 +0900
+Subject: [PATCH] Guard: no false positives from honest players' turns, lag
+ bursts and jumps
+
+From the 9 checks honest players failed on sg2 (2026-11-05 to 11-15):
+
+- aim: an attack off the server's look waits for the movement packet that
+  follows it and is checked against that packet's look. The client attacks
+  along the look of this frame and sends the look later in the same tick.
+- reach: look back 7 ticks and the round trip, not 4: the tracker's 2 ticks,
+  the client's 3 of interpolation and the tick until its attack.
+- timer: the burst after a stall may spend the whole stall, and a new
+  connection starts with a full bank (the proxy delivers its first packets
+  together).
+- fly: a free rise in the air ends in the air, whatever ground the probes
+  find at its end; a packet seeded after a teleport keeps its rise as the
+  vertical speed, not its average over the ticks.
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index e6c7667b7c45fc0d6162eedf9b107d24b6a1a104..be931535ec665338b997f03dd219b9ee9fa5cb05 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -84,6 +84,8 @@ public final class AthenaGuard {
+     // timer
+     private long lastFlyingNanos;
+     private double balanceMillis;
++    private double stallMillis;     // the last stall, which the burst after it may spend in full
++    private long stallUntilNanos;   // until when: the packets held up by it arrive right after it
+     private final int[] gaps = new int[12]; // the last gaps between movement packets, ms, for the log
+     private int gapHead;
+     private long positionSentNanos;
+@@ -97,6 +99,12 @@ public final class AthenaGuard {
+     // combat
+     private int swings;
+     private int lastAttackTick = Integer.MIN_VALUE;
++    // an attack whose aim waits for the look that follows it; see attackCheck
++    private boolean aimPending;
++    private double aimEyeX, aimEyeY, aimEyeZ;
++    private final double[] aimBoxes = new double[21 * 6]; // where the target stood in the lookback, newest first
++    private int aimBoxCount;
++    private String aimTarget;
+ 
+     // a check failed while enforcing with kick on: PlayerConnection disconnects once the packet is dropped
+     private boolean kickPending;
+@@ -270,21 +278,10 @@ public final class AthenaGuard {
+     boolean timerOk(PacketPlayInFlying packet) {
+         long now = packet.athenaReceivedNanos != 0L ? packet.athenaReceivedNanos : System.nanoTime();
+ 
+-        if (this.lastFlyingNanos == 0L) {
+-            this.lastFlyingNanos = now;
++        if (!this.arrive(now)) {
+             return true;
+         }
+ 
+-        double elapsed = (now - this.lastFlyingNanos) / 1.0E6D;
+-
+-        this.lastFlyingNanos = now;
+-        this.gaps[this.gapHead] = (int) Math.min(elapsed, 99999.0D);
+-        this.gapHead = (this.gapHead + 1) % this.gaps.length;
+-        this.balanceMillis += elapsed - 50.0D + elapsed * 0.003D; // 0.3% drift allowance
+-        if (this.balanceMillis > 1000.0D) {
+-            this.balanceMillis = 1000.0D;
+-        }
+-
+         if (!timer || this.exempt()) {
+             this.balanceMillis = Math.max(this.balanceMillis, 0.0D);
+             return true;
+@@ -299,6 +296,44 @@ public final class AthenaGuard {
+         return true;
+     }
+ 
++    /** The time banked by a packet that arrived at now; false for the first, which has nothing to compare with. */
++    boolean arrive(long now) {
++        if (this.lastFlyingNanos == 0L) {
++            this.lastFlyingNanos = now;
++            // A new connection starts with a full bank. Through the proxy the client's first packets
++            // on this server arrive together: those it sent while the proxy switched it over, held
++            // up until the server took it. Without the bank a dozen of them was a clock 250 ms fast.
++            this.balanceMillis = 1000.0D;
++            return false;
++        }
++
++        double elapsed = (now - this.lastFlyingNanos) / 1.0E6D;
++
++        this.lastFlyingNanos = now;
++        this.gaps[this.gapHead] = (int) Math.min(elapsed, 99999.0D);
++        this.gapHead = (this.gapHead + 1) % this.gaps.length;
++        if (elapsed > 1000.0D) {
++            // A stall: the packets the client sent meanwhile were held up on the way, and arrive
++            // together right after it - one per 50 ms it lasted, more than the capped bank pays for.
++            // The burst may spend the whole stall, but only while it lasts: the bank is capped again
++            // after it. A client that holds its packets back to send them at once moves no faster
++            // than one sending them on time; each still stands for one tick of movement.
++            this.stallMillis = Math.min(elapsed, 30000.0D);
++            this.stallUntilNanos = now + (long) (Math.min(this.stallMillis, 5000.0D) * 1.0E6D);
++        }
++        this.balanceMillis += elapsed - 50.0D + elapsed * 0.003D; // 0.3% drift allowance
++        double cap = now - this.stallUntilNanos < 0L ? Math.max(1000.0D, this.stallMillis) : 1000.0D;
++        if (this.balanceMillis > cap) {
++            this.balanceMillis = cap;
++        }
++        return true;
++    }
++
++    /** What the client has banked, ms; for AthenaGuardTimerTest. */
++    double athenaBalance() {
++        return this.balanceMillis;
++    }
++
+     private String timerContext() {
+         if (!log) {
+             return "";
+@@ -405,7 +440,7 @@ public final class AthenaGuard {
+         double slipNow = slipperiness(world, x, y, z);
+ 
+         if (!this.known) {
+-            this.seedFresh(h / ticks, dy / ticks, groundNow, maybeGround, certain, slipNow);
++            this.seedFresh(h / ticks, seedVy(dy, ticks), groundNow, maybeGround, certain, slipNow);
+             return true;
+         }
+ 
+@@ -590,6 +625,16 @@ public final class AthenaGuard {
+             this.grantH = this.grantV = 0.0D;
+         }
+ 
++        // A rise in the air that went exactly as gravity says ran into nothing, so it ends in the air:
++        // the client's onGround is a collision while moving down, and only a move that collided can
++        // step up. Ground the probes find at its end - a block whose shape the client does not share
++        // (a 1.7 client's), an edge beside a wall - is not ground the client stands on. Counted as
++        // ground, the jump's next tick was a rise from the ground that was not a jump.
++        if (ticks == 1 && !fromGround && dy > 0.0D && !inLiquid && !climbing && this.freshTicks >= 3
++                && Math.abs(dy - (this.lastDy - GRAVITY) * DRAG) < 1.0E-3D) {
++            maybeGround = false;
++        }
++
+         this.liquidGrace = inLiquid ? 3 : Math.max(this.liquidGrace - 1, 0);
+         this.carriedH = this.carriedVy = this.carriedDown = 0.0D; // a checked move: the bounds carry the motion from here
+         // several ticks: the net distance can be less than the last tick's when the direction turned, so
+@@ -598,6 +643,16 @@ public final class AthenaGuard {
+         return result;
+     }
+ 
++    /**
++     * The vertical speed to seed from a packet that covers these ticks. A rise is all the last tick's:
++     * the ticks before it, not reported, moved under 0.03 - a jump after standing is one packet of
++     * 0.42 over several ticks, and its speed is 0.42, not its average. Seeded from the average after
++     * a teleport, the jump's next tick (0.333) was over what the guard let it rise.
++     */
++    static double seedVy(double dy, int ticks) {
++        return dy > 0.0D ? dy : dy / ticks;
++    }
++
+     private void seedFresh(double h, double dy, boolean groundNow, boolean maybeGround, boolean certain, double slipNow) {
+         this.freshTicks = 0;
+         this.seed(Math.max(h, this.carriedH), Math.max(dy, this.carriedVy), groundNow, maybeGround, certain, slipNow);
+@@ -766,16 +821,27 @@ public final class AthenaGuard {
+         }
+     }
+ 
++    /** What attackCheck decides: the hit lands, is dropped, or waits for the look that follows it. */
++    static final int ATTACK = 0, DROP = 1, AIM_LATER = 2;
++
+     /**
+      * Whether this attack is one the client could have made. An attack drops when it comes without
+      * the arm swing a client always sends first, when it is the second this tick (a second hit inside
+      * the target's invulnerability does nothing in vanilla anyway), when the target was out of reach
+      * wherever it stood in the time the attacker could have seen it, or when it was well off to the
+      * side of where the attacker was looking.
++     *
++     * <p>Where it was looking is not known yet when the hit is off to the side of the last look. The
++     * client turns its head every frame and attacks along that look, but sends the look only later in
++     * the same tick, after the attack (Minecraft.runTick: clickMouse, then the world's entities, the
++     * player's movement packet last): the server's yaw is a tick old. A player who turns quickly onto
++     * someone and hits in the same tick - 64 and 88 degrees in one tick were seen from honest players -
++     * hit off the server's look. Such a hit waits for the movement packet that follows it, and is
++     * checked against that packet's look (AIM_LATER; aimOkLater).
+      */
+-    boolean attackOk(Entity target) {
++    int attackCheck(Entity target) {
+         if (!enabled || !combat || this.player.playerInteractManager.isCreative() || this.player.isSpectator()) {
+-            return true;
++            return ATTACK;
+         }
+ 
+         int tick = this.athenaTick(); // Athena - the player's world's tick; see athenaTick
+@@ -783,14 +849,14 @@ public final class AthenaGuard {
+         if (this.swings <= 0) {
+             this.flag(3, "noswing", "attacked %s without swinging", target.getName());
+             if (enforce) {
+-                return false;
++                return DROP;
+             }
+         } else {
+             --this.swings;
+         }
+ 
+         if (this.lastAttackTick == tick) {
+-            return !enforce; // no log: harmless and common with fast clicking
++            return enforce ? DROP : ATTACK; // no log: harmless and common with fast clicking
+         }
+         this.lastAttackTick = tick;
+ 
+@@ -800,9 +866,9 @@ public final class AthenaGuard {
+         // the attack was made a tick before the move that follows it, so the eye may be off by that move
+         double slack = Math.min(this.lastH, 1.0D) + 0.03D;
+         double reach = maxReach + 0.1D + slack;
+-        int lookback = Math.min(20, 4 + lagTicks(this.player.ping + 49));
++        int lookback = reachLookback(this.player.ping);
+         double best = Double.MAX_VALUE;
+-        double bestMinX = 0, bestMinY = 0, bestMinZ = 0, bestMaxX = 0, bestMaxY = 0, bestMaxZ = 0;
++        this.aimBoxCount = 0;
+ 
+         for (int back = 0; back <= lookback; ++back) {
+             double[] box = target instanceof EntityPlayer ? ((EntityPlayer) target).athenaBoxAt(tick - back) : null;
+@@ -818,47 +884,119 @@ public final class AthenaGuard {
+ 
+             if (d < best) {
+                 best = d;
+-                bestMinX = box[0]; bestMinY = box[1]; bestMinZ = box[2]; bestMaxX = box[3]; bestMaxY = box[4]; bestMaxZ = box[5];
+             }
++            System.arraycopy(box, 0, this.aimBoxes, this.aimBoxCount * 6, 6);
++            ++this.aimBoxCount;
+         }
+ 
+         if (best > reach) {
+             this.flag(4, "reach", "hit %s at %.2f, at most %.2f (ping %d)", target.getName(), best, reach, this.player.ping);
+             if (enforce) {
+-                return false;
++                return DROP;
+             }
+         }
+ 
+-        // direction: the angle from the line of sight to the nearest target position, less the angle
+-        // the box itself covers, must not be large. Generous: it only has to catch a hit on something
+-        // beside or behind the attacker.
+-        double cx = (bestMinX + bestMaxX) / 2.0D - eyeX;
+-        double cy = (bestMinY + bestMaxY) / 2.0D - eyeY;
+-        double cz = (bestMinZ + bestMaxZ) / 2.0D - eyeZ;
+-        double len = Math.sqrt(cx * cx + cy * cy + cz * cz);
++        if (aimOff(eyeX, eyeY, eyeZ, this.aimBoxes, this.aimBoxCount, this.player.yaw, this.player.pitch) > MAX_AIM_OFF) {
++            this.aimPending = true;
++            this.aimEyeX = eyeX; this.aimEyeY = eyeY; this.aimEyeZ = eyeZ;
++            this.aimTarget = target.getName();
++            return enforce ? AIM_LATER : ATTACK; // when only logging, the hit lands and the look is still checked
++        }
++        this.aimPending = false;
++        return ATTACK;
++    }
+ 
+-        if (len > 0.5D) {
+-            float yaw = this.player.yaw * 0.017453292F;
+-            float pitch = this.player.pitch * 0.017453292F;
+-            double lx = -Math.sin(yaw) * Math.cos(pitch);
+-            double ly = -Math.sin(pitch);
+-            double lz = Math.cos(yaw) * Math.cos(pitch);
+-            double cos = (lx * cx + ly * cy + lz * cz) / len;
+-            double angle = Math.toDegrees(Math.acos(Math.max(-1.0D, Math.min(1.0D, cos))));
+-            double halfDiag = Math.sqrt((bestMaxX - bestMinX) * (bestMaxX - bestMinX) + (bestMaxY - bestMinY) * (bestMaxY - bestMinY) + (bestMaxZ - bestMinZ) * (bestMaxZ - bestMinZ)) / 2.0D + 0.1D;
+-            double cover = Math.toDegrees(Math.atan(halfDiag / len));
+-
+-            if (angle - cover > 60.0D) {
+-                this.flag(5, "aim", "hit %s %.0f degrees off the line of sight", target.getName(), angle - cover);
+-                if (enforce) {
+-                    return false;
+-                }
+-            }
++    /** Whether an attack is waiting for the look of the next movement packet. */
++    boolean aimPending() {
++        return this.aimPending;
++    }
++
++    /**
++     * The look the client sent after the attack it waits for - its yaw and pitch at the attack, or the
++     * last look when the packet has none (it did not turn). Whether the attack lands, when enforcing.
++     */
++    boolean aimOkLater(float yaw, float pitch) {
++        if (!this.aimPending) {
++            return true;
+         }
++        this.aimPending = false;
++        double off = aimOff(this.aimEyeX, this.aimEyeY, this.aimEyeZ, this.aimBoxes, this.aimBoxCount, yaw, pitch);
+ 
++        if (off > MAX_AIM_OFF) {
++            this.flag(5, "aim", "hit %s %.0f degrees off the line of sight", this.aimTarget, off);
++            return !enforce;
++        }
+         return true;
+     }
+ 
++    /** The attack test for AthenaGuardCombatTest: an attack from this eye on this box that waits for its look. */
++    void athenaAimPending(double eyeX, double eyeY, double eyeZ, double[] box) {
++        this.aimPending = true;
++        this.aimEyeX = eyeX; this.aimEyeY = eyeY; this.aimEyeZ = eyeZ;
++        System.arraycopy(box, 0, this.aimBoxes, 0, 6);
++        this.aimBoxCount = 1;
++        this.aimTarget = "target";
++    }
++
++    /** How far off the line of sight a hit may be, past what the box itself covers. */
++    static final double MAX_AIM_OFF = 60.0D;
++
++    /**
++     * The smallest aimOff of the first count boxes in boxes (6 values each): the attacker aimed at the
++     * target where it saw it, which is any of the positions the reach looks back over - not the
++     * nearest one. Checked against the nearest only, a target several players piled onto from above,
++     * knocked about between their hits, was hit 60 to 94 degrees off the look.
++     */
++    static double aimOff(double eyeX, double eyeY, double eyeZ, double[] boxes, int count, float yawDegrees, float pitchDegrees) {
++        double least = Double.MAX_VALUE;
++        double[] box = new double[6];
++
++        for (int i = 0; i < count; ++i) {
++            System.arraycopy(boxes, i * 6, box, 0, 6);
++            least = Math.min(least, aimOff(eyeX, eyeY, eyeZ, box, yawDegrees, pitchDegrees));
++        }
++        return count > 0 ? least : 0.0D;
++    }
++
++    /**
++     * The angle from the line of sight to the box's centre, less the angle the box itself covers, in
++     * degrees; 0 for a box under half a block away. Generous: it only has to catch a hit on something
++     * beside or behind the attacker.
++     */
++    static double aimOff(double eyeX, double eyeY, double eyeZ, double[] box, float yawDegrees, float pitchDegrees) {
++        double cx = (box[0] + box[3]) / 2.0D - eyeX;
++        double cy = (box[1] + box[4]) / 2.0D - eyeY;
++        double cz = (box[2] + box[5]) / 2.0D - eyeZ;
++        double len = Math.sqrt(cx * cx + cy * cy + cz * cz);
++
++        if (len <= 0.5D) {
++            return 0.0D;
++        }
++        float yaw = yawDegrees * 0.017453292F;
++        float pitch = pitchDegrees * 0.017453292F;
++        double lx = -Math.sin(yaw) * Math.cos(pitch);
++        double ly = -Math.sin(pitch);
++        double lz = Math.cos(yaw) * Math.cos(pitch);
++        double cos = (lx * cx + ly * cy + lz * cz) / len;
++        double angle = Math.toDegrees(Math.acos(Math.max(-1.0D, Math.min(1.0D, cos))));
++        double halfDiag = Math.sqrt((box[3] - box[0]) * (box[3] - box[0]) + (box[4] - box[1]) * (box[4] - box[1]) + (box[5] - box[2]) * (box[5] - box[2])) / 2.0D + 0.1D;
++        double cover = Math.toDegrees(Math.atan(halfDiag / len));
++
++        return angle - cover;
++    }
++
++    /**
++     * How many ticks back the target may have stood where the attacker saw it. The attacker's screen
++     * shows the server's position of another player late by: up to 2 ticks before the tracker sends it
++     * (players are sent every other tick, EntityTracker), the way to the client, the 3 ticks the client
++     * takes to move the player there (EntityOtherPlayerMP's interpolation), and up to a tick until its
++     * next attack - and the attack takes the way back. 7 ticks and the round trip. With 4 and the round
++     * trip a sprinting target, or one knocked back, was hit just past the reach.
++     */
++    static int reachLookback(int ping) {
++        return Math.min(20, 7 + lagTicks(ping + 49));
++    }
++
+     private static double distanceToBox(double x, double y, double z, double minX, double minY, double minZ, double maxX, double maxY, double maxZ) {
+         double dx = x < minX ? minX - x : (x > maxX ? x - maxX : 0.0D);
+         double dy = y < minY ? minY - y : (y > maxY ? y - maxY : 0.0D);
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 5a3715c66bffaca07faa2754915b62b80dd3b948..3dbd3036ca340b149d6f3dfcfdc5355e3445fa21 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -101,6 +101,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     private final boolean legacy17; // Athena - a 1.7.10 client, translated by AthenaLegacy17
+     final AthenaGuard guard; // Athena - server-authoritative movement and combat checks
++    private Entity athenaAimTarget; // Athena - an attack that waits for the look of the next movement packet; see AthenaGuard.attackCheck
+ 
+     // Athena - the world getWorldServer(player.dimension) finds, without its walk: that is the
+     // player's own world whenever its dimension is the player's, which is always but in the middle of
+@@ -241,6 +242,19 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         if (this.b(packetplayinflying)) {
+             this.disconnect("Invalid move packet received");
+         } else {
++            // Athena start - an attack made along the look this packet brings; see AthenaGuard.attackCheck
++            if (this.guard.aimPending()) {
++                Entity target = this.athenaAimTarget;
++                this.athenaAimTarget = null;
++                boolean rotating = packetplayinflying.getRotating();
++                if (this.guard.aimOkLater(rotating ? packetplayinflying.getYaw() : this.player.yaw, rotating ? packetplayinflying.getPitch() : this.player.pitch)) {
++                    if (target != null) this.athenaAttackLater(target);
++                } else if (this.guard.kickPending()) {
++                    this.disconnect(AthenaGuard.kickMessage);
++                    return;
++                }
++            }
++            // Athena end
+             // Athena start - a client running its clock fast sends more ticks than time allows
+             this.guard.observe(packetplayinflying);
+             if (!this.guard.timerOk(packetplayinflying)) {
+@@ -1563,10 +1577,18 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         return;
+                     }
+ 
+-                    if (!this.guard.attackOk(entity)) { // Athena - a hit the client could not have made
++                    // Athena start - a hit the client could not have made
++                    int athenaVerdict = this.guard.attackCheck(entity);
++                    if (athenaVerdict == AthenaGuard.DROP) {
+                         if (this.guard.kickPending()) this.disconnect(AthenaGuard.kickMessage);
+                         return;
+                     }
++                    // an earlier attack still waiting for its look is not made: this one replaced it
++                    this.athenaAimTarget = athenaVerdict == AthenaGuard.AIM_LATER ? entity : null;
++                    if (athenaVerdict == AthenaGuard.AIM_LATER) {
++                        return; // made when the next movement packet brings the look it was made along
++                    }
++                    // Athena end
+                     this.player.attack(entity);
+ 
+                     // CraftBukkit start
+@@ -1580,6 +1602,21 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+     }
+ 
++    // Athena start - an attack that waited for its look; what processUseEntity checked before it, again
++    private void athenaAttackLater(Entity entity) {
++        if (this.player.dead || entity.dead || entity.world != this.player.world || this.player.isSpectator()
++                || this.player.getDistanceSqToEntity(entity) >= 36.0D) {
++            return;
++        }
++        ItemStack itemInHand = this.player.inventory.getItemInHand();
++
++        this.player.attack(entity);
++        if (itemInHand != null && itemInHand.count <= -1) {
++            this.player.updateInventory(this.player.activeContainer);
++        }
++    }
++    // Athena end
++
+     public void processClientStatus(PacketPlayInClientCommand packetplayinclientcommand) {
+         if (PlayerConnectionUtils.postToMainThread(packetplayinclientcommand, this, this.player.getServerForPlayer())) return; // Athena - no exception
+         this.player.resetIdleTimer();
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java b/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1907306ee46af5244b01abe67bd8f046cb119707
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardCombatTest.java
+@@ -0,0 +1,108 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++/** AthenaGuard's combat bounds that do not need a world: the reach's lookback and the aim. */
++public class AthenaGuardCombatTest {
++
++    private boolean savedEnforce, savedKick;
++
++    @Before
++    public void enforce() {
++        this.savedEnforce = AthenaGuard.enforce;
++        this.savedKick = AthenaGuard.kick;
++        AthenaGuard.enforce = true;
++        AthenaGuard.kick = false;
++    }
++
++    @After
++    public void restore() {
++        AthenaGuard.enforce = this.savedEnforce;
++        AthenaGuard.kick = this.savedKick;
++    }
++
++    // a player's box with its feet at (x, y, z)
++    private static double[] box(double x, double y, double z) {
++        return new double[] { x - 0.3, y, z - 0.3, x + 0.3, y + 1.8, z + 0.3 };
++    }
++
++    private static final double EYE = 1.62;
++
++    @Test
++    public void theLookbackCoversTheTrackerTheInterpolationAndTheRoundTrip() {
++        assertEquals(7, AthenaGuard.reachLookback(0));
++        assertEquals(8, AthenaGuard.reachLookback(1));
++        assertEquals(9, AthenaGuard.reachLookback(54)); // 11-05, Kurono: 6 ticks, and hit just past the reach
++        assertEquals(9, AthenaGuard.reachLookback(61));
++        assertEquals(20, AthenaGuard.reachLookback(AthenaGuard.MAX_LAG_MILLIS));
++    }
++
++    @Test
++    public void aTargetAheadIsOnTheLineOfSight() {
++        // yaw 0 looks along +z
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(0, 0, 3), 0.0F, 0.0F) <= 0.0D);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(1, 0, 3), 0.0F, 10.0F) < AthenaGuard.MAX_AIM_OFF);
++    }
++
++    @Test
++    public void aTargetBesideOrBehindIsNot() {
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(3, 0, 0), 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, box(0, 0, -3), 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++    }
++
++    @Test
++    public void theTargetMayBeAimedAtWhereverItStoodInTheLookback() {
++        // knocked about: now beside the attacker (+x), a few ticks ago ahead of it (+z), where it was seen
++        double[] boxes = new double[12];
++        System.arraycopy(box(2, 0, 0), 0, boxes, 0, 6);
++        System.arraycopy(box(0, 0, 3), 0, boxes, 6, 6);
++
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 1, 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 2, 0.0F, 0.0F) <= AthenaGuard.MAX_AIM_OFF);
++        // behind it all along is still off
++        System.arraycopy(box(0, 0, -3), 0, boxes, 6, 6);
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, boxes, 2, 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++    }
++
++    @Test
++    public void aHitAfterATurnIsCheckedAgainstTheLookItWasMadeAlong() {
++        // 11-05, Kurono: hit 64 and 88 degrees off the server's look - the look of the tick before.
++        // The client turned onto the target (+x, yaw -90) and hit in the same tick; the look comes after.
++        AthenaGuard guard = new AthenaGuard(null);
++        double[] target = box(3, 0, 0);
++
++        assertTrue(AthenaGuard.aimOff(0, EYE, 0, target, 0.0F, 0.0F) > AthenaGuard.MAX_AIM_OFF);
++        guard.athenaAimPending(0, EYE, 0, target);
++        assertTrue(guard.aimPending());
++        assertTrue(guard.aimOkLater(-90.0F, 0.0F));
++        assertFalse(guard.aimPending());
++        // a yaw that has gone round more than once is the same look
++        guard.athenaAimPending(0, EYE, 0, target);
++        assertTrue(guard.aimOkLater(-90.0F + 720.0F, 0.0F));
++    }
++
++    @Test
++    public void aHitBehindIsDroppedWhenTheLookStaysAway() {
++        AthenaGuard guard = new AthenaGuard(null);
++
++        guard.athenaAimPending(0, EYE, 0, box(0, 0, -3));
++        assertFalse(guard.aimOkLater(0.0F, 0.0F)); // the packet brought no new look, or one still away
++        assertFalse(guard.aimPending());
++        assertTrue(guard.aimOkLater(0.0F, 0.0F)); // nothing waits any more
++    }
++
++    @Test
++    public void whenOnlyLoggingTheHitIsNeverDropped() {
++        AthenaGuard.enforce = false;
++        AthenaGuard guard = new AthenaGuard(null);
++
++        guard.athenaAimPending(0, EYE, 0, box(0, 0, -3));
++        assertTrue(guard.aimOkLater(0.0F, 0.0F));
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index a1d9bc9ecb2629c1ece08050138eb59b0ba06ae8..93455140bf330957115a589667834525f6b21523 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -272,7 +272,7 @@ public class AthenaGuardMovementTest {
+             double slip = slipperiness(nx, ny);
+             int r;
+             if (!this.guard.athenaKnown()) {
+-                this.guard.athenaSeed(Math.sqrt(dx * dx + dz * dz) / ticks, dy / ticks, groundNow, maybeGround, certain, slip);
++                this.guard.athenaSeed(Math.sqrt(dx * dx + dz * dz) / ticks, AthenaGuard.seedVy(dy, ticks), groundNow, maybeGround, certain, slip);
+                 r = 0;
+             } else {
+                 boolean ceiling = dy > 0 && this.guard.groundStart() && (ceilingAt(this.x, ny, this.z) || ceilingAt(nx, ny, nz));
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardRiseTest.java b/src/test/java/net/minecraft/server/AthenaGuardRiseTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff18b63a6270d314a1cd21b3128f14c614e3eb79
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardRiseTest.java
+@@ -0,0 +1,110 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotEquals;
++
++import org.junit.After;
++import org.junit.Before;
++import org.junit.Test;
++
++/**
++ * Two fly false positives from honest players (2026-11-07), driven through AthenaGuard.evaluate with
++ * the world probes' answers spelled out: a jump whose ground the probes found in the middle of the
++ * rise, and the first move after a teleport that came in the middle of a jump.
++ */
++public class AthenaGuardRiseTest {
++
++    private static final double JUMP = 0.41999998688697815D;
++    private static final double GRAVITY = 0.08D;
++    private static final double DRAG = 0.9800000190734863D;
++
++    private boolean savedEnforce, savedKick;
++
++    @Before
++    public void enforce() {
++        this.savedEnforce = AthenaGuard.enforce;
++        this.savedKick = AthenaGuard.kick;
++        AthenaGuard.enforce = true;
++        AthenaGuard.kick = false;
++        AthenaGuard.enabled = true;
++        AthenaGuard.movement = true;
++    }
++
++    @After
++    public void restore() {
++        AthenaGuard.enforce = this.savedEnforce;
++        AthenaGuard.kick = this.savedKick;
++    }
++
++    /** One tick in the open: no wall, no liquid, no knockback. */
++    private static int move(AthenaGuard guard, double dy, boolean groundNow, boolean maybeGround) {
++        return guard.evaluate(1, 0.0D, dy, groundNow, maybeGround, !maybeGround || groundNow, false, 0.6D, false, false, false, false, 0.0D);
++    }
++
++    private static AthenaGuard standing() {
++        AthenaGuard guard = new AthenaGuard(null);
++
++        guard.athenaSeed(0.0D, 0.0D, true, true, true, 0.6D);
++        for (int i = 0; i < 4; ++i) {
++            assertEquals(0, move(guard, 0.0D, true, true));
++        }
++        return guard;
++    }
++
++    @Test
++    public void aJumpWhoseRiseTheProbesTookForGroundGoesOnRising() {
++        // Kurono (1.7, against a wall): +0.420, +0.333, +0.248 - found on the ground there - then +0.165,
++        // "at most 0.000"
++        AthenaGuard guard = standing();
++        double v1 = JUMP, v2 = (v1 - GRAVITY) * DRAG, v3 = (v2 - GRAVITY) * DRAG, v4 = (v3 - GRAVITY) * DRAG;
++
++        assertEquals(0, move(guard, v1, false, false));
++        assertEquals(0, move(guard, v2, false, false));
++        assertEquals(0, move(guard, v3, true, true)); // ground at the end of a free rise
++        assertEquals(0, move(guard, v4, false, false));
++    }
++
++    @Test
++    public void aRiseInTheAirIsNoJump() {
++        // the free rise ends in the air: a second jump from it is still a fly
++        AthenaGuard guard = standing();
++        double v1 = JUMP, v2 = (v1 - GRAVITY) * DRAG, v3 = (v2 - GRAVITY) * DRAG;
++
++        assertEquals(0, move(guard, v1, false, false));
++        assertEquals(0, move(guard, v2, false, false));
++        assertEquals(0, move(guard, v3, true, true));
++        assertNotEquals(0, move(guard, JUMP, false, false));
++    }
++
++    @Test
++    public void aStepUpWhileLandingStillEndsOnTheGround() {
++        // falling onto a slab's edge: the move collides going down and steps up, and ends on the ground,
++        // free to jump
++        AthenaGuard guard = standing();
++        double v1 = JUMP, v = v1;
++
++        assertEquals(0, move(guard, v1, false, false));
++        for (int i = 0; i < 8; ++i) {
++            v = (v - GRAVITY) * DRAG;
++            assertEquals(0, move(guard, v, false, false));
++        }
++        assertEquals(0, move(guard, 0.5D, true, true)); // stepped up onto the slab
++        assertEquals(0, move(guard, JUMP, false, false));
++    }
++
++    @Test
++    public void aTeleportInTheMiddleOfAJumpGoesOnRising() {
++        // HaniwaCho, arriving at the deathmatch arena: the packet seeded after the teleport was a jump
++        // over 4 ticks (+0.420), then +0.333 - "at most 0.024", from 0.42 / 4
++        AthenaGuard guard = new AthenaGuard(null);
++
++        guard.athenaSeed(0.0D, AthenaGuard.seedVy(JUMP, 4), false, false, false, 0.6D);
++        assertEquals(0, move(guard, (JUMP - GRAVITY) * DRAG, false, false));
++    }
++
++    @Test
++    public void aFallIsSeededFromItsAverage() {
++        assertEquals(-0.25D, AthenaGuard.seedVy(-1.0D, 4), 1.0E-9D);
++        assertEquals(JUMP, AthenaGuard.seedVy(JUMP, 4), 1.0E-9D);
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardTimerTest.java b/src/test/java/net/minecraft/server/AthenaGuardTimerTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2654ddad10a337787c22a8957a9b37e543cd8dbf
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardTimerTest.java
+@@ -0,0 +1,103 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertTrue;
++
++import org.junit.Test;
++
++/**
++ * AthenaGuard's timer bank (arrive): a client is flagged once it is 250 ms ahead of real time. Honest
++ * clients whose packets were held up on the way - by a stall, or by the proxy while it switched them
++ * over - arrive in bursts, and must not be; a clock that runs fast must still be.
++ */
++public class AthenaGuardTimerTest {
++
++    private static final long MS = 1_000_000L;
++
++    private long now = 1_000_000_000L;
++    private double lowest = Double.MAX_VALUE;
++
++    private void arrive(AthenaGuard guard, long gapMillis) {
++        this.now += gapMillis * MS;
++        if (guard.arrive(this.now)) {
++            this.lowest = Math.min(this.lowest, guard.athenaBalance());
++        }
++    }
++
++    private void steady(AthenaGuard guard, int packets, long gapMillis) {
++        for (int i = 0; i < packets; ++i) {
++            this.arrive(guard, gapMillis);
++        }
++    }
++
++    @Test
++    public void onTimeIsNeverAhead() {
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 2000, 50);
++        assertTrue(this.lowest > -250.0D);
++    }
++
++    @Test
++    public void theBurstAfterAStallIsPaidForByTheStall() {
++        // 11-07, Kurono: a burst of at least 25 packets with no gap between them, after a stall
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 200, 50);
++        for (long stall : new long[] { 1500, 3000, 8000 }) {
++            this.arrive(guard, stall);
++            this.steady(guard, (int) (stall / 50) - 1, 0);
++            this.steady(guard, 200, 50);
++        }
++        assertTrue("lowest " + this.lowest, this.lowest > -250.0D);
++    }
++
++    @Test
++    public void aStallWhoseBurstComesInPiecesIsPaidForToo() {
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 200, 50);
++        this.arrive(guard, 4000);
++        for (int i = 0; i < 8; ++i) {
++            this.steady(guard, 10, 0);
++            this.arrive(guard, 120);
++        }
++        this.steady(guard, 200, 50);
++        assertTrue("lowest " + this.lowest, this.lowest > -250.0D);
++    }
++
++    @Test
++    public void theFirstPacketsOnANewConnectionMayComeTogether() {
++        // 11-15, HaniwaCho: just joined through the proxy, a dozen packets at once
++        AthenaGuard guard = new AthenaGuard(null);
++        this.arrive(guard, 0);
++        this.steady(guard, 15, 0);
++        this.steady(guard, 200, 50);
++        assertTrue("lowest " + this.lowest, this.lowest > -250.0D);
++    }
++
++    @Test
++    public void aFastClockIsStillCaught() {
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 200, 50);
++        this.steady(guard, 600, 40); // 25% fast
++        assertTrue("lowest " + this.lowest, this.lowest < -250.0D);
++    }
++
++    @Test
++    public void aStallBuysNoFastClockAfterItsBurst() {
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 200, 50);
++        this.arrive(guard, 5000);
++        this.steady(guard, 99, 0);
++        this.steady(guard, 600, 40);
++        assertTrue("lowest " + this.lowest, this.lowest < -250.0D);
++    }
++
++    @Test
++    public void standingStillLongDoesNotBankForLater() {
++        // a stall that no burst follows: the bank is capped again once the burst would be over
++        AthenaGuard guard = new AthenaGuard(null);
++        this.steady(guard, 200, 50);
++        this.arrive(guard, 10000);
++        this.steady(guard, 200, 50);
++        this.steady(guard, 60, 0);
++        assertTrue("lowest " + this.lowest, this.lowest < -250.0D);
++    }
++}

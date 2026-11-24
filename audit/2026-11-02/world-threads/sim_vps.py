@@ -61,9 +61,12 @@ p.add_argument("--jfr", action="store_true")                # a flight recording
 p.add_argument("--main-world", default=None)              # the main world's folder (default: bench/run_sg/lobby)
 p.add_argument("--keep-spawn", default=None)              # paper.yml keep-spawn-loaded: true or false (default: the config's)
 p.add_argument("--java-opts", default="")                  # more JVM options (e.g. -Dsgbots.planNanosPerTick=6000000), after the bench's own
+p.add_argument("--conf-root", default="/Users/glacier/Documents/Minecraft/developments/ArcanaServers")  # a checkout (or worktree) of ArcanaServers
+p.add_argument("--guard-combat", action="store_true")      # AthenaGuard on, enforcing, with only its combat checks (the bots fly) and no kicks
+p.add_argument("--bot-args", default="")                   # more sgbot.py arguments (e.g. --turn-hit)
 p.add_argument("--conf", default="sg1")                    # ArcanaServers vps-b/<conf>: sg2 plays duos and the tournament in arenas
 a = p.parse_args()
-CONF = "/Users/glacier/Documents/Minecraft/developments/ArcanaServers/vps-b/" + a.conf
+CONF = os.path.join(a.conf_root, "vps-b", a.conf)
 BOTS = a.bots or a.at_once * a.per_match
 H = a.host
 D = "/opt/mc/simbench"
@@ -104,8 +107,20 @@ edit("server.properties", [(r"^server-port=.*", "server-port=%d" % a.port), (r"^
                            (r"^max-players=.*", "max-players=%d" % (BOTS + 10))])
 edit("spigot.yml", [(r"^(\s*)bungeecord: true", r"\1bungeecord: false")])
 edit("bukkit.yml", [(r"^(\s*)connection-throttle: \d+", r"\1connection-throttle: -1")])
-edit("athena.yml", [(r"^bungeeGuardTokens:\n(\s+- .*\n)+", "bungeeGuardTokens: []\n"),
-                    (r"^guard:\n  enabled: true", "guard:\n  enabled: false")])
+edit("athena.yml", [(r"^bungeeGuardTokens:\n(\s+- .*\n)+", "bungeeGuardTokens: []\n")])
+if a.guard_combat:
+    # only inside guard: (other sections have an "enabled" of their own)
+    path = os.path.join(RUN, "athena.yml"); text = open(path).read()
+    m = re.search(r"(?m)^guard:\n((?:[ #].*\n|\n)*)", text)
+    if not m: sys.exit("athena.yml: no guard section")
+    block = m.group(1)
+    for key, value in (("enabled", "true"), ("enforce", "true"), ("combat", "true"), ("log", "true"),
+                       ("movement", "false"), ("timer", "false"), ("kick", "false")):
+        block, n = re.subn(r"(?m)^(  %s): \w+$" % key, r"\1: " + value, block)
+        if n != 1: sys.exit("athena.yml: guard.%s found %d times" % (key, n))
+    open(path, "w").write(text[:m.start(1)] + block + text[m.end(1):])
+else:
+    edit("athena.yml", [(r"^guard:\n  enabled: true", "guard:\n  enabled: false")])
 open(os.path.join(RUN, "eula.txt"), "w").write("eula=true\n")
 if a.keep_spawn is not None:
     edit("paper.yml", [(r"^(\s*)keep-spawn-loaded: \w+", r"\g<1>keep-spawn-loaded: " + a.keep_spawn)])
@@ -248,7 +263,7 @@ for i in range(BOTS):
     out = os.path.join(OUT, "bot%d.json" % i)
     args = [sys.executable, os.path.join(HERE, "sgbot.py"), "--port", str(a.port), "--name", "SBot%d" % i,
             "--centre", CENTRE, "--roam", str(a.roam), "--matches", str(a.rounds), "--seconds", str(a.timeout),
-            "--seed", str(i), "--out", out]
+            "--seed", str(i), "--out", out] + a.bot_args.split()
     bots.append((out, subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=open(os.path.join(OUT, "bot%d.err" % i), "w"))))
     time.sleep(a.login_gap)
 for _, pr in bots:
