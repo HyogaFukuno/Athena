@@ -42,6 +42,10 @@ p.add_argument("--spread", default=None)                # "k/n"
 p.add_argument("--hub-sign", default=None)              # "x,y,z": the hub's join sign to right-click first
 p.add_argument("--hop-sign", default=None)              # "x,y,z": back to the hub from the SG lobby, then this sign
 p.add_argument("--hop-after", type=float, default=15.0)
+# turn-hit: punch as a player who turns onto the target and hits in the same tick - the swing and the
+# attack first, the look toward the target after them (as the client sends its look later in the tick),
+# then the next tick look well away again, so that every hit starts from a look off the target
+p.add_argument("--turn-hit", action="store_true")
 p.add_argument("--rejoin", default=None)                # "after,away,x,y,z": drop out of the live game and come back
 a = p.parse_args()
 rnd = random.Random(a.seed if a.seed is not None else a.name)
@@ -521,13 +525,32 @@ def known_chests():
     return out
 
 
+look_away = None     # turn-hit: the look to send the tick after a hit
+
+
+def look_at(q):
+    """Yaw and pitch from our eyes to the middle of a player standing at q."""
+    dx, dy, dz = q[0] - b.pos[0], q[1] + 0.9 - (b.pos[1] + 1.62), q[2] - b.pos[2]
+    yaw = math.degrees(math.atan2(-dx, dz))
+    pitch = -math.degrees(math.atan2(dy, math.hypot(dx, dz)))
+    return yaw, max(-90.0, min(90.0, pitch))
+
+
 def punch(e):
-    global swing
+    global swing, look_away
     swing += 1
     if swing % 3 == 0:            # ~6-7 swings a second
         b.send(0x0A)
         b.send(0x02, vi(e) + vi(1))
         b.stats["attacks"] += 1
+        if a.turn_hit and e in b.players:
+            yaw, pitch = look_at(b.players[e])
+            b.send(0x05, struct.pack(">ff?", yaw, pitch, False))
+            look_away = (yaw + 150.0, 0.0)
+            b.stats["turn_hits"] = b.stats.get("turn_hits", 0) + 1
+    elif look_away is not None:
+        b.send(0x05, struct.pack(">ff?", look_away[0], look_away[1], False))
+        look_away = None
 
 
 def live_tick(fight_all):
