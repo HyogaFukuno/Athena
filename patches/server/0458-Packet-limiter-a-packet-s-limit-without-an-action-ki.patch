@@ -1,0 +1,110 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 25 Nov 2026 21:55:54 +0900
+Subject: [PATCH] Packet limiter: a packet's limit without an action kicks
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
+index e5648195bda5aebc29c2fdda077ee7080443ac46..060c418a7b8366e6da8a37237b8f84fff608d356 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PacketLimiterConfig.java
+@@ -93,7 +93,7 @@ public class PacketLimiterConfig {
+                     PacketLimit packetLimit = new PacketLimit(
+                         limitNode.node("interval").getDouble(),
+                         limitNode.node("maxPacketRate").getDouble(),
+-                        limitNode.node("action").get(PacketLimit.ViolateAction.class)
++                        limitNode.node("action").get(PacketLimit.ViolateAction.class, PacketLimit.ViolateAction.KICK) // Athena - a limit without an action kicks: null made NetworkManager's switch throw on the Netty thread
+                     );
+ 
+                     if (packetLimit.packetLimitInterval > 0.0 && packetLimit.maxPacketRate > 0.0) {
+diff --git a/src/test/java/com/hpfxd/pandaspigot/config/PacketLimiterConfigTest.java b/src/test/java/com/hpfxd/pandaspigot/config/PacketLimiterConfigTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..88cb6759ec3cb0f1e9ab51e69aaa5bacbc2d27b1
+--- /dev/null
++++ b/src/test/java/com/hpfxd/pandaspigot/config/PacketLimiterConfigTest.java
+@@ -0,0 +1,57 @@
++package com.hpfxd.pandaspigot.config;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++
++import net.minecraft.server.PacketPlayInChat;
++import org.junit.Test;
++import org.spongepowered.configurate.BasicConfigurationNode;
++import org.spongepowered.configurate.ConfigurationNode;
++
++/**
++ * Athena - a packet's own limit survives being written back to pandaspigot.yml, and a limit without
++ * an action kicks.
++ */
++public class PacketLimiterConfigTest {
++
++    private static final PacketLimiterConfig.Serializer SERIALIZER = new PacketLimiterConfig.Serializer();
++
++    private static PacketLimiterConfig read(ConfigurationNode node) throws Exception {
++        return SERIALIZER.deserialize(PacketLimiterConfig.class, node);
++    }
++
++    private static ConfigurationNode written(PacketLimiterConfig config) throws Exception {
++        ConfigurationNode node = BasicConfigurationNode.root();
++        SERIALIZER.serialize(PacketLimiterConfig.class, config, node);
++        return node;
++    }
++
++    @Test
++    public void aPacketsLimitSurvivesBeingWrittenBack() throws Exception {
++        ConfigurationNode node = BasicConfigurationNode.root();
++        node.node("limits", "PacketPlayInChat", "interval").set(2.0);
++        node.node("limits", "PacketPlayInChat", "maxPacketRate").set(5.0);
++        node.node("limits", "PacketPlayInChat", "action").set("DROP");
++
++        // the file is read, written back, and read again at the next start
++        PacketLimiterConfig.PacketLimit limit = read(written(read(node))).getPacketSpecificLimits().get(PacketPlayInChat.class);
++
++        assertNotNull(limit);
++        assertEquals(2.0, limit.packetLimitInterval, 0.0);
++        assertEquals(5.0, limit.maxPacketRate, 0.0);
++        assertEquals(PacketLimiterConfig.PacketLimit.ViolateAction.DROP, limit.violateAction);
++    }
++
++    @Test
++    public void aLimitWithoutAnActionKicks() throws Exception {
++        ConfigurationNode node = BasicConfigurationNode.root();
++        node.node("limits", "PacketPlayInChat", "interval").set(1.0);
++        node.node("limits", "PacketPlayInChat", "maxPacketRate").set(5.0);
++
++        PacketLimiterConfig.PacketLimit limit = read(node).getPacketSpecificLimits().get(PacketPlayInChat.class);
++
++        assertEquals(PacketLimiterConfig.PacketLimit.ViolateAction.KICK, limit.violateAction);
++        // and it is written so: the next start reads the same
++        assertEquals(PacketLimiterConfig.PacketLimit.ViolateAction.KICK, read(written(read(node))).getPacketSpecificLimits().get(PacketPlayInChat.class).violateAction);
++    }
++}
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+index 93455140bf330957115a589667834525f6b21523..d6349f282eb367eed4d07b1ca50cd829f45dc8c0 100644
+--- a/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
++++ b/src/test/java/net/minecraft/server/AthenaGuardMovementTest.java
+@@ -434,6 +434,23 @@ public class AthenaGuardMovementTest {
+         }
+     }
+ 
++    /**
++     * Right after a teleport the guard assumes the air's friction for a few moves. A packet that
++     * covers held-back ticks is bounded by what the client may hold all the same, and a one-tick move
++     * by one tick's speed: neither is a way to blink from the spot a teleport put the player on.
++     */
++    @Test
++    public void aTeleportIsNoPlaceToBlinkFrom() {
++        Server held = new Server(0.5, 0, 0.5, -1);
++        for (int t = 0; t < 19; ++t) {
++            held.noPosition();
++        }
++        assertEquals(1, held.receive(9.5, 0, 0.5));
++
++        Server single = new Server(0.5, 0, 0.5, -1);
++        assertEquals(1, single.receive(1.5, 0, 0.5)); // a block in one tick, standing
++    }
++
+     @Test
+     public void stepAndMiniHopsAreCaught() {
+         Server s = new Server(0.5, 0, 0.5, -1);
