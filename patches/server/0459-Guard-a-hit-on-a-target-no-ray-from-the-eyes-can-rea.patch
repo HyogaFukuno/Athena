@@ -1,0 +1,197 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: glacier <hyouga.dev@gmail.com>
+Date: Wed, 25 Nov 2026 21:55:54 +0900
+Subject: [PATCH] Guard: a hit on a target no ray from the eyes can reach is
+ through a wall
+
+
+diff --git a/src/main/java/net/minecraft/server/AthenaGuard.java b/src/main/java/net/minecraft/server/AthenaGuard.java
+index be931535ec665338b997f03dd219b9ee9fa5cb05..5879849949893e26990178c2dbc0c187d8ece588 100644
+--- a/src/main/java/net/minecraft/server/AthenaGuard.java
++++ b/src/main/java/net/minecraft/server/AthenaGuard.java
+@@ -896,6 +896,19 @@ public final class AthenaGuard {
+             }
+         }
+ 
++        // through a wall: the client picks what it attacks with a ray from its eyes that stops at the
++        // first block in the way, so a hit lands only on something in view. PandaSpigot dropped the
++        // line of sight test (GH-244) because it took one line, eyes to eyes, against one position:
++        // a target half behind a corner, or seen where it was a few ticks ago, failed it. This asks
++        // whether any of a few points on any of the target's boxes the reach looked back over, within
++        // reach, can be seen; an honest hit is answered by the first ray.
++        if (this.player.world != null && !seesAny(sight(this.player.world), eyeX, eyeY, eyeZ, this.aimBoxes, this.aimBoxCount, reach)) {
++            this.flag(7, "wall", "hit %s with no line of sight (at %.2f)", target.getName(), best);
++            if (enforce) {
++                return DROP;
++            }
++        }
++
+         if (aimOff(eyeX, eyeY, eyeZ, this.aimBoxes, this.aimBoxCount, this.player.yaw, this.player.pitch) > MAX_AIM_OFF) {
+             this.aimPending = true;
+             this.aimEyeX = eyeX; this.aimEyeY = eyeY; this.aimEyeZ = eyeZ;
+@@ -906,6 +919,54 @@ public final class AthenaGuard {
+         return ATTACK;
+     }
+ 
++    /** Whether a point on one of the first count boxes in boxes (6 values each) within reach is in view of the eyes. */
++    static boolean seesAny(Sight sight, double eyeX, double eyeY, double eyeZ, double[] boxes, int count, double reach) {
++        double[] box = new double[6];
++
++        for (int i = 0; i < count; ++i) {
++            System.arraycopy(boxes, i * 6, box, 0, 6);
++            if (distanceToBox(eyeX, eyeY, eyeZ, box[0] - 0.1D, box[1] - 0.1D, box[2] - 0.1D, box[3] + 0.1D, box[4] + 0.1D, box[5] + 0.1D) > reach) {
++                continue; // a box out of reach is not where the hit landed
++            }
++            if (sees(sight, eyeX, eyeY, eyeZ, box)) {
++                return true;
++            }
++        }
++        return count == 0;
++    }
++
++    /**
++     * Whether the eyes see the box: the point of it nearest the eyes, its middle, near its top or near
++     * its feet, or one of its four vertical edges at mid height (a target half behind a corner). The
++     * client picks against the box grown by 0.1, so the edges and the top are taken just inside that;
++     * the feet stay 0.1 over the bottom so a ray there does not end on the ground's face.
++     */
++    static boolean sees(Sight sight, double eyeX, double eyeY, double eyeZ, double[] box) {
++        double minX = box[0] - 0.09D, minY = box[1] + 0.1D, minZ = box[2] - 0.09D;
++        double maxX = box[3] + 0.09D, maxY = box[4] + 0.09D, maxZ = box[5] + 0.09D;
++        double midX = (box[0] + box[3]) / 2.0D, midY = (box[1] + box[4]) / 2.0D, midZ = (box[2] + box[5]) / 2.0D;
++
++        return sight.clear(eyeX, eyeY, eyeZ, Math.max(minX, Math.min(eyeX, maxX)), Math.max(minY, Math.min(eyeY, maxY)), Math.max(minZ, Math.min(eyeZ, maxZ)))
++                || sight.clear(eyeX, eyeY, eyeZ, midX, midY, midZ)
++                || sight.clear(eyeX, eyeY, eyeZ, midX, maxY, midZ)
++                || sight.clear(eyeX, eyeY, eyeZ, midX, minY, midZ)
++                || sight.clear(eyeX, eyeY, eyeZ, minX, midY, minZ)
++                || sight.clear(eyeX, eyeY, eyeZ, minX, midY, maxZ)
++                || sight.clear(eyeX, eyeY, eyeZ, maxX, midY, minZ)
++                || sight.clear(eyeX, eyeY, eyeZ, maxX, midY, maxZ);
++    }
++
++    /** Whether nothing stops a ray from the first point to the second. */
++    interface Sight {
++        boolean clear(double fromX, double fromY, double fromZ, double toX, double toY, double toZ);
++    }
++
++    // a block with no collision box (grass, flowers, cobweb) and liquids do not stop the ray: the
++    // client's ray may stop at some of them, and this only has to catch a hit through a solid wall
++    private static Sight sight(World world) {
++        return (fromX, fromY, fromZ, toX, toY, toZ) -> world.rayTrace(new Vec3D(fromX, fromY, fromZ), new Vec3D(toX, toY, toZ), false, true, false) == null;
++    }
++
+     /** Whether an attack is waiting for the look of the next movement packet. */
+     boolean aimPending() {
+         return this.aimPending;
+diff --git a/src/test/java/net/minecraft/server/AthenaGuardSightTest.java b/src/test/java/net/minecraft/server/AthenaGuardSightTest.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..416ed22ce9830326cb9897ebd120ba18af939479
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/AthenaGuardSightTest.java
+@@ -0,0 +1,105 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.util.ArrayList;
++import java.util.List;
++import org.junit.Test;
++
++/**
++ * Athena - the guard's line of sight for a hit: a target behind a wall is not in view, one only half
++ * hidden by a corner or a low wall is.
++ */
++public class AthenaGuardSightTest {
++
++    private static final double EYE_X = 0.0, EYE_Y = 1.62, EYE_Z = 0.0;
++    // a player standing 2.3 blocks away along x
++    private static final double[] TARGET = { 2.0, 0.0, -0.3, 2.6, 1.8, 0.3 };
++
++    private final List<double[]> blocks = new ArrayList<double[]>();
++
++    /** A ray is clear when it meets none of the blocks (slab test on each box). */
++    private boolean clear(double fx, double fy, double fz, double tx, double ty, double tz) {
++        for (double[] b : this.blocks) {
++            double t0 = 0.0, t1 = 1.0;
++            double[] from = { fx, fy, fz };
++            double[] d = { tx - fx, ty - fy, tz - fz };
++            boolean hit = true;
++
++            for (int axis = 0; axis < 3 && hit; ++axis) {
++                if (Math.abs(d[axis]) < 1.0E-12) {
++                    hit = from[axis] >= b[axis] && from[axis] <= b[axis + 3];
++                } else {
++                    double a = (b[axis] - from[axis]) / d[axis];
++                    double c = (b[axis + 3] - from[axis]) / d[axis];
++
++                    t0 = Math.max(t0, Math.min(a, c));
++                    t1 = Math.min(t1, Math.max(a, c));
++                    hit = t0 <= t1;
++                }
++            }
++            if (hit) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private boolean sees() {
++        return AthenaGuard.sees(this::clear, EYE_X, EYE_Y, EYE_Z, TARGET);
++    }
++
++    @Test
++    public void aTargetInTheOpenIsSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 }); // the floor it stands on
++        assertTrue(this.sees());
++    }
++
++    @Test
++    public void aTargetBehindAWallIsNotSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 });
++        this.blocks.add(new double[] { 1, 0, -2, 2, 3, 2 }); // a wall three blocks high between them
++        assertFalse(this.sees());
++    }
++
++    @Test
++    public void aTargetHalfBehindACornerIsSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 });
++        this.blocks.add(new double[] { 1, 0, -2, 2, 3, 0.1 }); // hides the target's middle and its -z half
++        assertTrue(this.sees());
++    }
++
++    @Test
++    public void aTargetOverALowWallIsSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 });
++        this.blocks.add(new double[] { 1, 0, -2, 2, 1, 2 }); // waist high
++        assertTrue(this.sees());
++    }
++
++    // the target where the attacker saw it a few ticks ago, before it stepped behind the wall
++    private static final double[] SEEN_BEFORE = { 2.0, 0.0, 2.7, 2.6, 1.8, 3.3 };
++
++    @Test
++    public void aTargetSeenWhereItWasAFewTicksAgoIsSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 });
++        this.blocks.add(new double[] { 1, 0, -2, 2, 3, 0.6 }); // hides where it is now, not where it was
++        double[] boxes = new double[12];
++        System.arraycopy(TARGET, 0, boxes, 0, 6);
++        System.arraycopy(SEEN_BEFORE, 0, boxes, 6, 6);
++
++        assertTrue(AthenaGuard.seesAny(this::clear, EYE_X, EYE_Y, EYE_Z, boxes, 2, 4.5));
++    }
++
++    @Test
++    public void aPositionOutOfReachDoesNotCountAsSeen() {
++        this.blocks.add(new double[] { -10, -1, -10, 10, 0, 10 });
++        this.blocks.add(new double[] { 1, 0, -2, 2, 3, 0.6 }); // as above: the old position is in view
++        double[] boxes = new double[12];
++        System.arraycopy(TARGET, 0, boxes, 0, 6);
++        System.arraycopy(SEEN_BEFORE, 0, boxes, 6, 6);
++
++        // the old position is about 3.3 away: past a reach of 3, it is not where the hit landed
++        assertFalse(AthenaGuard.seesAny(this::clear, EYE_X, EYE_Y, EYE_Z, boxes, 2, 3.0));
++    }
++}
