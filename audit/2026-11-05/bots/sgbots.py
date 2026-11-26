@@ -68,6 +68,7 @@ if os.path.isdir(CONF + "/plugins/SurvivalGames/arenas"):
 sg = open(CONF + "/plugins/SurvivalGames/config.yml").read()
 sg = re.sub(r"(?m)^(database:\n  enabled: )true", r"\1false", sg)
 sg = re.sub(r"(?m)^maps-folder: .*", "maps-folder: " + ("/opt/mc/maps" if a.vps else MAPS), sg)
+sg = re.sub(r"(?m)^lobby-template: .*\n", "", sg) + "\nlobby-template: %s\n" % ("/opt/mc/maps/map_sg_lobby" if a.vps else os.path.join(MAIN, "bench", "run_sg", "lobby"))
 for k, v in {"lobby": 20, "pre-game": 10, "live-game": a.live, "pre-deathmatch": 10, "deathmatch": 120, "end-game": 5, "clean-up": 5}.items():
     sg, n = re.subn(r"(?m)^(  %s: )\d+" % k, r"\g<1>%d" % v, sg)
     if not n: sys.exit("SG config: no durations.%s" % k)
